@@ -1,0 +1,16 @@
+[package]
+name = "topos-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "THE PURE TRUST LOGIC — deterministic functions over explicit values, over its OWN validated domain newtypes. No I/O, no traits, no ambient clock/RNG. Every L0 invariant is a unit/proptest here. Does NOT depend on topos-types."
+
+# Deps land with the logic they serve: sha2 (digest + device-op preimage),
+# ed25519-dalek (verify). Kept out of the skeleton so the L0 inner loop stays seconds-fast.
+[dependencies]
+
+[lints]
+workspace = true

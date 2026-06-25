@@ -1,0 +1,170 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WireError",
+  "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a stable code + retryability + the safe next actions; never raw SQL/git strings.",
+  "type": "object",
+  "required": [
+    "code",
+    "outcome",
+    "retryable"
+  ],
+  "properties": {
+    "affected": {
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/Affected"
+        }
+      ]
+    },
+    "code": {
+      "description": "A stable error code (distinct from the outcome; e.g. `STALE_BASE`, `OFF_ROSTER`).",
+      "type": "string"
+    },
+    "context": {
+      "description": "Structured context (no TTY prose to parse).",
+      "default": null
+    },
+    "current_generation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Generation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_generation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Generation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "next_actions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NextAction"
+      }
+    },
+    "outcome": {
+      "$ref": "#/definitions/TerminalOutcome"
+    },
+    "retryable": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ActionCode": {
+      "type": "string"
+    },
+    "Affected": {
+      "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
+      "type": "object",
+      "properties": {
+        "proposal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "required": [
+        "epoch",
+        "seq"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "NextAction": {
+      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+      "type": "object",
+      "required": [
+        "argv",
+        "code"
+      ],
+      "properties": {
+        "argv": {
+          "description": "A complete argv array — execute as-is (no TTY parsing).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "code": {
+          "$ref": "#/definitions/ActionCode"
+        }
+      }
+    },
+    "TerminalOutcome": {
+      "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "OK",
+            "CONFLICT",
+            "DIVERGED",
+            "DENIED",
+            "UNAVAILABLE",
+            "AMBIGUOUS_NAME",
+            "KEY_REPIN_REQUIRED",
+            "RETRYABLE_FAILURE",
+            "PERMANENT_FAILURE"
+          ]
+        },
+        {
+          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the `publish --propose` next-action.",
+          "type": "string",
+          "enum": [
+            "APPROVAL_REQUIRED"
+          ]
+        },
+        {
+          "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
+          "type": "string",
+          "enum": [
+            "NEEDS_REVIEW"
+          ]
+        }
+      ]
+    }
+  }
+}

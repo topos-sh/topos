@@ -1,0 +1,18 @@
+[package]
+name = "plane-store"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "THE SERVER AUTHORITY BOUNDARY — a crate so raw access is private. Owns ALL plane SQL (raw sqlx, no ORM), git object access, R1 skill-scoped authz, the COMPLETE Step-E transaction, lifecycle/GC, the in-process Ed25519 signer. Raw SQL + git reads are pub(crate)-private; the only public surface is authorized authority operations."
+
+# sqlx (raw, no ORM, pin 0.8.6) + ed25519-dalek land later.
+[dependencies]
+topos-core.workspace = true
+topos-types.workspace = true
+topos-gitstore.workspace = true
+
+[lints]
+workspace = true

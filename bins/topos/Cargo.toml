@@ -1,0 +1,22 @@
+[package]
+name = "topos"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The CLIENT app (lib + thin bin): the 12-verb domain ops, the pull state machine, the sidecar, namespace-atomic materialization, the device-flow client + device-key signer. A thin sync tool, never an authority — depends on NO SQL and NO plane-store (architectural layering, asserted by a cargo-tree check)."
+
+# The architectural-layering rule: this binary's graph
+# carries NO plane-store, NO sqlx, NO libsqlite3-sys. Enforced by a `cargo tree -p topos` CI check
+# (see xtask), NOT a global cargo-deny ban (those crates live elsewhere in the workspace).
+# clap + ureq + ed25519-dalek land with the verbs.
+[dependencies]
+topos-core.workspace = true
+topos-types.workspace = true
+topos-gitstore.workspace = true
+topos-harness.workspace = true
+
+[lints]
+workspace = true

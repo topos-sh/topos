@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NextAction",
+  "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+  "type": "object",
+  "required": [
+    "argv",
+    "code"
+  ],
+  "properties": {
+    "argv": {
+      "description": "A complete argv array — execute as-is (no TTY parsing).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "code": {
+      "$ref": "#/definitions/ActionCode"
+    }
+  },
+  "definitions": {
+    "ActionCode": {
+      "type": "string"
+    }
+  }
+}

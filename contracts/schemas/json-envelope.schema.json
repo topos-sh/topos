@@ -1,0 +1,320 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JsonEnvelope",
+  "description": "The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the SAME typed value where practical.",
+  "type": "object",
+  "required": [
+    "command",
+    "ok",
+    "schema_version"
+  ],
+  "properties": {
+    "command": {
+      "description": "The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …).",
+      "type": "string"
+    },
+    "data": {
+      "description": "Command-specific payload (`{}` when empty).",
+      "default": null
+    },
+    "error": {
+      "description": "The actionable failure detail (when `ok == false`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WireError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "next_actions": {
+      "description": "Stable, machine-actionable next steps — each carries a complete argv.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NextAction"
+      }
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "receipt": {
+      "description": "The durable idempotency record — present on **every** terminal op, including failures.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "warnings": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "ActionCode": {
+      "type": "string"
+    },
+    "Affected": {
+      "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
+      "type": "object",
+      "properties": {
+        "proposal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "required": [
+        "epoch",
+        "seq"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "NextAction": {
+      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+      "type": "object",
+      "required": [
+        "argv",
+        "code"
+      ],
+      "properties": {
+        "argv": {
+          "description": "A complete argv array — execute as-is (no TTY parsing).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "code": {
+          "$ref": "#/definitions/ActionCode"
+        }
+      }
+    },
+    "Receipt": {
+      "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even on failures): one stable receipt per op, identical on retry.",
+      "type": "object",
+      "required": [
+        "command",
+        "created_at",
+        "op_id",
+        "outcome",
+        "schema_version",
+        "workspace_id"
+      ],
+      "properties": {
+        "bundle_digest": {
+          "description": "The byte-exact consent hash.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "created_at": {
+          "description": "RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).",
+          "type": "string"
+        },
+        "current_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "description": "Outcome-specific extra detail."
+        },
+        "expected_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key_id": {
+          "description": "The signing key id that covered this op.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "description": "Client-minted UUIDv4, persisted before the first send.",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/definitions/TerminalOutcome"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "skill_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_id": {
+          "description": "The commit SHA-256.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TerminalOutcome": {
+      "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "OK",
+            "CONFLICT",
+            "DIVERGED",
+            "DENIED",
+            "UNAVAILABLE",
+            "AMBIGUOUS_NAME",
+            "KEY_REPIN_REQUIRED",
+            "RETRYABLE_FAILURE",
+            "PERMANENT_FAILURE"
+          ]
+        },
+        {
+          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the `publish --propose` next-action.",
+          "type": "string",
+          "enum": [
+            "APPROVAL_REQUIRED"
+          ]
+        },
+        {
+          "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
+          "type": "string",
+          "enum": [
+            "NEEDS_REVIEW"
+          ]
+        }
+      ]
+    },
+    "WireError": {
+      "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a stable code + retryability + the safe next actions; never raw SQL/git strings.",
+      "type": "object",
+      "required": [
+        "code",
+        "outcome",
+        "retryable"
+      ],
+      "properties": {
+        "affected": {
+          "default": {},
+          "allOf": [
+            {
+              "$ref": "#/definitions/Affected"
+            }
+          ]
+        },
+        "code": {
+          "description": "A stable error code (distinct from the outcome; e.g. `STALE_BASE`, `OFF_ROSTER`).",
+          "type": "string"
+        },
+        "context": {
+          "description": "Structured context (no TTY prose to parse).",
+          "default": null
+        },
+        "current_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_actions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NextAction"
+          }
+        },
+        "outcome": {
+          "$ref": "#/definitions/TerminalOutcome"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "topos-plane"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The OSS plane, library-first (lib + thin bin). The lib is the composable plane-core (the public authority API over plane-store, a router(state) builder, the review-required workspace policy, the enrollment state machine). The bin is a thin axum main. The private cloud plane IMPORTS this lib and COMPOSES it — no fork, no extension hook."
+
+# axum + tower + oauth2/openidconnect (feature-gated) + lettre land later.
+[dependencies]
+topos-core.workspace = true
+topos-types.workspace = true
+plane-store.workspace = true
+
+[lints]
+workspace = true

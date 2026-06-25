@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TriggerReport",
+  "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+  "type": "object",
+  "required": [
+    "currency_kind",
+    "harness",
+    "marker_id",
+    "state"
+  ],
+  "properties": {
+    "currency_kind": {
+      "$ref": "#/definitions/CurrencyKind"
+    },
+    "harness": {
+      "$ref": "#/definitions/HarnessId"
+    },
+    "marker_id": {
+      "description": "`topos` + harness id + schema version + command identity.",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/TriggerState"
+    },
+    "touched_path": {
+      "description": "The config file edited (never a skill dir).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "CurrencyKind": {
+      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\", \"next topos touch\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "type": "string",
+      "enum": [
+        "session_start",
+        "first_topos_touch",
+        "first_turn",
+        "explicit_pull_only"
+      ]
+    },
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "enum": [
+            "already_present_unmanaged"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SignedCurrentRecord",
+  "description": "The signed `current` pointer — a versioned envelope; `ETag = \"<epoch>.<seq>\"`.",
+  "type": "object",
+  "required": [
+    "record",
+    "schema_version",
+    "scope",
+    "signature"
+  ],
+  "properties": {
+    "record": {
+      "$ref": "#/definitions/CurrentRecord"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "scope": {
+      "$ref": "#/definitions/PointerScope"
+    },
+    "signature": {
+      "$ref": "#/definitions/Signature"
+    }
+  },
+  "definitions": {
+    "CurrentRecord": {
+      "type": "object",
+      "required": [
+        "digest",
+        "generation"
+      ],
+      "properties": {
+        "digest": {
+          "description": "The full commit SHA-256 (`version_id`).",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/definitions/Generation"
+        }
+      }
+    },
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "required": [
+        "epoch",
+        "seq"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PointerScope": {
+      "type": "object",
+      "required": [
+        "skill_id",
+        "workspace_id"
+      ],
+      "properties": {
+        "skill_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "Signature": {
+      "type": "object",
+      "required": [
+        "alg",
+        "key_id",
+        "value"
+      ],
+      "properties": {
+        "alg": {
+          "description": "Always `\"Ed25519\"` in v0.",
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "value": {
+          "description": "base64url, raw 64-byte signature.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

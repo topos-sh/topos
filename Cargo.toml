@@ -1,0 +1,64 @@
+# topos — one public Apache-2.0 Cargo workspace.
+# 5 lib crates + 2 app crates (lib+bin) + xtask. Every split is paid for by a
+# testable-authority boundary, a platform-dep boundary, or the plane-store privacy
+# boundary — never a crate-per-noun.
+[workspace]
+resolver = "3"
+members = [
+    "crates/topos-types",
+    "crates/topos-core",
+    "crates/topos-gitstore",
+    "crates/topos-harness",
+    "crates/plane-store",
+    "bins/topos",
+    "bins/topos-plane",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+repository = "https://github.com/topos-sh/topos" # org topos-sh claimed; repo created at the split
+publish = false
+
+# The curated pin set. A member only compiles a dep it references with `.workspace = true`;
+# entries listed here but unused are not resolved, so the heavy trees (gix/sqlx/axum) stay
+# out of the first build until their crate lands.
+[workspace.dependencies]
+# --- internal crates (the acyclic graph) ---
+topos-types = { path = "crates/topos-types" }
+topos-core = { path = "crates/topos-core" }
+topos-gitstore = { path = "crates/topos-gitstore" }
+topos-harness = { path = "crates/topos-harness" }
+plane-store = { path = "crates/plane-store" }
+
+# --- the wire leaf (topos-types) ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"                                   # JSON-Schema (the v0 contract artifact)
+uuid = { version = "1", features = ["v4", "serde"] } # client-minted op_id v4
+
+# --- errors (libs use thiserror; bins use anyhow) ---
+thiserror = "2"
+anyhow = "1"
+
+# --- declared for later (NOT yet referenced by any member) ---
+sha2 = "0.10"                  # topos-core: byte-exact digest + device-op preimage
+ed25519-dalek = "2"           # topos-core verify + plane-store/client sign (the ONE shared impl)
+gix = "0.66"                  # topos-gitstore: dumb object mechanics
+sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM
+axum = "0.8"                  # topos-plane HTTP
+utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)
+clap = { version = "4", features = ["derive"] }       # topos client bin
+ureq = "2"                    # topos client transport — default, blocking, rustls+ring
+tracing = "0.1"              # observability spine
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"        # no unsafe in our crates (deps may use it internally)
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Thin release profile knobs can land later; defaults are fine for the initial skeleton.

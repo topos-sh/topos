@@ -1,0 +1,11 @@
+**/.DS_Store
+.gstack/
+
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local tooling — not tracked (editor config, Claude Code skills/agents)
+.vscode/
+.claude/

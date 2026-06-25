@@ -1,0 +1,18 @@
+[package]
+name = "topos-types"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The wire DTOs only — the --json envelope, terminal-outcome/action-code enums, receipt + error, the signed-current envelope. NO logic."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

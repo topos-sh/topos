@@ -1,0 +1,6 @@
+# One pinned stable toolchain — reproducible agent + CI builds.
+# Bump deliberately; the whole workspace is edition 2024 (needs >= 1.85).
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

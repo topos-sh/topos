@@ -1,0 +1,28 @@
+# cargo-deny — advisories + licenses.
+#
+# NOTE on the client architectural-layering ban:
+# "the topos client carries no plane-store / sqlx / libsqlite3-sys" is NOT a global cargo-deny
+# `bans.deny` (those crates legitimately appear in the workspace via plane-store/topos-plane).
+# It is a per-target `cargo tree -p topos` assertion in CI / xtask — see xtask. cargo-deny here
+# owns advisories + license policy only.
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

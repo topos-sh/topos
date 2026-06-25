@@ -1,0 +1,17 @@
+[package]
+name = "topos-gitstore"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Shared dumb gix object mechanics: read/write, dedup, tree→empty-staging-dir render, diff/diff3 execution, topos-sha256-ID ↔ git-OID mapping. Re-verifies bytes→sha256 on every read. Holds NO access control."
+
+# gix lands later (isolated behind this small surface, shared by plane + client).
+[dependencies]
+topos-core.workspace = true
+topos-types.workspace = true
+
+[lints]
+workspace = true
