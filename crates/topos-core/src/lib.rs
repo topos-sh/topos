@@ -12,10 +12,12 @@
 //! Modules:
 //! - [`digest`]  — canonical bundle manifest + the byte-exact sha256 digest + path reject rules.
 //! - [`consent`] — the consent-satisfier truth-table as a pure decision function.
+//! - [`sign`]    — the frozen signing/commit byte encodings: `commit_id`, the device-op signature
+//!   frame + verify, and the JCS `current`-pointer preimage + verify. Construction + verify live
+//!   here (the one shared encoder); the concrete `sign` is the caller's, over the same crate.
 //!
-//! Still to land (each behind its golden vector, once its wire encoding is frozen): the device-op
-//! signing preimage + verify, the `(epoch,seq)` CAS decision, the four-state sync transition, diff3,
-//! and the first-parent / same-skill lineage asserts.
+//! Still to land (each behind its golden vector): the `(epoch,seq)` CAS decision, the four-state
+//! sync transition, diff3, and the first-parent / same-skill lineage asserts.
 #![cfg_attr(not(test), no_std)]
 // Purity AND panic-freedom are enforced by the compiler in production builds: the kernel may not
 // reach `std`, nor `unwrap`/`expect`/`panic!`. Tests keep them (assertions, fixture construction).
@@ -28,3 +30,4 @@ extern crate alloc;
 
 pub mod consent;
 pub mod digest;
+pub mod sign;

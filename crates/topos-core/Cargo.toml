@@ -9,11 +9,21 @@ publish = false
 description = "THE PURE TRUST LOGIC — deterministic functions over explicit values, over its OWN validated domain newtypes. No I/O, no traits, no ambient clock/RNG. Every L0 invariant is a unit/proptest here. Does NOT depend on topos-types."
 
 # The kernel pulls ONLY crypto + canonical-form primitives (asserted by `cargo xtask check-arch` — no
-# I/O/async/storage crates). `ed25519-dalek` (verify + sign-preimage) lands with the signing module
-# once its wire encoding is frozen.
+# I/O/async/storage crates). `ed25519-dalek` is verify-ONLY here (`default-features = false` keeps it
+# no_std — no RNG, no std); the concrete `sign` lives in the caller over the SAME crate.
 [dependencies]
 sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+# Test-only oracles (std is available under `cfg(test)`). `json-canon` is a maintained RFC 8785 (JCS)
+# implementation — it is NOT no_std (it uses `std::io`), so it cannot be a runtime dep of the kernel;
+# here it cross-validates the kernel's fixed-shape pointer canonicalization byte-for-byte. `hex`
+# decodes the pinned known-answer vectors.
+json-canon = "0.1"
+serde_json = { workspace = true }
+hex = "0.4"
 
 [lints]
 workspace = true
