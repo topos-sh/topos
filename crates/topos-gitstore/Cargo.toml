@@ -8,10 +8,13 @@ repository.workspace = true
 publish = false
 description = "Shared dumb gix object mechanics: read/write, dedup, tree→empty-staging-dir render, diff/diff3 execution, topos-sha256-ID ↔ git-OID mapping. Re-verifies bytes→sha256 on every read. Holds NO access control."
 
-# gix lands later (isolated behind this small surface, shared by plane + client).
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
+thiserror.workspace = true
+# Plumbing-only: object read/write + the tree editor + sha1 hashing + ref edits. No worktree/index/
+# network/blob-diff/status — those heavy defaults aren't needed for a dumb byte/object layer.
+gix = { workspace = true, features = ["sha1", "tree-editor"] }
 
 [lints]
 workspace = true

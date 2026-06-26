@@ -51,7 +51,7 @@ unicode-normalization = { version = "0.1", default-features = false } # topos-co
 # default-features = false keeps topos-core's verify path no_std (no RNG/std); the signing consumers
 # (plane-store / client) opt back into `std` + `rand_core` for the in-process / device signer.
 ed25519-dalek = { version = "2", default-features = false }  # topos-core verify + caller sign (ONE shared impl)
-gix = "0.85"                  # topos-gitstore: dumb object mechanics
+gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
 axum = "0.8"                  # topos-plane HTTP
 utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)

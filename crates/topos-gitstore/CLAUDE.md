@@ -1,20 +1,39 @@
 # `topos-gitstore` — the gix object mechanics + the large-object store
 
-The shared dumb byte layer over `gix`: object read/write, dedup, **tree → empty-staging-dir render** (never
-an in-place reset), diff/diff3 execution, and the **sha256-id ↔ git-OID mapping** (a tested invariant — git
-OIDs are SHA-1, an internal detail; the version id is always our own sha256).
+The shared dumb byte layer over `gix`: object read/write, a **recursive byte-oriented tree render**, and
+the **sha256-id ↔ git-OID mapping** carried as a ref name (a tested invariant — git OIDs are SHA-1, an
+internal detail; the version id is always our own sha256).
 
 **Re-verifies bytes → expected sha256 on every read** (never trusts gix's object id). The untrusted tree
-renderer is fuzzed. Holds **no access control**.
+renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (it never fsyncs — it only
+*names* the durability set for the client to sync, so the client owns the fault-injectable seam).
 
-## The `LargeObjectStore` seam
+## Implemented (each behind a test in `src/tests.rs`)
 
-A small content-addressed `put` / `get` / `exists` / `delete` trait (streaming, verify-on-read, crash-safe
-two-phase install: temp → fsync → recompute-sha256 == `blob_id` → commit) for the size-routed large-blob
-offload. The **v0 impl is local-filesystem** (sharded `objects/aa/bb/<sha256>` dirs). Keyed by
-`blob_id = sha256(raw bytes)` — **no pointer files**. The S3-compatible remote impl is a later no-op
-extraction behind this trait.
+- `Store::{init, open}` — one **bare** repo per skill (no worktree/index).
+- `write_bundle` — validate every path through the kernel, write one real content-addressed git blob per
+  file (no size cap, **no LFS pointer files**), build a tree mirroring paths + modes; returns the kernel
+  `bundle_digest`.
+- `commit` — snapshot a tree as a commit under `refs/topos/versions/<version_id>`; **re-derives the
+  `version_id` through the kernel `commit_id` and refuses a lying ref**; maps parent `version_id`s → git
+  commits (a missing parent is typed).
+- `render_verified` — resolve → recursively walk the tree → re-hash **every** blob through the kernel
+  sha256 → recompute the canonical `bundle_digest` → assert it equals the caller's pin. A flipped/forged
+  byte, a non-UTF-8 name, or a non-blob entry fails **typed** (verify-on-read; the put→render round-trip is
+  fuzzed byte-identical).
+- `log` / `list_versions` — first-parent history + the ref-set reverse map, with duplicate-lineage rejected.
+- `durability_set` — the loose objects + version refs + their parent dirs the client fsyncs to make a write
+  durable *before* any JSON references it.
 
-Isolates the large, pre-1.0 `gix` dependency behind a small surface shared by the plane and the client.
+## The `LargeObjectStore` seam (declared, **unwired**)
 
-Dependencies: `gix`, `topos-core`, `topos-types`.
+A content-addressed `put`/`get`/`exists`/`delete` trait keyed by `blob_id = sha256(raw bytes)` — **no impl
+ships yet** (every blob lives in the git store). Because identity is recomputed over real bytes, a later
+size-routed local / S3-compatible backend is a pure drop-in behind this trait with zero id/digest impact.
+
+## Planned (lands later)
+
+Size-routing + the local large-object store impl + GC; `diff`/`diff3` *execution* (the client renders a
+plain unified diff itself for now); the S3-compatible remote backend (a no-op extraction behind the seam).
+
+Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `topos-core`, `topos-types`, `thiserror`.
