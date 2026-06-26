@@ -9,12 +9,12 @@ wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `top
 
 Implemented (each behind a known-answer / truth-table test):
 - ✅ the byte-exact sha256 **bundle digest** + the canonical-manifest **reject rules** (`digest`);
-- ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`).
+- ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`);
+- ✅ the frozen **signing/commit byte-encodings** (`sign`) — the canonical `commit_id` construction, the
+  **Ed25519** device-op signature frame + verify, and the JCS `current`-pointer preimage + verify (the
+  concrete `sign` lives in the caller, over the same dalek crate).
 
 Planned (land behind a golden vector as their wire encoding / mechanics freeze):
-- the canonical **commit** construction (the byte layout is a pending design decision — see the spec);
-- the **Ed25519 signing-PREIMAGE** construction + verify (the device-op frame + pointer canonicalization
-  are the same pending decision; the concrete `sign` lives in the caller, over the same dalek crate);
 - the `(epoch, seq)` compare-and-set *decision*; the four-state sync *transition* fn; diff3 hunk planning;
   first-parent + same-skill lineage assertions.
 
@@ -27,4 +27,4 @@ Planned (land behind a golden vector as their wire encoding / mechanics freeze):
 - **Every core invariant is a unit/proptest in this crate.**
 - Depends on nothing in the workspace, and only on crypto primitives (`cargo xtask check-arch` enforces it).
 
-Dependencies: `sha2` today; `ed25519-dalek` lands with the signing module. Nothing else.
+Dependencies: `sha2` + `ed25519-dalek` (verify-only, `default-features = false`). Nothing else.

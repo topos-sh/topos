@@ -8,12 +8,12 @@ The source of truth for the wire boundary, GENERATED from `topos-types` and comm
   all fail).
 - **`fixtures/json/`** — golden `--json` envelopes (success + failure), **generated from the typed shapes**
   by `cargo run -p xtask -- gen-fixtures` (so they cannot drift from the contract); `gen-fixtures --check` is
-  the drift gate. The digest golden vector + the 11-row consent table live as `topos-core` known-answer
-  tests (the kernel is their source of truth).
+  the drift gate. The digest golden vector, the 11-row consent table, and the signing/commit byte vectors
+  live as `topos-core` known-answer tests (the kernel is their source of truth).
 - **`openapi/`** — the plane spec; generated for the Rust plane once its routes are annotated (it has none
   yet, so there is nothing to generate — deferred, not missing).
 - **Not yet here (honestly):** the per-harness **placement** fixtures (need the harness adapter, which lands
-  later) and the **signing** vectors (their byte encodings are a pending design decision — see the spec).
+  later).
 
 Why committed-and-generated: a hand-edited protocol drifts; a generated-and-reviewed artifact does not. Any
 consumer in another language pins these by the exact commit.

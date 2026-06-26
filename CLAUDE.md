@@ -13,14 +13,22 @@ is a bundle of files (`SKILL.md` + scripts + reference docs); the **whole bundle
 They share one trust kernel (`topos-core`) — the single, auditable implementation of the byte-exact digest,
 consent, signing, and sync algorithm. Nothing proprietary lives here.
 
-> **Status — early scaffold (contracts + trust kernel landing).** The boundary contracts are frozen and
+> **Status — early scaffold (contracts frozen; trust kernel complete).** The boundary contracts are frozen and
 > schema-generated (the `--json` envelope, the outcome/receipt/error/action-code shapes, the closed
 > signature-alg + signed pointer, all 12 per-verb `data` payloads, and the four load-bearing client documents
 > — sync/lock/map/op), with golden `--json` fixtures (pull/list/diff/publish) validated positive **and**
-> negative against the schemas. The pure trust kernel (`topos-core`) implements the **byte-exact digest** + the
-> **consent truth-table** behind known-answer tests. Still to come: the verb *logic*, the plane, the harness
-> adapters, and the **signing** byte-encodings (a pending design decision — the kernel ships none yet).
-> Heavy deps (`gix`/`sqlx`/`axum`) are declared but unreferenced, so the build stays light.
+> negative against the schemas. The pure trust kernel (`topos-core`) implements the **byte-exact digest**, the
+> **consent truth-table**, and the frozen **signing/commit byte-encodings** — the `commit_id` construction, the
+> **Ed25519** device-op signature frame, and the JCS `current`-pointer preimage, all with verify and all behind
+> known-answer vectors. Still to come: the verb *logic*, the embedded-git sidecar + large-object store, the
+> plane, and the harness adapters. The remaining heavy deps (`gix`/`sqlx`/`axum`) are declared but unreferenced,
+> so the build stays light.
+>
+> **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
+> Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
+> they describe. A `CLAUDE.md` that still calls landed work "planned" (or planned work "landed") is a bug, not
+> just drift. The code is the source of truth; when this summary and the tree disagree, `cargo test` + the
+> crate's own `CLAUDE.md` win — fix the prose to match.
 
 ## Progressive disclosure — read the CLAUDE.md in the folder you're working in
 
