@@ -11,12 +11,19 @@ description = "The CLIENT app (lib + thin bin): the 12-verb domain ops, the pull
 # The architectural-layering rule: this binary's graph
 # carries NO plane-store, NO sqlx, NO libsqlite3-sys. Enforced by a `cargo tree -p topos` CI check
 # (see xtask), NOT a global cargo-deny ban (those crates live elsewhere in the workspace).
-# clap + ureq + ed25519-dalek land with the verbs.
+# The plane transport (ureq) + device-key signer (ed25519-dalek) + harness adapters land later.
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
 topos-gitstore.workspace = true
 topos-harness.workspace = true
+clap = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+rustix.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

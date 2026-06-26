@@ -3,16 +3,16 @@
   "command": "list",
   "ok": true,
   "data": {
-    "followed": [
+    "followed": [],
+    "published_by_you": [],
+    "tracked": [
       {
-        "bundle_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "draft": true,
+        "bundle_digest": "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369",
+        "draft": false,
         "skill": "pr-describe",
-        "version_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
       }
     ],
-    "published_by_you": [],
-    "tracked": [],
     "untracked": []
   },
   "warnings": [],

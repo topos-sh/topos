@@ -57,6 +57,7 @@ axum = "0.8"                  # topos-plane HTTP
 utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)
 clap = { version = "4", features = ["derive"] }       # topos client bin
 ureq = "3"                    # topos client transport — default, blocking, rustls+ring
+rustix = { version = "1", features = ["fs"] } # topos client: safe fsync / F_FULLFSYNC / flock (no unsafe)
 tracing = "0.1"              # observability spine
 tracing-subscriber = { version = "0.3", features = ["json"] }
 

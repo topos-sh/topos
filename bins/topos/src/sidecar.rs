@@ -1,0 +1,190 @@
+//! The `~/.topos/` layout, the footprint walk, the per-skill writer lock, and the idempotent crash
+//! recovery sweep. The client owns this policy; the gitstore knows none of it.
+
+use std::path::{Path, PathBuf};
+
+use crate::atomic::TMP_SUFFIX;
+use crate::error::ClientError;
+use crate::fs_seam::{FsOps, LockGuard};
+
+/// The prefix marking a transient staging directory (`skills/.staging-<id>/`) being assembled by `add`.
+const STAGING_PREFIX: &str = ".staging-";
+
+/// Resolves every `~/.topos/` path from the home directory (injected, so tests get an isolated home).
+#[derive(Debug, Clone)]
+pub(crate) struct Layout {
+    home: PathBuf,
+}
+
+/// The four per-skill paths under a base directory (a published `skills/<id>/` or a staging dir).
+#[derive(Debug, Clone)]
+pub(crate) struct SkillPaths {
+    pub store: PathBuf,
+    pub lock: PathBuf,
+    pub map: PathBuf,
+    pub sync: PathBuf,
+}
+
+impl SkillPaths {
+    fn under(base: &Path) -> Self {
+        Self {
+            store: base.join("store"),
+            lock: base.join("lock.json"),
+            map: base.join("map.json"),
+            sync: base.join("sync.json"),
+        }
+    }
+}
+
+impl Layout {
+    pub(crate) fn new(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+        }
+    }
+
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub(crate) fn skills_dir(&self) -> PathBuf {
+        self.home.join("skills")
+    }
+
+    pub(crate) fn skill_dir(&self, id: &str) -> PathBuf {
+        self.skills_dir().join(id)
+    }
+
+    /// The paths of a published skill (`skills/<id>/…`).
+    pub(crate) fn published(&self, id: &str) -> SkillPaths {
+        SkillPaths::under(&self.skill_dir(id))
+    }
+
+    /// The paths of a skill being staged (`skills/.staging-<id>/…`), published with one directory rename.
+    pub(crate) fn staging(&self, id: &str) -> (PathBuf, SkillPaths) {
+        let base = self.skills_dir().join(format!("{STAGING_PREFIX}{id}"));
+        let paths = SkillPaths::under(&base);
+        (base, paths)
+    }
+
+    pub(crate) fn locks_dir(&self) -> PathBuf {
+        self.home.join("locks")
+    }
+
+    pub(crate) fn lock_file(&self, id: &str) -> PathBuf {
+        self.locks_dir().join(format!("{id}.lock"))
+    }
+
+    pub(crate) fn log_path(&self) -> PathBuf {
+        self.home.join("log.jsonl")
+    }
+
+    pub(crate) fn identity_dir(&self) -> PathBuf {
+        self.home.join("identity")
+    }
+
+    pub(crate) fn host_path(&self) -> PathBuf {
+        self.identity_dir().join("host.json")
+    }
+}
+
+/// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file
+/// lives under `locks/` — **outside** `skills/<id>/`, so it never vanishes under the publish rename.
+///
+/// # Errors
+/// The [`FsOps`] failure if the lock cannot be opened/acquired.
+pub(crate) fn lock_skill(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    id: &str,
+) -> Result<LockGuard, ClientError> {
+    Ok(fs.lock_exclusive(&layout.lock_file(id))?)
+}
+
+/// The exhaustive set of paths topos owns under `~/.topos/` (every file **and** directory, sorted) — the
+/// `--footprint` answer. A literal walk, so it is self-consistent with the real tree by construction
+/// (a stray write under the home shows up here; topos never writes the user's source dir).
+///
+/// # Errors
+/// The [`FsOps`] read failure.
+pub(crate) fn footprint(fs: &dyn FsOps, layout: &Layout) -> Result<Vec<String>, ClientError> {
+    let mut out = Vec::new();
+    walk(fs, layout.home(), &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientError> {
+    for entry in fs.read_dir(dir)? {
+        out.push(entry.to_string_lossy().into_owned());
+        if entry.is_dir() {
+            walk(fs, &entry, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The idempotent recovery sweep, run at the start of every command.
+///
+/// - repairs a torn `log.jsonl` tail;
+/// - removes an incomplete staging dir (`skills/.staging-<id>/`) — but only if no live writer holds its
+///   lock (else it is a concurrent `add`, left alone);
+/// - removes a published `skills/<id>/` **only** if `lock.json` is absent (an impossible-via-atomic-add
+///   half state) — a *present* lock is never deleted, so an unknown/newer schema means "upgrade
+///   required", never data loss;
+/// - sweeps leftover `*.tmp` files (a faulted atomic write pre-rename) under the per-skill lock.
+///
+/// The user's source dir is never touched, so a draft (the live source bytes, or a committed version in
+/// the store) always survives.
+///
+/// # Errors
+/// An [`FsOps`] failure during the sweep.
+pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientError> {
+    crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
+
+    for entry in fs.read_dir(&layout.skills_dir())? {
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(id) = name.strip_prefix(STAGING_PREFIX) {
+            // Incomplete `add`: claim the id; if a live writer holds it, leave it be.
+            if let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(id))? {
+                fs.remove_dir_all(&entry)?;
+            }
+        } else if entry.is_dir() {
+            recover_published(fs, layout, name, &entry)?;
+        }
+    }
+    Ok(())
+}
+
+fn recover_published(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    id: &str,
+    skill_dir: &Path,
+) -> Result<(), ClientError> {
+    // Claim the id; a held lock means a concurrent writer is mid-publish — leave it.
+    let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(id))? else {
+        return Ok(());
+    };
+    let paths = layout.published(id);
+    if fs.read_opt(&paths.lock)?.is_none() {
+        // No lock marker: an incomplete dir (can't arise via the atomic staging-rename, but never trust
+        // disk). The user's source bytes are untouched, so removing the half-built sidecar is safe.
+        fs.remove_dir_all(skill_dir)?;
+        return Ok(());
+    }
+    // A lock marker is present (and, being atomically written, is whole) — never delete it; just sweep any
+    // stray temp file a future in-place write might have left.
+    for entry in fs.read_dir(skill_dir)? {
+        if entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(TMP_SUFFIX))
+        {
+            fs.remove_file(&entry)?;
+        }
+    }
+    Ok(())
+}

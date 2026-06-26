@@ -189,7 +189,8 @@ fn gen_schema(check: bool) -> Result<()> {
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::results::{
-        DiffData, DiffSource, ListData, PullAction, PullData, PullSkill, SkillEntry,
+        AddData, DiffData, DiffSource, ListData, LogData, PullAction, PullData, PullSkill,
+        SkillEntry,
     };
     use topos_types::{
         ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
@@ -197,6 +198,30 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     let argv = |parts: &[&str]| parts.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+    // The deterministic identity of the committed `tests/fixtures/pr-describe` skill (device id
+    // `d_test`, the fixed adopt message) — the local verbs reproduce these byte-for-byte.
+    let fx_version = "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5";
+    let fx_digest = "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369";
+
+    // `add` of the fixture skill (offline; no plane op, so no receipt).
+    let add_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: "topos_t00".to_owned(),
+            name: "pr-describe".to_owned(),
+            version_id: fx_version.to_owned(),
+            bundle_digest: fx_digest.to_owned(),
+            tracked: true,
+        })
+        .expect("AddData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
 
     // A clean `pull` that found one followed skill already current.
     let pull_ok = JsonEnvelope {
@@ -221,17 +246,17 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `list` with one followed skill carrying a local draft.
+    // `list` after adopting the fixture skill — one tracked skill, no draft.
     let list_ok = JsonEnvelope {
         schema_version: 1,
         command: "list".to_owned(),
         ok: true,
         data: serde_json::to_value(ListData {
-            followed: vec![SkillEntry {
+            tracked: vec![SkillEntry {
                 skill: "pr-describe".to_owned(),
-                version_id: "b".repeat(64),
-                bundle_digest: "c".repeat(64),
-                draft: true,
+                version_id: fx_version.to_owned(),
+                bundle_digest: fx_digest.to_owned(),
+                draft: false,
                 pending_proposals: vec![],
             }],
             ..Default::default()
@@ -243,18 +268,49 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `diff` of a local draft against current — a plain unified diff body.
+    // `diff` of a one-line draft edit against current — the vendored unified diff body.
     let diff_ok = JsonEnvelope {
         schema_version: 1,
         command: "diff".to_owned(),
         ok: true,
         data: serde_json::to_value(DiffData {
             source: DiffSource::Local,
-            version_id: "b".repeat(64),
-            bundle_digest: "c".repeat(64),
-            diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+            version_id: fx_version.to_owned(),
+            bundle_digest: fx_digest.to_owned(),
+            diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
         })
         .expect("DiffData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `log` after adopting the fixture skill — the local add action + the genesis version.
+    let log_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "log".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LogData {
+            events: vec![
+                serde_json::json!({
+                    "action": "add",
+                    "skill_id": "topos_t00",
+                    "name": "pr-describe",
+                    "version_id": fx_version,
+                    "at": 1_700_000_000_000u64,
+                }),
+                serde_json::json!({
+                    "action": "version",
+                    "version_id": fx_version,
+                    "author": "d_test",
+                    "message": "topos: add",
+                    "parents": [],
+                }),
+            ],
+            team: None,
+        })
+        .expect("LogData serializes"),
         warnings: vec![],
         next_actions: vec![],
         receipt: None,
@@ -349,8 +405,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
+        ("json/add.ok", emit_json(&add_ok)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
+        ("json/log.ok", emit_json(&log_ok)),
         (
             "json/publish.approval-required",
             emit_json(&publish_approval_required),

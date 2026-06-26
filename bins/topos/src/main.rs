@@ -1,8 +1,6 @@
-//! `topos` — the client binary. Thin `clap` wiring over the lib; `--json` (no prompts) + a TTY
-//! renderer over the SAME typed outcomes. The verbs land later.
+//! `topos` — the client binary. A thin composition root over the library; all logic lives in the lib so
+//! it is unit-testable without a process.
 
-fn main() {
-    // Placeholder entrypoint — the clap surface + the 12 verbs land later.
-    eprintln!("topos: not yet implemented (scaffold)");
-    std::process::exit(0);
+fn main() -> std::process::ExitCode {
+    topos::run()
 }
