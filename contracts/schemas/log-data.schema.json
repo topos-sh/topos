@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LogData",
+  "description": "`log` — local action events (and, with `--team`, partial plane records). The individual event\nfields are **not pinned by the spec**, so events stay open JSON. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "events": {
+      "description": "Local action-event envelopes from `log.jsonl` (field set intentionally open).",
+      "type": "array",
+      "items": true
+    },
+    "team": {
+      "description": "Plane-side records under `--team` (op-receipts ⋈ approvals ⋈ lineage) — honestly partial.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": true
+    }
+  },
+  "required": [
+    "events"
+  ]
+}

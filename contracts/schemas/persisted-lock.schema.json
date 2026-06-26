@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lock",
+  "description": "`skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the\nper-file `(path, mode, sha256, size)` tuple and the digest are frozen; the JSON spelling here is\nthe natural object form).",
+  "type": "object",
+  "properties": {
+    "base_commit": {
+      "description": "The `version_id` (commit SHA-256) this lock is pinned to.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bundle_digest": {
+      "description": "The byte-exact consent hash over the file list.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "files": {
+      "description": "Files sorted by raw path bytes — the same ordering the canonical manifest uses.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LockedFile"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "skill_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "skill_id",
+    "name",
+    "base_commit",
+    "bundle_digest",
+    "files"
+  ],
+  "$defs": {
+    "LockedFile": {
+      "description": "One file in [`Lock::files`]. `size` is OPERATIONAL only — it never enters the canonical manifest\nor the digest (so the digest is placement-independent).",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "`100644` (regular) or `100755` (executable) — the only two allowed.",
+          "type": "string",
+          "enum": [
+            "100644",
+            "100755"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "description": "The file's content sha256 (lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "description": "Size in bytes (operational metadata only).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "mode",
+        "sha256",
+        "size"
+      ]
+    }
+  }
+}

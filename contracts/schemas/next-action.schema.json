@@ -1,12 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NextAction",
-  "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+  "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
   "type": "object",
-  "required": [
-    "argv",
-    "code"
-  ],
   "properties": {
     "argv": {
       "description": "A complete argv array — execute as-is (no TTY parsing).",
@@ -16,12 +12,29 @@
       }
     },
     "code": {
-      "$ref": "#/definitions/ActionCode"
+      "$ref": "#/$defs/ActionCode"
     }
   },
-  "definitions": {
+  "required": [
+    "code",
+    "argv"
+  ],
+  "$defs": {
     "ActionCode": {
-      "type": "string"
+      "title": "ActionCode",
+      "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
+      "type": "string",
+      "examples": [
+        "PROPOSE_PUBLISH",
+        "REBASE_AND_RETRY",
+        "RESOLVE_DIVERGED_DRAFT",
+        "APPLY_WAITING_UPDATE",
+        "DISAMBIGUATE_NAME",
+        "REPIN_PLANE_KEY",
+        "REQUEST_ACCESS",
+        "RETRY",
+        "CONTACT_ADMIN"
+      ]
     }
   }
 }

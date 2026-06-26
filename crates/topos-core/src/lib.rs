@@ -1,23 +1,30 @@
 //! `topos-core` — the pure trust kernel.
 //!
-//! Deterministic FUNCTIONS over EXPLICIT VALUES, over this crate's OWN validated domain newtypes
-//! (`SkillId`, `Generation`, `Commit`, the state-transition types — parse-don't-validate, so a
-//! constructed value is well-formed by construction and the kernel cannot represent an invalid
-//! state). **No I/O, no traits, no `tokio`/`sqlx`/`axum`/`gix`/`std::fs`, and no ambient clock or
-//! RNG** — time is a `now` parameter; keys/signatures are byte parameters. **Every L0 invariant is
-//! a unit/proptest HERE.**
+//! Deterministic FUNCTIONS over EXPLICIT VALUES. **No I/O, no traits, no `tokio`/`sqlx`/`axum`/
+//! `gix`/`std::fs`, and no ambient clock or RNG** — time is a `now` parameter; keys/signatures are
+//! byte parameters. The kernel is `#![no_std]` (+ `alloc`) in production builds, so a clock / RNG /
+//! filesystem call would fail to COMPILE — purity is enforced by the type system, not convention.
+//! Every L0 invariant is a unit test HERE, each behind a golden vector.
 //!
 //! The kernel does NOT depend on `topos-types`: the app libs convert wire DTOs → these domain types
 //! at the edge, so an invalid deserialized value can never reach the kernel.
 //!
-//! Planned modules (each behind its golden vector):
-//! - `digest`   — canonical bundle + commit construction; the byte-exact sha256 + reject rules.
-//! - `consent`  — the consent satisfier truth-table as a pure fn.
-//! - `cas`      — the `(epoch,seq)` CAS *decision* (current, expected → Promote | Conflict | …).
-//! - `sync`     — the four-state sync *transition* fn (state, input → next).
-//! - `sign`     — the device-op signing PREIMAGE (`TOPOS_DEVICE_OP_SIG_V1`) + verify.
-//! - `diff3`    — author-only diff3 hunk planning.
-//! - `lineage`  — first-parent + same-skill lineage asserts.
+//! Modules:
+//! - [`digest`]  — canonical bundle manifest + the byte-exact sha256 digest + path reject rules.
+//! - [`consent`] — the consent-satisfier truth-table as a pure decision function.
+//!
+//! Still to land (each behind its golden vector, once its wire encoding is frozen): the device-op
+//! signing preimage + verify, the `(epoch,seq)` CAS decision, the four-state sync transition, diff3,
+//! and the first-parent / same-skill lineage asserts.
+#![cfg_attr(not(test), no_std)]
+// Purity AND panic-freedom are enforced by the compiler in production builds: the kernel may not
+// reach `std`, nor `unwrap`/`expect`/`panic!`. Tests keep them (assertions, fixture construction).
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 
-/// Placeholder until the domain newtypes land. Keeps the crate non-empty + linked.
-pub const KERNEL_READY: bool = false;
+extern crate alloc;
+
+pub mod consent;
+pub mod digest;

@@ -1,73 +1,72 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SignedCurrentRecord",
   "description": "The signed `current` pointer — a versioned envelope; `ETag = \"<epoch>.<seq>\"`.",
   "type": "object",
-  "required": [
-    "record",
-    "schema_version",
-    "scope",
-    "signature"
-  ],
   "properties": {
     "record": {
-      "$ref": "#/definitions/CurrentRecord"
+      "$ref": "#/$defs/CurrentRecord"
     },
     "schema_version": {
+      "description": "Always `1` for this contract version (the schema pins it `const`).",
       "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "const": 1,
+      "minimum": 0
     },
     "scope": {
-      "$ref": "#/definitions/PointerScope"
+      "$ref": "#/$defs/PointerScope"
     },
     "signature": {
-      "$ref": "#/definitions/Signature"
+      "$ref": "#/$defs/Signature"
     }
   },
-  "definitions": {
+  "required": [
+    "schema_version",
+    "scope",
+    "record",
+    "signature"
+  ],
+  "$defs": {
     "CurrentRecord": {
       "type": "object",
-      "required": [
-        "digest",
-        "generation"
-      ],
       "properties": {
-        "digest": {
-          "description": "The full commit SHA-256 (`version_id`).",
-          "type": "string"
-        },
         "generation": {
-          "$ref": "#/definitions/Generation"
+          "$ref": "#/$defs/Generation"
+        },
+        "version_id": {
+          "description": "The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the\npointer names the version, and the commit transitively pins the bytes.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
-      }
+      },
+      "required": [
+        "version_id",
+        "generation"
+      ]
     },
     "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
       "type": "object",
-      "required": [
-        "epoch",
-        "seq"
-      ],
       "properties": {
         "epoch": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "seq": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
     },
     "PointerScope": {
       "type": "object",
-      "required": [
-        "skill_id",
-        "workspace_id"
-      ],
       "properties": {
         "skill_id": {
           "type": "string"
@@ -75,28 +74,39 @@
         "workspace_id": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "workspace_id",
+        "skill_id"
+      ]
     },
     "Signature": {
       "type": "object",
-      "required": [
-        "alg",
-        "key_id",
-        "value"
-      ],
       "properties": {
         "alg": {
-          "description": "Always `\"Ed25519\"` in v0.",
-          "type": "string"
+          "$ref": "#/$defs/SignatureAlg"
         },
         "key_id": {
           "type": "string"
         },
         "value": {
-          "description": "base64url, raw 64-byte signature.",
-          "type": "string"
+          "description": "base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
         }
-      }
+      },
+      "required": [
+        "alg",
+        "key_id",
+        "value"
+      ]
+    },
+    "SignatureAlg": {
+      "description": "The signature algorithm — a CLOSED set. v0 is Ed25519 only; an unknown or `none` algorithm must\nfail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root\npointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the\nexact opposite of a next-action code and must never silently pass through.)",
+      "type": "string",
+      "enum": [
+        "Ed25519"
+      ]
     }
   }
 }

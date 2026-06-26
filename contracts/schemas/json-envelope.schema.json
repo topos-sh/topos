@@ -1,13 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "JsonEnvelope",
-  "description": "The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the SAME typed value where practical.",
+  "description": "The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the\nSAME typed value where practical.",
   "type": "object",
-  "required": [
-    "command",
-    "ok",
-    "schema_version"
-  ],
   "properties": {
     "command": {
       "description": "The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …).",
@@ -15,13 +10,13 @@
     },
     "data": {
       "description": "Command-specific payload (`{}` when empty).",
-      "default": null
+      "default": {}
     },
     "error": {
       "description": "The actionable failure detail (when `ok == false`).",
       "anyOf": [
         {
-          "$ref": "#/definitions/WireError"
+          "$ref": "#/$defs/WireError"
         },
         {
           "type": "null"
@@ -30,10 +25,10 @@
     },
     "next_actions": {
       "description": "Stable, machine-actionable next steps — each carries a complete argv.",
-      "default": [],
       "type": "array",
+      "default": [],
       "items": {
-        "$ref": "#/definitions/NextAction"
+        "$ref": "#/$defs/NextAction"
       }
     },
     "ok": {
@@ -43,7 +38,7 @@
       "description": "The durable idempotency record — present on **every** terminal op, including failures.",
       "anyOf": [
         {
-          "$ref": "#/definitions/Receipt"
+          "$ref": "#/$defs/Receipt"
         },
         {
           "type": "null"
@@ -51,21 +46,41 @@
       ]
     },
     "schema_version": {
+      "description": "Always `1` for this contract version (the schema pins it `const`).",
       "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "const": 1,
+      "minimum": 0
     },
     "warnings": {
-      "default": [],
       "type": "array",
+      "default": [],
       "items": {
         "type": "string"
       }
     }
   },
-  "definitions": {
+  "required": [
+    "schema_version",
+    "command",
+    "ok"
+  ],
+  "$defs": {
     "ActionCode": {
-      "type": "string"
+      "title": "ActionCode",
+      "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
+      "type": "string",
+      "examples": [
+        "PROPOSE_PUBLISH",
+        "REBASE_AND_RETRY",
+        "RESOLVE_DIVERGED_DRAFT",
+        "APPLY_WAITING_UPDATE",
+        "DISAMBIGUATE_NAME",
+        "REPIN_PLANE_KEY",
+        "REQUEST_ACCESS",
+        "RETRY",
+        "CONTACT_ADMIN"
+      ]
     },
     "Affected": {
       "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
@@ -84,10 +99,12 @@
           ]
         },
         "version": {
+          "description": "A `version_id` (commit SHA-256, lowercase hex) when the outcome refers to a version.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[0-9a-f]{64}$"
         },
         "workspace": {
           "type": [
@@ -98,32 +115,28 @@
       }
     },
     "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
       "type": "object",
-      "required": [
-        "epoch",
-        "seq"
-      ],
       "properties": {
         "epoch": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "seq": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
     },
     "NextAction": {
-      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
       "type": "object",
-      "required": [
-        "argv",
-        "code"
-      ],
       "properties": {
         "argv": {
           "description": "A complete argv array — execute as-is (no TTY parsing).",
@@ -133,40 +146,38 @@
           }
         },
         "code": {
-          "$ref": "#/definitions/ActionCode"
+          "$ref": "#/$defs/ActionCode"
         }
-      }
+      },
+      "required": [
+        "code",
+        "argv"
+      ]
     },
     "Receipt": {
-      "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even on failures): one stable receipt per op, identical on retry.",
+      "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
       "type": "object",
-      "required": [
-        "command",
-        "created_at",
-        "op_id",
-        "outcome",
-        "schema_version",
-        "workspace_id"
-      ],
       "properties": {
         "bundle_digest": {
-          "description": "The byte-exact consent hash.",
+          "description": "The byte-exact consent hash (lowercase hex).",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[0-9a-f]{64}$"
         },
         "command": {
           "type": "string"
         },
         "created_at": {
           "description": "RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).",
-          "type": "string"
+          "type": "string",
+          "format": "date-time"
         },
         "current_generation": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Generation"
+              "$ref": "#/$defs/Generation"
             },
             {
               "type": "null"
@@ -179,7 +190,7 @@
         "expected_generation": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Generation"
+              "$ref": "#/$defs/Generation"
             },
             {
               "type": "null"
@@ -195,15 +206,18 @@
         },
         "op_id": {
           "description": "Client-minted UUIDv4, persisted before the first send.",
-          "type": "string"
+          "type": "string",
+          "format": "uuid"
         },
         "outcome": {
-          "$ref": "#/definitions/TerminalOutcome"
+          "$ref": "#/$defs/TerminalOutcome"
         },
         "schema_version": {
+          "description": "Always `1` for this contract version (the schema pins it `const`).",
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "const": 1,
+          "minimum": 0
         },
         "skill_id": {
           "type": [
@@ -212,16 +226,25 @@
           ]
         },
         "version_id": {
-          "description": "The commit SHA-256.",
+          "description": "The commit SHA-256 (lowercase hex).",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[0-9a-f]{64}$"
         },
         "workspace_id": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "schema_version",
+        "op_id",
+        "command",
+        "outcome",
+        "workspace_id",
+        "created_at"
+      ]
     },
     "TerminalOutcome": {
       "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
@@ -241,40 +264,27 @@
           ]
         },
         {
-          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the `publish --propose` next-action.",
+          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the\n`publish --propose` next-action.",
           "type": "string",
-          "enum": [
-            "APPROVAL_REQUIRED"
-          ]
+          "const": "APPROVAL_REQUIRED"
         },
         {
           "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
           "type": "string",
-          "enum": [
-            "NEEDS_REVIEW"
-          ]
+          "const": "NEEDS_REVIEW"
         }
       ]
     },
     "WireError": {
-      "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a stable code + retryability + the safe next actions; never raw SQL/git strings.",
+      "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a\nstable code + retryability + the safe next actions; never raw SQL/git strings.",
       "type": "object",
-      "required": [
-        "code",
-        "outcome",
-        "retryable"
-      ],
       "properties": {
         "affected": {
-          "default": {},
-          "allOf": [
-            {
-              "$ref": "#/definitions/Affected"
-            }
-          ]
+          "$ref": "#/$defs/Affected",
+          "default": {}
         },
         "code": {
-          "description": "A stable error code (distinct from the outcome; e.g. `STALE_BASE`, `OFF_ROSTER`).",
+          "description": "A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an\n**open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are\nadded over time, and a consumer must treat an unrecognized `code` as the `outcome` it carries.",
           "type": "string"
         },
         "context": {
@@ -284,7 +294,7 @@
         "current_generation": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Generation"
+              "$ref": "#/$defs/Generation"
             },
             {
               "type": "null"
@@ -294,7 +304,7 @@
         "expected_generation": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Generation"
+              "$ref": "#/$defs/Generation"
             },
             {
               "type": "null"
@@ -302,19 +312,24 @@
           ]
         },
         "next_actions": {
-          "default": [],
           "type": "array",
+          "default": [],
           "items": {
-            "$ref": "#/definitions/NextAction"
+            "$ref": "#/$defs/NextAction"
           }
         },
         "outcome": {
-          "$ref": "#/definitions/TerminalOutcome"
+          "$ref": "#/$defs/TerminalOutcome"
         },
         "retryable": {
           "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "code",
+        "outcome",
+        "retryable"
+      ]
     }
   }
 }

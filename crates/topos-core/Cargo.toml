@@ -8,9 +8,12 @@ repository.workspace = true
 publish = false
 description = "THE PURE TRUST LOGIC — deterministic functions over explicit values, over its OWN validated domain newtypes. No I/O, no traits, no ambient clock/RNG. Every L0 invariant is a unit/proptest here. Does NOT depend on topos-types."
 
-# Deps land with the logic they serve: sha2 (digest + device-op preimage),
-# ed25519-dalek (verify). Kept out of the skeleton so the L0 inner loop stays seconds-fast.
+# The kernel pulls ONLY crypto + canonical-form primitives (asserted by `cargo xtask check-arch` — no
+# I/O/async/storage crates). `ed25519-dalek` (verify + sign-preimage) lands with the signing module
+# once its wire encoding is frozen.
 [dependencies]
+sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [lints]
 workspace = true

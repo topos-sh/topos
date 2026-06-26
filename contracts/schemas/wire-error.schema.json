@@ -1,24 +1,15 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "WireError",
-  "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a stable code + retryability + the safe next actions; never raw SQL/git strings.",
+  "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a\nstable code + retryability + the safe next actions; never raw SQL/git strings.",
   "type": "object",
-  "required": [
-    "code",
-    "outcome",
-    "retryable"
-  ],
   "properties": {
     "affected": {
-      "default": {},
-      "allOf": [
-        {
-          "$ref": "#/definitions/Affected"
-        }
-      ]
+      "$ref": "#/$defs/Affected",
+      "default": {}
     },
     "code": {
-      "description": "A stable error code (distinct from the outcome; e.g. `STALE_BASE`, `OFF_ROSTER`).",
+      "description": "A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an\n**open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are\nadded over time, and a consumer must treat an unrecognized `code` as the `outcome` it carries.",
       "type": "string"
     },
     "context": {
@@ -28,7 +19,7 @@
     "current_generation": {
       "anyOf": [
         {
-          "$ref": "#/definitions/Generation"
+          "$ref": "#/$defs/Generation"
         },
         {
           "type": "null"
@@ -38,7 +29,7 @@
     "expected_generation": {
       "anyOf": [
         {
-          "$ref": "#/definitions/Generation"
+          "$ref": "#/$defs/Generation"
         },
         {
           "type": "null"
@@ -46,22 +37,40 @@
       ]
     },
     "next_actions": {
-      "default": [],
       "type": "array",
+      "default": [],
       "items": {
-        "$ref": "#/definitions/NextAction"
+        "$ref": "#/$defs/NextAction"
       }
     },
     "outcome": {
-      "$ref": "#/definitions/TerminalOutcome"
+      "$ref": "#/$defs/TerminalOutcome"
     },
     "retryable": {
       "type": "boolean"
     }
   },
-  "definitions": {
+  "required": [
+    "code",
+    "outcome",
+    "retryable"
+  ],
+  "$defs": {
     "ActionCode": {
-      "type": "string"
+      "title": "ActionCode",
+      "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
+      "type": "string",
+      "examples": [
+        "PROPOSE_PUBLISH",
+        "REBASE_AND_RETRY",
+        "RESOLVE_DIVERGED_DRAFT",
+        "APPLY_WAITING_UPDATE",
+        "DISAMBIGUATE_NAME",
+        "REPIN_PLANE_KEY",
+        "REQUEST_ACCESS",
+        "RETRY",
+        "CONTACT_ADMIN"
+      ]
     },
     "Affected": {
       "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
@@ -80,10 +89,12 @@
           ]
         },
         "version": {
+          "description": "A `version_id` (commit SHA-256, lowercase hex) when the outcome refers to a version.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[0-9a-f]{64}$"
         },
         "workspace": {
           "type": [
@@ -94,32 +105,28 @@
       }
     },
     "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.",
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
       "type": "object",
-      "required": [
-        "epoch",
-        "seq"
-      ],
       "properties": {
         "epoch": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "seq": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
     },
     "NextAction": {
-      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent branch on the known set and still pass through unknowns.",
+      "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
       "type": "object",
-      "required": [
-        "argv",
-        "code"
-      ],
       "properties": {
         "argv": {
           "description": "A complete argv array — execute as-is (no TTY parsing).",
@@ -129,9 +136,13 @@
           }
         },
         "code": {
-          "$ref": "#/definitions/ActionCode"
+          "$ref": "#/$defs/ActionCode"
         }
-      }
+      },
+      "required": [
+        "code",
+        "argv"
+      ]
     },
     "TerminalOutcome": {
       "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
@@ -151,18 +162,14 @@
           ]
         },
         {
-          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the `publish --propose` next-action.",
+          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the\n`publish --propose` next-action.",
           "type": "string",
-          "enum": [
-            "APPROVAL_REQUIRED"
-          ]
+          "const": "APPROVAL_REQUIRED"
         },
         {
           "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
           "type": "string",
-          "enum": [
-            "NEEDS_REVIEW"
-          ]
+          "const": "NEEDS_REVIEW"
         }
       ]
     }

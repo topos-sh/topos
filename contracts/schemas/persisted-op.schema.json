@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpRecord",
+  "description": "`ops/<op_id>.json` — the durable request identity, persisted BEFORE the first network send so an\nuncertain write can be reconciled against the receipt. **Field-set pinned.**",
+  "type": "object",
+  "properties": {
+    "candidate_commit": {
+      "description": "The built commit (`version_id`) this op publishes / reverts / reviews.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_generation": {
+      "description": "The `(epoch,seq)` this op's compare-and-set targets.",
+      "$ref": "#/$defs/Generation"
+    },
+    "last_receipt": {
+      "description": "The stored terminal receipt, once one is known (the source of idempotent-retry truth).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "op_id": {
+      "description": "The client-minted UUIDv4 (also the filename).",
+      "type": "string",
+      "format": "uuid"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "op_id",
+    "candidate_commit",
+    "expected_generation"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    },
+    "Receipt": {
+      "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "description": "The byte-exact consent hash (lowercase hex).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "command": {
+          "type": "string"
+        },
+        "created_at": {
+          "description": "RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).",
+          "type": "string",
+          "format": "date-time"
+        },
+        "current_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "description": "Outcome-specific extra detail."
+        },
+        "expected_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key_id": {
+          "description": "The signing key id that covered this op.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "description": "Client-minted UUIDv4, persisted before the first send.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "outcome": {
+          "$ref": "#/$defs/TerminalOutcome"
+        },
+        "schema_version": {
+          "description": "Always `1` for this contract version (the schema pins it `const`).",
+          "type": "integer",
+          "format": "uint32",
+          "const": 1,
+          "minimum": 0
+        },
+        "skill_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_id": {
+          "description": "The commit SHA-256 (lowercase hex).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "op_id",
+        "command",
+        "outcome",
+        "workspace_id",
+        "created_at"
+      ]
+    },
+    "TerminalOutcome": {
+      "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "OK",
+            "CONFLICT",
+            "DIVERGED",
+            "DENIED",
+            "UNAVAILABLE",
+            "AMBIGUOUS_NAME",
+            "KEY_REPIN_REQUIRED",
+            "RETRYABLE_FAILURE",
+            "PERMANENT_FAILURE"
+          ]
+        },
+        {
+          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the\n`publish --propose` next-action.",
+          "type": "string",
+          "const": "APPROVAL_REQUIRED"
+        },
+        {
+          "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
+          "type": "string",
+          "const": "NEEDS_REVIEW"
+        }
+      ]
+    }
+  }
+}

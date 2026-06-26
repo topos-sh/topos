@@ -36,7 +36,7 @@ plane-store = { path = "crates/plane-store" }
 # --- the wire leaf (topos-types) ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-schemars = "0.8"                                   # JSON-Schema (the v0 contract artifact)
+schemars = "1"                                     # JSON-Schema 2020-12 (the v0 contract artifact)
 uuid = { version = "1", features = ["v4", "serde"] } # client-minted op_id v4
 
 # --- errors (libs use thiserror; bins use anyhow) ---
@@ -44,21 +44,33 @@ thiserror = "2"
 anyhow = "1"
 
 # --- declared for later (NOT yet referenced by any member) ---
-sha2 = "0.10"                  # topos-core: byte-exact digest + device-op preimage
+sha2 = "0.10"                  # topos-core: byte-exact digest + device-op preimage (held at 0.10 to share one sha2 with ed25519-dalek)
+unicode-normalization = { version = "0.1", default-features = false } # topos-core: NFC path-collision reject (no_std)
 ed25519-dalek = "2"           # topos-core verify + plane-store/client sign (the ONE shared impl)
-gix = "0.66"                  # topos-gitstore: dumb object mechanics
-sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM
+gix = "0.85"                  # topos-gitstore: dumb object mechanics
+sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
 axum = "0.8"                  # topos-plane HTTP
 utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)
 clap = { version = "4", features = ["derive"] }       # topos client bin
-ureq = "2"                    # topos client transport — default, blocking, rustls+ring
+ureq = "3"                    # topos client transport — default, blocking, rustls+ring
 tracing = "0.1"              # observability spine
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"        # no unsafe in our crates (deps may use it internally)
+unreachable_pub = "warn"      # a pub item not reachable outside its crate is almost always a missing pub(crate)
+missing_debug_implementations = "warn" # public types should be inspectable
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Selected restriction lints that suit a trust kernel; widened per-crate (topos-core) where it earns it.
+dbg_macro = "warn"
+todo = "warn"
 
-# Thin release profile knobs can land later; defaults are fine for the initial skeleton.
+# Release profile for the prebuilt, statically-distributed client + the plane binary.
+# `panic` is deliberately NOT set workspace-wide: the CLI could abort, but the plane server
+# wants unwinding so one request's panic can't take the whole process down — set it per-bin if ever.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

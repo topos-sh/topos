@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RevertData",
+  "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a\npointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "current_generation": {
+      "$ref": "#/$defs/Generation"
+    },
+    "new_version_id": {
+      "description": "The new forward-revert commit that carries those bytes.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reverted_to": {
+      "description": "The good version named by `--to` (the bytes being restored).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "skill_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "skill_id",
+    "reverted_to",
+    "new_version_id",
+    "current_generation"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    }
+  }
+}

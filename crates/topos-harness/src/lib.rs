@@ -9,8 +9,8 @@
 //! bytes); the OpenClaw/Hermes concrete config bytes stay build-first behind the trait until the
 //! pilot's real builds are probed.
 
-use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 use std::path::PathBuf;
+use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 
 /// A discovered skill placement — probe known dirs; read frontmatter to CONFIRM only. Carries the
 /// concrete path + category/layer (Hermes `<category>/<name>`, project/global).

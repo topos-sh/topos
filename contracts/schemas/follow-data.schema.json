@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FollowData",
+  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED.**",
+  "type": "object",
+  "properties": {
+    "enrolled": {
+      "type": "boolean"
+    },
+    "skills": {
+      "description": "First-receive offers — empty when the link is membership-only.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FollowOffer"
+      }
+    },
+    "workspace_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "enrolled"
+  ],
+  "$defs": {
+    "FollowOffer": {
+      "description": "A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "offer": {
+          "$ref": "#/$defs/Offer"
+        },
+        "skill_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_id",
+        "name",
+        "offer"
+      ]
+    },
+    "Offer": {
+      "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version_id",
+        "bundle_digest"
+      ]
+    }
+  }
+}

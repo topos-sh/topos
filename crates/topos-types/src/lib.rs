@@ -1,10 +1,11 @@
-//! `topos-types` — the WIRE DTOs only.
+//! `topos-types` — the boundary DTOs (wire + persisted).
 //!
 //! These are *deserialization shapes* for the boundary: the `--json` envelope, every per-verb
-//! result shape, the frozen [`TerminalOutcome`] enum, the [`Receipt`] + [`WireError`], the
-//! signed-`current` envelope, the [`ActionCode`] vocabulary, and the harness [`TriggerReport`].
-//! **No logic.** The app libs parse these into `topos-core`'s validated domain newtypes at the
-//! HTTP/CLI edge (parse-don't-validate), so `topos-core` never imports this crate.
+//! result shape ([`results`]), the frozen [`TerminalOutcome`] enum, the [`Receipt`] + [`WireError`],
+//! the signed-`current` envelope, the [`ActionCode`] vocabulary, the harness [`TriggerReport`], and
+//! the on-disk client documents ([`persisted`]). **No logic.** The app libs parse these into
+//! `topos-core`'s validated domain newtypes at the HTTP/CLI edge (parse-don't-validate), so
+//! `topos-core` never imports this crate.
 //!
 //! Naming: `version_id` = the commit SHA-256 (the user-facing
 //! `<skill>@<version_id>`); `bundle_digest` = the byte-exact consent hash over the bundle's
@@ -12,8 +13,20 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Per-verb `--json` `data` payloads (what the envelope's `data` deserializes into per command).
+pub mod results;
+
+/// On-disk persisted client documents under `~/.topos/` (sync / lock / map / op records).
+pub mod persisted;
+
 /// Bumped on any breaking change to a persisted/wire shape; every document carries it.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// The `data` payload defaults to an empty object (`{}`), not `null`, when absent — matching the
+/// emitted envelope (a pure-signal command still carries `"data": {}`).
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
 
 // ---------------------------------------------------------------------------------------------
 // The `--json` envelope (the single most important interface; the agent
@@ -24,12 +37,14 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// SAME typed value where practical.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JsonEnvelope {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[schemars(extend("const" = 1))]
     pub schema_version: u32,
     /// The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …).
     pub command: String,
     pub ok: bool,
     /// Command-specific payload (`{}` when empty).
-    #[serde(default)]
+    #[serde(default = "empty_object")]
     pub data: serde_json::Value,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -69,7 +84,7 @@ pub enum TerminalOutcome {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The next_actions action-code vocabulary — HYBRID: known variants + Unknown(String),
+// The next_actions action-code vocabulary — HYBRID: known variants + a sealed Unknown,
 // so an old agent never *fails* on a perfectly executable future code (it has the argv).
 // ---------------------------------------------------------------------------------------------
 
@@ -81,6 +96,21 @@ pub struct NextAction {
     /// A complete argv array — execute as-is (no TTY parsing).
     pub argv: Vec<String>,
 }
+
+/// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
+/// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
+/// reading Rust; additive-only — new codes append here.
+pub const KNOWN_ACTION_CODES: [&str; 9] = [
+    "PROPOSE_PUBLISH",
+    "REBASE_AND_RETRY",
+    "RESOLVE_DIVERGED_DRAFT",
+    "APPLY_WAITING_UPDATE",
+    "DISAMBIGUATE_NAME",
+    "REPIN_PLANE_KEY",
+    "REQUEST_ACCESS",
+    "RETRY",
+    "CONTACT_ADMIN",
+];
 
 /// The action-code vocabulary. Known variants serialize to their SCREAMING_SNAKE string; an
 /// unrecognized code round-trips through [`ActionCode::Unknown`]. Serialized as a plain string.
@@ -96,7 +126,22 @@ pub enum ActionCode {
     Retry,                // RETRYABLE_FAILURE / UNAVAILABLE
     ContactAdmin,         // non-self-service denials
     /// A forward-compatible code this build doesn't know — execute the action's `argv` anyway.
-    Unknown(String),
+    /// Only constructible via the normalizing [`From<String>`], which maps a known string to its
+    /// variant first, so an `Unknown` can never alias a known code (the inner value is private).
+    Unknown(UnknownActionCode),
+}
+
+/// An action code outside this build's known set — its inner string is private so it can only be
+/// produced by [`ActionCode::from`], which canonicalizes known codes first. This prevents an
+/// `Unknown("PROPOSE_PUBLISH")` that would serialize as a known code yet compare unequal to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownActionCode(String);
+
+impl UnknownActionCode {
+    /// The raw, unrecognized code string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl ActionCode {
@@ -111,7 +156,7 @@ impl ActionCode {
             ActionCode::RequestAccess => "REQUEST_ACCESS",
             ActionCode::Retry => "RETRY",
             ActionCode::ContactAdmin => "CONTACT_ADMIN",
-            ActionCode::Unknown(s) => s,
+            ActionCode::Unknown(s) => s.as_str(),
         }
     }
 }
@@ -128,7 +173,7 @@ impl From<String> for ActionCode {
             "REQUEST_ACCESS" => ActionCode::RequestAccess,
             "RETRY" => ActionCode::Retry,
             "CONTACT_ADMIN" => ActionCode::ContactAdmin,
-            _ => ActionCode::Unknown(s),
+            _ => ActionCode::Unknown(UnknownActionCode(s)),
         }
     }
 }
@@ -136,7 +181,7 @@ impl From<String> for ActionCode {
 impl From<ActionCode> for String {
     fn from(c: ActionCode) -> String {
         match c {
-            ActionCode::Unknown(s) => s,
+            ActionCode::Unknown(s) => s.0,
             other => other.as_str().to_owned(),
         }
     }
@@ -155,12 +200,21 @@ impl<'de> Deserialize<'de> for ActionCode {
 }
 
 impl schemars::JsonSchema for ActionCode {
-    fn schema_name() -> String {
-        "ActionCode".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ActionCode".into()
     }
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        // An open string set with known values — the agent matches the knowns, passes unknowns.
-        String::json_schema(generator)
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // An OPEN string set: the known vocabulary is advertised (so a cross-language consumer can
+        // branch without reading Rust), but any string validates — an old build must pass an unknown
+        // future code through, not reject it. Contrast the CLOSED `TerminalOutcome` / `SignatureAlg`.
+        schemars::json_schema!({
+            "type": "string",
+            "title": "ActionCode",
+            "description": "A machine-actionable next-action code. The values in `examples` are the \
+                known set; an unrecognized future code is still valid and MUST be executed via the \
+                action's `argv` (never rejected).",
+            "examples": KNOWN_ACTION_CODES,
+        })
     }
 }
 
@@ -183,7 +237,9 @@ pub struct Affected {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// A `version_id` (commit SHA-256, lowercase hex) when the outcome refers to a version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
@@ -193,25 +249,31 @@ pub struct Affected {
 /// on failures): one stable receipt per op, identical on retry.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Receipt {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[schemars(extend("const" = 1))]
     pub schema_version: u32,
     /// Client-minted UUIDv4, persisted before the first send.
+    #[schemars(extend("format" = "uuid"))]
     pub op_id: String,
     pub command: String,
     pub outcome: TerminalOutcome,
     pub workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
-    /// The commit SHA-256.
+    /// The commit SHA-256 (lowercase hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub version_id: Option<String>,
-    /// The byte-exact consent hash.
+    /// The byte-exact consent hash (lowercase hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub bundle_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<Generation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<Generation>,
     /// RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).
+    #[schemars(extend("format" = "date-time"))]
     pub created_at: String,
     /// The signing key id that covered this op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,7 +287,9 @@ pub struct Receipt {
 /// stable code + retryability + the safe next actions; never raw SQL/git strings.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WireError {
-    /// A stable error code (distinct from the outcome; e.g. `STALE_BASE`, `OFF_ROSTER`).
+    /// A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an
+    /// **open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are
+    /// added over time, and a consumer must treat an unrecognized `code` as the `outcome` it carries.
     pub code: String,
     pub outcome: TerminalOutcome,
     pub retryable: bool,
@@ -243,7 +307,7 @@ pub struct WireError {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The signed `current` pointer envelope — public semantics {digest, generation},
+// The signed `current` pointer envelope — public semantics {version_id, generation},
 // the signed preimage also binds workspace_id + skill_id (no cross-scope replay).
 // ---------------------------------------------------------------------------------------------
 
@@ -255,23 +319,36 @@ pub struct PointerScope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CurrentRecord {
-    /// The full commit SHA-256 (`version_id`).
-    pub digest: String,
+    /// The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the
+    /// pointer names the version, and the commit transitively pins the bytes.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub version_id: String,
     pub generation: Generation,
+}
+
+/// The signature algorithm — a CLOSED set. v0 is Ed25519 only; an unknown or `none` algorithm must
+/// fail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root
+/// pointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the
+/// exact opposite of a next-action code and must never silently pass through.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum SignatureAlg {
+    Ed25519,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Signature {
-    /// Always `"Ed25519"` in v0.
-    pub alg: String,
+    pub alg: SignatureAlg,
     pub key_id: String,
-    /// base64url, raw 64-byte signature.
+    /// base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars.
+    #[schemars(extend("pattern" = "^[A-Za-z0-9_-]{86}$"))]
     pub value: String,
 }
 
 /// The signed `current` pointer — a versioned envelope; `ETag = "<epoch>.<seq>"`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SignedCurrentRecord {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[schemars(extend("const" = 1))]
     pub schema_version: u32,
     pub scope: PointerScope,
     pub record: CurrentRecord,
@@ -341,8 +418,45 @@ mod tests {
 
         // A forward-compatible code this build doesn't know is preserved, not rejected.
         let unknown: ActionCode = serde_json::from_str("\"FUTURE_FLOW\"").unwrap();
-        assert_eq!(unknown, ActionCode::Unknown("FUTURE_FLOW".to_owned()));
+        assert!(matches!(&unknown, ActionCode::Unknown(u) if u.as_str() == "FUTURE_FLOW"));
         assert_eq!(serde_json::to_string(&unknown).unwrap(), "\"FUTURE_FLOW\"");
+    }
+
+    #[test]
+    fn action_code_unknown_cannot_alias_a_known_code() {
+        // Deserializing a known string ALWAYS canonicalizes to its variant — never an `Unknown`
+        // that would compare unequal yet serialize identically. The private inner field makes the
+        // aliasing `Unknown` unconstructible from outside the crate.
+        assert_eq!(
+            serde_json::from_str::<ActionCode>("\"RETRY\"").unwrap(),
+            ActionCode::Retry
+        );
+        assert_eq!(
+            ActionCode::from("REPIN_PLANE_KEY".to_owned()),
+            ActionCode::RepinPlaneKey
+        );
+        // Every advertised known code parses to a known (non-`Unknown`) variant.
+        for code in KNOWN_ACTION_CODES {
+            assert!(!matches!(
+                ActionCode::from(code.to_owned()),
+                ActionCode::Unknown(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn signature_alg_is_closed_and_fails_closed() {
+        assert_eq!(
+            serde_json::to_string(&SignatureAlg::Ed25519).unwrap(),
+            "\"Ed25519\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SignatureAlg>("\"Ed25519\"").unwrap(),
+            SignatureAlg::Ed25519
+        );
+        // An unknown / "none" algorithm must REFUSE to deserialize (fail closed) — no downgrade.
+        assert!(serde_json::from_str::<SignatureAlg>("\"none\"").is_err());
+        assert!(serde_json::from_str::<SignatureAlg>("\"RSA\"").is_err());
     }
 
     #[test]

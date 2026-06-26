@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlacementMap",
+  "description": "`skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and\nexact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.",
+  "type": "object",
+  "properties": {
+    "applied_commit": {
+      "description": "The `version_id` currently realized on disk.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "materialized_sha": {
+      "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "placements": {
+      "description": "The target dir(s) where the skill is placed (project / global / per-category layers).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pre_existing_sha": {
+      "description": "sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "swap_capability": {
+      "$ref": "#/$defs/SwapCapability"
+    }
+  },
+  "required": [
+    "schema_version",
+    "placements",
+    "applied_commit",
+    "materialized_sha",
+    "swap_capability"
+  ],
+  "$defs": {
+    "SwapCapability": {
+      "description": "Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "`renameat2(RENAME_EXCHANGE)` (Linux) / `renamex_np(RENAME_SWAP)` (macOS).",
+          "type": "string",
+          "const": "atomic_exchange"
+        },
+        {
+          "description": "A degraded rename-dance fallback (no single-syscall swap available).",
+          "type": "string",
+          "const": "rename_dance"
+        },
+        {
+          "description": "No safe atomic materialization — refuse or warn.",
+          "type": "string",
+          "const": "unsupported"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewData",
+  "description": "`review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale\nbase returns `CONFLICT`. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "current_generation": {
+      "description": "The pointer's new generation when an approval moved `current`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Generation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decision": {
+      "$ref": "#/$defs/ReviewDecision"
+    },
+    "proposal": {
+      "description": "`<skill>@<version_id>` of the reviewed proposal.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "proposal",
+    "decision"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    },
+    "ReviewDecision": {
+      "description": "A review verdict. **INFERRED.**",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
+    }
+  }
+}

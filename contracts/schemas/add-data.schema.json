@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AddData",
+  "description": "`add` (local, offline — no plane op, `receipt: null`). **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "bundle_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "name": {
+      "type": "string"
+    },
+    "skill_id": {
+      "type": "string"
+    },
+    "tracked": {
+      "type": "boolean"
+    },
+    "version_id": {
+      "description": "The base commit the local sidecar starts from.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "skill_id",
+    "name",
+    "version_id",
+    "bundle_digest",
+    "tracked"
+  ]
+}

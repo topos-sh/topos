@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "command": "pull",
+  "ok": true,
+  "data": {
+    "proposals_awaiting": 0,
+    "skills": [
+      {
+        "action": "up_to_date",
+        "applied": {
+          "epoch": 1,
+          "seq": 42
+        },
+        "observed": {
+          "epoch": 1,
+          "seq": 42
+        },
+        "skill": "pr-describe"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": []
+}

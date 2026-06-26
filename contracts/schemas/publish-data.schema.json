@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PublishData",
+  "description": "`publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is\nreturned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the\n`publish --propose` next-action) and carries no `data`. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "bundle_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "current_generation": {
+      "description": "The pointer's new generation after the move.",
+      "$ref": "#/$defs/Generation"
+    },
+    "invite_link": {
+      "description": "Returned only on the first publish (which stands up the workspace): `/i/<token>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skill_id": {
+      "type": "string"
+    },
+    "version_id": {
+      "description": "The new commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "skill_id",
+    "version_id",
+    "bundle_digest",
+    "current_generation"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    }
+  }
+}

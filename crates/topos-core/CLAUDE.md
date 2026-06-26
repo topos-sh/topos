@@ -7,22 +7,24 @@ wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `top
 
 ## Owns (the single implementation of each)
 
-- the canonical bundle + commit construction;
-- the byte-exact sha256 bundle digest + the canonical-manifest reject rules;
-- the consent-satisfier truth-table, as a pure fn;
-- the `(epoch, seq)` compare-and-set *decision* (current, expected → Promote | Conflict | …);
-- the four-state sync *transition* fn (state, input → next);
-- diff3 hunk planning;
-- Ed25519 signing-PREIMAGE construction + verify (the one shared verify/preimage impl — the concrete
-  `sign` lives in the caller, over the same dalek crate);
-- first-parent + same-skill lineage assertions.
+Implemented (each behind a known-answer / truth-table test):
+- ✅ the byte-exact sha256 **bundle digest** + the canonical-manifest **reject rules** (`digest`);
+- ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`).
+
+Planned (land behind a golden vector as their wire encoding / mechanics freeze):
+- the canonical **commit** construction (the byte layout is a pending design decision — see the spec);
+- the **Ed25519 signing-PREIMAGE** construction + verify (the device-op frame + pointer canonicalization
+  are the same pending decision; the concrete `sign` lives in the caller, over the same dalek crate);
+- the `(epoch, seq)` compare-and-set *decision*; the four-state sync *transition* fn; diff3 hunk planning;
+  first-parent + same-skill lineage assertions.
 
 ## Hard constraints
 
+- **`#![cfg_attr(not(test), no_std)]` + `alloc`** — purity is enforced by the compiler: a `std::fs` /
+  `SystemTime::now` / RNG call would fail to BUILD in a production build, not just fail review.
 - **No I/O. No traits. No `tokio` / `sqlx` / `axum` / `gix` / `std::fs`.**
 - **No ambient clock or RNG** — time is a `now` parameter; keys/signatures are byte parameters.
 - **Every core invariant is a unit/proptest in this crate.**
-- Depends on nothing else in the workspace. (It stays accidentally wasm-compilable as a free effect of
-  purity, but that is not a requirement.)
+- Depends on nothing in the workspace, and only on crypto primitives (`cargo xtask check-arch` enforces it).
 
-Dependencies: `ed25519-dalek` (verify), `sha2`. Nothing else.
+Dependencies: `sha2` today; `ed25519-dalek` lands with the signing module. Nothing else.

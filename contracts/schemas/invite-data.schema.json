@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InviteData",
+  "description": "`invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never\nenrolls on its own. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "invite_link": {
+      "description": "`/i/<token>`.",
+      "type": "string"
+    },
+    "roster_added": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "skills": {
+      "description": "The skills a redeemer joins + follows (empty = a membership-only door).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "invite_link"
+  ]
+}

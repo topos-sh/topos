@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "command": "diff",
+  "ok": true,
+  "data": {
+    "bundle_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1 +1 @@\n-old\n+new\n",
+    "source": "local",
+    "version_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "warnings": [],
+  "next_actions": []
+}

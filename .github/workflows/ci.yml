@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      # Honors rust-toolchain.toml (pinned channel + rustfmt/clippy components) — do NOT pin a
+      # channel here, or it would override the repo's reproducible toolchain.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: format
+        run: cargo fmt --all --check
+      - name: clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Doc-comments are load-bearing: topos-types `///`s become the committed JSON-Schema field
+      # descriptions, and intra-doc links must not rot. Deny rustdoc warnings.
+      - name: docs (broken intra-doc links are errors)
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      - name: contract drift gate (schemas)
+        run: cargo run -p xtask --locked -- gen-schema --check
+      - name: contract drift gate (fixtures)
+        run: cargo run -p xtask --locked -- gen-fixtures --check
+      - name: architectural layering
+        run: cargo run -p xtask --locked -- check-arch
+
+  deny:
+    name: cargo-deny (advisories + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

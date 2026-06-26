@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PullData",
+  "description": "`pull` result — per-skill currency state plus the reviewer-queue count. **PINNED.**",
+  "type": "object",
+  "properties": {
+    "proposals_awaiting": {
+      "description": "Proposals awaiting *me* as a reviewer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PullSkill"
+      }
+    }
+  },
+  "required": [
+    "skills",
+    "proposals_awaiting"
+  ],
+  "$defs": {
+    "Conflict": {
+      "description": "The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**",
+      "type": "object",
+      "properties": {
+        "local_version_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "remote_version_id": {
+          "description": "The remote version the draft diverged from.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "remote_version_id"
+      ]
+    },
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    },
+    "Offer": {
+      "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version_id",
+        "bundle_digest"
+      ]
+    },
+    "PullAction": {
+      "description": "What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
+      "oneOf": [
+        {
+          "description": "State ① — already current; nothing to do.",
+          "type": "string",
+          "const": "up_to_date"
+        },
+        {
+          "description": "State ② clean — auto fast-forwarded to the new bytes.",
+          "type": "string",
+          "const": "fast_forwarded"
+        },
+        {
+          "description": "State ② confirm-each / first-receive — a one-tap offer is waiting.",
+          "type": "string",
+          "const": "offered"
+        },
+        {
+          "description": "State ④ — a local draft conflicts with a newer remote.",
+          "type": "string",
+          "const": "diverged"
+        },
+        {
+          "description": "A transient local hold (e.g. a local go-back is pinned).",
+          "type": "string",
+          "const": "held"
+        },
+        {
+          "description": "A reused/replayed generation tuple was seen — a loud integrity alarm.",
+          "type": "string",
+          "const": "alarm"
+        }
+      ]
+    },
+    "PullSkill": {
+      "description": "One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by\nname; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PullAction"
+        },
+        "applied": {
+          "description": "Highest generation actually materialized to disk.",
+          "$ref": "#/$defs/Generation"
+        },
+        "conflict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Conflict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed": {
+          "description": "Highest authenticated `(epoch,seq)` seen — the anti-rollback floor.",
+          "$ref": "#/$defs/Generation"
+        },
+        "offer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Offer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skill": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill",
+        "observed",
+        "applied",
+        "action"
+      ]
+    }
+  }
+}

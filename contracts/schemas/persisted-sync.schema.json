@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SyncState",
+  "description": "`skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).\n**Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from these\nfields, never stored.",
+  "type": "object",
+  "properties": {
+    "applied": {
+      "description": "Highest generation actually MATERIALIZED — advances only after a successful swap (`≤ observed`).",
+      "$ref": "#/$defs/Generation"
+    },
+    "base_commit": {
+      "description": "The commit the working tree derives from (= the applied commit when clean).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "held": {
+      "description": "A transient local pin (a `pull <skill>@<hash>` go-back) suppressing one auto fast-forward.",
+      "type": "boolean"
+    },
+    "observed": {
+      "description": "Highest AUTHENTICATED (signature-verified) generation ever seen — the anti-rollback floor and\nthe retry target. Only a signed record raises it.",
+      "$ref": "#/$defs/Generation"
+    },
+    "recorded": {
+      "description": "Per observed generation, the commit it carried — a reused tuple with a *different* commit is a\nloud ALARM; same tuple + same commit is a no-op.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RecordedTuple"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "work_hash": {
+      "description": "sha256 (lowercase hex) of the current harness-dir bytes (recomputed; cheap).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "observed",
+    "applied",
+    "base_commit",
+    "work_hash",
+    "held"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    },
+    "RecordedTuple": {
+      "description": "One `(generation → commit)` record in [`SyncState::recorded`]. (A list, not a JSON-object map,\nbecause the key is the `(epoch,seq)` pair.)",
+      "type": "object",
+      "properties": {
+        "commit_id": {
+          "description": "The commit (`version_id`) seen at this generation.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "generation": {
+          "$ref": "#/$defs/Generation"
+        }
+      },
+      "required": [
+        "generation",
+        "commit_id"
+      ]
+    }
+  }
+}

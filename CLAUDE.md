@@ -13,9 +13,14 @@ is a bundle of files (`SKILL.md` + scripts + reference docs); the **whole bundle
 They share one trust kernel (`topos-core`) — the single, auditable implementation of the byte-exact digest,
 consent, signing, and sync algorithm. Nothing proprietary lives here.
 
-> **Status — early scaffold.** A compiling scaffold: the wire contracts are frozen and the workspace builds; the
-> verbs are not implemented yet. Heavy dependencies (`gix`/`sqlx`/`axum`) are declared but not yet
-> referenced, so the initial build is light.
+> **Status — early scaffold (contracts + trust kernel landing).** The boundary contracts are frozen and
+> schema-generated (the `--json` envelope, the outcome/receipt/error/action-code shapes, the closed
+> signature-alg + signed pointer, all 12 per-verb `data` payloads, and the four load-bearing client documents
+> — sync/lock/map/op), with golden `--json` fixtures (pull/list/diff/publish) validated positive **and**
+> negative against the schemas. The pure trust kernel (`topos-core`) implements the **byte-exact digest** + the
+> **consent truth-table** behind known-answer tests. Still to come: the verb *logic*, the plane, the harness
+> adapters, and the **signing** byte-encodings (a pending design decision — the kernel ships none yet).
+> Heavy deps (`gix`/`sqlx`/`axum`) are declared but unreferenced, so the build stays light.
 
 ## Progressive disclosure — read the CLAUDE.md in the folder you're working in
 

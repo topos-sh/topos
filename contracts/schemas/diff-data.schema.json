@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiffData",
+  "description": "`diff` result. `source` + `version_id` (+ the emitted digest) are **PINNED**; the diff *body*\nrepresentation (\"a plain unified diff\") is the only INFERRED part.",
+  "type": "object",
+  "properties": {
+    "bundle_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "diff": {
+      "description": "A plain unified diff.",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/DiffSource"
+    },
+    "version_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "source",
+    "version_id",
+    "bundle_digest",
+    "diff"
+  ],
+  "$defs": {
+    "DiffSource": {
+      "description": "Where the compared bytes came from: the local sidecar, or a plane-held proposal. **PINNED.**",
+      "type": "string",
+      "enum": [
+        "local",
+        "plane"
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProposeData",
+  "description": "`publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns\n`NEEDS_REVIEW`. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "base_version_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "proposal": {
+      "description": "`<skill>@<version_id>` of the candidate.",
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "proposal",
+    "base_version_id",
+    "title"
+  ]
+}

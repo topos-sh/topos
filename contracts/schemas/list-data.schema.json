@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ListData",
+  "description": "`list` result — the four inventory buckets. **PINNED** (bucket set + per-entry identity).",
+  "type": "object",
+  "properties": {
+    "followed": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkillEntry"
+      }
+    },
+    "footprint": {
+      "description": "Only present under `--footprint`: topos-owned paths outside skill dirs. **INFERRED shape.**",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "published_by_you": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkillEntry"
+      }
+    },
+    "tracked": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkillEntry"
+      }
+    },
+    "untracked": {
+      "description": "A real skill in a harness dir that topos doesn't manage yet (discovered, not adopted) — it has\nno topos `version_id`/`bundle_digest` yet, so it carries only what is knowable on disk.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UntrackedEntry"
+      }
+    }
+  },
+  "required": [
+    "followed",
+    "published_by_you",
+    "tracked",
+    "untracked"
+  ],
+  "$defs": {
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
+    "SkillEntry": {
+      "description": "A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "description": "The byte-exact consent hash, shown alongside as evidence.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "draft": {
+          "description": "Local edits ahead of the version this entry is on.",
+          "type": "boolean"
+        },
+        "pending_proposals": {
+          "description": "Open proposals, each as `<skill>@<version_id>`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skill": {
+          "type": "string"
+        },
+        "version_id": {
+          "description": "The approvable `@` token (the commit SHA-256).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "skill",
+        "version_id",
+        "bundle_digest",
+        "draft"
+      ]
+    },
+    "UntrackedEntry": {
+      "description": "A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.",
+      "type": "object",
+      "properties": {
+        "harness": {
+          "$ref": "#/$defs/HarnessId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The harness dir it was found in.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "harness"
+      ]
+    }
+  }
+}

@@ -12,7 +12,13 @@ description = "The wire DTOs only — the --json envelope, terminal-outcome/acti
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-uuid.workspace = true
+# NB: op_id is a wire String here (format: uuid in the schema); the uuid CRATE is a client dep
+# (it mints the v4), not a wire-DTO dep — so it is deliberately absent from this leaf.
+
+[dev-dependencies]
+# Test-only: a JSON-Schema 2020-12 validator, to prove our generated schemas actually REJECT bad
+# instances (the negative half of the contract oracle) — and that serde output matches schemars.
+jsonschema = "0.46"
 
 [lints]
 workspace = true
