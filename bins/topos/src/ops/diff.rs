@@ -43,6 +43,7 @@ pub(crate) fn diff(ctx: &Ctx<'_>, skill: &str) -> Result<DiffData, ClientError> 
         .iter()
         .map(|f| FileBytes {
             path: &f.path,
+            mode: f.mode,
             bytes: &f.bytes,
         })
         .collect();
@@ -50,6 +51,7 @@ pub(crate) fn diff(ctx: &Ctx<'_>, skill: &str) -> Result<DiffData, ClientError> 
         .iter()
         .map(|f| FileBytes {
             path: &f.path,
+            mode: f.mode,
             bytes: &f.bytes,
         })
         .collect();

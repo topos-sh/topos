@@ -322,6 +322,54 @@ fn verify_rejects_a_non_blob_entry() {
 }
 
 #[test]
+fn durability_set_names_the_whole_store_not_just_objects() {
+    // A crash-safe add must fsync everything needed to OPEN the store, not only the loose objects:
+    // a doc that names a commit must never become durable while the store can't be opened.
+    let scratch = Scratch::new("durset");
+    let store = Store::init(&scratch.0).expect("init");
+    commit_genesis(
+        &store,
+        &[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"x\n",
+        }],
+    );
+    let batch = store.durability_set().expect("durability set");
+    let files: Vec<String> = batch
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let dirs: Vec<String> = batch
+        .dirs
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    // The repo metadata gix wrote outside any fs seam.
+    assert!(
+        files.iter().any(|f| f.ends_with("/HEAD")),
+        "HEAD missing: {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f.ends_with("/config")),
+        "config missing"
+    );
+    // The repo root + the parent dirs of the loose objects + the version ref.
+    assert!(dirs.iter().any(|d| d.ends_with("/objects")), "objects dir");
+    assert!(dirs.iter().any(|d| d.ends_with("/refs")), "refs dir");
+    assert!(
+        files.iter().any(|f| f.contains("/refs/topos/versions/")),
+        "the version ref must be named"
+    );
+    assert!(
+        files.iter().filter(|f| f.contains("/objects/")).count() >= 1,
+        "at least one loose object"
+    );
+}
+
+#[test]
 fn render_rejects_missing_version() {
     let scratch = Scratch::new("missing");
     let store = Store::init(&scratch.0).expect("init");

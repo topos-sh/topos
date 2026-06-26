@@ -9,7 +9,9 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::sidecar::footprint;
 
-/// What `uninstall` did (ad-hoc data — this verb has no frozen result schema).
+/// What `uninstall` did. Ad-hoc data — this verb has no frozen result schema; the envelope stays
+/// schema-valid (a free-form `data`). The "touches no skill bytes" guarantee is structural (the user's
+/// source dir is never referenced for deletion) and is asserted directly by the per-file-sha256 test.
 #[derive(Debug, Serialize)]
 pub(crate) struct UninstallOutcome {
     pub home_removed: bool,
@@ -17,8 +19,6 @@ pub(crate) struct UninstallOutcome {
     pub footprint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_removed: Option<String>,
-    /// Always `false`: uninstall never touches a user skill directory.
-    pub skill_bytes_touched: bool,
 }
 
 /// Remove `~/.topos/` (and, if given, the binary). `binary` is injected so a test removes a fake target,
@@ -58,6 +58,5 @@ pub(crate) fn uninstall(
         home_removed,
         footprint,
         binary_removed,
-        skill_bytes_touched: false,
     })
 }

@@ -2,46 +2,50 @@
 //! `diff` golden is byte-stable regardless of any external diff library's output across releases.
 //!
 //! Lines are compared **byte-exactly** (a line is split inclusive of its `\n`, so a trailing-newline
-//! change is a real difference). A non-UTF-8 file renders as `Binary files … differ`; a missing trailing
-//! newline renders the standard `\ No newline at end of file`.
+//! change is a real difference). A **mode** change (e.g. `chmod +x`) is surfaced even with identical
+//! content — it changes the `bundle_digest`, so the diff must not hide it. A non-UTF-8 file renders as
+//! `Binary files … differ`; a missing trailing newline renders the standard `\ No newline at end of file`.
 
-/// One file's bytes under its bundle-relative path.
+use topos_core::digest::FileMode;
+
+/// One file's mode + bytes under its bundle-relative path.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FileBytes<'a> {
     pub path: &'a str,
+    pub mode: FileMode,
     pub bytes: &'a [u8],
 }
 
 const CONTEXT: usize = 3;
 
 /// Render a unified diff of two bundles, each sorted by raw path bytes. Files only in `base` are
-/// deletions; files only in `draft` are additions; common files with differing bytes are hunked.
+/// deletions; files only in `draft` are additions; common files with differing bytes **or mode** are shown.
 pub(crate) fn unified_bundle_diff(base: &[FileBytes<'_>], draft: &[FileBytes<'_>]) -> String {
     let mut out = String::new();
     let (mut i, mut j) = (0usize, 0usize);
     while i < base.len() || j < draft.len() {
         match (base.get(i), draft.get(j)) {
             (Some(b), Some(d)) if b.path == d.path => {
-                if b.bytes != d.bytes {
-                    out.push_str(&file_diff(b.path, Some(b.bytes), Some(d.bytes)));
+                if b.bytes != d.bytes || b.mode != d.mode {
+                    out.push_str(&file_diff(b.path, Some(*b), Some(*d)));
                 }
                 i += 1;
                 j += 1;
             }
             (Some(b), Some(d)) if b.path.as_bytes() < d.path.as_bytes() => {
-                out.push_str(&file_diff(b.path, Some(b.bytes), None));
+                out.push_str(&file_diff(b.path, Some(*b), None));
                 i += 1;
             }
             (Some(_), Some(d)) => {
-                out.push_str(&file_diff(d.path, None, Some(d.bytes)));
+                out.push_str(&file_diff(d.path, None, Some(*d)));
                 j += 1;
             }
             (Some(b), None) => {
-                out.push_str(&file_diff(b.path, Some(b.bytes), None));
+                out.push_str(&file_diff(b.path, Some(*b), None));
                 i += 1;
             }
             (None, Some(d)) => {
-                out.push_str(&file_diff(d.path, None, Some(d.bytes)));
+                out.push_str(&file_diff(d.path, None, Some(*d)));
                 j += 1;
             }
             (None, None) => break,
@@ -50,17 +54,34 @@ pub(crate) fn unified_bundle_diff(base: &[FileBytes<'_>], draft: &[FileBytes<'_>
     out
 }
 
-fn file_diff(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
-    let old_lines = old.map(split_lines);
-    let new_lines = new.map(split_lines);
-    // Binary on either side -> we don't render content.
+fn file_diff(path: &str, old: Option<FileBytes<'_>>, new: Option<FileBytes<'_>>) -> String {
+    let mut out = String::new();
+
+    // A mode change on an existing file (content may be identical) — surface it git-style.
+    if let (Some(o), Some(n)) = (old, new)
+        && o.mode != n.mode
+    {
+        out.push_str(&format!("diff --git a/{path} b/{path}\n"));
+        out.push_str(&format!("old mode {}\n", o.mode.as_str()));
+        out.push_str(&format!("new mode {}\n", n.mode.as_str()));
+    }
+
+    let old_bytes = old.map(|f| f.bytes);
+    let new_bytes = new.map(|f| f.bytes);
+    if old_bytes == new_bytes {
+        // No content change (a pure mode change already rendered above, or nothing).
+        return out;
+    }
+
+    let old_lines = old_bytes.map(split_lines);
+    let new_lines = new_bytes.map(split_lines);
     if matches!(old_lines, Some(None)) || matches!(new_lines, Some(None)) {
-        return format!("Binary files a/{path} and b/{path} differ\n");
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return out;
     }
     let old_lines = old_lines.flatten().unwrap_or_default();
     let new_lines = new_lines.flatten().unwrap_or_default();
 
-    let mut out = String::new();
     out.push_str(&format!(
         "--- {}\n",
         if old.is_some() {
@@ -222,12 +243,20 @@ fn hunks(old: &[&str], new: &[&str]) -> Vec<Hunk> {
 }
 
 fn render_hunk(hunk: &Hunk, old: &[&str], new: &[&str]) -> String {
+    // Unified-diff convention: an empty range starts at line 0 (e.g. a new file is `-0,0`).
+    let old_start = if hunk.old_len == 0 {
+        0
+    } else {
+        hunk.old_start + 1
+    };
+    let new_start = if hunk.new_len == 0 {
+        0
+    } else {
+        hunk.new_start + 1
+    };
     let mut out = format!(
         "@@ -{},{} +{},{} @@\n",
-        hunk.old_start + 1,
-        hunk.old_len,
-        hunk.new_start + 1,
-        hunk.new_len
+        old_start, hunk.old_len, new_start, hunk.new_len
     );
     for (op, a, b) in &hunk.ops {
         let (prefix, line) = match op {
@@ -242,4 +271,48 @@ fn render_hunk(hunk: &Hunk, old: &[&str], new: &[&str]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn f<'a>(path: &'a str, mode: FileMode, bytes: &'a [u8]) -> FileBytes<'a> {
+        FileBytes { path, mode, bytes }
+    }
+
+    #[test]
+    fn mode_only_change_is_surfaced() {
+        // chmod +x with identical content must still produce a diff (it changes the bundle_digest).
+        let base = [f("run.sh", FileMode::Regular, b"#!/bin/sh\n")];
+        let draft = [f("run.sh", FileMode::Executable, b"#!/bin/sh\n")];
+        let out = unified_bundle_diff(&base, &draft);
+        assert!(
+            out.contains("old mode 100644") && out.contains("new mode 100755"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn added_file_uses_zero_old_range() {
+        let draft = [f("new.txt", FileMode::Regular, b"a\nb\n")];
+        let out = unified_bundle_diff(&[], &draft);
+        assert!(out.contains("@@ -0,0 +1,2 @@"), "{out}");
+        assert!(out.contains("--- /dev/null") && out.contains("+++ b/new.txt"));
+    }
+
+    #[test]
+    fn deleted_file_uses_zero_new_range() {
+        let base = [f("gone.txt", FileMode::Regular, b"x\n")];
+        let out = unified_bundle_diff(&base, &[]);
+        assert!(out.contains("@@ -1,1 +0,0 @@"), "{out}");
+    }
+
+    #[test]
+    fn no_newline_marker_is_rendered() {
+        let base = [f("a", FileMode::Regular, b"x")];
+        let draft = [f("a", FileMode::Regular, b"y")];
+        let out = unified_bundle_diff(&base, &draft);
+        assert!(out.contains("\\ No newline at end of file"), "{out}");
+    }
 }

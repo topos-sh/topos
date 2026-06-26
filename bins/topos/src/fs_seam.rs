@@ -118,15 +118,28 @@ impl FsOps for RealFs {
             .append(true)
             .open(path)?;
         f.write_all(line)?;
-        Self::fsync_handle(&f)
+        Self::fsync_handle(&f)?;
+        // The first append CREATES the file — fsync the parent so its directory entry is durable too.
+        if let Some(dir) = path.parent() {
+            self.fsync_dir(dir)?;
+        }
+        Ok(())
     }
 
+    // Removals are NotFound-tolerant: removing something a concurrent command already removed (a publish
+    // rename that raced recovery's directory listing) is success, not a spurious hard error.
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        std::fs::remove_file(path)
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
     }
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
-        std::fs::remove_dir_all(path)
+        match std::fs::remove_dir_all(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
     }
 
     fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {

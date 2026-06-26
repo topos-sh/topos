@@ -199,42 +199,11 @@ impl Store {
     /// # Errors
     /// [`GitstoreError::Io`] if the store directory cannot be read.
     pub fn durability_set(&self) -> Result<WriteBatch, GitstoreError> {
+        // The WHOLE git directory: not just the loose objects + version refs, but the repo metadata
+        // (`HEAD`, `config`, the `objects/`/`refs/` dirs) `init_bare` created outside any fs seam. A doc
+        // that names a commit must not become durable while the store it lives in can't even be opened.
         let mut batch = WriteBatch::default();
-        let objects = self.git_dir.join("objects");
-        if objects.is_dir() {
-            batch.dirs.push(objects.clone());
-            for shard in read_dir(&objects)? {
-                let name = shard.file_name();
-                let name = name.to_string_lossy();
-                // Loose object shards are two lowercase-hex chars; skip `pack/` and `info/`.
-                if name.len() == 2
-                    && name.bytes().all(|b| b.is_ascii_hexdigit())
-                    && shard.path().is_dir()
-                {
-                    batch.dirs.push(shard.path());
-                    for obj in read_dir(&shard.path())? {
-                        if obj.path().is_file() {
-                            batch.files.push(obj.path());
-                        }
-                    }
-                }
-            }
-        }
-        let refs_dir = self.git_dir.join(VERSION_REF_PREFIX);
-        if refs_dir.is_dir() {
-            batch.dirs.push(refs_dir.clone());
-            for r in read_dir(&refs_dir)? {
-                if r.path().is_file() {
-                    batch.files.push(r.path());
-                }
-            }
-        }
-        // gix may pack a lone ref; include packed-refs if present.
-        let packed = self.git_dir.join("packed-refs");
-        if packed.is_file() {
-            batch.files.push(packed);
-            batch.dirs.push(self.git_dir.clone());
-        }
+        collect_tree(&self.git_dir, &mut batch)?;
         Ok(batch)
     }
 
@@ -297,6 +266,21 @@ fn read_dir(dir: &Path) -> Result<Vec<std::fs::DirEntry>, GitstoreError> {
         out.push(e.map_err(|e| GitstoreError::Io(format!("{e}")))?);
     }
     Ok(out)
+}
+
+/// Collect every file + directory under `dir` (recursively) into the durability batch — the client
+/// fsyncs them all so the store is fully reconstructable after a crash.
+fn collect_tree(dir: &Path, batch: &mut WriteBatch) -> Result<(), GitstoreError> {
+    batch.dirs.push(dir.to_path_buf());
+    for entry in read_dir(dir)? {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_tree(&path, batch)?;
+        } else if path.is_file() {
+            batch.files.push(path);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn gix_err<E: std::fmt::Display>(e: E) -> GitstoreError {

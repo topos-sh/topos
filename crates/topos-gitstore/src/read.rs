@@ -11,6 +11,10 @@ use crate::VERSION_REF_PREFIX;
 use crate::error::VerifyError;
 use crate::store::Store;
 
+/// The maximum directory nesting `render_verified` will follow — a forged store can't overflow the stack.
+/// Far beyond any real skill bundle's depth.
+const MAX_TREE_DEPTH: usize = 64;
+
 /// One file rendered out of the store, with its content sha256 recomputed from the raw bytes.
 #[derive(Debug, Clone)]
 pub struct RenderedFile {
@@ -49,7 +53,8 @@ impl Store {
     /// # Errors
     /// [`VerifyError::MissingVersion`] / [`VerifyError::MissingObject`] if an object is absent;
     /// [`VerifyError::NonUtf8Name`] / [`VerifyError::NonBlobEntry`] on an illegal stored entry;
-    /// [`VerifyError::BundleDigestMismatch`] if the recomputed digest does not match the pin.
+    /// [`VerifyError::BundleDigestMismatch`] if the recomputed digest does not match the pin;
+    /// [`VerifyError::Malformed`] on an undecodable/too-deep tree; [`VerifyError::Gix`] on a ref-read failure.
     pub fn render_verified(
         &self,
         version_id: [u8; 32],
@@ -69,7 +74,7 @@ impl Store {
             .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
 
         let mut files = Vec::new();
-        self.walk_tree(&tree, "", &mut files)?;
+        self.walk_tree(&tree, "", 0, &mut files)?;
 
         // Re-run the kernel digest over the rendered bytes — re-applies check_path + the collision rules
         // AND recomputes the consent hash. A flipped byte fails here.
@@ -99,7 +104,8 @@ impl Store {
     ///
     /// # Errors
     /// [`VerifyError::MissingVersion`] if `head` is absent; [`VerifyError::DuplicateLineage`] on an
-    /// ambiguous map; [`VerifyError::Malformed`] if a commit cannot be decoded.
+    /// ambiguous map; [`VerifyError::MissingObject`] / [`VerifyError::Malformed`] if a commit cannot be
+    /// read or decoded; [`VerifyError::Gix`] on a ref-read failure.
     pub fn log(&self, head: [u8; 32]) -> Result<Vec<VersionNode>, VerifyError> {
         let reverse = self.reverse_map()?;
         let mut out = Vec::new();
@@ -138,9 +144,12 @@ impl Store {
                 author,
                 message,
             });
+            // Advance only to a first-parent that is itself a known version; an unknown parent is the
+            // boundary of this machine's history (a partial sidecar store), where the walk stops cleanly
+            // rather than hard-erroring — consistent with how `parents` already drops unknown OIDs.
             match parent_git.first() {
-                Some(p) => cur = *p,
-                None => break,
+                Some(p) if reverse.contains_key(p) => cur = *p,
+                _ => break,
             }
         }
         Ok(out)
@@ -158,8 +167,13 @@ impl Store {
         &self,
         tree: &gix::Tree<'_>,
         prefix: &str,
+        depth: usize,
         out: &mut Vec<RenderedFile>,
     ) -> Result<(), VerifyError> {
+        // Bound the recursion so a forged/corrupted store with a deep tree chain can't overflow the stack.
+        if depth > MAX_TREE_DEPTH {
+            return Err(VerifyError::Malformed("tree nesting too deep".into()));
+        }
         for entry in tree.iter() {
             let entry = entry.map_err(|e| VerifyError::Malformed(format!("{e}")))?;
             // Byte-oriented: reject a non-UTF-8 name (the scanner never wrote one).
@@ -179,7 +193,7 @@ impl Store {
                         .map_err(|_| VerifyError::MissingObject)?
                         .try_into_tree()
                         .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
-                    self.walk_tree(&sub, &path, out)?;
+                    self.walk_tree(&sub, &path, depth + 1, out)?;
                 }
                 kind @ (EntryKind::Blob | EntryKind::BlobExecutable) => {
                     let mode = if kind == EntryKind::BlobExecutable {
@@ -187,12 +201,16 @@ impl Store {
                     } else {
                         FileMode::Regular
                     };
-                    let bytes = self
+                    // The mode says "blob"; assert the resolved object actually IS a blob, so a forged
+                    // entry can't make us hash a tree/commit payload as if it were file content.
+                    let object = self
                         .repo()
                         .find_object(oid)
-                        .map_err(|_| VerifyError::MissingObject)?
-                        .detach()
-                        .data;
+                        .map_err(|_| VerifyError::MissingObject)?;
+                    if object.kind != gix::objs::Kind::Blob {
+                        return Err(VerifyError::NonBlobEntry);
+                    }
+                    let bytes = object.detach().data;
                     let content_sha256 = digest::sha256(&bytes);
                     out.push(RenderedFile {
                         path,

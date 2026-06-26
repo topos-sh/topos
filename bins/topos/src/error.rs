@@ -77,7 +77,10 @@ impl ClientError {
     pub(crate) fn outcome(&self) -> TerminalOutcome {
         match self {
             ClientError::AmbiguousName { .. } => TerminalOutcome::AmbiguousName,
-            ClientError::Io(_) => TerminalOutcome::RetryableFailure,
+            // A transient filesystem failure is retryable — whether it surfaced client-side or in the store.
+            ClientError::Io(_) | ClientError::Gitstore(GitstoreError::Io(_)) => {
+                TerminalOutcome::RetryableFailure
+            }
             _ => TerminalOutcome::PermanentFailure,
         }
     }

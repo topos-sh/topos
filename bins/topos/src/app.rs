@@ -27,10 +27,19 @@ pub fn run() -> ExitCode {
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
 
-    // Recovery + the host identity are part of starting any command.
-    let device_id = match startup(&fs, &layout) {
-        Ok(d) => d,
-        Err(e) => return emit_err(json, cmd_name, &e),
+    // Recovery runs at the start of every command.
+    if let Err(e) = recover(&fs, &layout) {
+        return emit_err(json, cmd_name, &e);
+    }
+
+    // Only `add` authors a commit, so only `add` loads (and on first use, mints) the device identity —
+    // `uninstall` must never create or require it before tearing the home down.
+    let device_id = match &command {
+        Command::Add { .. } => match identity::load_or_create_device_id(&fs, &layout) {
+            Ok(d) => d,
+            Err(e) => return emit_err(json, cmd_name, &e),
+        },
+        _ => String::new(),
     };
     let ctx = Ctx {
         fs: &fs,
@@ -62,11 +71,6 @@ pub fn run() -> ExitCode {
             )
         }
     }
-}
-
-fn startup(fs: &RealFs, layout: &Layout) -> Result<String, ClientError> {
-    recover(fs, layout)?;
-    identity::load_or_create_device_id(fs, layout)
 }
 
 fn finish<T: Serialize>(

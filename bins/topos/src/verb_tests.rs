@@ -249,6 +249,78 @@ fn add_rejects_empty_bundle_and_source_overlapping_home() {
 }
 
 #[test]
+fn add_rejects_a_fifo_and_handles_a_casefold_collision() {
+    // A non-regular file (fifo) is rejected typed, nothing tracked.
+    let src = Scratch::new("fifo");
+    let root = src.0.join("skill");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("SKILL.md"), b"# s\n").unwrap();
+    let made_fifo = std::process::Command::new("mkfifo")
+        .arg(root.join("pipe"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if made_fifo {
+        let h = Harness::new("fifohome");
+        assert!(matches!(
+            ops::add(&h.ctx(), &root).unwrap_err(),
+            crate::error::ClientError::Scan(_)
+        ));
+        assert!(ops::list(&h.ctx(), None, false).unwrap().tracked.is_empty());
+    }
+
+    // A case-fold collision (`Readme.md` vs `readme.md`): a case-insensitive FS collapses them (add
+    // succeeds with one), a case-sensitive FS keeps both (the kernel rejects typed) — both honor the gate.
+    let src2 = Scratch::new("cf");
+    let root2 = src2.0.join("skill");
+    std::fs::create_dir_all(&root2).unwrap();
+    std::fs::write(root2.join("SKILL.md"), b"# s\n").unwrap();
+    std::fs::write(root2.join("Readme.md"), b"a\n").unwrap();
+    std::fs::write(root2.join("readme.md"), b"b\n").unwrap();
+    let h2 = Harness::new("cfhome");
+    match ops::add(&h2.ctx(), &root2) {
+        Ok(_) => {} // the FS collapsed the colliding pair into one file
+        Err(e) => assert!(matches!(e, crate::error::ClientError::Scan(_)), "got {e:?}"),
+    }
+}
+
+#[test]
+fn error_envelope_is_coded_retryability_aware_and_leak_free() {
+    use crate::error::ClientError;
+
+    // Ambiguous name -> the frozen code + the disambiguate next-action.
+    let amb = ClientError::AmbiguousName {
+        name: "x".into(),
+        count: 2,
+    };
+    let env = render::err_envelope("list", &amb);
+    assert!(!env.ok);
+    let err = env.error.as_ref().unwrap();
+    assert_eq!(err.code, "AMBIGUOUS_NAME");
+    assert_eq!(err.outcome, topos_types::TerminalOutcome::AmbiguousName);
+    assert!(!err.retryable);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(
+        env.next_actions[0].code,
+        topos_types::ActionCode::DisambiguateName
+    );
+
+    // Corrupt must not leak the inner serde detail to --json or TTY.
+    let corrupt = ClientError::Corrupt("secret-serde-detail-xyzzy".into());
+    let env = render::err_envelope("list", &corrupt);
+    let msg = env.error.unwrap().context["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!msg.contains("xyzzy"), "safe_message leaked: {msg}");
+    assert!(!render::err_tty(&corrupt).contains("xyzzy"));
+
+    // A store-side IO failure is retryable, like a client-side one.
+    let io = ClientError::Gitstore(topos_gitstore::GitstoreError::Io("disk full".into()));
+    assert!(render::err_envelope("add", &io).error.unwrap().retryable);
+}
+
+#[test]
 fn list_by_ambiguous_name_is_typed() {
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -336,7 +408,6 @@ fn uninstall_removes_home_and_binary_but_no_skill_bytes() {
 
     let out = ops::uninstall(&h.ctx(), true, Some(&fake_bin)).unwrap();
     assert!(out.home_removed);
-    assert!(!out.skill_bytes_touched);
     assert!(out.footprint.is_some());
     assert_eq!(
         out.binary_removed.as_deref(),

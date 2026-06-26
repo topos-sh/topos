@@ -202,6 +202,34 @@ fn recover_sweeps_tmp_repairs_log_and_is_idempotent() {
     );
 }
 
+/// A log that is a single partial line with no trailing newline (a crash on the very first append) is
+/// truncated to empty, idempotently.
+#[test]
+fn repair_truncates_a_lone_partial_line() {
+    let scratch = Scratch::new("tail");
+    let real = RealFs;
+    let layout = Layout::new(&scratch.0);
+    real.append_fsync(&layout.log_path(), b"{\"partial\":")
+        .unwrap();
+
+    crate::logfile::repair_torn_tail(&real, &layout.log_path()).unwrap();
+    assert!(
+        real.read_opt(&layout.log_path())
+            .unwrap()
+            .unwrap()
+            .is_empty(),
+        "a lone partial line must be truncated to empty"
+    );
+    // Idempotent.
+    crate::logfile::repair_torn_tail(&real, &layout.log_path()).unwrap();
+    assert!(
+        real.read_opt(&layout.log_path())
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// Recovery removes an incomplete `add` staging dir, but never one a live writer is holding.
 #[test]
 fn recover_removes_unlocked_staging_keeps_locked() {

@@ -62,13 +62,16 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
     }
 }
 
-/// A clean, leak-free summary for a user surface (the inner git/io string stays in logs only).
+/// A clean, leak-free summary for a user surface — variants whose `Display` could embed a raw serde / io
+/// / git string or a host path get a fixed message; the inner detail stays in logs only.
 pub(crate) fn safe_message(err: &ClientError) -> String {
     match err {
         ClientError::Io(_) => "a filesystem operation failed".to_owned(),
         ClientError::Gitstore(_) => "the embedded git store reported an error".to_owned(),
         ClientError::Verify(_) => "an integrity check failed".to_owned(),
-        // The remaining Display strings are already clean (no git/io internals).
+        ClientError::Corrupt(_) => "a sidecar document is corrupt".to_owned(),
+        ClientError::Scan(_) => "the skill directory was rejected".to_owned(),
+        // The remaining Display strings are fixed text or a user-supplied name — safe to show verbatim.
         other => other.to_string(),
     }
 }
