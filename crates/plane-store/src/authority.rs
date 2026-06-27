@@ -119,12 +119,20 @@ impl Authority {
 
     /// Open-or-create the per-workspace git store for an upload's object write (the bare repo is created
     /// on a workspace's first upload).
+    ///
+    /// Open first, then create, then open again on a failed create: two concurrent first-time uploads to
+    /// the same workspace can both observe the directory as absent, and bare-repo `init` is not an
+    /// idempotent open-or-create — so the loser of the creation race falls back to opening what the winner
+    /// just made instead of failing. (A finer-grained guard against a writer racing *mid*-init lands with
+    /// the broader concurrency work.)
     pub(crate) fn store_for_write(&self, ws: &WorkspaceId) -> Result<Store> {
         let dir = self.workspace_git_dir(ws);
-        if dir.exists() {
-            Store::open(&dir).map_err(AuthorityError::internal)
-        } else {
-            Store::init(&dir).map_err(AuthorityError::internal)
+        match Store::open(&dir) {
+            Ok(store) => Ok(store),
+            Err(_) => match Store::init(&dir) {
+                Ok(store) => Ok(store),
+                Err(_) => Store::open(&dir).map_err(AuthorityError::internal),
+            },
         }
     }
 }

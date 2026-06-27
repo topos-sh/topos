@@ -78,6 +78,10 @@ jobs:
         run: |
           sqlx database create
           sqlx migrate run --source crates/plane-store/migrations
+      # `-- --tests` matches the scope the committed metadata was generated with
+      # (`cargo sqlx prepare -- --tests`): three of the `.sqlx` files are `#[cfg(test)]`-only seed
+      # queries, so a lib-only check would neither validate them nor regenerate them (it would just warn
+      # they look unused), leaving them silently unguarded.
       - name: prepare --check (fails if the committed .sqlx has drifted from the schema)
         working-directory: crates/plane-store
-        run: cargo sqlx prepare --check
+        run: cargo sqlx prepare --check -- --tests

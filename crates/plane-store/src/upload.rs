@@ -65,6 +65,15 @@ pub(crate) async fn upload_candidate(
     skill: &SkillId,
     candidate: CandidateUpload,
 ) -> Result<UploadReceipt> {
+    // A skill bundle must contain at least one file. The git store is a dumb layer that happily snapshots
+    // a zero-entry tree, so the authority enforces the no-empty-bundle policy itself (it cannot trust the
+    // client scanner to have done so) — before writing any object or recording any provenance.
+    if candidate.files.is_empty() {
+        return Err(AuthorityError::RejectedUpload(
+            "a skill bundle must contain at least one file".to_owned(),
+        ));
+    }
+
     // Logical accounting is a pure function of the upload (the sum of uploaded file lengths), computed
     // up front and never from storage, so it is identical on a dedup hit and on a first upload.
     let logical_bytes: u64 = candidate.files.iter().map(|f| f.bytes.len() as u64).sum();

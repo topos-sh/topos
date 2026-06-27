@@ -233,7 +233,11 @@ impl Db {
             .await
             .map_err(AuthorityError::internal)?;
             if let Some(row) = row {
-                out.push((id, SkillId::parse(&row.skill_id)?));
+                // A stored skill_id is always pre-validated on the way in, so a re-parse failure here is
+                // store corruption — map it to an integrity fault, not the boundary `InvalidId` (mirroring
+                // `commit_id_from_row`'s handling of a bad-width BLOB).
+                let skill = SkillId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
+                out.push((id, skill));
             }
         }
         Ok(out)

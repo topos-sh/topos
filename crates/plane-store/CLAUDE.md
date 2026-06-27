@@ -38,8 +38,9 @@ same-process code.) The error type holds this line too: internal faults carry a 
 - **Transaction discipline.** WAL + `synchronous = NORMAL` + a busy timeout + foreign keys on, set on the
   connect options; one private `begin_with("BEGIN IMMEDIATE")` entrypoint (a plain `begin()` or a bare
   `execute("BEGIN IMMEDIATE")` on the pool are unreachable). Compile-time-checked `query!` against the
-  committed `.sqlx`; `cargo sqlx prepare --check` is the CI drift gate (the CLI is pinned to the library
-  version).
+  committed `.sqlx`; `cargo sqlx prepare --check -- --tests` is the CI drift gate (the `--tests` scope
+  matches how the metadata is generated — three queries are `#[cfg(test)]`-only seed helpers — and the CLI
+  is pinned to the library version).
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 

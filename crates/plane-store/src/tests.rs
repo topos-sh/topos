@@ -327,6 +327,19 @@ async fn upload_rejects_a_forbidden_path_and_records_nothing() {
 }
 
 #[tokio::test]
+async fn empty_upload_is_rejected() {
+    let fx = Fixture::new("empty-upload").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_pr"));
+    let p = prin("dev_p");
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    // The git store would happily snapshot a zero-entry tree; the authority must reject an empty bundle
+    // itself (it cannot trust the client scanner to have done so).
+    let res = a.upload_candidate(&p, &w, &s, genesis(vec![])).await;
+    assert!(matches!(res, Err(AuthorityError::RejectedUpload(_))));
+}
+
+#[tokio::test]
 async fn unrostered_upload_is_denied_and_records_nothing_readable() {
     let fx = Fixture::new("upload-denied").await;
     let a = &fx.authority;

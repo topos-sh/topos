@@ -153,8 +153,10 @@ fn read_object_in_version_returns_verified_bytes_and_typed_misses() {
         assert_eq!(got, f.bytes, "object at {} round-trips byte-exact", f.path);
     }
 
-    // An object id not present in this version -> typed ObjectNotInVersion (the access port maps this
-    // to its uniform not-found; it is NOT a corruption alarm).
+    // An object id not present in this version -> the typed gitstore miss `ObjectNotInVersion`. (The
+    // plane's access port only reaches this with an ALREADY-AUTHORIZED witness — provenance said the
+    // commit reaches the object — so it treats this miss as a database/store divergence, i.e. an
+    // integrity fault, never a not-found.)
     let absent = digest::sha256(b"these bytes are in no bundle");
     assert!(matches!(
         store.read_object_in_version(vid, absent),
