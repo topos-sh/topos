@@ -7,7 +7,7 @@
 //!
 //! ## Durability
 //!
-//! All on-disk mutation goes through one fault-injectable [`fs_seam::FsOps`] seam, so the crash gate can
+//! All on-disk mutation goes through one fault-injectable `FsOps` seam, so the crash gate can
 //! fail the Nth syscall and assert recovery. Documents are written atomically (temp → fsync → rename →
 //! fsync-dir; never in place); a fresh `add` is staged in full and published with one directory rename,
 //! so adoption is all-or-nothing on top of the per-document guarantee. The git objects a document refers
