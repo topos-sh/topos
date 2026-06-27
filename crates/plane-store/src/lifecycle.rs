@@ -233,7 +233,10 @@ pub(crate) async fn migrate(
     migrate_install(authority, ws, staged, now).await?;
     // The install genuinely took real wall-clock time (its `deleting`-waits sleep); advance the finish
     // clock by that elapsed time so the lease-liveness CAS is meaningful. In the fast path (and in tests)
-    // this is ~0, so finish ≈ now.
+    // this is ~0, so finish ≈ now. (Sampled before `migrate_finish`'s `commit_durable`, which is fast git
+    // I/O; a pathological multi-minute fsync stall there is the one window this approximation misses — and
+    // it cannot corrupt bytes, only over-commit a lapsed lease, which the deferred pointer-move that
+    // consumes the lease re-verifies for renderability before trusting.)
     let finish_now = now.saturating_add(started.elapsed().as_secs() as i64);
     migrate_finish(authority, ws, staged, finish_now).await
 }
