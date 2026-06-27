@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT op_id AS \"op_id!\" FROM promotion_lease\n               WHERE workspace_id = ?1 AND op_id = ?2 AND expires_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b02d8e4eff8f496c2675949fb15be0fec47d8c0f09523c2b9eb2d5a72c83093f"
+}

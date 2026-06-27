@@ -347,6 +347,22 @@ impl Db {
         let op_s = op_id.as_str();
         let cid = commit_id.0.as_slice();
         let mut tx = self.begin_immediate().await?;
+        // A COMMITTED (non-expiring) lease is the durable root of an already-succeeded migrate; never
+        // rewrite it or clear its child set (that would unroot the version and let GC reclaim its blobs).
+        // op-id reuse against a committed lease is therefore an idempotent no-op.
+        let committed = sqlx::query!(
+            r#"SELECT op_id AS "op_id!" FROM promotion_lease
+               WHERE workspace_id = ?1 AND op_id = ?2 AND expires_at IS NULL"#,
+            ws_s,
+            op_s,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        if committed.is_some() {
+            tx.rollback().await.map_err(AuthorityError::internal)?;
+            return Ok(());
+        }
         sqlx::query!(
             "INSERT INTO promotion_lease (workspace_id, op_id, commit_id, expires_at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (workspace_id, op_id) DO UPDATE SET commit_id = excluded.commit_id, expires_at = excluded.expires_at",
@@ -358,8 +374,8 @@ impl Db {
         .execute(&mut *tx)
         .await
         .map_err(AuthorityError::internal)?;
-        // Clear any prior child set for this op (op-id reuse) before re-inserting, so the lease names
-        // exactly this candidate's objects.
+        // Clear any prior in-flight child set for this op (op-id reuse) before re-inserting, so the lease
+        // names exactly this candidate's objects.
         sqlx::query!(
             "DELETE FROM promotion_lease_object WHERE workspace_id = ?1 AND op_id = ?2",
             ws_s,
@@ -386,19 +402,39 @@ impl Db {
     }
 
     /// Make a lease non-expiring on migrate SUCCESS, so the migrated version stays rooted until the later
-    /// pointer-move consumes it (a finite TTL would let GC reclaim a good, just-migrated version).
-    pub(crate) async fn commit_lease(&self, ws: &WorkspaceId, op_id: &OpId) -> Result<()> {
+    /// pointer-move consumes it (a finite TTL would let GC reclaim a good, just-migrated version). A guarded
+    /// CAS on the expected `commit_id` AND lease liveness (still non-expired, or already committed): a
+    /// **stale** `migrate_finish` whose lease expired or was replaced under a reused op id updates no row
+    /// and gets [`AuthorityError::Internal`], so it can never falsely claim a success whose objects GC may
+    /// already have reclaimed — nor mark a *different* reused lease non-expiring.
+    pub(crate) async fn commit_lease(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &OpId,
+        commit_id: CommitId,
+        now: i64,
+    ) -> Result<()> {
         let ws_s = ws.as_str();
         let op_s = op_id.as_str();
+        let cid = commit_id.0.as_slice();
         let mut tx = self.begin_immediate().await?;
-        sqlx::query!(
-            "UPDATE promotion_lease SET expires_at = NULL WHERE workspace_id = ?1 AND op_id = ?2",
+        let row = sqlx::query!(
+            r#"UPDATE promotion_lease SET expires_at = NULL
+               WHERE workspace_id = ?1 AND op_id = ?2 AND commit_id = ?3
+                 AND (expires_at IS NULL OR expires_at > ?4)
+               RETURNING op_id AS "op_id!""#,
             ws_s,
             op_s,
+            cid,
+            now,
         )
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AuthorityError::internal)?;
+        if row.is_none() {
+            tx.rollback().await.map_err(AuthorityError::internal)?;
+            return Err(AuthorityError::internal(LeaseNotLive));
+        }
         tx.commit().await.map_err(AuthorityError::internal)?;
         Ok(())
     }
@@ -644,3 +680,9 @@ struct BadGitOidWidth;
 #[derive(Debug, thiserror::Error)]
 #[error("install upsert was suppressed yet the row is absent")]
 struct SuppressedButAbsent;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the promotion lease is no longer live (expired or replaced) — the migrate must not claim success"
+)]
+struct LeaseNotLive;

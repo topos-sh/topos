@@ -490,6 +490,52 @@ fn fence_stage_install_commit_render_and_delete() {
 }
 
 #[test]
+fn install_refuses_a_corrupted_staged_object() {
+    // A quarantine object corrupted after staging must NOT be installed-as-present: install fails (whether
+    // gix rejects the unreadable object or our written-id check catches mismatched bytes), so the authority
+    // never marks an object present whose bytes are not actually at its locator.
+    let main_scratch = Scratch::new("fence-corrupt-main");
+    let q_scratch = Scratch::new("fence-corrupt-q");
+    let main = Store::init(&main_scratch.0).expect("init main");
+    let files = [ImportFile {
+        path: "SKILL.md",
+        mode: FileMode::Regular,
+        bytes: b"content to corrupt in quarantine\n",
+    }];
+    let staged = Store::stage(&q_scratch.0, &files).expect("stage");
+
+    // Flip a byte inside the quarantine's loose object.
+    let objects = q_scratch.0.join("objects");
+    let mut corrupted = false;
+    for shard in std::fs::read_dir(&objects).unwrap() {
+        let shard = shard.unwrap().path();
+        if !shard.is_dir() || shard.file_name().unwrap().to_string_lossy().len() != 2 {
+            continue;
+        }
+        if let Some(obj) = std::fs::read_dir(&shard).unwrap().next() {
+            let obj = obj.unwrap().path();
+            let mut bytes = std::fs::read(&obj).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0xff;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&obj, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::write(&obj, &bytes).unwrap();
+            corrupted = true;
+            break;
+        }
+    }
+    assert!(corrupted, "expected a loose object to corrupt");
+
+    // Re-open the quarantine so gix re-reads the corrupted bytes, then install must refuse.
+    let quarantine = Store::open(&q_scratch.0).expect("reopen quarantine");
+    assert!(
+        main.install_object_durable(&quarantine, staged.entries[0].git_oid)
+            .is_err(),
+        "installing a corrupted staged object must fail, never silently mark it present"
+    );
+}
+
+#[test]
 fn render_rejects_missing_version() {
     let scratch = Scratch::new("missing");
     let store = Store::init(&scratch.0).expect("init");

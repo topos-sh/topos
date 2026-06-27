@@ -121,8 +121,18 @@ impl Store {
             return Err(GitstoreError::Gix("quarantine object is not a blob".into()));
         }
         let bytes = object.detach().data;
-        // gix writes the loose object to its final path (temp + rename); we add the fsync for durability.
-        self.repo().write_blob(&bytes).map_err(gix_err)?;
+        // gix writes the loose object to its final path (temp + rename). write_blob returns the id of what
+        // it actually wrote (the hash of `bytes`); assert it equals the requested `git_oid` so a quarantine
+        // object corrupted after staging can NEVER be marked present under a locator whose path now holds
+        // nothing — the bytes are verified to be at their final path before we report durability. We add the
+        // fsync for durability.
+        let written = self.repo().write_blob(&bytes).map_err(gix_err)?.detach();
+        if written != oid {
+            return Err(GitstoreError::Gix(
+                "staged object failed verification on install (bytes do not match the locator)"
+                    .into(),
+            ));
+        }
         let batch = self.loose_durability(git_oid);
         fsync_batch(&batch)?;
         Ok(batch)

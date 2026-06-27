@@ -171,6 +171,7 @@ pub(crate) async fn migrate_finish(
     authority: &Authority,
     ws: &WorkspaceId,
     staged: &StagedCandidate,
+    now: i64,
 ) -> Result<()> {
     let main = authority.store_for_write(ws)?;
     let entries: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = staged
@@ -189,8 +190,13 @@ pub(crate) async fn migrate_finish(
     )
     .map_err(map_stage_reject)?;
 
-    // Success: the lease becomes the durable root until the pointer-move consumes it.
-    authority.db().commit_lease(ws, &staged.op_id).await?;
+    // Success: the lease becomes the durable root until the pointer-move consumes it. The CAS on the
+    // staged commit + lease liveness fails closed if this migrate's lease lapsed (so it cannot claim a
+    // success whose objects GC may already have reclaimed).
+    authority
+        .db()
+        .commit_lease(ws, &staged.op_id, staged.version_id, now)
+        .await?;
     // Post-commit cleanup (the objects are safely in the main store): remove the quarantine dir FIRST, then
     // drop its tracking row — and only if the removal succeeded. A failure/crash before the row is dropped
     // leaves it for the janitor to retry (the row is the only way to rebuild the rm -rf path); dropping the
@@ -220,7 +226,7 @@ pub(crate) async fn migrate(
 ) -> Result<()> {
     migrate_lease(authority, ws, staged, now).await?;
     migrate_install(authority, ws, staged, now).await?;
-    migrate_finish(authority, ws, staged).await
+    migrate_finish(authority, ws, staged, now).await
 }
 
 /// Install one object, honoring the fence: reuse if `present`; wait out `deleting` (no transaction held

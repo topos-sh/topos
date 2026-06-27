@@ -590,12 +590,17 @@ async fn expired_lease_does_not_spare_but_committed_lease_always_does() {
         a.db().claim_for_delete(&w, o1, 200).await.unwrap(),
         ClaimOutcome::Claimed { .. }
     ));
-    // A committed (non-expiring) lease protects even far in the future.
+    // A committed (non-expiring) lease protects even far in the future. commit_lease is a CAS on the
+    // commit id + lease liveness, so it must run while the lease is still live (now=100 < expires 150).
+    let perm_commit = CommitId([0xE2; 32]);
     a.db()
-        .insert_lease(&w, &op("perm"), CommitId([0xE2; 32]), &[o2], 150)
+        .insert_lease(&w, &op("perm"), perm_commit, &[o2], 150)
         .await
         .unwrap();
-    a.db().commit_lease(&w, &op("perm")).await.unwrap();
+    a.db()
+        .commit_lease(&w, &op("perm"), perm_commit, 100)
+        .await
+        .unwrap();
     assert!(matches!(
         a.db().claim_for_delete(&w, o2, 1_000_000).await.unwrap(),
         ClaimOutcome::Spared
@@ -749,6 +754,69 @@ async fn lease_rebuilds_its_object_set_on_op_id_reuse() {
     ));
 }
 
+#[tokio::test]
+async fn committed_lease_is_not_clobbered_by_op_id_reuse() {
+    // After a migrate commits its lease (non-expiring root of a good version), reusing the same op id must
+    // be a no-op — never rewriting the lease or its object set, which would unroot the version.
+    let fx = Fixture::new("t-committed-lease").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (x, y) = (object_id(b"rooted"), object_id(b"other"));
+    a.db()
+        .install_object(&w, x, &goid(1), 1, 100)
+        .await
+        .unwrap();
+    a.db()
+        .install_object(&w, y, &goid(2), 1, 100)
+        .await
+        .unwrap();
+    let c1 = CommitId([0x1; 32]);
+    a.db()
+        .insert_lease(&w, &op("re"), c1, &[x], 9_999)
+        .await
+        .unwrap();
+    a.db().commit_lease(&w, &op("re"), c1, 100).await.unwrap(); // X is now committed-rooted
+    // Reuse the op id with a different candidate {Y}: it must NOT touch the committed lease.
+    a.db()
+        .insert_lease(&w, &op("re"), CommitId([0x2; 32]), &[y], 9_999)
+        .await
+        .unwrap();
+    // X is still leased (the committed lease survived); Y was never adopted by this op.
+    assert!(matches!(
+        a.db().claim_for_delete(&w, x, 1_000_000).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
+    assert!(matches!(
+        a.db().claim_for_delete(&w, y, 200).await.unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn commit_lease_fails_on_a_stale_or_mismatched_lease() {
+    let fx = Fixture::new("t-commit-stale").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let c = CommitId([0xC; 32]);
+    a.db()
+        .insert_lease(&w, &op("o"), c, &[object_id(b"z")], 150)
+        .await
+        .unwrap();
+    // The lease has expired (now > expires_at): commit must fail closed (its objects may have been GC'd).
+    assert!(a.db().commit_lease(&w, &op("o"), c, 200).await.is_err());
+    // A commit-id mismatch (a stale finish over a reused op) also fails.
+    a.db()
+        .insert_lease(&w, &op("o2"), c, &[object_id(b"z")], 9_999)
+        .await
+        .unwrap();
+    assert!(
+        a.db()
+            .commit_lease(&w, &op("o2"), CommitId([0xD; 32]), 100)
+            .await
+            .is_err()
+    );
+}
+
 // ── ingest → migrate → GC, end-to-end (the fence through the real ops) ──────────────────────────────
 
 /// Ingest a genesis candidate then migrate it fully; returns the staged candidate.
@@ -890,7 +958,7 @@ async fn dedup_race_lease_protects_the_full_closure_under_a_slow_migrate() {
     );
     // Finish the migrate: A is reused (dedup), C installs.
     lifecycle::migrate_install(a, &w, &v2, 200).await.unwrap();
-    lifecycle::migrate_finish(a, &w, &v2).await.unwrap();
+    lifecycle::migrate_finish(a, &w, &v2, 200).await.unwrap();
     let store = a.open_store(&w).unwrap();
     let rendered = store
         .render_verified(v2.version_id.0, v2.bundle_digest)
