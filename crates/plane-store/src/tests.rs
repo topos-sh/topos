@@ -683,12 +683,70 @@ async fn recovery_sweep_finalizes_only_stale_deleting() {
         .seed_deleting_object(&w, fresh, &goid(8), 1000)
         .await
         .unwrap(); // a live GC's
-    // Only the stale one (status_updated_at < threshold) is returned for recovery.
+    // Only the stale one (status_updated_at < threshold) is in the candidate list.
     let stale = a.db().stale_deleting(&w, 500).await.unwrap();
-    assert_eq!(stale.len(), 1);
-    assert_eq!(stale[0].0, old);
+    assert_eq!(stale, vec![old]);
     let wss = a.db().workspaces_with_stale_deleting(500).await.unwrap();
     assert_eq!(wss, vec![w.clone()]);
+
+    // The recovery CLAIM is one-winner: the first claim wins (and bumps status_updated_at out of stale
+    // range), so a concurrent second claim sees nothing to take — closing the double-unlink race.
+    let first = a
+        .db()
+        .claim_stale_for_recovery(&w, old, 500, 600)
+        .await
+        .unwrap();
+    assert_eq!(first, Some(goid(8)));
+    let second = a
+        .db()
+        .claim_stale_for_recovery(&w, old, 500, 600)
+        .await
+        .unwrap();
+    assert_eq!(
+        second, None,
+        "a second concurrent sweeper must not also claim it"
+    );
+    // It is still `deleting` (the claim keeps the row deleting across the unlink), not resurrected.
+    assert_eq!(
+        a.db().object_status(&w, old).await.unwrap(),
+        ObjectStatus::Deleting
+    );
+}
+
+#[tokio::test]
+async fn lease_rebuilds_its_object_set_on_op_id_reuse() {
+    // op-id reuse with a different candidate must REPLACE the lease's object set, not merge — else a stale
+    // object would be pinned non-expiring after commit_lease.
+    let fx = Fixture::new("t-lease-reuse").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (x, y) = (object_id(b"first-cand"), object_id(b"second-cand"));
+    a.db()
+        .install_object(&w, x, &goid(1), 1, 100)
+        .await
+        .unwrap();
+    a.db()
+        .install_object(&w, y, &goid(2), 1, 100)
+        .await
+        .unwrap();
+    // First lease names {X}; reusing the same op id then names {Y}.
+    a.db()
+        .insert_lease(&w, &op("re"), CommitId([0x1; 32]), &[x], 9_999)
+        .await
+        .unwrap();
+    a.db()
+        .insert_lease(&w, &op("re"), CommitId([0x2; 32]), &[y], 9_999)
+        .await
+        .unwrap();
+    // X is no longer leased (reclaimable); Y is leased (spared).
+    assert!(matches!(
+        a.db().claim_for_delete(&w, x, 200).await.unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+    assert!(matches!(
+        a.db().claim_for_delete(&w, y, 200).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
 }
 
 // ── ingest → migrate → GC, end-to-end (the fence through the real ops) ──────────────────────────────
@@ -1015,6 +1073,11 @@ async fn ingest_rejects_a_denylisted_blob() {
         .unwrap();
     let res = lifecycle::ingest(a, &w, &op("d"), genesis(vec![file("S.md", body)]), 110).await;
     assert!(matches!(res, Err(AuthorityError::RejectedUpload(_))));
+    // The denylist check runs BEFORE staging, so the purged bytes are never persisted to disk.
+    assert!(
+        !a.workspace_quarantine_dir(&w, &op("d")).exists(),
+        "a denylisted candidate must not be staged into a quarantine"
+    );
 }
 
 // ── cross-workspace isolation (release blockers) ───────────────────────────────────────────────────

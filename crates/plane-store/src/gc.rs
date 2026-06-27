@@ -9,9 +9,17 @@
 //! concurrent migrate's lease-insert is never starved. GC acts ONLY on objects with an `object_presence`
 //! row — the legacy straight-to-git upload path (no presence row) is invisible to it.
 //!
-//! **Recovery sweep:** finalizes a STALE `deleting` (one a crashed GC left behind) — re-unlink is
-//! idempotent. **Janitor:** sweeps expired/abandoned quarantines, rebuilding the `rm -rf` path from the
-//! re-validated ids (never trusting the stored objdir string).
+//! **Recovery sweep:** finalizes a STALE `deleting` (one a crashed GC left behind), each via a one-winner
+//! re-claim so two concurrent sweeps never both unlink. **Janitor:** sweeps expired/abandoned quarantines,
+//! rebuilding the `rm -rf` path from the re-validated ids (never trusting the stored objdir string) and
+//! keeping the tracking row whenever the removal fails.
+//!
+//! **Power-loss note (self-healing):** under WAL + `synchronous = NORMAL` a fsync'd unlink can briefly get
+//! ahead of the not-yet-checkpointed claim/finalize commits, so a crash can leave a `present` row over
+//! already-gone bytes. It is reconciled by the next pass (the object is rooted by nothing, so it is
+//! re-claimed and the re-unlink tolerates the already-gone object), and no *materializable* root is ever
+//! created over it. When the pointer-move makes a long-idle `present` row load-bearing for dedup-reuse, the
+//! destructive transitions should be made power-durable (a checkpoint/`synchronous = FULL` barrier).
 
 use crate::authority::Authority;
 use crate::error::Result;
@@ -62,7 +70,18 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
         .await?
     {
         let store = authority.open_store(&ws)?;
-        for (object_id, git_oid) in authority.db().stale_deleting(&ws, older_than).await? {
+        // The stale list is advisory; the per-object claim is the one-winner guard (mirroring run_gc's
+        // claim) — it keeps the row `deleting` across the unlink and hands the git locator to exactly one
+        // sweeper, so two concurrent recoveries can't both unlink and a migrate can't reinstall mid-sweep.
+        for object_id in authority.db().stale_deleting(&ws, older_than).await? {
+            let git_oid = match authority
+                .db()
+                .claim_stale_for_recovery(&ws, object_id, older_than, now)
+                .await?
+            {
+                None => continue, // another sweeper already claimed it
+                Some(git_oid) => git_oid,
+            };
             store
                 .delete_loose_object(git_oid)
                 .map_err(crate::error::AuthorityError::internal)?;
@@ -85,9 +104,12 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
     {
         for op_id in authority.db().expired_quarantine_ops(&ws, now).await? {
             let dir = authority.workspace_quarantine_dir(&ws, &op_id);
-            let _ = std::fs::remove_dir_all(&dir);
-            authority.db().delete_quarantine(&ws, &op_id).await?;
-            swept += 1;
+            // Drop the tracking row ONLY if the dir is actually gone — the row is the only way to rebuild
+            // this rm -rf path, so a transient removal failure must keep it for the next pass to retry.
+            if crate::lifecycle::remove_quarantine_dir(&dir) {
+                authority.db().delete_quarantine(&ws, &op_id).await?;
+                swept += 1;
+            }
         }
     }
     Ok(swept)

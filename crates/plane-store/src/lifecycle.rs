@@ -67,6 +67,18 @@ pub(crate) async fn ingest(
             "a skill bundle must contain at least one file".to_owned(),
         ));
     }
+    // Reject a denylisted candidate blob BEFORE staging, so purged bytes are never persisted to disk (the
+    // object id is `sha256(bytes)`, exactly what `Store::stage` recomputes, so this needs no staging). A
+    // best-effort early check; the serializing check is the install CAS.
+    for f in &candidate.files {
+        let oid = ObjectId(topos_core::digest::sha256(&f.bytes));
+        if authority.db().is_tombstoned(ws, oid).await? {
+            return Err(AuthorityError::RejectedUpload(
+                "a candidate blob is on the denylist".to_owned(),
+            ));
+        }
+    }
+
     let quarantine_dir = authority.workspace_quarantine_dir(ws, op_id);
 
     // Record the quarantine objdir (GC-excluded) before staging, so a crash mid-stage leaves a janitor-able
@@ -91,19 +103,6 @@ pub(crate) async fn ingest(
         })
         .collect();
     let staged = Store::stage(&quarantine_dir, &import).map_err(map_stage_reject)?;
-
-    // Reject a denylisted candidate blob (no reintroducing purged bytes). Best-effort early check.
-    for e in &staged.entries {
-        if authority
-            .db()
-            .is_tombstoned(ws, ObjectId(e.object_id))
-            .await?
-        {
-            return Err(AuthorityError::RejectedUpload(
-                "a candidate blob is on the denylist".to_owned(),
-            ));
-        }
-    }
 
     let parents: Vec<[u8; 32]> = candidate.parents.iter().map(|c| c.0).collect();
     let version_id = sign::commit_id(&Commit {
@@ -192,10 +191,24 @@ pub(crate) async fn migrate_finish(
 
     // Success: the lease becomes the durable root until the pointer-move consumes it.
     authority.db().commit_lease(ws, &staged.op_id).await?;
-    // Post-commit cleanup: drop the quarantine row + its dir (the objects are safely in the main store).
-    authority.db().delete_quarantine(ws, &staged.op_id).await?;
-    let _ = std::fs::remove_dir_all(&staged.quarantine_dir);
+    // Post-commit cleanup (the objects are safely in the main store): remove the quarantine dir FIRST, then
+    // drop its tracking row — and only if the removal succeeded. A failure/crash before the row is dropped
+    // leaves it for the janitor to retry (the row is the only way to rebuild the rm -rf path); dropping the
+    // row first would orphan the dir.
+    if remove_quarantine_dir(&staged.quarantine_dir) {
+        authority.db().delete_quarantine(ws, &staged.op_id).await?;
+    }
     Ok(())
+}
+
+/// Remove a quarantine dir, treating "already gone" as success. Returns whether the dir is now gone (so the
+/// caller may safely drop its tracking row); any other error leaves it for the janitor to retry.
+pub(crate) fn remove_quarantine_dir(dir: &std::path::Path) -> bool {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 /// The full migrate (lease → install → finish).

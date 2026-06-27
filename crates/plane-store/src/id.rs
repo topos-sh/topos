@@ -29,10 +29,13 @@ pub enum IdError {
 
 /// A workspace identifier — the hard tenant scope and a per-workspace git-store **path component**.
 ///
-/// Admits only `[A-Za-z0-9_-]` (the `w_…` id shape), which by construction excludes `/`, `\`, `.`,
-/// `..`, NUL, and every other path metacharacter — so [`Self::as_str`] is always safe to join onto
-/// the confined store root. Isolation itself is the `workspace_id` database binding (every row and
-/// query carries it); the path-safety here only keeps the physical store from escaping its root.
+/// Admits only `[a-z0-9_-]` (the `w_…` id shape), which by construction excludes `/`, `\`, `.`, `..`,
+/// NUL, and every other path metacharacter — so [`Self::as_str`] is always safe to join onto the confined
+/// store root. The **lowercase** restriction is load-bearing: the per-workspace store + quarantine dirs are
+/// `git_root/<id>`, so on a case-insensitive filesystem two case-only-distinct ids would fold to one
+/// physical directory and a per-workspace GC unlink could destroy another tenant's bytes. Isolation itself
+/// is the `workspace_id` database binding (every row and query carries it); the path-safety here only keeps
+/// the physical store from escaping its root and one tenant's store from colliding with another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceId(String);
 
@@ -46,15 +49,27 @@ pub struct Principal(String);
 
 /// An operation identifier — the client-minted id of one in-flight write (quarantine + promotion lease).
 ///
-/// Admits only the path-safe charset (`[A-Za-z0-9_-]`, which excludes `.`, `..`, and every separator),
-/// because it is used as a **directory component** of the per-op quarantine objdir the janitor `rm -rf`s —
-/// a `..` or `/` here would let the destructive sweep escape its root. A v4-UUID op id (hex + `-`) fits.
+/// Admits only the lowercase path-safe charset (`[a-z0-9_-]`, which excludes `.`, `..`, and every
+/// separator), because it is used as a **directory component** of the per-op quarantine objdir the janitor
+/// `rm -rf`s — a `..` or `/` would let the destructive sweep escape its root, and (like [`WorkspaceId`]) a
+/// case-only-distinct id would fold to one directory on a case-insensitive filesystem. A v4-UUID op id
+/// (lowercase hex + `-`) fits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpId(String);
 
-/// `[A-Za-z0-9_-]` — the path-safe id charset (workspace + skill ids).
+/// `[A-Za-z0-9_-]` — the path-safe id charset (skill ids: a database key, never a path component, so a
+/// mixed case is fine — the database uses BINARY collation and the bytes never reach the filesystem).
 fn is_path_safe(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// `[a-z0-9_-]` — the LOWERCASE path-safe charset for ids that become **filesystem directory components**
+/// (`WorkspaceId`, `OpId`). Forbidding uppercase makes the id→path mapping injective on a case-INSENSITIVE
+/// filesystem (macOS/Windows default): without it, two database-distinct ids differing only by case would
+/// fold to one physical directory, and a per-workspace GC unlink could then destroy another tenant's bytes.
+/// Real ids (the `w_…` shape, lowercase-hex op ids) are already lowercase, so this rejects nothing real.
+fn is_lower_path_safe(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
 }
 
 /// `is_path_safe` plus the characters real principal ids carry (email-like + device ids): `.@+`.
@@ -79,12 +94,12 @@ fn validate(s: &str, allowed: fn(u8) -> bool) -> Result<(), IdError> {
 }
 
 impl WorkspaceId {
-    /// Parse a workspace id, rejecting anything outside the path-safe charset.
+    /// Parse a workspace id, rejecting anything outside the lowercase path-safe charset.
     ///
     /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
+    /// [`IdError`] if the id is empty, too long, or contains a disallowed character (including uppercase).
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_path_safe)?;
+        validate(s, is_lower_path_safe)?;
         Ok(Self(s.to_owned()))
     }
 
@@ -130,13 +145,13 @@ impl Principal {
 }
 
 impl OpId {
-    /// Parse an operation id, rejecting anything outside the path-safe charset (so it is always safe as a
-    /// single quarantine directory component).
+    /// Parse an operation id, rejecting anything outside the lowercase path-safe charset (so it is always
+    /// safe as a single quarantine directory component, on a case-insensitive filesystem too).
     ///
     /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
+    /// [`IdError`] if the id is empty, too long, or contains a disallowed character (including uppercase).
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_path_safe)?;
+        validate(s, is_lower_path_safe)?;
         Ok(Self(s.to_owned()))
     }
 
@@ -198,16 +213,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_id_rejects_path_traversal_and_separators() {
+    fn workspace_id_rejects_path_traversal_separators_and_uppercase() {
         for bad in [
-            "", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "wörk", "a\nb",
+            // Uppercase is rejected: it would fold to a colliding directory on a case-insensitive
+            // filesystem, where a per-workspace GC unlink could destroy another tenant's bytes.
+            "", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "wörk", "a\nb", "A_B-9", "Work",
+            "wA",
         ] {
             assert!(
                 WorkspaceId::parse(bad).is_err(),
                 "should reject workspace id {bad:?}"
             );
         }
-        for ok in ["w", "w_abc123", "ws-01", "A_B-9"] {
+        for ok in ["w", "w_abc123", "ws-01", "a_b-9"] {
             assert!(
                 WorkspaceId::parse(ok).is_ok(),
                 "should accept workspace id {ok:?}"
@@ -233,17 +251,20 @@ mod tests {
     }
 
     #[test]
-    fn op_id_rejects_path_traversal_and_separators() {
-        // op_id is an rm -rf'd directory component, so it must reject `.`/`..`/separators exactly as the
-        // workspace id does — a `..` here would let the quarantine janitor escape its root.
-        for bad in ["", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "a\nb"] {
+    fn op_id_rejects_path_traversal_separators_and_uppercase() {
+        // op_id is an rm -rf'd directory component, so it must reject `.`/`..`/separators (a `..` would let
+        // the quarantine janitor escape its root) and uppercase (a case-fold collision on a
+        // case-insensitive filesystem) exactly as the workspace id does.
+        for bad in [
+            "", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "a\nb", "A_B-9", "Op",
+        ] {
             assert!(OpId::parse(bad).is_err(), "should reject op id {bad:?}");
         }
         for ok in [
             "op",
             "op_1",
             "a1b2c3d4-e5f6-7890-ab12-cd34ef567890",
-            "A_B-9",
+            "a_b-9",
         ] {
             assert!(OpId::parse(ok).is_ok(), "should accept op id {ok:?}");
         }

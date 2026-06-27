@@ -246,17 +246,18 @@ impl Db {
             .collect()
     }
 
-    /// The `(object_id, git_oid)` of every STALE `deleting` row in the workspace — one a crashed GC left
-    /// behind (older than the recovery threshold), so the sweep never races a live GC's in-flight unlink.
+    /// The object ids of every STALE `deleting` row in the workspace — ones a crashed GC left behind (older
+    /// than the recovery threshold). This is the recovery sweep's ADVISORY candidate list (a pool read); the
+    /// authoritative one-winner claim + the git locator come from [`Self::claim_stale_for_recovery`], so two
+    /// concurrent sweeps never both act on the same row.
     pub(crate) async fn stale_deleting(
         &self,
         ws: &WorkspaceId,
         older_than: i64,
-    ) -> Result<Vec<(ObjectId, [u8; GIT_OID_LEN])>> {
+    ) -> Result<Vec<ObjectId>> {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
-            r#"SELECT object_id AS "object_id!: Vec<u8>", git_oid AS "git_oid: Vec<u8>"
-               FROM object_presence
+            r#"SELECT object_id AS "object_id!: Vec<u8>" FROM object_presence
                WHERE workspace_id = ?1 AND status = 'deleting' AND status_updated_at < ?2"#,
             ws_s,
             older_than,
@@ -265,13 +266,44 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
-            .map(|r| {
-                Ok((
-                    object_id_from_row(r.object_id)?,
-                    git_oid_from_row(r.git_oid)?,
-                ))
-            })
+            .map(|r| object_id_from_row(r.object_id))
             .collect()
+    }
+
+    /// Atomically claim a STALE `deleting` row for recovery — the one-winner guard that makes the recovery
+    /// sweep safe under concurrency. Bumps `status_updated_at` to now (so a second concurrent sweep no
+    /// longer sees it as stale) while KEEPING it `deleting`, and returns its git locator only to the winner.
+    /// A `None` result means another sweeper already claimed it (or it is no longer a stale `deleting` row)
+    /// — the caller must NOT unlink. Keeping the row `deleting` across the unlink preserves the
+    /// unlink-before-`absent` ordering, so a concurrent migrate cannot reinstall the bytes mid-recovery.
+    pub(crate) async fn claim_stale_for_recovery(
+        &self,
+        ws: &WorkspaceId,
+        object_id: ObjectId,
+        older_than: i64,
+        now: i64,
+    ) -> Result<Option<[u8; GIT_OID_LEN]>> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        let mut tx = self.begin_immediate().await?;
+        let row = sqlx::query!(
+            r#"UPDATE object_presence SET status_updated_at = ?4
+               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at < ?3
+               RETURNING git_oid AS "git_oid: Vec<u8>""#,
+            ws_s,
+            oid,
+            older_than,
+            now,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        let claimed = match row {
+            None => None,
+            Some(r) => Some(git_oid_from_row(r.git_oid)?),
+        };
+        tx.commit().await.map_err(AuthorityError::internal)?;
+        Ok(claimed)
     }
 
     /// Distinct workspaces holding a stale `deleting` row — the only cross-workspace read the recovery
@@ -299,6 +331,10 @@ impl Db {
     /// concurrent GC's keep-set already protects every needed object (even an old, already-present one a
     /// dedup-skip would otherwise leave exposed). `expires_at` is the in-flight guard (a crashed migrate's
     /// lease lapses and becomes GC-reclaimable); a successful migrate later makes it non-expiring.
+    ///
+    /// On op-id reuse (a retry, or a re-run with a different candidate) the child object set is REBUILT, not
+    /// merged: stale rows from a prior candidate are cleared first, so a later `commit_lease` can never pin
+    /// objects the current candidate does not name.
     pub(crate) async fn insert_lease(
         &self,
         ws: &WorkspaceId,
@@ -318,6 +354,16 @@ impl Db {
             op_s,
             cid,
             expires_at,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        // Clear any prior child set for this op (op-id reuse) before re-inserting, so the lease names
+        // exactly this candidate's objects.
+        sqlx::query!(
+            "DELETE FROM promotion_lease_object WHERE workspace_id = ?1 AND op_id = ?2",
+            ws_s,
+            op_s,
         )
         .execute(&mut *tx)
         .await

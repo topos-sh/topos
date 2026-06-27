@@ -83,5 +83,7 @@ server crate now needs a C toolchain (CI runners have one). The **client never g
 `cargo run -p xtask -- check-arch` asserts `topos` depends on no `plane-store` / `sqlx` / `libsqlite3-sys`.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `thiserror`, raw `sqlx` (sqlite,
-runtime-tokio, macros, migrate — no TLS); `tokio` is a dev-dependency only (it drives `#[tokio::test]`;
-the runtime is otherwise the caller's, via sqlx's `runtime-tokio` feature).
+runtime-tokio, macros, migrate — no TLS); `tokio` with only the `time` feature is a **normal** dependency
+(the migrate deleting-wait uses a bounded-backoff sleep while it polls outside any write transaction) —
+arch-clean because the client takes no edge to `plane-store`; `tokio`'s `rt` + `macros` are dev-only (to
+drive `#[tokio::test]`). The async runtime itself is still the caller's, via sqlx's `runtime-tokio` feature.

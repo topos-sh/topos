@@ -66,11 +66,12 @@ impl Db {
         Ok(Self { pool })
     }
 
-    /// The connection pool — exposed to the sibling `lifecycle` submodule (a child of `mod sqlite`, so it
-    /// stays inside the privacy boundary) for its pool reads. Never leaves the crate. (Only the
-    /// not-yet-wired lifecycle pool reads use it, so it is unreferenced in a non-test production build.)
+    /// The connection pool — PRIVATE to `mod sqlite`, so the child `lifecycle`/`seed` submodules reach it
+    /// for their pool reads while it stays unreachable elsewhere in the crate (no `sqlx` handle ever crosses
+    /// the module boundary). (Only the not-yet-wired lifecycle pool reads use it, so it is unreferenced in a
+    /// non-test production build.)
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn pool(&self) -> &SqlitePool {
+    fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
