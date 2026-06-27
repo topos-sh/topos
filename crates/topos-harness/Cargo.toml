@@ -11,6 +11,7 @@ description = "The HarnessAdapter trait + its 3 impls (Claude Code reference · 
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
+serde_json.workspace = true # strict-JSON config edit for the Claude Code settings.json hook (content-blind)
 
 [lints]
 workspace = true

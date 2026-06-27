@@ -2700,6 +2700,7 @@ dependencies = [
 name = "topos-harness"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "topos-core",
  "topos-types",
 ]
