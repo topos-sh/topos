@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO upload_quarantine (workspace_id, op_id, objdir, expires_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (workspace_id, op_id) DO UPDATE SET objdir = excluded.objdir, expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "379b4e1dd2ff01432f946cc7f381bbb56acd3f90bd8449d13173d88b2358b470"
+}

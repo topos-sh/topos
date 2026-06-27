@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM promotion_lease WHERE workspace_id = ?1 AND op_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c8acb0fc7b56e37e1e8db329855377155c18d7d45a78e0784003ad47ee092d99"
+}

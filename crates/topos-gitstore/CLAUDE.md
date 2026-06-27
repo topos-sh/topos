@@ -34,6 +34,16 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   mode-change, binary detection, the no-newline marker) is **owned here**, so the committed `diff` golden
   stays byte-stable across imara-diff releases. The `diff` verb calls this; the `current..<hash>` plane half
   reuses it later.
+- **The object-lifecycle fence primitives** (`fence.rs`) — the dumb byte ops the plane's server-side
+  garbage-collection fence drives, holding **no database and no access control**: `stage` writes a candidate's
+  blobs into a per-op quarantine object store (returning each blob's `object_id`/`git_oid`/size + the kernel
+  `bundle_digest`); `install_object_durable` copies one staged blob into the main store and **fsyncs** it (the
+  object + its parent dirs) so the authority may mark it present only after the bytes are durable;
+  `commit_durable` builds a migrated version's tree from already-installed ids (`write_tree`, **never**
+  re-writing a blob) and records the commit + version ref durably; `delete_loose_object` is the GC unlink;
+  `object_exists` is an idempotency belt only. Unlike the client write path (which names a durability set for
+  the client to fsync), these server-side ops are self-durable and **return the path set they synced**. The
+  git tree + the read path (`render_verified` / `read_object_in_version`) are **unchanged**.
 
 ## The `LargeObjectStore` seam (declared, **unwired**)
 

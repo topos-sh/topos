@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO object_presence (workspace_id, object_id, status, location, size, git_oid, status_updated_at) VALUES (?1, ?2, 'present', 'git', ?3, ?4, ?5) ON CONFLICT (workspace_id, object_id) DO UPDATE SET status='present', size=excluded.size, git_oid=excluded.git_oid, status_updated_at=excluded.status_updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "59f2ed1e810d85bac2f7d1bc7fbbc5977f86df1880d8beca1c8b4cbfbb90634d"
+}

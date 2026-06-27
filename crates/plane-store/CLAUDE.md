@@ -39,8 +39,23 @@ same-process code.) The error type holds this line too: internal faults carry a 
   connect options; one private `begin_with("BEGIN IMMEDIATE")` entrypoint (a plain `begin()` or a bare
   `execute("BEGIN IMMEDIATE")` on the pool are unreachable). Compile-time-checked `query!` against the
   committed `.sqlx`; `cargo sqlx prepare --check -- --tests` is the CI drift gate (the `--tests` scope
-  matches how the metadata is generated — three queries are `#[cfg(test)]`-only seed helpers — and the CLI
-  is pinned to the library version).
+  matches how the metadata is generated — the seed + lifecycle helpers include `#[cfg(test)]`-only queries —
+  and the CLI is pinned to the library version).
+- **The DB-authoritative object-lifecycle / garbage-collection fence (git-only).** Migration `0002` adds the
+  fenced `object_presence` (`present`/`deleting`/`absent`/`unavailable` + the `git_oid` locator + `size`,
+  shaped for the later large-object store but always `location='git'`), the GC-excluded `upload_quarantine`,
+  the `promotion_lease` (+ object child table), and `tombstones`. The transitions are guarded compare-and-swaps
+  in `mod sqlite` (a `deleting` object is **non-resurrectable** — the `present`-writer's `WHERE status='absent'`
+  cannot fire on it); the orchestration (`lifecycle.rs`/`gc.rs`) builds **ingest** (quarantine + rehash +
+  denylist), **migrate** (lease the full object set *before* migrating, server-side dedup, durable install,
+  then record a real version + make the lease non-expiring on success), the **three-step mark-then-claim GC**
+  (claim → unlink-outside-any-transaction → finalize; the keep-set is **exactly the read-authorization surface**
+  — any `commit_object` edge ∪ a live lease — so a readable object is never reclaimed), a **recovery sweep**, and
+  a **quarantine janitor**. GC acts only on objects with an `object_presence` row, so the legacy straight-to-git
+  upload path stays readable. It moves no pointer and the fence is wired to no public verb yet — the in-crate
+  tests drive it (deterministic interleavings for the dedup race, the snapshot-then-delete race, cross-workspace
+  isolation, and crash recovery). `topos-gitstore` gained the three dumb byte primitives it needs (quarantine
+  staging, durable per-object install, loose-object delete); the git tree + read path are unchanged.
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 
@@ -53,11 +68,13 @@ domain-typed boundary with no change to callers.
 
 ## Planned (lands later)
 
-The object-lifecycle / garbage-collection fence (quarantine, `object_presence`, promotion leases,
-transactional GC, the size-routed large-object store); the pointer-move write (compare-and-set on
+The **size-routed large-object store** (the immediate next step — offload big blobs to a content-addressed
+side store under the same `blob_id`, set `object_presence.location` accordingly, dispatch the read + the GC
+unlink on it; everything stays in the git store today); the pointer-move write (compare-and-set on
 `(epoch, seq)`, the in-process Ed25519 signer, durable all-outcome receipts) that *moves* the `current`
-row this layer only creates; the cross-skill lineage predicate's transactional **enforcement**; Postgres
-(SQLite-first); proposals / the review gate; per-skill encryption-at-rest.
+row this layer only creates **and** consumes a migrated candidate's lease; the cross-skill lineage
+predicate's transactional **enforcement**; the `purge` verb + force-unlink (the tombstones table + denylist
+check already exist); Postgres (SQLite-first); proposals / the review gate; per-skill encryption-at-rest.
 
 ## Build note
 

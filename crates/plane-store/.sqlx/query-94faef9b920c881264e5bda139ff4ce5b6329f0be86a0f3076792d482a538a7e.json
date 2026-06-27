@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT workspace_id AS \"workspace_id!\" FROM object_presence\n               WHERE status = 'deleting' AND status_updated_at < ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "workspace_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "94faef9b920c881264e5bda139ff4ce5b6329f0be86a0f3076792d482a538a7e"
+}

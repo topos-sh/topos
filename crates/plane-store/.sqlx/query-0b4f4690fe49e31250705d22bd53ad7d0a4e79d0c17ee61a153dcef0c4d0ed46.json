@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE promotion_lease SET expires_at = NULL WHERE workspace_id = ?1 AND op_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0b4f4690fe49e31250705d22bd53ad7d0a4e79d0c17ee61a153dcef0c4d0ed46"
+}

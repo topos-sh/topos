@@ -79,7 +79,8 @@ impl Store {
         &self.repo
     }
 
-    #[cfg(test)]
+    /// The store's git directory (the bare repo root). `pub(crate)` so the sibling `fence` module can
+    /// address loose objects + refs by path for the durable install / unlink primitives.
     pub(crate) fn git_dir(&self) -> &Path {
         &self.git_dir
     }

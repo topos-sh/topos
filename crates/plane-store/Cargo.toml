@@ -19,11 +19,14 @@ thiserror.workspace = true
 # `sqlx::Any` (it forfeits compile-time query checking). A future Postgres backend adds `postgres` + a TLS
 # feature behind its own module; the SQLite features stay split so that bump is a no-op here.
 sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "sqlite"] }
+# Only `tokio::time` — the bounded-backoff sleep the migrate deleting-wait uses while it polls OUTSIDE any
+# write transaction (holding it inside one would deadlock GC's finalize on SQLite's single writer). sqlx
+# already pulls tokio into this crate's tree via `runtime-tokio`, and the client takes NO edge to
+# `plane-store` (check-arch forbids it), so this never reaches the CLI.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-# Drives `#[tokio::test]` only — the library declares `async fn`s but takes no direct runtime dependency
-# (the runtime enters via sqlx's `runtime-tokio` feature). A current-thread flavor is enough for the
-# in-process authority tests, so no multi-thread runtime is pulled.
+# Drives `#[tokio::test]` — `rt` + `macros` for the runtime + attribute. (`time` comes from the normal dep.)
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]

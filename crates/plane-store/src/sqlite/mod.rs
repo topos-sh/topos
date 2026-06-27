@@ -66,6 +66,14 @@ impl Db {
         Ok(Self { pool })
     }
 
+    /// The connection pool — exposed to the sibling `lifecycle` submodule (a child of `mod sqlite`, so it
+    /// stays inside the privacy boundary) for its pool reads. Never leaves the crate. (Only the
+    /// not-yet-wired lifecycle pool reads use it, so it is unreferenced in a non-test production build.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Begin an IMMEDIATE-mode transaction pinned to one pooled connection.
     ///
     /// This is the **only** way the authority opens a write transaction. `begin_with("BEGIN
@@ -288,6 +296,13 @@ struct BadBlobWidth;
 #[derive(Debug, thiserror::Error)]
 #[error("provenance row absent immediately after insert")]
 struct MissingProvenanceRow;
+
+// The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). Driven
+// by the not-yet-wired orchestration + the tests; unreferenced in a non-test production build.
+#[cfg_attr(not(test), allow(dead_code))]
+mod lifecycle;
+
+pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, ObjectStatus};
 
 #[cfg(test)]
 mod seed;

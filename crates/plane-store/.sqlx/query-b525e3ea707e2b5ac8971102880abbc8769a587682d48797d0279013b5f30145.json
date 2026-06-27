@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM upload_quarantine WHERE workspace_id = ?1 AND op_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b525e3ea707e2b5ac8971102880abbc8769a587682d48797d0279013b5f30145"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT blob_id FROM tombstones WHERE workspace_id = ?1 AND blob_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob_id",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0de8925e54969165c4c05170243d5085b2085c4de95236670a3e05b8233f49b5"
+}

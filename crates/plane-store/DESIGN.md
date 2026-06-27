@@ -83,11 +83,52 @@ domain-typed. That boundary is exactly the seam a future `enum Db { Sqlite, Pg }
 no change to callers — so the second backend is an add, not a reshape. This follows the workspace's
 governing posture: concrete first, extract on the second implementation.
 
+## The object-lifecycle / garbage-collection fence (git-only)
+
+The database is the single authority for every object's byte status; the git store holds dumb bytes and
+always *trails* the database. No git ref is used for reachability, and no operation stats the store to decide
+presence — `object_presence` is the sole presence authority. A few decisions earn their keep:
+
+- **The keep-set is exactly the read-authorization surface, not the `current` ancestry.** `read_object`
+  authorizes a blob on *any* `commit_object` edge of a rostered skill — it never consults `current` (that
+  decoupling is what lets a member read an unpromoted version). So the readable set is "every object some
+  commit references." If GC reclaimed by `current`-reachability instead, it could unlink a blob that is still
+  readable via a non-`current` commit — a corruption alarm on a previously-valid read. The fence therefore
+  spares any object with a `commit_object` edge ∪ any object named by a live lease, and folds that into a
+  single guarded claim compare-and-swap that re-checks **at delete time** (closing the snapshot-then-delete
+  race against both a freshly-inserted lease and a concurrent legacy upload). The `current`-ancestry walk the
+  eventual design wants becomes meaningful only once the pointer-move makes `current` the trunk root and
+  proposals create reclaimable non-trunk branches; it lands then, as one coherent change, not here.
+- **The locator lives in the database, not a ref.** A fenced object's row carries its `git_oid` (the physical
+  loose-object locator), written in the same compare-and-swap that flips it to `present`. The database is
+  already the lifecycle authority, so the locator belongs with it — one crash-consistent artifact (the row)
+  instead of two (a row plus a separate ref that a crash could strand). `topos-gitstore` stays a dumb byte
+  layer keyed by `git_oid`. (This row is also the carrier the later large-object store needs to recover an
+  offloaded blob's identity.)
+- **`deleting` is non-resurrectable by construction.** The only writer of `present` is the install
+  compare-and-swap, whose `WHERE status = 'absent'` structurally cannot fire on a `deleting` row. A migrate
+  that meets a `deleting` object waits for `absent` (polling **outside** any write transaction, so it can
+  never hold the single SQLite writer that the finalize needs) and then re-copies fresh — it can never rescue
+  bytes a GC has authorized to unlink.
+- **Lease-before-migrate, with a two-state lifetime.** The promotion lease names a commit's *full* object set
+  — including an old, already-present object a dedup-skip would otherwise leave exposed — and is inserted
+  before any byte migrates, so a concurrent GC's keep-set protects everything the commit needs. A finite TTL
+  guards a crashed/abandoned migrate (its objects become reclaimable); a *successful* migrate makes the lease
+  non-expiring, so the migrated version stays rooted until the later pointer-move consumes it (a finite TTL
+  would let GC reclaim a good, just-migrated version).
+- **Built behind the privacy boundary, wired to no verb yet.** The fence is the directly-testable internal
+  ingest/migrate/GC ops; the legacy straight-to-git upload path is left untouched and GC ignores any object
+  with no presence row, so this increment is additive. One residual is documented: a concurrent legacy upload
+  could add a `commit_object` edge in the tiny window between a guarded claim and the (transaction-free)
+  unlink — not reachable in production this increment (the fenced ingress has no public verb), and closed when
+  the pointer-move routes all writes through the fence.
+
 ## What this deliberately is not, yet
 
-The garbage-collection fence (quarantine, object presence, promotion leases, the size-routed large-object
-store), the pointer-move write (the compare-and-set, the in-process signer, durable receipts) that *moves*
-the `current` pointer this layer only creates, the HTTP surface, identity/roster issuance, and Postgres are
-each a clean follow-on against this foundation. Object-write and provenance-recording are kept separable so
-the garbage-collection fence can later wrap both. The lineage predicate is built and tested read-only so
-wiring it into the pointer-move transaction is a small change.
+The size-routed large-object store (offload big blobs under the same `blob_id`, dispatching the read + the GC
+unlink on `object_presence.location`), the pointer-move write (the compare-and-set, the in-process signer,
+durable receipts) that *moves* the `current` pointer this layer only creates **and** consumes a migrated
+candidate's lease, the `purge` verb + force-unlink (the tombstones table + denylist check already exist), the
+HTTP surface, identity/roster issuance, and Postgres are each a clean follow-on against this foundation. The
+lineage predicate is built and tested read-only so wiring it into the pointer-move transaction is a small
+change.

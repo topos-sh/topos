@@ -111,6 +111,22 @@ impl Authority {
         self.git_root.join(ws.as_str())
     }
 
+    /// The per-op upload-quarantine directory: `git_root/<ws>.quarantine/<op_id>`. `WorkspaceId` forbids
+    /// `.`, so `<ws>.quarantine` can never collide with a real workspace store dir (`git_root/<ws>`), and
+    /// it is a SIBLING of that store — so the GC scanner, which walks only `git_root/<ws>/`, never sees a
+    /// quarantine. Both ids are validated path-safe newtypes, so the path can never escape `git_root`.
+    /// (Used by the not-yet-wired lifecycle ops, so unreferenced in a non-test production build.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn workspace_quarantine_dir(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &crate::id::OpId,
+    ) -> PathBuf {
+        self.git_root
+            .join(format!("{}.quarantine", ws.as_str()))
+            .join(op_id.as_str())
+    }
+
     /// Open the per-workspace git store for reading. A failure here is reached only after the database
     /// authorized the read, so a missing/un-openable store is a provenance/store divergence (corruption).
     pub(crate) fn open_store(&self, ws: &WorkspaceId) -> Result<Store> {

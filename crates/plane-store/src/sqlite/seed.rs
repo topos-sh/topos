@@ -6,10 +6,37 @@
 //! privacy wall closes — and `#[cfg(test)]` keeps them out of every release artifact.
 
 use super::Db;
+use super::lifecycle::GIT_OID_LEN;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
 impl Db {
+    /// Stage a `deleting` object_presence row directly (a crashed GC's leftover) — drives the recovery sweep.
+    pub(crate) async fn seed_deleting_object(
+        &self,
+        ws: &WorkspaceId,
+        object_id: ObjectId,
+        git_oid: &[u8; GIT_OID_LEN],
+        status_updated_at: i64,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        let goid = git_oid.as_slice();
+        sqlx::query!(
+            "INSERT INTO object_presence (workspace_id, object_id, status, location, size, git_oid, status_updated_at) \
+             VALUES (?1, ?2, 'deleting', 'git', 0, ?3, ?4) \
+             ON CONFLICT (workspace_id, object_id) DO UPDATE SET status='deleting', git_oid=excluded.git_oid, \
+               status_updated_at=excluded.status_updated_at",
+            ws_s,
+            oid,
+            goid,
+            status_updated_at,
+        )
+        .execute(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
     /// Stage a roster membership (the principal becomes entitled to read/upload the skill).
     pub(crate) async fn seed_roster(
         &self,

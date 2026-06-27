@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest;
 
-use crate::sqlite::RecordOutcome;
+use crate::sqlite::{ClaimOutcome, InstallOutcome, ObjectStatus, RecordOutcome};
 use crate::{
-    Authority, AuthorityError, CandidateUpload, CommitId, FileMode, ObjectId, Principal, SkillId,
-    UploadedFile, WorkspaceId,
+    Authority, AuthorityError, CandidateUpload, CommitId, FileMode, ObjectId, OpId, Principal,
+    SkillId, UploadedFile, WorkspaceId, gc, lifecycle,
 };
 
 // ── fixtures + helpers ───────────────────────────────────────────────────────────────────────────
@@ -60,6 +60,13 @@ fn file(path: &str, bytes: &[u8]) -> UploadedFile {
 }
 fn object_id(bytes: &[u8]) -> ObjectId {
     ObjectId(digest::sha256(bytes))
+}
+fn op(s: &str) -> OpId {
+    OpId::parse(s).expect("op id")
+}
+/// A dummy 20-byte git locator for pure object_presence fence tests (no real git store touched).
+fn goid(b: u8) -> [u8; 20] {
+    [b; 20]
 }
 
 /// A genesis candidate (no parents) with the given files.
@@ -450,4 +457,624 @@ async fn two_writers_serialize_without_a_busy_error() {
     );
     assert_eq!(r1.unwrap(), RecordOutcome::Recorded);
     assert_eq!(r2.unwrap(), RecordOutcome::Recorded);
+}
+
+// ── object_presence fenced transitions (the CAS state machine, in isolation) ───────────────────────
+
+#[tokio::test]
+async fn install_absent_to_present_is_idempotent_reuse() {
+    let fx = Fixture::new("t-install").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"obj");
+    // absent (no row) → present.
+    assert_eq!(
+        a.db()
+            .install_object(&w, o, &goid(7), 3, 100)
+            .await
+            .unwrap(),
+        InstallOutcome::Installed
+    );
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Present
+    );
+    // a second install observes present and reuses (the dedup path) — never a double-install.
+    assert_eq!(
+        a.db()
+            .install_object(&w, o, &goid(7), 3, 101)
+            .await
+            .unwrap(),
+        InstallOutcome::AlreadyPresent
+    );
+}
+
+#[tokio::test]
+async fn claim_unreferenced_present_then_finalize_to_absent() {
+    let fx = Fixture::new("t-claim").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"lonely");
+    a.db()
+        .install_object(&w, o, &goid(9), 1, 100)
+        .await
+        .unwrap();
+    // No commit_object, no lease → the guarded claim succeeds and yields the git locator.
+    match a.db().claim_for_delete(&w, o, 200).await.unwrap() {
+        ClaimOutcome::Claimed { git_oid } => assert_eq!(git_oid, goid(9)),
+        ClaimOutcome::Spared => panic!("expected claimed"),
+    }
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Deleting
+    );
+    a.db().finalize_delete(&w, o, 300).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn claim_spares_a_commit_object_referenced_object() {
+    let fx = Fixture::new("t-claim-co").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let o = object_id(b"reachable");
+    a.db()
+        .install_object(&w, o, &goid(1), 1, 100)
+        .await
+        .unwrap();
+    // A commit references it (the read-authorization surface) → GC must spare it.
+    a.db()
+        .seed_commit(&w, &s, CommitId([0xC1; 32]), &[o])
+        .await
+        .unwrap();
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o, 200).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Present
+    );
+}
+
+#[tokio::test]
+async fn claim_spares_a_live_lease_and_reclaims_after_release() {
+    let fx = Fixture::new("t-claim-lease").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"leased");
+    a.db()
+        .install_object(&w, o, &goid(2), 1, 100)
+        .await
+        .unwrap();
+    // A live lease (expires in the future) names it → spared.
+    a.db()
+        .insert_lease(&w, &op("op1"), CommitId([0xA1; 32]), &[o], 9_999)
+        .await
+        .unwrap();
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o, 200).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
+    // Releasing the lease makes it reclaimable.
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o, 200).await.unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn expired_lease_does_not_spare_but_committed_lease_always_does() {
+    let fx = Fixture::new("t-lease-exp").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (o1, o2) = (object_id(b"exp"), object_id(b"perm"));
+    a.db()
+        .install_object(&w, o1, &goid(3), 1, 100)
+        .await
+        .unwrap();
+    a.db()
+        .install_object(&w, o2, &goid(4), 1, 100)
+        .await
+        .unwrap();
+    // An expired lease (expires_at <= now) does NOT protect.
+    a.db()
+        .insert_lease(&w, &op("exp"), CommitId([0xE1; 32]), &[o1], 150)
+        .await
+        .unwrap();
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o1, 200).await.unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+    // A committed (non-expiring) lease protects even far in the future.
+    a.db()
+        .insert_lease(&w, &op("perm"), CommitId([0xE2; 32]), &[o2], 150)
+        .await
+        .unwrap();
+    a.db().commit_lease(&w, &op("perm")).await.unwrap();
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o2, 1_000_000).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
+}
+
+#[tokio::test]
+async fn deleting_is_non_resurrectable() {
+    let fx = Fixture::new("t-noresurrect").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"dying");
+    // A row already in `deleting` (a GC mid-unlink): a migrate's install must NOT bring it back to present.
+    a.db()
+        .seed_deleting_object(&w, o, &goid(5), 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db()
+            .install_object(&w, o, &goid(5), 1, 200)
+            .await
+            .unwrap(),
+        InstallOutcome::Deleting
+    );
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Deleting
+    );
+    // And a claim on a `deleting` row is a no-op spare (the WHERE status='present' cannot fire).
+    assert!(matches!(
+        a.db().claim_for_delete(&w, o, 300).await.unwrap(),
+        ClaimOutcome::Spared
+    ));
+}
+
+#[tokio::test]
+async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable() {
+    let fx = Fixture::new("t-tomb").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (fresh, existing) = (object_id(b"deny-fresh"), object_id(b"deny-existing"));
+    // A denylisted blob with no row: install is refused, no present row is created.
+    a.db()
+        .insert_tombstone(&w, fresh, "leaked", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db()
+            .install_object(&w, fresh, &goid(6), 1, 110)
+            .await
+            .unwrap(),
+        InstallOutcome::Unavailable
+    );
+    assert_eq!(
+        a.db().object_status(&w, fresh).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    // A present object that is then tombstoned reaches the terminal `unavailable` state.
+    a.db()
+        .install_object(&w, existing, &goid(6), 1, 100)
+        .await
+        .unwrap();
+    a.db()
+        .insert_tombstone(&w, existing, "leaked", 120)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db().object_status(&w, existing).await.unwrap(),
+        ObjectStatus::Unavailable
+    );
+    assert!(a.db().is_tombstoned(&w, existing).await.unwrap());
+}
+
+#[tokio::test]
+async fn recovery_sweep_finalizes_only_stale_deleting() {
+    let fx = Fixture::new("t-recover").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (old, fresh) = (object_id(b"crashed"), object_id(b"in-flight"));
+    a.db()
+        .seed_deleting_object(&w, old, &goid(8), 10)
+        .await
+        .unwrap(); // stamped long ago
+    a.db()
+        .seed_deleting_object(&w, fresh, &goid(8), 1000)
+        .await
+        .unwrap(); // a live GC's
+    // Only the stale one (status_updated_at < threshold) is returned for recovery.
+    let stale = a.db().stale_deleting(&w, 500).await.unwrap();
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].0, old);
+    let wss = a.db().workspaces_with_stale_deleting(500).await.unwrap();
+    assert_eq!(wss, vec![w.clone()]);
+}
+
+// ── ingest → migrate → GC, end-to-end (the fence through the real ops) ──────────────────────────────
+
+/// Ingest a genesis candidate then migrate it fully; returns the staged candidate.
+async fn ingest_migrate(
+    a: &Authority,
+    w: &WorkspaceId,
+    op_id: &str,
+    files: Vec<UploadedFile>,
+    now: i64,
+) -> lifecycle::StagedCandidate {
+    let staged = lifecycle::ingest(a, w, &op(op_id), genesis(files), now)
+        .await
+        .expect("ingest");
+    lifecycle::migrate(a, w, &staged, now)
+        .await
+        .expect("migrate");
+    staged
+}
+
+#[tokio::test]
+async fn migrate_installs_durably_and_committed_lease_protects_from_gc() {
+    let fx = Fixture::new("e-migrate").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"# skill\nrun it\n";
+    let staged = ingest_migrate(a, &w, "op1", vec![file("SKILL.md", body)], 100).await;
+
+    // The object is present, and its bytes verify from their FINAL path (a real render of the version).
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    let store = a.open_store(&w).unwrap();
+    let rendered = store
+        .render_verified(staged.version_id.0, staged.bundle_digest)
+        .expect("render the migrated version");
+    assert_eq!(rendered.files.len(), 1);
+    assert_eq!(rendered.files[0].bytes, body);
+
+    // A successful migrate makes its lease non-expiring, so even a far-future GC reclaims nothing.
+    assert_eq!(gc::run_gc(a, &w, 1_000_000_000).await.unwrap(), 0);
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    // The quarantine was cleaned up post-commit.
+    assert!(!a.workspace_quarantine_dir(&w, &op("op1")).exists());
+}
+
+#[tokio::test]
+async fn gc_reclaims_an_abandoned_migrated_object_physically() {
+    let fx = Fixture::new("e-abandon").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"abandon me";
+    let staged = ingest_migrate(a, &w, "op1", vec![file("SKILL.md", body)], 100).await;
+    // Abandon the migrate (the deferred pointer-move never took the root): release the committed lease.
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+
+    // No commit_object (migrate records none) + no live lease → GC reclaims it.
+    assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    // Physical deletion: a fresh store can no longer render the orphaned version (its blob is gone).
+    let fresh = a.open_store(&w).unwrap();
+    assert!(
+        fresh
+            .render_verified(staged.version_id.0, staged.bundle_digest)
+            .is_err(),
+        "the blob must be physically unlinked"
+    );
+}
+
+#[tokio::test]
+async fn gc_retention_is_exactly_reachability() {
+    let fx = Fixture::new("e-retain").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    // Two migrated objects, both abandoned (leases released) so only commit_object can root them.
+    let keep = b"keep-me";
+    let drop = b"drop-me";
+    ingest_migrate(a, &w, "k", vec![file("keep.md", keep)], 100).await;
+    ingest_migrate(a, &w, "d", vec![file("drop.md", drop)], 100).await;
+    a.db().release_lease(&w, &op("k")).await.unwrap();
+    a.db().release_lease(&w, &op("d")).await.unwrap();
+    // Root `keep` via a commit_object edge (the read-authorization surface); leave `drop` unrooted.
+    a.db()
+        .seed_commit(&w, &s, CommitId([0x55; 32]), &[object_id(keep)])
+        .await
+        .unwrap();
+
+    assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1); // exactly `drop`
+    assert_eq!(
+        a.db().object_status(&w, object_id(keep)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    assert_eq!(
+        a.db().object_status(&w, object_id(drop)).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn dedup_race_lease_protects_the_full_closure_under_a_slow_migrate() {
+    // The release-blocker dedup race, exercised through the REAL migrate op (lease step), deterministically.
+    let fx = Fixture::new("e-dedup").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let a_bytes = b"shared object A";
+    let c_bytes = b"new object C";
+
+    // V1 migrates A, then is abandoned → A is present + on disk but UNROOTED (no commit_object, no lease).
+    ingest_migrate(a, &w, "v1", vec![file("a.txt", a_bytes)], 100).await;
+    a.db().release_lease(&w, &op("v1")).await.unwrap();
+
+    // V2 reuses A and adds C. Stage + lease the FULL set {A, C}, then — mid-migrate, before C installs —
+    // run a GC. The lease must spare A (the dedup-skipped reused object); C is not present yet.
+    let v2 = lifecycle::ingest(
+        a,
+        &w,
+        &op("v2"),
+        genesis(vec![file("a.txt", a_bytes), file("c.txt", c_bytes)]),
+        200,
+    )
+    .await
+    .unwrap();
+    lifecycle::migrate_lease(a, &w, &v2, 200).await.unwrap();
+    // Fault-injected slow migrate: GC interposes here.
+    assert_eq!(
+        gc::run_gc(a, &w, 200).await.unwrap(),
+        0,
+        "GC must reclaim nothing: A is protected by V2's full-closure lease, C is not yet present"
+    );
+    assert_eq!(
+        a.db().object_status(&w, object_id(a_bytes)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    // Finish the migrate: A is reused (dedup), C installs.
+    lifecycle::migrate_install(a, &w, &v2, 200).await.unwrap();
+    lifecycle::migrate_finish(a, &w, &v2).await.unwrap();
+    let store = a.open_store(&w).unwrap();
+    let rendered = store
+        .render_verified(v2.version_id.0, v2.bundle_digest)
+        .expect("render V2");
+    let mut got: Vec<&[u8]> = rendered.files.iter().map(|f| f.bytes.as_slice()).collect();
+    got.sort();
+    let mut want = vec![a_bytes.as_slice(), c_bytes.as_slice()];
+    want.sort();
+    assert_eq!(
+        got, want,
+        "both A (reused) and C (installed) render byte-exact"
+    );
+}
+
+#[tokio::test]
+async fn two_concurrent_migrations_of_one_object_do_not_corrupt() {
+    let fx = Fixture::new("e-concurrent").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"identical content";
+    // Two independent ops staging the SAME bytes, migrated concurrently. The absent→present CAS makes one
+    // install and the other reuse; neither corrupts (write_blob is content-addressed/idempotent).
+    let sa = lifecycle::ingest(a, &w, &op("a"), genesis(vec![file("x", body)]), 100)
+        .await
+        .unwrap();
+    let sb = lifecycle::ingest(a, &w, &op("b"), genesis(vec![file("x", body)]), 100)
+        .await
+        .unwrap();
+    let (ra, rb) = tokio::join!(
+        lifecycle::migrate(a, &w, &sa, 100),
+        lifecycle::migrate(a, &w, &sb, 100),
+    );
+    ra.unwrap();
+    rb.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    // Both versions render the identical, verified bytes.
+    let store = a.open_store(&w).unwrap();
+    for s in [&sa, &sb] {
+        let r = store
+            .render_verified(s.version_id.0, s.bundle_digest)
+            .unwrap();
+        assert_eq!(r.files[0].bytes, body);
+    }
+}
+
+#[tokio::test]
+async fn gc_acts_only_on_fenced_objects_legacy_upload_stays_readable() {
+    let fx = Fixture::new("e-legacy").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_pr"));
+    let p = prin("dev_p");
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    // The pre-existing straight-to-git upload path: writes a blob with NO object_presence row.
+    let body = b"legacy bytes";
+    a.upload_candidate(&p, &w, &s, genesis(vec![file("L.md", body)]))
+        .await
+        .unwrap();
+    assert_eq!(
+        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
+        body
+    );
+    // A full GC pass must not touch it (no presence row → invisible to GC).
+    gc::run_gc(a, &w, 200).await.unwrap();
+    assert_eq!(
+        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
+        body,
+        "a legacy blob with no presence row stays readable after GC"
+    );
+}
+
+#[tokio::test]
+async fn gc_spares_an_object_a_legacy_commit_still_references_even_if_fenced() {
+    // The keep-set regression: read_object authorizes via ANY commit_object, so the fence must spare a
+    // commit-referenced object even when it also carries a (now-abandoned) presence row.
+    let fx = Fixture::new("e-overlap").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_pr"));
+    let p = prin("dev_p");
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    let body = b"shared between legacy and fenced";
+    // Legacy upload records commit_object + writes the blob (readable, no presence row).
+    a.upload_candidate(&p, &w, &s, genesis(vec![file("B.md", body)]))
+        .await
+        .unwrap();
+    // A later fenced migrate of the SAME bytes adds a presence row; then it is abandoned.
+    ingest_migrate(a, &w, "op", vec![file("B.md", body)], 100).await;
+    a.db().release_lease(&w, &op("op")).await.unwrap();
+
+    // GC must SPARE it (a commit_object edge = readable); the read keeps working.
+    gc::run_gc(a, &w, 200).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    assert_eq!(
+        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
+        body
+    );
+}
+
+#[tokio::test]
+async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired_one() {
+    let fx = Fixture::new("e-quarantine").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    // Ingest WITHOUT migrating → bytes sit in the GC-excluded quarantine, not the main store.
+    let staged = lifecycle::ingest(a, &w, &op("q"), genesis(vec![file("Q.md", b"queued")]), 100)
+        .await
+        .unwrap();
+    let qdir = a.workspace_quarantine_dir(&w, &op("q"));
+    assert!(qdir.exists(), "the quarantine objdir exists after ingest");
+
+    // A GC pass reclaims nothing staged in the quarantine (it is not in the main store / has no present row).
+    gc::run_gc(a, &w, 200).await.unwrap();
+    assert!(qdir.exists(), "GC must never touch an active quarantine");
+    assert_eq!(
+        a.db()
+            .object_status(&w, ObjectId(staged.entries[0].object_id))
+            .await
+            .unwrap(),
+        ObjectStatus::Absent
+    );
+
+    // The janitor spares an unexpired quarantine and sweeps an expired one (TTL = ingest_now + 3600).
+    assert_eq!(gc::quarantine_janitor(a, 200).await.unwrap(), 0);
+    assert!(qdir.exists());
+    assert_eq!(gc::quarantine_janitor(a, 100 + 3600 + 1).await.unwrap(), 1);
+    assert!(
+        !qdir.exists(),
+        "the janitor sweeps an expired quarantine whole"
+    );
+}
+
+#[tokio::test]
+async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end() {
+    let fx = Fixture::new("e-recovery").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"half-unlinked";
+    let staged = ingest_migrate(a, &w, "op", vec![file("X.md", body)], 100).await;
+    let oid = object_id(body);
+    // Simulate a GC that claimed the object (present → deleting) long ago, then crashed before finalizing.
+    a.db()
+        .seed_deleting_object(&w, oid, &staged.entries[0].git_oid, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db().object_status(&w, oid).await.unwrap(),
+        ObjectStatus::Deleting
+    );
+    // The recovery sweep (far past the stale threshold) finalizes it: re-unlink + absent.
+    assert_eq!(gc::recovery_sweep(a, 1_000_000).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, oid).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    let fresh = a.open_store(&w).unwrap();
+    assert!(
+        fresh
+            .render_verified(staged.version_id.0, staged.bundle_digest)
+            .is_err(),
+        "the crashed unlink is completed (bytes gone)"
+    );
+    // Idempotent: a second sweep finds nothing stale.
+    assert_eq!(gc::recovery_sweep(a, 1_000_001).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn ingest_rejects_a_denylisted_blob() {
+    let fx = Fixture::new("e-deny").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"a leaked secret";
+    a.db()
+        .insert_tombstone(&w, object_id(body), "leaked", 100)
+        .await
+        .unwrap();
+    let res = lifecycle::ingest(a, &w, &op("d"), genesis(vec![file("S.md", body)]), 110).await;
+    assert!(matches!(res, Err(AuthorityError::RejectedUpload(_))));
+}
+
+// ── cross-workspace isolation (release blockers) ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn gc_for_one_workspace_never_touches_another_with_identical_content() {
+    let fx = Fixture::new("e-xws-gc").await;
+    let a = &fx.authority;
+    let (wa, wb) = (ws("w_a"), ws("w_b"));
+    let body = b"identical bytes across tenants";
+    // The SAME content migrated into BOTH workspaces — two DISTINCT physical objects + presence rows.
+    ingest_migrate(a, &wa, "op", vec![file("X.md", body)], 100).await;
+    let sb = ingest_migrate(a, &wb, "op", vec![file("X.md", body)], 100).await;
+    // Abandon A's (so it is a GC candidate); keep B's rooted (committed lease).
+    a.db().release_lease(&wa, &op("op")).await.unwrap();
+
+    // GC for A reclaims A's object; B's identical-content object is untouched (workspace_id-bound).
+    assert_eq!(gc::run_gc(a, &wa, 200).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&wa, object_id(body)).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    assert_eq!(
+        a.db().object_status(&wb, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
+    );
+    // B's bytes are intact on disk (its version still renders).
+    let store_b = a.open_store(&wb).unwrap();
+    assert_eq!(
+        store_b
+            .render_verified(sb.version_id.0, sb.bundle_digest)
+            .unwrap()
+            .files[0]
+            .bytes,
+        body
+    );
+}
+
+#[tokio::test]
+async fn quarantines_are_per_workspace_and_the_janitor_is_scoped() {
+    let fx = Fixture::new("e-xws-q").await;
+    let a = &fx.authority;
+    let (wa, wb) = (ws("w_a"), ws("w_b"));
+    // Same op id in two workspaces → distinct quarantine dirs.
+    lifecycle::ingest(a, &wa, &op("k"), genesis(vec![file("A.md", b"a")]), 100)
+        .await
+        .unwrap();
+    lifecycle::ingest(a, &wb, &op("k"), genesis(vec![file("B.md", b"b")]), 100)
+        .await
+        .unwrap();
+    let qa = a.workspace_quarantine_dir(&wa, &op("k"));
+    let qb = a.workspace_quarantine_dir(&wb, &op("k"));
+    assert_ne!(qa, qb);
+    assert!(qa.exists() && qb.exists());
+    // Expire only A's window: the janitor sweeps A's quarantine and spares B's.
+    a.db()
+        .insert_quarantine(&wa, &op("k"), &qa.to_string_lossy(), 150)
+        .await
+        .unwrap();
+    assert_eq!(gc::quarantine_janitor(a, 200).await.unwrap(), 1);
+    assert!(!qa.exists(), "A's expired quarantine swept");
+    assert!(qb.exists(), "B's quarantine spared (its TTL is far off)");
 }

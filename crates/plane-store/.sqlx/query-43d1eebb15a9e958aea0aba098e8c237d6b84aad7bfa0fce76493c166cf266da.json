@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tombstones (workspace_id, blob_id, reason, at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (workspace_id, blob_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "43d1eebb15a9e958aea0aba098e8c237d6b84aad7bfa0fce76493c166cf266da"
+}

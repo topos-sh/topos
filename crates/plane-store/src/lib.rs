@@ -39,12 +39,21 @@ mod read;
 mod sqlite;
 mod upload;
 
+// The object-lifecycle fence (quarantine ingest, lease-before-migrate, the 3-phase GC, recovery + janitor)
+// is built behind the privacy boundary and exercised by the in-crate tests, but it is wired to NO public
+// verb this increment — the pointer-move write that drives it lands later. So in a non-test build its
+// `pub(crate)` ops are legitimately unreferenced; the lint stays active under `test`, where they are used.
+#[cfg_attr(not(test), allow(dead_code))]
+mod gc;
+#[cfg_attr(not(test), allow(dead_code))]
+mod lifecycle;
+
 #[cfg(test)]
 mod tests;
 
 pub use authority::Authority;
 pub use error::{AuthorityError, Result};
-pub use id::{CommitId, IdError, ObjectId, Principal, SkillId, WorkspaceId};
+pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use upload::{CandidateUpload, UploadReceipt, UploadedFile};
 

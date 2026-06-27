@@ -34,6 +34,7 @@
 
 mod diff;
 mod error;
+mod fence;
 mod read;
 mod store;
 
@@ -44,6 +45,7 @@ mod tests;
 
 pub use diff::{DiffFile, unified_diff};
 pub use error::{GitstoreError, VerifyError};
+pub use fence::{GIT_OID_LEN, StagedBundle, StagedEntry};
 pub use read::{RenderedBundle, RenderedFile, VersionNode};
 pub use store::{ImportFile, Store, TreeHandle, WriteBatch};
 

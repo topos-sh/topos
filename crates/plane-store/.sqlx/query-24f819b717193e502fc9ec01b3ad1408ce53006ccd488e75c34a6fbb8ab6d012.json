@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status AS \"status!\" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "status!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "24f819b717193e502fc9ec01b3ad1408ce53006ccd488e75c34a6fbb8ab6d012"
+}

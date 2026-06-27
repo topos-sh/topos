@@ -44,6 +44,14 @@ pub struct SkillId(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Principal(String);
 
+/// An operation identifier — the client-minted id of one in-flight write (quarantine + promotion lease).
+///
+/// Admits only the path-safe charset (`[A-Za-z0-9_-]`, which excludes `.`, `..`, and every separator),
+/// because it is used as a **directory component** of the per-op quarantine objdir the janitor `rm -rf`s —
+/// a `..` or `/` here would let the destructive sweep escape its root. A v4-UUID op id (hex + `-`) fits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpId(String);
+
 /// `[A-Za-z0-9_-]` — the path-safe id charset (workspace + skill ids).
 fn is_path_safe(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
@@ -121,6 +129,24 @@ impl Principal {
     }
 }
 
+impl OpId {
+    /// Parse an operation id, rejecting anything outside the path-safe charset (so it is always safe as a
+    /// single quarantine directory component).
+    ///
+    /// # Errors
+    /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
+    pub fn parse(s: &str) -> Result<Self, IdError> {
+        validate(s, is_path_safe)?;
+        Ok(Self(s.to_owned()))
+    }
+
+    /// The id as a string slice — safe to use as a single path component.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -132,6 +158,11 @@ impl fmt::Display for SkillId {
     }
 }
 impl fmt::Display for Principal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl fmt::Display for OpId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -199,6 +230,23 @@ mod tests {
         // The path-safe charset (skill/workspace) rejects the email metacharacters.
         assert!(SkillId::parse("dev@example.com").is_err());
         assert!(WorkspaceId::parse("a.b").is_err());
+    }
+
+    #[test]
+    fn op_id_rejects_path_traversal_and_separators() {
+        // op_id is an rm -rf'd directory component, so it must reject `.`/`..`/separators exactly as the
+        // workspace id does — a `..` here would let the quarantine janitor escape its root.
+        for bad in ["", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "a\nb"] {
+            assert!(OpId::parse(bad).is_err(), "should reject op id {bad:?}");
+        }
+        for ok in [
+            "op",
+            "op_1",
+            "a1b2c3d4-e5f6-7890-ab12-cd34ef567890",
+            "A_B-9",
+        ] {
+            assert!(OpId::parse(ok).is_ok(), "should accept op id {ok:?}");
+        }
     }
 
     #[test]

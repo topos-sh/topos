@@ -30,14 +30,22 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > skill-scoped object-read access rule (rostered ∧ reachable, one indistinguishable not-found, never served by
 > bare hash); full-tree upload with server rehash that records provenance + reachability only after an
 > authoritative roster check; and the cross-skill lineage predicate — all directly tested against a real
-> database + git store (it moves no pointer and signs nothing yet). Still to come: the object-lifecycle /
-> garbage-collection fence + the size-routed large-object store; the pointer-move write (the `(epoch,seq)`
-> compare-and-set + the in-process signer + durable receipts) that *moves* the `current` pointer this layer
-> only creates; the HTTP plane; signing-at-rest; the four-state sync machine + the `pull` engine; the
-> byte-writing materialization (the atomic dir-swap that an *update* uses to overwrite a harness dir); the
-> OpenClaw/Hermes adapters; identity/roster issuance; and Postgres. `sqlx` is now referenced by `plane-store`
-> (and kept out of the client build — `check-arch` forbids that edge); `axum` stays declared but unreferenced
-> until the HTTP plane lands.
+> database + git store (it moves no pointer and signs nothing yet). The **DB-authoritative object-lifecycle /
+> garbage-collection fence** over that store is now built too (git-only): a GC-excluded upload **quarantine**;
+> the fenced **`object_presence`** state machine (`present`/`deleting`/`absent`/`unavailable`) whose
+> guarded compare-and-swaps make a `deleting` object non-resurrectable; **promotion leases** that root a
+> commit's full object set before any byte migrates; **migrate-into-git** (lease-before-migrate, server-side
+> dedup, durable install) recording a real version; **transactional mark-then-claim GC** (claim → unlink →
+> finalize, the unlink outside any transaction, the keep-set exactly the read-authorization surface) with a
+> recovery sweep + a quarantine janitor; and the **tombstones denylist** (no `purge` verb yet). The database
+> leads and the filesystem trails throughout. Still to come: **the size-routed large-object store** (the
+> immediate next step — everything stays in the git store today, `object_presence.location` always `git`);
+> the pointer-move write (the `(epoch,seq)` compare-and-set + the in-process signer + durable receipts) that
+> *moves* the `current` pointer this layer only creates; the HTTP plane; signing-at-rest; the four-state sync
+> machine + the `pull` engine; the byte-writing materialization (the atomic dir-swap that an *update* uses to
+> overwrite a harness dir); the OpenClaw/Hermes adapters; identity/roster issuance; and Postgres. `sqlx` is
+> referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
+> stays declared but unreferenced until the HTTP plane lands.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what

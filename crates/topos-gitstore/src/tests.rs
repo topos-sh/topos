@@ -421,6 +421,75 @@ fn durability_set_names_the_whole_store_not_just_objects() {
 }
 
 #[test]
+fn fence_stage_install_commit_render_and_delete() {
+    // The fence primitives in isolation: stage into a quarantine, install into main durably, record the
+    // version from the installed ids (no blob re-write), render byte-exact, then physically unlink.
+    let main_scratch = Scratch::new("fence-main");
+    let q_scratch = Scratch::new("fence-q");
+    let main = Store::init(&main_scratch.0).expect("init main");
+    let files = [
+        ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"# skill\n",
+        },
+        ImportFile {
+            path: "scripts/run.sh",
+            mode: FileMode::Executable,
+            bytes: b"#!/bin/sh\necho hi\n",
+        },
+    ];
+    let staged = Store::stage(&q_scratch.0, &files).expect("stage");
+    assert_eq!(staged.entries.len(), 2);
+
+    // Staged bytes are in the quarantine, NOT yet in main.
+    for e in &staged.entries {
+        assert!(!main.object_exists(e.git_oid).expect("exists"));
+    }
+
+    // Install each object into main durably (the op names what it fsynced).
+    let quarantine = Store::open(&q_scratch.0).expect("open quarantine");
+    for e in &staged.entries {
+        let batch = main
+            .install_object_durable(&quarantine, e.git_oid)
+            .expect("install");
+        assert!(
+            !batch.files.is_empty(),
+            "install must name a synced object file"
+        );
+        assert!(main.object_exists(e.git_oid).expect("exists after install"));
+    }
+
+    // Record the version from the installed ids (write_tree builds the tree WITHOUT writing blobs).
+    let entries: Vec<(&str, FileMode, [u8; 20])> = staged
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.mode, e.git_oid))
+        .collect();
+    let vid = genesis_version_id(staged.bundle_digest);
+    main.commit_durable(vid, &[], &entries, staged.bundle_digest, AUTHOR, MESSAGE)
+        .expect("commit_durable");
+
+    // It renders byte-exact from its final path (placement-independent identity holds).
+    let rendered = main
+        .render_verified(vid, staged.bundle_digest)
+        .expect("render");
+    assert_eq!(rendered.files.len(), 2);
+
+    // Physically unlink one object → a fresh store can no longer render the version.
+    main.delete_loose_object(staged.entries[0].git_oid)
+        .expect("delete");
+    let fresh = Store::open(&main_scratch.0).expect("reopen");
+    assert!(
+        fresh.render_verified(vid, staged.bundle_digest).is_err(),
+        "the unlinked object must be physically gone"
+    );
+    // Re-delete is idempotent (the recovery sweep re-running).
+    main.delete_loose_object(staged.entries[0].git_oid)
+        .expect("idempotent re-delete");
+}
+
+#[test]
 fn render_rejects_missing_version() {
     let scratch = Scratch::new("missing");
     let store = Store::init(&scratch.0).expect("init");

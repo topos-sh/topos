@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO object_presence (workspace_id, object_id, status, location, size, git_oid, status_updated_at)\n            VALUES (?1, ?2, 'present', 'git', ?3, ?4, ?5)\n            ON CONFLICT (workspace_id, object_id) DO UPDATE SET\n                status            = 'present',\n                location          = 'git',\n                size              = excluded.size,\n                git_oid           = excluded.git_oid,\n                status_updated_at = excluded.status_updated_at\n            WHERE object_presence.status = 'absent'\n            RETURNING object_id AS \"object_id!: Vec<u8>\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9fff777f0395745ab3bcb0b24798997680c8d76427fb22a35f3cf3938a60dc48"
+}
