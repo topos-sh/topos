@@ -38,8 +38,15 @@ fn copy_tree(src: &Path, dst: &Path) {
 }
 
 fn run(home: &Path, args: &[&str]) -> (bool, serde_json::Value) {
+    // Hermetic: point the Claude config home at an isolated (empty) dir so a test never reads or writes
+    // the real `~/.claude`.
+    run_in(home, &home.join(".claude-isolated"), args)
+}
+
+fn run_in(home: &Path, claude: &Path, args: &[&str]) -> (bool, serde_json::Value) {
     let out = Command::new(bin())
         .env("TOPOS_HOME", home)
+        .env("CLAUDE_CONFIG_DIR", claude)
         .args(args)
         .output()
         .expect("spawn topos");
@@ -87,5 +94,73 @@ fn end_to_end_add_then_list_over_json() {
     assert_eq!(v["error"]["code"], "NO_SUCH_SKILL");
 
     let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
+    let home = scratch("cc-home");
+    let claude = scratch("cc-claude");
+    // A real Claude Code skill under the isolated config home.
+    let skill = claude.join("skills").join("pr-describe");
+    std::fs::create_dir_all(&skill).unwrap();
+    let skill_md = skill.join("SKILL.md");
+    std::fs::write(
+        &skill_md,
+        "# pr-describe\n\nWrite a clear PR description.\n",
+    )
+    .unwrap();
+    let before = std::fs::read(&skill_md).unwrap();
+
+    // add → recognized as Claude Code, currency armed, hook written to settings.json.
+    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    assert!(ok, "add should exit 0");
+    assert_eq!(v["data"]["name"], "pr-describe");
+    assert_eq!(v["data"]["harness"], "claude-code");
+    assert_eq!(v["data"]["currency"]["state"], "active");
+    assert_eq!(v["data"]["currency"]["currency_kind"], "session_start");
+
+    let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
+    assert!(
+        settings.contains("topos pull --quiet"),
+        "the hook command was installed"
+    );
+    assert!(
+        settings.contains("# topos:currency"),
+        "the idempotency sentinel is present"
+    );
+
+    // Adopt-in-place wrote nothing into the skill dir.
+    assert_eq!(
+        std::fs::read(&skill_md).unwrap(),
+        before,
+        "the skill file is byte-identical"
+    );
+
+    // list shows it tracked.
+    let (ok, v) = run_in(&home, &claude, &["--json", "list"]);
+    assert!(ok);
+    assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
+
+    // The installed hook runs `topos pull --quiet` — it must exit 0 and emit NOTHING on stdout (a
+    // SessionStart hook's stdout is injected into the session).
+    let out = Command::new(bin())
+        .env("TOPOS_HOME", &home)
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .args(["pull", "--quiet"])
+        .output()
+        .expect("spawn topos pull");
+    assert!(out.status.success(), "pull exits 0");
+    assert!(
+        out.stdout.is_empty(),
+        "pull --quiet emits nothing on stdout"
+    );
+
+    // A second add of the same dir is refused (already tracked), not silently duplicated.
+    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    assert!(!ok, "re-adding the same dir exits nonzero");
+    assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
+
+    let _ = std::fs::remove_dir_all(&claude);
     let _ = std::fs::remove_dir_all(&home);
 }

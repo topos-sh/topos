@@ -42,9 +42,18 @@ pub(crate) enum Command {
         /// The skill name.
         skill: String,
     },
-    /// Remove topos: the binary + `~/.topos/`. Touches no skill bytes.
+    /// Check for and apply updates to followed skills — the session-start currency entry point. A no-op
+    /// until the sync engine lands (nothing is followed yet); the installed hook runs `pull --quiet`.
+    Pull {
+        /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
+        /// still go to stderr with a non-zero exit. Overrides `--json`.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Remove topos: scrub the harness currency hook, then delete the binary + `~/.topos/`. Touches no
+    /// skill bytes.
     Uninstall {
-        /// First report the paths topos owns under the home directory.
+        /// First report the paths topos owns outside skill directories.
         #[arg(long)]
         footprint: bool,
     },
@@ -58,6 +67,7 @@ impl Command {
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
             Command::Log { .. } => "log",
+            Command::Pull { .. } => "pull",
             Command::Uninstall { .. } => "uninstall",
         }
     }

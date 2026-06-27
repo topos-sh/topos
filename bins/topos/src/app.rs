@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde::Serialize;
+use topos_harness::ClaudeCode;
 
 use crate::cli::{Cli, Command};
 use crate::ctx::Ctx;
@@ -26,6 +27,10 @@ pub fn run() -> ExitCode {
     let ids = RealIds;
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
+    // The Claude Code adapter, wired to the real config-store seam (the same `RealFs`). It resolves
+    // Claude Code's own config home (`$CLAUDE_CONFIG_DIR` else `$HOME/.claude`) so a relocated config is
+    // honored; it touches that home only when adopting a recognized skill or on uninstall.
+    let harness = ClaudeCode::new(ClaudeCode::resolve_home(), &fs);
 
     // Recovery runs at the start of every command.
     if let Err(e) = recover(&fs, &layout) {
@@ -47,6 +52,7 @@ pub fn run() -> ExitCode {
         clock: &clock,
         device_id,
         layout,
+        harness: &harness,
     };
 
     match command {
@@ -61,6 +67,23 @@ pub fn run() -> ExitCode {
             finish(json, cmd_name, ops::diff(&ctx, &skill), render::diff_tty)
         }
         Command::Log { skill } => finish(json, cmd_name, ops::log(&ctx, &skill), render::log_tty),
+        Command::Pull { quiet } => {
+            let result = ops::pull(&ctx);
+            if quiet {
+                // Byte-silent stdout: the session-start hook injects stdout into the session context, so
+                // the no-op emits nothing. An error (none today) surfaces on stderr with a non-zero exit
+                // — never on stdout, even under `--json` (which `--quiet` overrides for the hook path).
+                match result {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("{}", render::err_tty(&e));
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                finish(json, cmd_name, result, render::pull_tty)
+            }
+        }
         Command::Uninstall { footprint } => {
             let binary = std::env::current_exe().ok();
             finish(

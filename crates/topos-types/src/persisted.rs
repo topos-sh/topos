@@ -102,6 +102,16 @@ pub struct PlacementMap {
     #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub pre_existing_sha: Option<String>,
     pub swap_capability: SwapCapability,
+    /// The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude
+    /// Code); `None` for a plain directory tracked in place with no known harness. Drives where the
+    /// currency trigger applies. **Additive optional** (a `None` placement omits it). v0 records exactly
+    /// one placement, so this single tag is 1:1 with `placements`; a per-placement shape lands if/when a
+    /// skill is ever placed across layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::HarnessId>,
+    /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_layer: Option<String>,
 }
 
 /// Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**

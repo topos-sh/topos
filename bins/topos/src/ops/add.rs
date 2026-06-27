@@ -7,6 +7,7 @@ use std::path::Path;
 use topos_core::digest::to_hex;
 use topos_core::sign::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
+use topos_harness::DiscoveredPlacement;
 use topos_types::persisted::{
     Lock, LockedFile, PlacementMap, RecordedTuple, SwapCapability, SyncState,
 };
@@ -39,13 +40,26 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         .canonicalize()
         .map_err(|e| ClientError::Io(format!("canonicalize {}: {e}", source.display())))?;
 
-    // Mint identity. The name prefers SKILL.md frontmatter, then the dir basename, then the id.
+    // Adopt-in-place is non-destructive, so re-adopting the same directory would mint a SECOND record
+    // tracking one mutable dir — refuse, pointing at the skill already tracking it.
+    reject_already_tracked(ctx, &source_abs)?;
+
+    // Recognize a known harness: a source that IS one of the harness's discovered skill placements
+    // (canonical equality — never a prefix, so a subdir is not mistaken for the skill) is tagged so
+    // currency applies to it. A plain/unrecognized dir is tracked in place with no harness association.
+    let recognized = recognize(ctx, &source_abs);
+
+    // Mint identity. A recognized harness skill is keyed by its DIRECTORY name (the command name the
+    // harness invokes); a plain dir keeps the frontmatter-first-then-basename order.
     let skill_id = ctx.ids.new_skill_id();
-    let name = bundle
-        .name_hint
-        .clone()
-        .or_else(|| dir_basename(&source_abs))
-        .unwrap_or_else(|| skill_id.clone());
+    let name = match &recognized {
+        Some(placement) => dir_basename(&placement.path).unwrap_or_else(|| skill_id.clone()),
+        None => bundle
+            .name_hint
+            .clone()
+            .or_else(|| dir_basename(&source_abs))
+            .unwrap_or_else(|| skill_id.clone()),
+    };
 
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
     // fixed fixture pins it while ids stay free.
@@ -113,16 +127,28 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
             held: false,
         },
     )?;
+    // Record the placement: the harness skill dir for a recognized skill (the path the harness reads),
+    // else the canonical source. Topos writes NOTHING into this dir — it stays byte-identical.
+    let (placement, harness, harness_layer) = match &recognized {
+        Some(p) => (
+            p.path.to_string_lossy().into_owned(),
+            Some(ctx.harness.id()),
+            p.layer.clone(),
+        ),
+        None => (source_abs.to_string_lossy().into_owned(), None, None),
+    };
     doc::write_doc(
         ctx.fs,
         &sp.map,
         &PlacementMap {
             schema_version: SCHEMA_VERSION,
-            placements: vec![source_abs.to_string_lossy().into_owned()],
+            placements: vec![placement],
             applied_commit: version_hex.clone(),
             materialized_sha: digest_hex.clone(),
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
+            harness,
+            harness_layer,
         },
     )?;
     doc::write_doc(
@@ -162,12 +188,21 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         }),
     )?;
 
+    // Arm currency for a recognized harness — a best-effort, idempotent edit of the harness CONFIG
+    // (never the skill dir), AFTER the all-or-nothing adoption above, so a settings.json hiccup never
+    // rolls back a good adoption. Disclosed in the result (the only write `add` makes outside ~/.topos/).
+    let currency = recognized
+        .as_ref()
+        .map(|_| ctx.harness.install_currency_trigger());
+
     Ok(AddData {
         skill_id,
         name,
         version_id: version_hex,
         bundle_digest: digest_hex,
         tracked: true,
+        harness,
+        currency,
     })
 }
 
@@ -186,6 +221,50 @@ fn locked_files(bundle: &ScannedBundle) -> Vec<LockedFile> {
 
 fn dir_basename(path: &Path) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+/// Refuse to re-adopt a directory topos already tracks (same canonical path). Best-effort: the writer
+/// lock is per fresh skill id, so a rare concurrent `add` of the same dir could still race through to
+/// today's same-name `AmbiguousName`; the common re-run is caught here.
+///
+/// # Errors
+/// [`ClientError::AlreadyTracked`] if a tracked skill already records this canonical path; otherwise an
+/// [`FsOps`](crate::fs_seam::FsOps) read failure.
+fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), ClientError> {
+    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if id.starts_with('.') || !entry.is_dir() {
+            continue;
+        }
+        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(id).map)?
+        else {
+            continue;
+        };
+        // Compare canonically (resolving symlinks/firmlinks on both sides), as `Path`, never a lossy
+        // string; a placement that no longer resolves on disk is stale, not a match.
+        if map.placements.iter().any(|p| {
+            Path::new(p)
+                .canonicalize()
+                .is_ok_and(|c| c == *canonical_source)
+        }) {
+            return Err(ClientError::AlreadyTracked {
+                skill_id: id.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Match a canonical source dir against the harness's discovered placements by canonical EQUALITY (not
+/// a prefix — a subdir of a skill is never tagged as that skill). Returns the matched placement, or
+/// `None` for a plain/unrecognized dir.
+fn recognize(ctx: &Ctx<'_>, canonical_source: &Path) -> Option<DiscoveredPlacement> {
+    ctx.harness
+        .discover()
+        .into_iter()
+        .find(|d| d.path.canonicalize().is_ok_and(|c| c == *canonical_source))
 }
 
 /// Refuse a source path that is equal to, an ancestor of, or a descendant of `~/.topos/` (canonicalized,

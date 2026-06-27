@@ -16,6 +16,7 @@
 mod app;
 pub(crate) mod atomic;
 pub(crate) mod cli;
+pub(crate) mod config_io;
 pub(crate) mod ctx;
 pub(crate) mod diff;
 pub(crate) mod doc;

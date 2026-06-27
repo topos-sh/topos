@@ -1,9 +1,10 @@
 //! Two presentations of one typed outcome: the `--json` envelope (the agent surface) and a thin TTY
 //! renderer. Error messages are summarized so a raw git/io string never reaches a user surface.
 
-use topos_types::results::{AddData, DiffData, ListData, LogData};
+use topos_types::results::{AddData, DiffData, ListData, LogData, PullData};
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
+    WireError,
 };
 
 use crate::error::ClientError;
@@ -82,12 +83,29 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
 }
 
 pub(crate) fn add_tty(data: &AddData) -> String {
-    format!(
+    let mut out = format!(
         "Adopted '{}' ({}) @ {}",
         data.name,
         data.skill_id,
         short(&data.version_id)
-    )
+    );
+    // Disclose the one write `add` makes outside ~/.topos/ — the session-start currency hook — honestly
+    // (it is plumbing: it runs a no-op `pull` until the sync engine lands; never "it auto-updates").
+    if let Some(report) = &data.currency {
+        out.push_str(match report.state {
+            TriggerState::Active => {
+                "\nInstalled the session-start currency hook (runs `topos pull` at session start)."
+            }
+            TriggerState::AlreadyPresentUnmanaged => {
+                "\nLeft your existing `topos pull` session-start hook untouched."
+            }
+            TriggerState::Degraded => {
+                "\nCouldn't update settings.json for the currency hook — left it untouched."
+            }
+            TriggerState::Inactive => "",
+        });
+    }
+    out
 }
 
 pub(crate) fn list_tty(data: &ListData) -> String {
@@ -144,6 +162,18 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
             out.push_str(&format!("  {p}\n"));
         }
     }
+    if let Some(report) = &data.currency {
+        out.push_str(match report.state {
+            TriggerState::Inactive => "Scrubbed the session-start currency hook.\n",
+            TriggerState::AlreadyPresentUnmanaged => {
+                "Left your own (unmanaged) `topos pull` hook in place.\n"
+            }
+            TriggerState::Degraded => {
+                "Couldn't scrub the currency hook from settings.json — remove it by hand if present.\n"
+            }
+            TriggerState::Active => "",
+        });
+    }
     out.push_str(if data.home_removed {
         "Removed ~/.topos."
     } else {
@@ -154,6 +184,14 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
     }
     out.push_str("\nNo skill bytes were touched.");
     out
+}
+
+pub(crate) fn pull_tty(data: &PullData) -> String {
+    if data.skills.is_empty() {
+        "No followed skills.".to_owned()
+    } else {
+        format!("Checked {} followed skill(s).", data.skills.len())
+    }
 }
 
 pub(crate) fn err_tty(err: &ClientError) -> String {

@@ -4,12 +4,14 @@ mod add;
 mod diff;
 mod list;
 mod log;
+mod pull;
 mod uninstall;
 
 pub(crate) use add::add;
 pub(crate) use diff::diff;
 pub(crate) use list::list;
 pub(crate) use log::log;
+pub(crate) use pull::pull;
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
 
 use topos_types::persisted::Lock;

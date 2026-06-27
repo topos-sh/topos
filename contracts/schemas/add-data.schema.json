@@ -8,6 +8,28 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "currency": {
+      "description": "The currency-trigger outcome, present when adopting into a recognized harness attempted a\nsession-start trigger install — the honest disclosure of the (only) write `add` makes outside\n`~/.topos/`. `None` for a plain directory.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriggerReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "harness": {
+      "description": "The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain\ndirectory tracked in place. Disclosed so the agent can see whether currency was armed.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HarnessId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -29,5 +51,74 @@
     "version_id",
     "bundle_digest",
     "tracked"
-  ]
+  ],
+  "$defs": {
+    "CurrencyKind": {
+      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"next topos touch\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "type": "string",
+      "enum": [
+        "session_start",
+        "first_topos_touch",
+        "first_turn",
+        "explicit_pull_only"
+      ]
+    },
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
+    "TriggerReport": {
+      "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "type": "object",
+      "properties": {
+        "currency_kind": {
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "harness": {
+          "$ref": "#/$defs/HarnessId"
+        },
+        "marker_id": {
+          "description": "`topos` + harness id + schema version + command identity.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file edited (never a skill dir).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "harness",
+        "currency_kind",
+        "marker_id",
+        "state"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "const": "already_present_unmanaged"
+        }
+      ]
+    }
+  }
 }

@@ -1,6 +1,7 @@
 //! The one crash-safe write primitive + the fail-closed schema-migration dispatch.
 
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -12,21 +13,37 @@ use crate::fs_seam::FsOps;
 /// The suffix recovery sweeps for a temp file a faulted [`atomic_write`] may have left pre-rename.
 pub(crate) const TMP_SUFFIX: &str = ".tmp";
 
-/// Write `bytes` to `target` crash-safely: temp file (same dir) → fsync → atomic rename → fsync dir.
-/// After any fault the target is byte-for-byte the **pre** or **post** state — never torn. The caller
-/// serializes + validates `bytes` in memory first, so a malformed value never reaches disk.
+/// The one crash-safe write sequence: write `bytes` to `tmp` → fsync the file → atomic rename onto
+/// `target` → fsync the dir. After any fault `target` is byte-for-byte the **pre** or **post** state —
+/// never torn. The temp path is the caller's, so a foreign-file writer can pick a unique, namespaced
+/// name (never the user's `<file>.tmp`); `target`'s parent must already exist. This is the single dance
+/// — [`atomic_write`] and the harness config writer both go through it, so it cannot drift.
 ///
 /// # Errors
 /// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
-pub(crate) fn atomic_write(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> Result<(), ClientError> {
-    let tmp = temp_path(target);
-    fs.write_temp(&tmp, bytes)?;
-    fs.fsync_file(&tmp)?;
-    fs.rename(&tmp, target)?;
+pub(crate) fn atomic_write_at(
+    fs: &dyn FsOps,
+    target: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    fs.write_temp(tmp, bytes)?;
+    fs.fsync_file(tmp)?;
+    fs.rename(tmp, target)?;
     if let Some(dir) = target.parent() {
         fs.fsync_dir(dir)?;
     }
     Ok(())
+}
+
+/// Crash-safely write `bytes` to `target` under `~/.topos/` (temp = `target` + [`TMP_SUFFIX`], same
+/// dir). The caller serializes + validates `bytes` in memory first, so a malformed value never reaches
+/// disk.
+///
+/// # Errors
+/// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
+pub(crate) fn atomic_write(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+    Ok(atomic_write_at(fs, target, &temp_path(target), bytes)?)
 }
 
 /// The temp path for a target: the same path with [`TMP_SUFFIX`] appended (same directory, so the rename

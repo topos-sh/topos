@@ -46,6 +46,11 @@ pub(crate) enum ClientError {
     /// A skill with this id already exists on disk — `add` fails closed rather than overwrite/merge.
     #[error("a skill with this id already exists")]
     SkillExists,
+    /// The directory is already tracked in place (same canonical path) — re-adopting would mint a second
+    /// record for one mutable dir, so `add` refuses and points at the existing skill (edits already
+    /// surface as a draft via `diff`).
+    #[error("this directory is already tracked as skill '{skill_id}'")]
+    AlreadyTracked { skill_id: String },
     /// A name resolved to more than one tracked skill; the caller must disambiguate by id.
     #[error("the name '{name}' is ambiguous across {count} tracked skills")]
     AmbiguousName { name: String, count: usize },
@@ -68,6 +73,7 @@ impl ClientError {
             ClientError::EmptyBundle => "EMPTY_BUNDLE",
             ClientError::SourceOverlap => "SOURCE_OVERLAP",
             ClientError::SkillExists => "SKILL_EXISTS",
+            ClientError::AlreadyTracked { .. } => "ALREADY_TRACKED",
             ClientError::AmbiguousName { .. } => "AMBIGUOUS_NAME",
             ClientError::NoSuchSkill { .. } => "NO_SUCH_SKILL",
         }

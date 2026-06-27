@@ -1,6 +1,7 @@
 //! `list [<skill>] [--footprint]` — inventory this machine. This increment populates only the
 //! **tracked** bucket (followed / published-by-you / untracked need the plane + adapters and render
-//! empty). `--footprint` reports the paths topos owns under `~/.topos/`.
+//! empty). `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree plus
+//! any harness config the currency hook lives in (disclosed, never deleted).
 
 use std::path::Path;
 
@@ -72,7 +73,17 @@ pub(crate) fn list(
     }
 
     let footprint = if want_footprint {
-        Some(sidecar::footprint(ctx.fs, &ctx.layout)?)
+        // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in (disclosed,
+        // never deleted) — every topos-owned path outside skill dirs.
+        let mut paths = sidecar::footprint(ctx.fs, &ctx.layout)?;
+        paths.extend(
+            ctx.harness
+                .uninstall_footprint()
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        paths.sort();
+        Some(paths)
     } else {
         None
     };

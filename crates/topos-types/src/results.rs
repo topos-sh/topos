@@ -165,6 +165,15 @@ pub struct AddData {
     #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub bundle_digest: String,
     pub tracked: bool,
+    /// The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain
+    /// directory tracked in place. Disclosed so the agent can see whether currency was armed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::HarnessId>,
+    /// The currency-trigger outcome, present when adopting into a recognized harness attempted a
+    /// session-start trigger install — the honest disclosure of the (only) write `add` makes outside
+    /// `~/.topos/`. `None` for a plain directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<crate::TriggerReport>,
 }
 
 /// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.

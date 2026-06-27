@@ -22,9 +22,13 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > **Ed25519** device-op signature frame, and the JCS `current`-pointer preimage, all with verify and all behind
 > known-answer vectors. The **local, accountless core** is built: the embedded-git sidecar (`topos-gitstore`
 > over `gix`, with verify-on-read), the crash-safe document protocol, the bundle scanner, and the local verbs
-> (`add`/`list`/`diff`/`log`/`uninstall`). Still to come: the plane, signing-at-rest, the four-state sync
-> machine, the harness adapters + placement, and the large-object store. The remaining heavy deps
-> (`sqlx`/`axum`) are declared but unreferenced, so those trees stay out of the client build.
+> (`add`/`list`/`diff`/`log`/`pull`/`uninstall`). The **Claude Code harness adapter** is built too: discovery,
+> adopt-in-place (track a skill where it sits, writing nothing into it), the idempotent content-blind
+> session-start currency hook in `settings.json`, and a clean (skill-byte-preserving) uninstall — `pull` is a
+> no-op skeleton the hook runs until the sync engine lands. Still to come: the plane, signing-at-rest, the
+> four-state sync machine + the `pull` engine, the byte-writing materialization (the atomic dir-swap that an
+> *update* uses to overwrite a harness dir), the OpenClaw/Hermes adapters, and the large-object store. The
+> remaining heavy deps (`sqlx`/`axum`) are declared but unreferenced, so those trees stay out of the client build.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what

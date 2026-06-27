@@ -9,6 +9,24 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "harness": {
+      "description": "The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude\nCode); `None` for a plain directory tracked in place with no known harness. Drives where the\ncurrency trigger applies. **Additive optional** (a `None` placement omits it). v0 records exactly\none placement, so this single tag is 1:1 with `placements`; a per-placement shape lands if/when a\nskill is ever placed across layers.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HarnessId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "harness_layer": {
+      "description": "The harness layer the placement sits in (e.g. `\"user\"`), when a harness was recognized.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "materialized_sha": {
       "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match.",
       "type": "string",
@@ -47,6 +65,14 @@
     "swap_capability"
   ],
   "$defs": {
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
     "SwapCapability": {
       "description": "Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**",
       "oneOf": [

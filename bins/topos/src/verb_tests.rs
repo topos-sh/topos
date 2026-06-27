@@ -6,8 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use topos_types::JsonEnvelope;
+use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::Lock;
+use topos_types::{CurrencyKind, HarnessId, JsonEnvelope, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::doc;
@@ -18,6 +19,48 @@ use crate::{ops, render};
 
 const DEVICE_ID: &str = "d_test";
 const FIXED_MILLIS: u64 = 1_700_000_000_000;
+
+/// A borrow-free no-op harness for the tests that don't exercise harness recognition: it discovers
+/// nothing (so `add` never tags a plain temp source as a harness skill) and installs/removes nothing.
+/// The Claude Code adapter itself is tested directly (its own crate tests + the dedicated tests below).
+#[derive(Debug)]
+struct NoHarness;
+
+impl HarnessAdapter for NoHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::ClaudeCode
+    }
+    fn discover(&self) -> Vec<DiscoveredPlacement> {
+        Vec::new()
+    }
+    fn placement_for(&self, skill_id: &str, _: Option<&DiscoveredPlacement>) -> PlacementTarget {
+        PlacementTarget {
+            dir: PathBuf::from(skill_id),
+        }
+    }
+    fn currency_kind(&self) -> CurrencyKind {
+        CurrencyKind::SessionStart
+    }
+    fn install_currency_trigger(&self) -> TriggerReport {
+        no_harness_report()
+    }
+    fn remove_currency_trigger(&self) -> TriggerReport {
+        no_harness_report()
+    }
+    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+fn no_harness_report() -> TriggerReport {
+    TriggerReport {
+        harness: HarnessId::ClaudeCode,
+        currency_kind: CurrencyKind::SessionStart,
+        touched_path: None,
+        marker_id: "test:none".to_owned(),
+        state: TriggerState::Inactive,
+    }
+}
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -76,6 +119,7 @@ struct Harness {
     fs: RealFs,
     ids: SeqIds,
     clock: FixedClock,
+    harness: NoHarness,
 }
 impl Harness {
     fn new(tag: &str) -> Self {
@@ -84,15 +128,21 @@ impl Harness {
             fs: RealFs,
             ids: SeqIds::new("t"),
             clock: FixedClock(FIXED_MILLIS),
+            harness: NoHarness,
         }
     }
     fn ctx(&self) -> Ctx<'_> {
+        self.ctx_with(&self.harness)
+    }
+    /// A context over an explicit harness adapter (for the Claude Code recognition / hook tests).
+    fn ctx_with<'a>(&'a self, harness: &'a dyn HarnessAdapter) -> Ctx<'a> {
         Ctx {
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,
             device_id: DEVICE_ID.to_owned(),
             layout: Layout::new(&self.home.0),
+            harness,
         }
     }
 }
@@ -322,12 +372,14 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
 
 #[test]
 fn list_by_ambiguous_name_is_typed() {
-    let src = editable_source();
-    let root = src.0.join("pr-describe");
     let h = Harness::new("ambig");
-    // Two adds of the same bytes/name -> two distinct tracked skills.
-    ops::add(&h.ctx(), &root).unwrap();
-    ops::add(&h.ctx(), &root).unwrap();
+    // Two DISTINCT directories that share a name -> two distinct tracked skills (legitimate), so a name
+    // lookup is ambiguous. (Re-adding the SAME dir is refused as ALREADY_TRACKED — a different case,
+    // covered separately.)
+    let src_a = editable_source();
+    let src_b = editable_source();
+    ops::add(&h.ctx(), &src_a.0.join("pr-describe")).unwrap();
+    ops::add(&h.ctx(), &src_b.0.join("pr-describe")).unwrap();
 
     let err = ops::list(&h.ctx(), Some("pr-describe"), false).unwrap_err();
     assert!(matches!(
@@ -430,6 +482,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     let src = editable_source();
     let root = src.0.join("pr-describe");
     let before = fs_hashes(&root);
+    // The temp source is not under any harness home, so recognition is a no-op (no extra durable ops);
+    // a borrow-free stub keeps the fault sweep's op count exactly the sidecar adoption's.
+    let no_harness = NoHarness;
 
     // How many durable ops a clean add performs (so we fault each). A non-faulting FaultFs counts them.
     let probe_home = Scratch::new("probe");
@@ -442,6 +497,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         clock: &probe_clock,
         device_id: DEVICE_ID.to_owned(),
         layout: Layout::new(&probe_home.0),
+        harness: &no_harness,
     };
     ops::add(&probe_ctx, &root).unwrap();
     let max_ops = probe_fs.ops_attempted();
@@ -458,6 +514,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             clock: &clock,
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
+            harness: &no_harness,
         };
         let result = ops::add(&ctx, &root);
 
@@ -478,6 +535,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             clock: &clock,
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
+            harness: &no_harness,
         };
         let tracked = ops::list(&clean_ctx, None, false).unwrap().tracked;
 
@@ -514,6 +572,203 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             crate::sidecar::footprint(&real, &layout).unwrap()
         );
     }
+}
+
+/// Lay down a real Claude Code skill (`<claude_home>/skills/<name>/SKILL.md`) and return its dir.
+fn claude_skill(claude_home: &Path, name: &str, body: &str) -> PathBuf {
+    let dir = claude_home.join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    dir
+}
+
+#[test]
+fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothing() {
+    let h = Harness::new("cc-add");
+    let claude = Scratch::new("cc-home");
+    // Frontmatter `name` deliberately differs from the dir name — the DIRECTORY name (the command name)
+    // must win for a recognized Claude Code skill.
+    let skill = claude_skill(
+        &claude.0,
+        "pr-describe",
+        "---\nname: not-the-command-name\n---\n\n# PR describe\n\nWrite a clear PR description.\n",
+    );
+    let before = fs_hashes(&skill);
+
+    let cfg = RealFs;
+    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
+    let ctx = h.ctx_with(&cc);
+
+    let add = ops::add(&ctx, &skill).unwrap();
+    assert_eq!(
+        add.name, "pr-describe",
+        "name is the directory basename, not frontmatter"
+    );
+    assert_eq!(
+        add.harness,
+        Some(HarnessId::ClaudeCode),
+        "tagged as Claude Code"
+    );
+    let report = add.currency.expect("currency armed for a recognized skill");
+    assert_eq!(report.state, TriggerState::Active);
+    assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
+
+    // Adopt-in-place writes NOTHING into the skill dir — it is byte-identical.
+    assert_eq!(
+        fs_hashes(&skill),
+        before,
+        "the skill dir must stay byte-identical"
+    );
+
+    // The hook landed in the harness settings.json (the only write outside ~/.topos/).
+    let settings = std::fs::read_to_string(claude.0.join("settings.json")).unwrap();
+    assert!(
+        settings.contains("topos pull --quiet"),
+        "hook command installed"
+    );
+    assert!(settings.contains("# topos:currency"), "sentinel present");
+
+    // The placement was recorded with the harness tag; a list shows it tracked.
+    let tracked = ops::list(&ctx, None, false).unwrap().tracked;
+    assert_eq!(tracked.len(), 1);
+    assert_eq!(tracked[0].skill, "pr-describe");
+}
+
+#[test]
+fn add_of_a_plain_dir_tags_no_harness_and_installs_no_hook() {
+    let h = Harness::new("cc-plain");
+    let claude = Scratch::new("cc-empty"); // a real (empty) Claude home — the source is NOT under it
+    let src = editable_source();
+    let cfg = RealFs;
+    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
+    let ctx = h.ctx_with(&cc);
+
+    let add = ops::add(&ctx, &src.0.join("pr-describe")).unwrap();
+    assert!(
+        add.harness.is_none(),
+        "a plain dir is not a recognized harness skill"
+    );
+    assert!(add.currency.is_none(), "no currency armed for a plain dir");
+    assert!(
+        !claude.0.join("settings.json").exists(),
+        "a plain-dir add never touches the harness config"
+    );
+}
+
+#[test]
+fn re_adding_the_same_dir_is_refused_as_already_tracked() {
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("dup");
+    ops::add(&h.ctx(), &root).unwrap();
+
+    let err = ops::add(&h.ctx(), &root).unwrap_err();
+    assert!(
+        matches!(err, crate::error::ClientError::AlreadyTracked { .. }),
+        "re-adding the same dir must be refused, got {err:?}"
+    );
+    assert_eq!(
+        ops::list(&h.ctx(), None, false).unwrap().tracked.len(),
+        1,
+        "no second record was minted"
+    );
+}
+
+#[test]
+fn uninstall_scrubs_the_hook_and_leaves_claude_skills_byte_identical() {
+    let h = Harness::new("cc-uninst");
+    let claude = Scratch::new("cc-uninst-home");
+    let skill = claude_skill(&claude.0, "pr-describe", "# pr\nWrite a clear PR.\n");
+    let before = fs_hashes(&skill);
+
+    let cfg = RealFs;
+    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
+    let ctx = h.ctx_with(&cc);
+    ops::add(&ctx, &skill).unwrap();
+    let settings_path = claude.0.join("settings.json");
+    assert!(
+        std::fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("topos pull")
+    );
+
+    let fake_bin = h.home.0.parent().unwrap().join("topos-fake-cc-bin");
+    std::fs::write(&fake_bin, b"binary").unwrap();
+    let out = ops::uninstall(&ctx, true, Some(&fake_bin)).unwrap();
+
+    // The hook was scrubbed; settings.json is still valid JSON without our entry.
+    assert_eq!(out.currency.as_ref().unwrap().state, TriggerState::Inactive);
+    let settings = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(!settings.contains("topos pull"), "the managed hook is gone");
+    serde_json::from_str::<Value>(&settings).expect("settings.json stays valid JSON");
+
+    // --footprint disclosed the settings.json path (captured before the scrub), never as a delete.
+    let footprint = out.footprint.unwrap();
+    assert!(
+        footprint.iter().any(|p| p.ends_with("settings.json")),
+        "settings.json disclosed in the footprint: {footprint:?}"
+    );
+    assert!(
+        settings_path.exists(),
+        "settings.json is scrubbed, never deleted"
+    );
+
+    // The user's skill dir is byte-for-byte unchanged, and ~/.topos + the binary are gone.
+    assert_eq!(
+        fs_hashes(&skill),
+        before,
+        "uninstall must not touch skill bytes"
+    );
+    assert!(out.home_removed && !h.home.0.exists());
+    assert!(!fake_bin.exists());
+    let _ = std::fs::remove_file(&fake_bin);
+}
+
+#[test]
+fn install_currency_trigger_is_crash_safe_across_the_fault_table() {
+    // A realistic pre-existing settings.json: a foreign top-level key + a non-SessionStart hook.
+    let claude = Scratch::new("cc-fault");
+    let settings_path = claude.0.join("settings.json");
+    let original = "{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"Bash\"}]\n  }\n}\n";
+
+    // Count the durable ops a clean install performs, so we fault each.
+    std::fs::write(&settings_path, original).unwrap();
+    let probe = FaultFs::new(0);
+    ClaudeCode::new(claude.0.clone(), &probe).install_currency_trigger();
+    let max_ops = probe.ops_attempted();
+    assert!(
+        max_ops >= 4,
+        "the atomic config write performs at least temp/fsync/rename/fsync-dir"
+    );
+
+    for fail_at in 1..=max_ops {
+        std::fs::write(&settings_path, original).unwrap(); // reset to the pre-state
+        let fs = FaultFs::new(fail_at);
+        let _ = ClaudeCode::new(claude.0.clone(), &fs).install_currency_trigger();
+
+        // After a fault at any step, settings.json is the pre- or post-state — never torn — so it always
+        // parses as JSON and the user's foreign content survives intact.
+        let bytes = std::fs::read(&settings_path).unwrap();
+        let root: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!("fail_at={fail_at}: settings.json torn (invalid JSON): {e}")
+        });
+        assert_eq!(
+            root["model"], "opus",
+            "fail_at={fail_at}: foreign key must survive"
+        );
+        assert!(
+            root["hooks"]["PreToolUse"].is_array(),
+            "fail_at={fail_at}: the sibling hook must survive"
+        );
+    }
+}
+
+#[test]
+fn pull_is_an_honest_empty_no_op() {
+    let h = Harness::new("pull");
+    let data = ops::pull(&h.ctx()).unwrap();
+    assert!(data.skills.is_empty(), "nothing is followed yet");
+    assert_eq!(data.proposals_awaiting, 0);
 }
 
 /// Every path under a directory (files + dirs), for the footprint oracle.
