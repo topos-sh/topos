@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO roster (workspace_id, skill_id, principal) VALUES (?1, ?2, ?3) ON CONFLICT (workspace_id, skill_id, principal) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "bdfc211feb4e999f8e51b3057b2bc365e73836e4583541dc84211a3d8c0360c1"
+}

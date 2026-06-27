@@ -54,6 +54,10 @@ ed25519-dalek = { version = "2", default-features = false }  # topos-core verify
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases
 sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
+# The async runtime is the SERVER's (sqlx is async-native): it reaches plane-store's library via sqlx's
+# `runtime-tokio` feature, and is a dev-dependency there to drive `#[tokio::test]`. The client never gets
+# this edge — check-arch forbids `topos -> plane-store` — so the CLI stays sync and tokio-free.
+tokio = { version = "1", default-features = false }
 axum = "0.8"                  # topos-plane HTTP
 utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)
 clap = { version = "4", features = ["derive"] }       # topos client bin

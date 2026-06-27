@@ -14,6 +14,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # plane-store's compile-time-checked queries read the committed `crates/plane-store/.sqlx` metadata
+  # instead of opening a live database. The dedicated `sqlx-drift` job below regenerates that metadata
+  # and fails if it has drifted from the schema.
+  SQLX_OFFLINE: "true"
 
 jobs:
   gate:
@@ -53,3 +57,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  sqlx-drift:
+    name: sqlx offline-metadata drift gate
+    runs-on: ubuntu-latest
+    env:
+      # This job regenerates the query metadata against a live database, so it must NOT read the
+      # committed `.sqlx` — override the workspace-wide offline flag.
+      SQLX_OFFLINE: "false"
+      DATABASE_URL: "sqlite://${{ github.workspace }}/plane-store-ci.db"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Pin the CLI to the EXACT library version. A bare `cargo install sqlx-cli` resolves to a newer
+      # major whose generated metadata format differs from the pinned library's, which would silently
+      # turn this drift gate into a no-op.
+      - name: install sqlx-cli (pinned to the library version)
+        run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features sqlite
+      - name: create + migrate a scratch database
+        run: |
+          sqlx database create
+          sqlx migrate run --source crates/plane-store/migrations
+      - name: prepare --check (fails if the committed .sqlx has drifted from the schema)
+        working-directory: crates/plane-store
+        run: cargo sqlx prepare --check

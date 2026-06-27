@@ -6,13 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "THE SERVER AUTHORITY BOUNDARY — a crate so raw access is private. Owns ALL plane SQL (raw sqlx, no ORM), git object access, R1 skill-scoped authz, the COMPLETE Step-E transaction, lifecycle/GC, the in-process Ed25519 signer. Raw SQL + git reads are pub(crate)-private; the only public surface is authorized authority operations."
+description = "The server authority boundary — a crate so that raw access is private. Owns the plane's per-workspace SQL (raw sqlx, no ORM) + git-object storage + skill-scoped authorization. Raw SQL + git object reads are pub(crate)-private; the only public surface is authorized authority operations."
 
-# sqlx (raw, no ORM, pin 0.8.6) + ed25519-dalek land later.
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
 topos-gitstore.workspace = true
+thiserror.workspace = true
+# Raw sqlx, NO ORM (held at 0.8.6 for the offline-metadata drift gate). SQLite-first: a local file needs
+# no TLS feature. `runtime-tokio` provides the async hookup (the runtime itself is the caller's); `macros`
+# = compile-time-checked `query!` against committed `.sqlx`; `migrate` = embedded migrations. NEVER
+# `sqlx::Any` (it forfeits compile-time query checking). A future Postgres backend adds `postgres` + a TLS
+# feature behind its own module; the SQLite features stay split so that bump is a no-op here.
+sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "sqlite"] }
+
+[dev-dependencies]
+# Drives `#[tokio::test]` only — the library declares `async fn`s but takes no direct runtime dependency
+# (the runtime enters via sqlx's `runtime-tokio` feature). A current-thread flavor is enough for the
+# in-process authority tests, so no multi-thread runtime is pulled.
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

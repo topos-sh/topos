@@ -25,10 +25,19 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > (`add`/`list`/`diff`/`log`/`pull`/`uninstall`). The **Claude Code harness adapter** is built too: discovery,
 > adopt-in-place (track a skill where it sits, writing nothing into it), the idempotent content-blind
 > session-start currency hook in `settings.json`, and a clean (skill-byte-preserving) uninstall — `pull` is a
-> no-op skeleton the hook runs until the sync engine lands. Still to come: the plane, signing-at-rest, the
-> four-state sync machine + the `pull` engine, the byte-writing materialization (the atomic dir-swap that an
-> *update* uses to overwrite a harness dir), the OpenClaw/Hermes adapters, and the large-object store. The
-> remaining heavy deps (`sqlx`/`axum`) are declared but unreferenced, so those trees stay out of the client build.
+> no-op skeleton the hook runs until the sync engine lands. The **plane's storage + read authority**
+> (`plane-store`) is now built behind its privacy boundary: per-workspace SQLite + git-object storage; the
+> skill-scoped object-read access rule (rostered ∧ reachable, one indistinguishable not-found, never served by
+> bare hash); full-tree upload with server rehash that records provenance + reachability only after an
+> authoritative roster check; and the cross-skill lineage predicate — all directly tested against a real
+> database + git store (it moves no pointer and signs nothing yet). Still to come: the object-lifecycle /
+> garbage-collection fence + the size-routed large-object store; the pointer-move write (the `(epoch,seq)`
+> compare-and-set + the in-process signer + durable receipts) that *moves* the `current` pointer this layer
+> only creates; the HTTP plane; signing-at-rest; the four-state sync machine + the `pull` engine; the
+> byte-writing materialization (the atomic dir-swap that an *update* uses to overwrite a harness dir); the
+> OpenClaw/Hermes adapters; identity/roster issuance; and Postgres. `sqlx` is now referenced by `plane-store`
+> (and kept out of the client build — `check-arch` forbids that edge); `axum` stays declared but unreferenced
+> until the HTTP plane lands.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
