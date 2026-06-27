@@ -99,6 +99,91 @@ impl Store {
         })
     }
 
+    /// Read + verify **one** object's bytes from a stored version, by its content id.
+    ///
+    /// Resolves the version's commit, walks its tree re-hashing each blob through the kernel sha256
+    /// (never trusting gix's object id), and returns the bytes of the entry whose recomputed hash
+    /// equals `object_id` — the hash match **is** the verification, so a corrupted or forged blob can
+    /// never be returned. The plane drives this only *after* its skill-scoped authorization has
+    /// produced a witness version that provenance says reaches `object_id`; there is no read-by-bare-
+    /// hash path. Keying retrieval on the content sha256 keeps a future size-routed large-object store
+    /// a one-branch change here, with no change to identity, the database, or this signature.
+    ///
+    /// # Errors
+    /// [`VerifyError::MissingVersion`] if the version is absent; [`VerifyError::ObjectNotInVersion`] if
+    /// no blob in the version's tree hashes to `object_id`; [`VerifyError::MissingObject`] /
+    /// [`VerifyError::NonBlobEntry`] / [`VerifyError::Malformed`] on a corrupt/forged store;
+    /// [`VerifyError::Gix`] on a ref-read failure.
+    pub fn read_object_in_version(
+        &self,
+        version_id: [u8; 32],
+        object_id: [u8; 32],
+    ) -> Result<Vec<u8>, VerifyError> {
+        let commit_oid = self
+            .resolve_version(&version_id)?
+            .ok_or(VerifyError::MissingVersion)?;
+        let commit = self
+            .repo()
+            .find_object(commit_oid)
+            .map_err(|_| VerifyError::MissingObject)?
+            .try_into_commit()
+            .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+        let tree = commit
+            .tree()
+            .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+        self.find_object_in_tree(&tree, object_id, 0)?
+            .ok_or(VerifyError::ObjectNotInVersion)
+    }
+
+    /// Walk `tree` (bounded like [`Store::render_verified`]'s walk), returning the first blob whose
+    /// recomputed sha256 equals `object_id`. Short-circuits on the match. A non-blob/non-tree entry in
+    /// a stored tree is a forged/corrupt store (the scanner never writes one) and fails typed.
+    fn find_object_in_tree(
+        &self,
+        tree: &gix::Tree<'_>,
+        object_id: [u8; 32],
+        depth: usize,
+    ) -> Result<Option<Vec<u8>>, VerifyError> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(VerifyError::Malformed("tree nesting too deep".into()));
+        }
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+            let oid = entry.oid().to_owned();
+            match entry.mode().kind() {
+                EntryKind::Tree => {
+                    let sub = self
+                        .repo()
+                        .find_object(oid)
+                        .map_err(|_| VerifyError::MissingObject)?
+                        .try_into_tree()
+                        .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+                    if let Some(found) = self.find_object_in_tree(&sub, object_id, depth + 1)? {
+                        return Ok(Some(found));
+                    }
+                }
+                EntryKind::Blob | EntryKind::BlobExecutable => {
+                    // The mode says "blob"; assert the resolved object actually IS a blob so a forged
+                    // entry can't make us hash a tree/commit payload as if it were file content.
+                    let object = self
+                        .repo()
+                        .find_object(oid)
+                        .map_err(|_| VerifyError::MissingObject)?;
+                    if object.kind != gix::objs::Kind::Blob {
+                        return Err(VerifyError::NonBlobEntry);
+                    }
+                    let bytes = object.detach().data;
+                    if digest::sha256(&bytes) == object_id {
+                        return Ok(Some(bytes));
+                    }
+                }
+                // A symlink, gitlink, or any other entry kind the scanner would never have written.
+                _ => return Err(VerifyError::NonBlobEntry),
+            }
+        }
+        Ok(None)
+    }
+
     /// First-parent history from `head`, newest first. Maps each git commit back to its `version_id` via
     /// the version-ref set, detecting an ambiguous lineage (two refs at one commit).
     ///

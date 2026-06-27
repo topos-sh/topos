@@ -12,8 +12,10 @@ description = "Shared dumb gix object mechanics: read/write, dedup, tree→empty
 topos-core.workspace = true
 topos-types.workspace = true
 thiserror.workspace = true
-# Plumbing-only: object read/write + the tree editor + sha1 hashing + ref edits. No worktree/index/
-# network/blob-diff/status — those heavy defaults aren't needed for a dumb byte/object layer.
+# Plumbing-only: object read/write + the tree editor + sha1 hashing + ref edits. Dropping the default
+# features keeps the heavy worktree/index/status/blame/submodule trees out. (The `gix` umbrella still
+# pulls its protocol-plumbing crates unconditionally, but with no network-client feature on there is no
+# active transport, socket, or TLS — a dumb byte/object layer needs none of it.)
 gix = { workspace = true, features = ["sha1", "tree-editor"] }
 # The diff ENGINE for the unified-diff renderer (pure-Rust histogram/Myers). The unified-diff FORMATTING is
 # owned in `diff.rs`, so the committed `diff` golden stays byte-stable across imara-diff releases.

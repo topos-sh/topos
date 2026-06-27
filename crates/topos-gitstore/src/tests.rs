@@ -122,6 +122,55 @@ fn round_trip_preserves_every_byte_for_nested_and_empty_and_binary() {
 }
 
 #[test]
+fn read_object_in_version_returns_verified_bytes_and_typed_misses() {
+    let scratch = Scratch::new("readobj");
+    let store = Store::init(&scratch.0).expect("init");
+    let files = [
+        ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"# skill\n",
+        },
+        ImportFile {
+            path: "scripts/run.sh",
+            mode: FileMode::Executable,
+            bytes: b"#!/bin/sh\necho hi\n",
+        },
+        ImportFile {
+            path: "reference/deep/notes.md",
+            mode: FileMode::Regular,
+            bytes: b"notes",
+        },
+    ];
+    let (vid, _bd) = commit_genesis(&store, &files);
+
+    // Every file's bytes are fetchable by their content id, byte-exact (incl. the nested paths).
+    for f in &files {
+        let oid = digest::sha256(f.bytes);
+        let got = store
+            .read_object_in_version(vid, oid)
+            .expect("read object by id");
+        assert_eq!(got, f.bytes, "object at {} round-trips byte-exact", f.path);
+    }
+
+    // An object id not present in this version -> typed ObjectNotInVersion (the access port maps this
+    // to its uniform not-found; it is NOT a corruption alarm).
+    let absent = digest::sha256(b"these bytes are in no bundle");
+    assert!(matches!(
+        store.read_object_in_version(vid, absent),
+        Err(VerifyError::ObjectNotInVersion)
+    ));
+
+    // An unknown version -> MissingVersion (no ref).
+    let bogus_vid = [0x11u8; 32];
+    let some_oid = digest::sha256(files[0].bytes);
+    assert!(matches!(
+        store.read_object_in_version(bogus_vid, some_oid),
+        Err(VerifyError::MissingVersion)
+    ));
+}
+
+#[test]
 fn empty_bundle_round_trips_at_the_store_layer() {
     // The CLIENT rejects an empty bundle as a policy; the dumb store must still handle a zero-entry tree
     // (digest = sha256 of the empty manifest) without panicking.

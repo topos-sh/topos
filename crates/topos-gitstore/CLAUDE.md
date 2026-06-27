@@ -21,6 +21,11 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   sha256 → recompute the canonical `bundle_digest` → assert it equals the caller's pin. A flipped/forged
   byte, a non-UTF-8 name, or a non-blob entry fails **typed** (verify-on-read; the put→render round-trip is
   fuzzed byte-identical).
+- `read_object_in_version` — read + verify **one** object's bytes from a version by its content id: walk
+  the version's tree, re-hash each blob, return the one whose sha256 matches (the match **is** the
+  verification); a content id absent from that tree is the typed `ObjectNotInVersion`. The plane's
+  skill-scoped read drives this *after* authorization yields a witness version — there is **no**
+  read-by-bare-hash path. Keying on sha256 keeps a future large-object backend a one-branch change.
 - `log` / `list_versions` — first-parent history + the ref-set reverse map, with duplicate-lineage rejected.
 - `durability_set` — the loose objects + version refs + their parent dirs the client fsyncs to make a write
   durable *before* any JSON references it.

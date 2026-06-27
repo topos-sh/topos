@@ -52,6 +52,11 @@ pub enum VerifyError {
     /// Two version refs point at one git commit, making first-parent lineage ambiguous.
     #[error("two version refs point at one commit (ambiguous lineage)")]
     DuplicateLineage,
+    /// No blob in the requested version's tree re-hashes to the requested object id — the object is
+    /// not reachable in that version. Distinct from [`Self::MissingObject`] (a referenced object
+    /// absent from the object database, i.e. corruption): this is a clean "not in this tree" answer.
+    #[error("the requested object is not present in this version")]
+    ObjectNotInVersion,
     /// The stored commit/tree could not be decoded into the expected shape.
     #[error("a stored object is malformed: {0}")]
     Malformed(String),
