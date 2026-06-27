@@ -4,8 +4,6 @@
 //! the module boundary and no caller can run an unbound query. The database is the sole authority for an
 //! object's byte status; the git store always trails it.
 
-use sqlx::Row as _;
-
 use super::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
@@ -594,8 +592,8 @@ impl Db {
     }
 
     /// Read an object's status while holding the write transaction (used inside [`Self::install_object`] to
-    /// classify a suppressed upsert with no time-of-check/time-of-use gap). Generic over the executor so
-    /// the same query serves the held transaction.
+    /// classify a suppressed upsert with no time-of-check/time-of-use gap). Uses `query!` like every other
+    /// statement here, so it stays in the committed `.sqlx` compile-time drift gate.
     async fn locked_status(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -604,20 +602,17 @@ impl Db {
     ) -> Result<ObjectStatus> {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
-        let row = sqlx::query(
-            "SELECT status FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2",
+        let row = sqlx::query!(
+            r#"SELECT status AS "status!" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2"#,
+            ws_s,
+            oid,
         )
-        .bind(ws_s)
-        .bind(oid)
         .fetch_optional(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
         match row {
             None => Ok(ObjectStatus::Absent),
-            Some(r) => {
-                let status: String = r.try_get("status").map_err(AuthorityError::internal)?;
-                parse_status(&status)
-            }
+            Some(r) => parse_status(&r.status),
         }
     }
 }

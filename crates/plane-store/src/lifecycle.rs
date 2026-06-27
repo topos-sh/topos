@@ -217,16 +217,25 @@ pub(crate) fn remove_quarantine_dir(dir: &std::path::Path) -> bool {
     }
 }
 
-/// The full migrate (lease → install → finish).
+/// The full migrate (lease → install → finish). `migrate_finish` is given a finish time advanced by the
+/// REAL install duration, not the lease-start `now` — so if installation ran past the lease TTL (e.g. many
+/// `deleting`-waits), `commit_lease`'s liveness CAS sees the lease expired and fails closed instead of
+/// committing a version whose objects a concurrent GC may already have reclaimed. (The decomposed steps
+/// take explicit per-step `now`s; a production caller that drives them passes a fresh time to each.)
 pub(crate) async fn migrate(
     authority: &Authority,
     ws: &WorkspaceId,
     staged: &StagedCandidate,
     now: i64,
 ) -> Result<()> {
+    let started = tokio::time::Instant::now();
     migrate_lease(authority, ws, staged, now).await?;
     migrate_install(authority, ws, staged, now).await?;
-    migrate_finish(authority, ws, staged, now).await
+    // The install genuinely took real wall-clock time (its `deleting`-waits sleep); advance the finish
+    // clock by that elapsed time so the lease-liveness CAS is meaningful. In the fast path (and in tests)
+    // this is ~0, so finish ≈ now.
+    let finish_now = now.saturating_add(started.elapsed().as_secs() as i64);
+    migrate_finish(authority, ws, staged, finish_now).await
 }
 
 /// Install one object, honoring the fence: reuse if `present`; wait out `deleting` (no transaction held
