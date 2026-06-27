@@ -1,16 +1,27 @@
-//! A vendored, deterministic line-oriented unified-diff renderer (LCS), owned in-repo so the committed
-//! `diff` golden is byte-stable regardless of any external diff library's output across releases.
+//! A deterministic, byte-stable line-oriented unified-diff renderer over two bundles.
+//!
+//! The diff **algorithm** is [`imara-diff`](imara_diff) (the histogram differ — the same family of engine
+//! gix's own blob diff is built on); the unified-diff **formatting** is owned here so the committed `diff`
+//! golden stays byte-stable regardless of imara-diff's output across its releases. We tokenize on our own
+//! line split (so the lines we render are exactly the lines we diff), then render the resulting edit
+//! script with our own hunk grouping and headers.
 //!
 //! Lines are compared **byte-exactly** (a line is split inclusive of its `\n`, so a trailing-newline
 //! change is a real difference). A **mode** change (e.g. `chmod +x`) is surfaced even with identical
 //! content — it changes the `bundle_digest`, so the diff must not hide it. A non-UTF-8 file renders as
 //! `Binary files … differ`; a missing trailing newline renders the standard `\ No newline at end of file`.
 
+use std::ops::Range;
+
+use imara_diff::intern::{InternedInput, TokenSource};
+use imara_diff::{Algorithm, Sink};
+
 use topos_core::digest::FileMode;
 
-/// One file's mode + bytes under its bundle-relative path.
+/// One file's mode + bytes under its bundle-relative path — the borrowed view both the rendered base
+/// bundle and a freshly scanned draft map into.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FileBytes<'a> {
+pub struct DiffFile<'a> {
     pub path: &'a str,
     pub mode: FileMode,
     pub bytes: &'a [u8],
@@ -20,7 +31,7 @@ const CONTEXT: usize = 3;
 
 /// Render a unified diff of two bundles, each sorted by raw path bytes. Files only in `base` are
 /// deletions; files only in `draft` are additions; common files with differing bytes **or mode** are shown.
-pub(crate) fn unified_bundle_diff(base: &[FileBytes<'_>], draft: &[FileBytes<'_>]) -> String {
+pub fn unified_diff(base: &[DiffFile<'_>], draft: &[DiffFile<'_>]) -> String {
     let mut out = String::new();
     let (mut i, mut j) = (0usize, 0usize);
     while i < base.len() || j < draft.len() {
@@ -54,7 +65,7 @@ pub(crate) fn unified_bundle_diff(base: &[FileBytes<'_>], draft: &[FileBytes<'_>
     out
 }
 
-fn file_diff(path: &str, old: Option<FileBytes<'_>>, new: Option<FileBytes<'_>>) -> String {
+fn file_diff(path: &str, old: Option<DiffFile<'_>>, new: Option<DiffFile<'_>>) -> String {
     let mut out = String::new();
 
     // A mode change on an existing file (content may be identical) — surface it git-style.
@@ -120,44 +131,81 @@ enum Op {
     Ins,
 }
 
-/// The LCS edit script over lines: `(Op, old_idx, new_idx)`.
+/// The pre-split lines as an imara-diff token source: one token per line, interned in order, so a
+/// `process_change` range indexes straight back into the line slice.
+struct Lines<'a>(&'a [&'a str]);
+
+impl<'a> TokenSource for Lines<'a> {
+    type Token = &'a str;
+    type Tokenizer = std::iter::Copied<std::slice::Iter<'a, &'a str>>;
+
+    fn tokenize(&self) -> Self::Tokenizer {
+        self.0.iter().copied()
+    }
+
+    fn estimate_tokens(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// Collects imara-diff's monotonic `process_change` calls into the flat `(Op, old_idx, new_idx)` script
+/// the hunk grouper consumes. The runs between changes are equal lines (rendered as context).
+struct ScriptSink {
+    old_len: usize,
+    a: usize,
+    b: usize,
+    script: Vec<(Op, usize, usize)>,
+}
+
+impl Sink for ScriptSink {
+    type Out = Vec<(Op, usize, usize)>;
+
+    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+        let before_start = before.start as usize;
+        let before_end = before.end as usize;
+        let after_end = after.end as usize;
+        // Equal run up to this change: old[a..before_start] aligns 1:1 with new[b..after.start].
+        while self.a < before_start {
+            self.script.push((Op::Keep, self.a, self.b));
+            self.a += 1;
+            self.b += 1;
+        }
+        // Removed lines: old[before_start..before_end].
+        while self.a < before_end {
+            self.script.push((Op::Del, self.a, self.b));
+            self.a += 1;
+        }
+        // Inserted lines: new[after.start..after_end] (b is now at after.start).
+        while self.b < after_end {
+            self.script.push((Op::Ins, self.a, self.b));
+            self.b += 1;
+        }
+    }
+
+    fn finish(mut self) -> Self::Out {
+        // The trailing equal run after the last change.
+        while self.a < self.old_len {
+            self.script.push((Op::Keep, self.a, self.b));
+            self.a += 1;
+            self.b += 1;
+        }
+        self.script
+    }
+}
+
+/// The edit script over lines via imara-diff's histogram algorithm: `(Op, old_idx, new_idx)`.
 fn edit_script(old: &[&str], new: &[&str]) -> Vec<(Op, usize, usize)> {
-    let (n, m) = (old.len(), new.len());
-    // lcs[a][b] = LCS length of old[a..] and new[b..].
-    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
-    for a in (0..n).rev() {
-        for b in (0..m).rev() {
-            lcs[a][b] = if old[a] == new[b] {
-                lcs[a + 1][b + 1] + 1
-            } else {
-                lcs[a + 1][b].max(lcs[a][b + 1])
-            };
-        }
-    }
-    let mut script = Vec::new();
-    let (mut a, mut b) = (0, 0);
-    while a < n && b < m {
-        if old[a] == new[b] {
-            script.push((Op::Keep, a, b));
-            a += 1;
-            b += 1;
-        } else if lcs[a + 1][b] >= lcs[a][b + 1] {
-            script.push((Op::Del, a, b));
-            a += 1;
-        } else {
-            script.push((Op::Ins, a, b));
-            b += 1;
-        }
-    }
-    while a < n {
-        script.push((Op::Del, a, b));
-        a += 1;
-    }
-    while b < m {
-        script.push((Op::Ins, a, b));
-        b += 1;
-    }
-    script
+    let input = InternedInput::new(Lines(old), Lines(new));
+    imara_diff::diff(
+        Algorithm::Histogram,
+        &input,
+        ScriptSink {
+            old_len: old.len(),
+            a: 0,
+            b: 0,
+            script: Vec::new(),
+        },
+    )
 }
 
 #[derive(Debug)]
@@ -277,8 +325,8 @@ fn render_hunk(hunk: &Hunk, old: &[&str], new: &[&str]) -> String {
 mod tests {
     use super::*;
 
-    fn f<'a>(path: &'a str, mode: FileMode, bytes: &'a [u8]) -> FileBytes<'a> {
-        FileBytes { path, mode, bytes }
+    fn f<'a>(path: &'a str, mode: FileMode, bytes: &'a [u8]) -> DiffFile<'a> {
+        DiffFile { path, mode, bytes }
     }
 
     #[test]
@@ -286,7 +334,7 @@ mod tests {
         // chmod +x with identical content must still produce a diff (it changes the bundle_digest).
         let base = [f("run.sh", FileMode::Regular, b"#!/bin/sh\n")];
         let draft = [f("run.sh", FileMode::Executable, b"#!/bin/sh\n")];
-        let out = unified_bundle_diff(&base, &draft);
+        let out = unified_diff(&base, &draft);
         assert!(
             out.contains("old mode 100644") && out.contains("new mode 100755"),
             "{out}"
@@ -296,7 +344,7 @@ mod tests {
     #[test]
     fn added_file_uses_zero_old_range() {
         let draft = [f("new.txt", FileMode::Regular, b"a\nb\n")];
-        let out = unified_bundle_diff(&[], &draft);
+        let out = unified_diff(&[], &draft);
         assert!(out.contains("@@ -0,0 +1,2 @@"), "{out}");
         assert!(out.contains("--- /dev/null") && out.contains("+++ b/new.txt"));
     }
@@ -304,7 +352,7 @@ mod tests {
     #[test]
     fn deleted_file_uses_zero_new_range() {
         let base = [f("gone.txt", FileMode::Regular, b"x\n")];
-        let out = unified_bundle_diff(&base, &[]);
+        let out = unified_diff(&base, &[]);
         assert!(out.contains("@@ -1,1 +0,0 @@"), "{out}");
     }
 
@@ -312,7 +360,32 @@ mod tests {
     fn no_newline_marker_is_rendered() {
         let base = [f("a", FileMode::Regular, b"x")];
         let draft = [f("a", FileMode::Regular, b"y")];
-        let out = unified_bundle_diff(&base, &draft);
+        let out = unified_diff(&base, &draft);
         assert!(out.contains("\\ No newline at end of file"), "{out}");
+    }
+
+    #[test]
+    fn single_line_edit_renders_one_replacement_hunk() {
+        // The shape the `diff` golden pins: a one-line change with leading context, deletions before
+        // insertions. imara-diff and a naive LCS agree byte-for-byte on this.
+        let base = [f("SKILL.md", FileMode::Regular, b"a\nb\nc\nold\n")];
+        let draft = [f("SKILL.md", FileMode::Regular, b"a\nb\nc\nnew\n")];
+        let out = unified_diff(&base, &draft);
+        assert_eq!(
+            out, "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,4 +1,4 @@\n a\n b\n c\n-old\n+new\n",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn insertion_groups_deletions_before_insertions() {
+        // A pure insertion in the middle: only `+` lines, anchored by context, no spurious deletions.
+        let base = [f("x", FileMode::Regular, b"a\nb\nc\n")];
+        let draft = [f("x", FileMode::Regular, b"a\nINSERTED\nb\nc\n")];
+        let out = unified_diff(&base, &draft);
+        assert_eq!(
+            out, "--- a/x\n+++ b/x\n@@ -1,3 +1,4 @@\n a\n+INSERTED\n b\n c\n",
+            "{out}"
+        );
     }
 }

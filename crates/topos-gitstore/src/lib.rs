@@ -32,6 +32,7 @@
 //! holds a blob never changes any id or digest. The [`largeobj`] seam is declared (unwired) so a later
 //! size-routed local / S3-compatible backend slots behind one read chokepoint with zero identity impact.
 
+mod diff;
 mod error;
 mod read;
 mod store;
@@ -41,6 +42,7 @@ pub mod largeobj;
 #[cfg(test)]
 mod tests;
 
+pub use diff::{DiffFile, unified_diff};
 pub use error::{GitstoreError, VerifyError};
 pub use read::{RenderedBundle, RenderedFile, VersionNode};
 pub use store::{ImportFile, Store, TreeHandle, WriteBatch};

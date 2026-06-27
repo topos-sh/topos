@@ -51,25 +51,32 @@ fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(String, Lock), ClientErro
     }
 }
 
-/// Parse 64 lowercase-hex chars into a 32-byte id (a sidecar doc field).
-fn parse_hex32(hex: &str) -> Result<[u8; 32], ClientError> {
-    let bytes = hex.as_bytes();
-    if bytes.len() != 64 {
-        return Err(ClientError::Corrupt("expected 64 hex chars".into()));
+/// Parse 64 lowercase-hex chars into a 32-byte id (a sidecar doc field) via the shared `hex` codec.
+/// Fails **closed** on uppercase: the persisted + result schemas pin `^[0-9a-f]{64}$`, and `diff` echoes
+/// the original string straight into its `--json`, so an uppercase byte (which `hex::decode_to_slice`
+/// would accept case-insensitively) must be rejected here, not passed through as schema-invalid output.
+fn parse_hex32(hex_str: &str) -> Result<[u8; 32], ClientError> {
+    if hex_str.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(ClientError::Corrupt("hex id must be lowercase".into()));
     }
     let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_val(bytes[2 * i])?;
-        let lo = hex_val(bytes[2 * i + 1])?;
-        *slot = (hi << 4) | lo;
-    }
+    hex::decode_to_slice(hex_str, &mut out)
+        .map_err(|e| ClientError::Corrupt(format!("invalid hex id: {e}")))?;
     Ok(out)
 }
 
-fn hex_val(b: u8) -> Result<u8, ClientError> {
-    match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        _ => Err(ClientError::Corrupt("non-hex character".into())),
+#[cfg(test)]
+mod tests {
+    use super::parse_hex32;
+
+    #[test]
+    fn parse_hex32_is_lowercase_only_and_length_checked() {
+        // 64 lowercase hex chars round-trips.
+        assert!(parse_hex32(&"abcdef0123456789".repeat(4)).is_ok());
+        // Uppercase must fail closed — the schema pins lowercase and `diff` echoes the raw string.
+        assert!(parse_hex32(&"ABCDEF0123456789".repeat(4)).is_err());
+        // Wrong length and non-hex are rejected by the codec.
+        assert!(parse_hex32("abc").is_err());
+        assert!(parse_hex32(&"g".repeat(64)).is_err());
     }
 }

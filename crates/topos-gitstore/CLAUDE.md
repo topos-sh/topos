@@ -24,6 +24,11 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
 - `log` / `list_versions` — first-parent history + the ref-set reverse map, with duplicate-lineage rejected.
 - `durability_set` — the loose objects + version refs + their parent dirs the client fsyncs to make a write
   durable *before* any JSON references it.
+- `unified_diff` (`diff`) — a byte-stable line-oriented unified-diff renderer over two bundles (`DiffFile`
+  views). The diff **algorithm** is `imara-diff` (histogram); the unified-diff **formatting** (hunk headers,
+  mode-change, binary detection, the no-newline marker) is **owned here**, so the committed `diff` golden
+  stays byte-stable across imara-diff releases. The `diff` verb calls this; the `current..<hash>` plane half
+  reuses it later.
 
 ## The `LargeObjectStore` seam (declared, **unwired**)
 
@@ -33,7 +38,8 @@ size-routed local / S3-compatible backend is a pure drop-in behind this trait wi
 
 ## Planned (lands later)
 
-Size-routing + the local large-object store impl + GC; `diff`/`diff3` *execution* (the client renders a
-plain unified diff itself for now); the S3-compatible remote backend (a no-op extraction behind the seam).
+Size-routing + the local large-object store impl + GC; `diff3` *execution* (three-way merge; the two-way
+`unified_diff` renderer lands above); the S3-compatible remote backend (a no-op extraction behind the seam).
 
-Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `topos-core`, `topos-types`, `thiserror`.
+Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `imara-diff` (the diff engine), `topos-core`,
+`topos-types`, `thiserror`.

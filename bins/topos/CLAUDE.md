@@ -28,9 +28,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
   nothing; **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `list [--footprint]` (the tracked bucket; others render
   empty; footprint = the `~/.topos/` walk plus any harness config topos holds an entry in), `diff`
-  (draft↔current, a vendored unified diff), `log` (local actions + git history), `pull [--quiet]` (the
-  session-start currency entry point — a **no-op skeleton** that exits 0 and is byte-silent under
-  `--quiet`, until the sync engine lands), `uninstall` (**scrub the currency hook**, then remove the
+  (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
+  [--quiet]` (the session-start currency entry point — a **no-op skeleton** that exits 0 and is byte-silent
+  under `--quiet`, until the sync engine lands), `uninstall` (**scrub the currency hook**, then remove the
   binary + `~/.topos/`, touch no skill bytes).
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
@@ -54,4 +54,5 @@ The sidecar keys skills by id; harness skill directories stay byte-pristine, so 
 your skills.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `clap`, `serde`/`serde_json`,
-`uuid`, `rustix` (safe fsync/flock), `anyhow`, `thiserror`. (The plane transport + device-key signer land later.)
+`uuid`, `rustix` (safe fsync/flock), `hex` (decode sidecar id fields), `anyhow`, `thiserror`. (The plane
+transport + device-key signer land later.)

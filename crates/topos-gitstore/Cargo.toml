@@ -15,6 +15,9 @@ thiserror.workspace = true
 # Plumbing-only: object read/write + the tree editor + sha1 hashing + ref edits. No worktree/index/
 # network/blob-diff/status — those heavy defaults aren't needed for a dumb byte/object layer.
 gix = { workspace = true, features = ["sha1", "tree-editor"] }
+# The diff ENGINE for the unified-diff renderer (pure-Rust histogram/Myers). The unified-diff FORMATTING is
+# owned in `diff.rs`, so the committed `diff` golden stays byte-stable across imara-diff releases.
+imara-diff = { workspace = true }
 
 [lints]
 workspace = true

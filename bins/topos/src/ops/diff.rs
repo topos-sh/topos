@@ -3,13 +3,12 @@
 
 use std::path::Path;
 
-use topos_gitstore::Store;
+use topos_gitstore::{DiffFile, Store, unified_diff};
 use topos_types::persisted::PlacementMap;
 use topos_types::results::{DiffData, DiffSource};
 
 use super::{parse_hex32, resolve_skill};
 use crate::ctx::Ctx;
-use crate::diff::{FileBytes, unified_bundle_diff};
 use crate::error::ClientError;
 use crate::scan;
 use crate::{doc, scan::ScannedBundle};
@@ -38,24 +37,24 @@ pub(crate) fn diff(ctx: &Ctx<'_>, skill: &str) -> Result<DiffData, ClientError> 
         .ok_or_else(|| ClientError::Corrupt("placement map has no path".into()))?;
     let ScannedBundle { files: draft, .. } = scan::scan(Path::new(placement))?;
 
-    let base_files: Vec<FileBytes<'_>> = base
+    let base_files: Vec<DiffFile<'_>> = base
         .files
         .iter()
-        .map(|f| FileBytes {
+        .map(|f| DiffFile {
             path: &f.path,
             mode: f.mode,
             bytes: &f.bytes,
         })
         .collect();
-    let draft_files: Vec<FileBytes<'_>> = draft
+    let draft_files: Vec<DiffFile<'_>> = draft
         .iter()
-        .map(|f| FileBytes {
+        .map(|f| DiffFile {
             path: &f.path,
             mode: f.mode,
             bytes: &f.bytes,
         })
         .collect();
-    let diff = unified_bundle_diff(&base_files, &draft_files);
+    let diff = unified_diff(&base_files, &draft_files);
 
     Ok(DiffData {
         source: DiffSource::Local,

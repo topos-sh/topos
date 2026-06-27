@@ -23,7 +23,7 @@ ed25519-dalek = { workspace = true }
 # decodes the pinned known-answer vectors.
 json-canon = "0.1"
 serde_json = { workspace = true }
-hex = "0.4"
+hex = { workspace = true }
 
 [lints]
 workspace = true
