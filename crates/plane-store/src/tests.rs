@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest;
 
-use crate::sqlite::{ClaimOutcome, InstallOutcome, ObjectStatus, RecordOutcome};
+use crate::sqlite::{ClaimOutcome, InstallOutcome, Location, ObjectStatus, RecordOutcome};
 use crate::{
     Authority, AuthorityError, CandidateUpload, CommitId, FileMode, ObjectId, OpId, Principal,
     SkillId, UploadedFile, WorkspaceId, gc, lifecycle,
@@ -24,14 +24,32 @@ struct Fixture {
 
 impl Fixture {
     async fn new(tag: &str) -> Self {
+        Self::build(tag, None).await
+    }
+
+    /// A fixture with an overridden size-routing threshold + reject cap — for the offload tests, which
+    /// force placement (a tiny threshold routes ordinary test bytes to the large store) and exercise the
+    /// reject cap with small payloads.
+    async fn with_large_limits(tag: &str, threshold: u64, reject_cap: u64) -> Self {
+        Self::build(tag, Some((threshold, reject_cap))).await
+    }
+
+    async fn build(tag: &str, limits: Option<(u64, u64)>) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("topos-ps-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let authority = Authority::open_sqlite(&dir.join("plane.db"), &dir.join("stores"))
-            .await
-            .expect("open authority");
+        let mut authority = Authority::open_sqlite(
+            &dir.join("plane.db"),
+            &dir.join("stores"),
+            &dir.join("large"),
+        )
+        .await
+        .expect("open authority");
+        if let Some((threshold, reject_cap)) = limits {
+            authority = authority.with_large_limits(threshold, reject_cap);
+        }
         Self { dir, authority }
     }
 }
@@ -470,7 +488,7 @@ async fn install_absent_to_present_is_idempotent_reuse() {
     // absent (no row) → present.
     assert_eq!(
         a.db()
-            .install_object(&w, o, &goid(7), 3, 100)
+            .install_object(&w, o, Location::Git, &goid(7), 3, 100)
             .await
             .unwrap(),
         InstallOutcome::Installed
@@ -482,7 +500,7 @@ async fn install_absent_to_present_is_idempotent_reuse() {
     // a second install observes present and reuses (the dedup path) — never a double-install.
     assert_eq!(
         a.db()
-            .install_object(&w, o, &goid(7), 3, 101)
+            .install_object(&w, o, Location::Git, &goid(7), 3, 101)
             .await
             .unwrap(),
         InstallOutcome::AlreadyPresent
@@ -496,12 +514,12 @@ async fn claim_unreferenced_present_then_finalize_to_absent() {
     let w = ws("w_acme");
     let o = object_id(b"lonely");
     a.db()
-        .install_object(&w, o, &goid(9), 1, 100)
+        .install_object(&w, o, Location::Git, &goid(9), 1, 100)
         .await
         .unwrap();
     // No commit_object, no lease → the guarded claim succeeds and yields the git locator.
     match a.db().claim_for_delete(&w, o, 200).await.unwrap() {
-        ClaimOutcome::Claimed { git_oid } => assert_eq!(git_oid, goid(9)),
+        ClaimOutcome::Claimed { git_oid, .. } => assert_eq!(git_oid, goid(9)),
         ClaimOutcome::Spared => panic!("expected claimed"),
     }
     assert_eq!(
@@ -523,7 +541,7 @@ async fn claim_spares_a_commit_object_referenced_object() {
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let o = object_id(b"reachable");
     a.db()
-        .install_object(&w, o, &goid(1), 1, 100)
+        .install_object(&w, o, Location::Git, &goid(1), 1, 100)
         .await
         .unwrap();
     // A commit references it (the read-authorization surface) → GC must spare it.
@@ -548,7 +566,7 @@ async fn claim_spares_a_live_lease_and_reclaims_after_release() {
     let w = ws("w_acme");
     let o = object_id(b"leased");
     a.db()
-        .install_object(&w, o, &goid(2), 1, 100)
+        .install_object(&w, o, Location::Git, &goid(2), 1, 100)
         .await
         .unwrap();
     // A live lease (expires in the future) names it → spared.
@@ -575,11 +593,11 @@ async fn expired_lease_does_not_spare_but_committed_lease_always_does() {
     let w = ws("w_acme");
     let (o1, o2) = (object_id(b"exp"), object_id(b"perm"));
     a.db()
-        .install_object(&w, o1, &goid(3), 1, 100)
+        .install_object(&w, o1, Location::Git, &goid(3), 1, 100)
         .await
         .unwrap();
     a.db()
-        .install_object(&w, o2, &goid(4), 1, 100)
+        .install_object(&w, o2, Location::Git, &goid(4), 1, 100)
         .await
         .unwrap();
     // An expired lease (expires_at <= now) does NOT protect.
@@ -621,7 +639,7 @@ async fn deleting_is_non_resurrectable() {
         .unwrap();
     assert_eq!(
         a.db()
-            .install_object(&w, o, &goid(5), 1, 200)
+            .install_object(&w, o, Location::Git, &goid(5), 1, 200)
             .await
             .unwrap(),
         InstallOutcome::Deleting
@@ -650,7 +668,7 @@ async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable() {
         .unwrap();
     assert_eq!(
         a.db()
-            .install_object(&w, fresh, &goid(6), 1, 110)
+            .install_object(&w, fresh, Location::Git, &goid(6), 1, 110)
             .await
             .unwrap(),
         InstallOutcome::Unavailable
@@ -661,7 +679,7 @@ async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable() {
     );
     // A present object that is then tombstoned reaches the terminal `unavailable` state.
     a.db()
-        .install_object(&w, existing, &goid(6), 1, 100)
+        .install_object(&w, existing, Location::Git, &goid(6), 1, 100)
         .await
         .unwrap();
     a.db()
@@ -702,7 +720,7 @@ async fn recovery_sweep_finalizes_only_stale_deleting() {
         .claim_stale_for_recovery(&w, old, 500, 600)
         .await
         .unwrap();
-    assert_eq!(first, Some(goid(8)));
+    assert_eq!(first, Some((Location::Git, goid(8))));
     let second = a
         .db()
         .claim_stale_for_recovery(&w, old, 500, 600)
@@ -728,11 +746,11 @@ async fn lease_rebuilds_its_object_set_on_op_id_reuse() {
     let w = ws("w_acme");
     let (x, y) = (object_id(b"first-cand"), object_id(b"second-cand"));
     a.db()
-        .install_object(&w, x, &goid(1), 1, 100)
+        .install_object(&w, x, Location::Git, &goid(1), 1, 100)
         .await
         .unwrap();
     a.db()
-        .install_object(&w, y, &goid(2), 1, 100)
+        .install_object(&w, y, Location::Git, &goid(2), 1, 100)
         .await
         .unwrap();
     // First lease names {X}; reusing the same op id then names {Y}.
@@ -764,11 +782,11 @@ async fn committed_lease_is_not_clobbered_by_op_id_reuse() {
     let w = ws("w_acme");
     let (x, y) = (object_id(b"rooted"), object_id(b"other"));
     a.db()
-        .install_object(&w, x, &goid(1), 1, 100)
+        .install_object(&w, x, Location::Git, &goid(1), 1, 100)
         .await
         .unwrap();
     a.db()
-        .install_object(&w, y, &goid(2), 1, 100)
+        .install_object(&w, y, Location::Git, &goid(2), 1, 100)
         .await
         .unwrap();
     let c1 = CommitId([0x1; 32]);
@@ -1434,13 +1452,13 @@ async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
     let w = ws("w_acme");
     let o = object_id(b"contended");
     a.db()
-        .install_object(&w, o, &goid(9), 1, 100)
+        .install_object(&w, o, Location::Git, &goid(9), 1, 100)
         .await
         .unwrap();
 
     // (1) The live GC claims it with token T=100 (a back-dated, pass-fixed `now`).
     match a.db().claim_for_delete(&w, o, 100).await.unwrap() {
-        ClaimOutcome::Claimed { git_oid } => assert_eq!(git_oid, goid(9)),
+        ClaimOutcome::Claimed { git_oid, .. } => assert_eq!(git_oid, goid(9)),
         ClaimOutcome::Spared => panic!("expected claimed"),
     }
     // (2) A recovery sweep finds it stale (sua=100 < older_than=200) and re-claims it with token T=500.
@@ -1449,7 +1467,7 @@ async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
             .claim_stale_for_recovery(&w, o, 200, 500)
             .await
             .unwrap(),
-        Some(goid(9)),
+        Some((Location::Git, goid(9))),
         "recovery re-claims the stale deleting row"
     );
 
@@ -1518,4 +1536,303 @@ async fn migrate_re_materializes_a_present_row_whose_bytes_a_crash_removed() {
         .expect("render after the belt heals the missing bytes");
     assert_eq!(rendered.files.len(), 1);
     assert_eq!(rendered.files[0].bytes, body);
+}
+
+// ===== The size-routed large-object store (offload) — the release-blocker criteria =====
+
+use topos_gitstore::LargeObjectStore as _;
+
+/// A deterministic blob of `n` bytes filled with `seed` (distinct seeds → distinct content + object ids).
+fn blob(n: usize, seed: u8) -> Vec<u8> {
+    vec![seed; n]
+}
+
+#[tokio::test]
+async fn placement_independent_identity_same_bytes_either_store() {
+    // THE load-bearing property: the SAME bytes yield the SAME version_id AND bundle_digest whether routed
+    // to git or to large-local (every id is precomputed over real-byte sha256s, before any store write). We
+    // force the placement by varying the configurable threshold across two runs of an identical bundle.
+    let big = blob(4096, 0xA1);
+    let w = ws("w_acme");
+
+    // Run 1: a huge threshold keeps the 4 KiB blob in the git store.
+    let fx_git = Fixture::with_large_limits("id-git", 1 << 30, 1 << 30).await;
+    let s_git = ingest_migrate(
+        &fx_git.authority,
+        &w,
+        "op1",
+        vec![file("model.bin", &big)],
+        100,
+    )
+    .await;
+
+    // Run 2: a tiny threshold routes the SAME blob to the large-object store.
+    let fx_large = Fixture::with_large_limits("id-large", 1, 1 << 30).await;
+    let s_large = ingest_migrate(
+        &fx_large.authority,
+        &w,
+        "op1",
+        vec![file("model.bin", &big)],
+        100,
+    )
+    .await;
+
+    assert_eq!(
+        s_git.version_id.0, s_large.version_id.0,
+        "version_id must be byte-identical regardless of placement"
+    );
+    assert_eq!(
+        s_git.bundle_digest, s_large.bundle_digest,
+        "bundle_digest must be byte-identical regardless of placement"
+    );
+
+    // …and the two runs genuinely placed the bytes in different stores (else the assertion is vacuous).
+    let obj = object_id(&big);
+    assert_eq!(
+        fx_git
+            .authority
+            .db()
+            .object_location(&w, obj)
+            .await
+            .unwrap(),
+        Some(Location::Git)
+    );
+    assert_eq!(
+        fx_large
+            .authority
+            .db()
+            .object_location(&w, obj)
+            .await
+            .unwrap(),
+        Some(Location::LargeLocal)
+    );
+    // The large run physically holds the bytes in the side store; the git run does not.
+    assert!(fx_large.authority.large_store(&w).exists(obj.0).unwrap());
+    assert!(!fx_git.authority.large_store(&w).exists(obj.0).unwrap());
+}
+
+#[tokio::test]
+async fn routes_by_size_keeps_small_in_git_and_rejects_oversize_at_ingest() {
+    // threshold 1 KiB, hard cap 4 KiB.
+    let fx = Fixture::with_large_limits("route", 1024, 4096).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let small: &[u8] = b"a small prose file well under the threshold";
+    let big = blob(2048, 0x77); // >= 1 KiB and <= 4 KiB → offloaded
+    let staged = ingest_migrate(
+        a,
+        &w,
+        "op1",
+        vec![file("SKILL.md", small), file("model.bin", &big)],
+        100,
+    )
+    .await;
+
+    assert_eq!(
+        a.db().object_location(&w, object_id(small)).await.unwrap(),
+        Some(Location::Git),
+        "a sub-threshold blob stays in git"
+    );
+    assert_eq!(
+        a.db().object_location(&w, object_id(&big)).await.unwrap(),
+        Some(Location::LargeLocal),
+        "a blob at/above the threshold offloads"
+    );
+    // Commits + trees always stay in git — the version still renders (render reads the git tree + commit).
+    let rendered = crate::read::render_version(a, &w, staged.version_id.0, staged.bundle_digest)
+        .await
+        .expect("the mixed version renders");
+    assert_eq!(rendered.files.len(), 2);
+
+    // A blob over the per-blob cap is rejected TYPED at ingest, recording nothing (no row, no quarantine).
+    let oversize = blob(5000, 0x99); // > 4 KiB cap
+    let err = lifecycle::ingest(
+        a,
+        &w,
+        &op("op2"),
+        genesis(vec![file("huge.bin", &oversize)]),
+        200,
+    )
+    .await;
+    assert!(
+        matches!(err, Err(AuthorityError::RejectedUpload(_))),
+        "an oversize blob must be rejected typed at ingest"
+    );
+    assert_eq!(
+        a.db()
+            .object_status(&w, object_id(&oversize))
+            .await
+            .unwrap(),
+        ObjectStatus::Absent,
+        "a rejected oversize blob records no presence row"
+    );
+    assert!(
+        !a.workspace_quarantine_dir(&w, &op("op2")).exists(),
+        "a rejected oversize blob stages nothing to the quarantine"
+    );
+}
+
+#[tokio::test]
+async fn renders_a_mixed_offloaded_and_git_bundle_byte_exact() {
+    let fx = Fixture::with_large_limits("render-mix", 1024, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let prose: &[u8] = b"# SKILL\nrun the thing\n";
+    let nested: &[u8] = b"#!/bin/sh\necho nested\n";
+    let model = blob(3000, 0x42);
+    let staged = ingest_migrate(
+        a,
+        &w,
+        "op1",
+        vec![
+            file("SKILL.md", prose),
+            file("model.bin", &model),
+            file("scripts/run.sh", nested),
+        ],
+        100,
+    )
+    .await;
+    assert_eq!(
+        a.db().object_location(&w, object_id(&model)).await.unwrap(),
+        Some(Location::LargeLocal)
+    );
+    assert_eq!(
+        a.db().object_location(&w, object_id(prose)).await.unwrap(),
+        Some(Location::Git)
+    );
+
+    let rendered = crate::read::render_version(a, &w, staged.version_id.0, staged.bundle_digest)
+        .await
+        .expect("render the offloaded bundle");
+    assert_eq!(
+        rendered.bundle_digest, staged.bundle_digest,
+        "the recomputed digest must match the pin (consent holds across stores)"
+    );
+    let got: std::collections::HashMap<&str, &[u8]> = rendered
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
+        .collect();
+    assert_eq!(got["SKILL.md"], prose);
+    assert_eq!(got["model.bin"], model.as_slice());
+    assert_eq!(got["scripts/run.sh"], nested);
+
+    // A wrong pin is refused — the consent gate holds for an offloaded bundle too.
+    assert!(matches!(
+        crate::read::render_version(a, &w, staged.version_id.0, [0u8; 32]).await,
+        Err(AuthorityError::Integrity(_))
+    ));
+}
+
+#[tokio::test]
+async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash() {
+    let fx = Fixture::with_large_limits("r1-offload", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (s, other) = (skill("s_pr"), skill("s_other"));
+    let reader = prin("dev_read");
+    let outsider = prin("dev_out");
+    let body = blob(2048, 0x6F);
+    let staged = ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    let obj = object_id(&body);
+    assert_eq!(
+        a.db().object_location(&w, obj).await.unwrap(),
+        Some(Location::LargeLocal)
+    );
+    // Make the offloaded object readable for skill `s`: provenance + reachability + roster.
+    a.db()
+        .seed_commit(&w, &s, staged.version_id, &[obj])
+        .await
+        .unwrap();
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    a.db().seed_roster(&w, &other, &reader).await.unwrap();
+
+    // A rostered reader of `s` gets the offloaded bytes (the read dispatched to the large store + re-verified).
+    assert_eq!(a.read_object(&reader, &w, &s, obj).await.unwrap(), body);
+    // An unrostered principal → the single indistinguishable NotFound (404, never 403).
+    assert!(matches!(
+        a.read_object(&outsider, &w, &s, obj).await,
+        Err(AuthorityError::NotFound)
+    ));
+    // The reader, but via a DIFFERENT skill that does not reach the object → the SAME NotFound (never by
+    // bare hash — the large surface is gated by exactly the same skill-scoped join as git).
+    assert!(matches!(
+        a.read_object(&reader, &w, &other, obj).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn cross_workspace_offload_has_no_dedup_and_stays_isolated() {
+    let fx = Fixture::with_large_limits("xws-offload", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let (wa, wb) = (ws("w_acme"), ws("w_globex"));
+    let s = skill("s_pr");
+    let p = prin("dev_read");
+    let body = blob(2048, 0xC0); // byte-identical content uploaded by both workspaces
+    let sa = ingest_migrate(a, &wa, "opa", vec![file("model.bin", &body)], 100).await;
+    let _sb = ingest_migrate(a, &wb, "opb", vec![file("model.bin", &body)], 100).await;
+    let obj = object_id(&body);
+
+    // Two distinct physical objects under separate per-workspace roots — no cross-workspace dedup.
+    assert!(a.large_store(&wa).exists(obj.0).unwrap());
+    assert!(a.large_store(&wb).exists(obj.0).unwrap());
+
+    // Readable in A only; an A-rostered principal cannot reach it via B (cross-workspace isolation).
+    a.db()
+        .seed_commit(&wa, &s, sa.version_id, &[obj])
+        .await
+        .unwrap();
+    a.db().seed_roster(&wa, &s, &p).await.unwrap();
+    assert_eq!(a.read_object(&p, &wa, &s, obj).await.unwrap(), body);
+    assert!(matches!(
+        a.read_object(&p, &wb, &s, obj).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn gc_reclaims_an_offloaded_object_by_the_same_fence() {
+    let fx = Fixture::with_large_limits("gc-offload", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x5A);
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    let obj = object_id(&body);
+    assert_eq!(
+        a.db().object_location(&w, obj).await.unwrap(),
+        Some(Location::LargeLocal)
+    );
+    assert!(a.large_store(&w).exists(obj.0).unwrap());
+
+    // Abandon the migrate (the deferred pointer-move never took the root): release the committed lease.
+    // No commit_object roots it, so GC reclaims it — and the unlink step dispatches to the LARGE store.
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+    assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    assert!(
+        !a.large_store(&w).exists(obj.0).unwrap(),
+        "the offloaded object must be physically unlinked from the large store"
+    );
+}
+
+#[tokio::test]
+async fn a_live_lease_spares_an_offloaded_object_from_gc() {
+    let fx = Fixture::with_large_limits("gc-lease", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x33);
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    let obj = object_id(&body);
+    // A successful migrate's lease is non-expiring, so even a far-future GC reclaims nothing — the fence's
+    // lease protection holds for an offloaded object exactly as for a git one.
+    assert_eq!(gc::run_gc(a, &w, 1_000_000_000).await.unwrap(), 0);
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+    assert!(a.large_store(&w).exists(obj.0).unwrap());
 }

@@ -303,7 +303,7 @@ struct MissingProvenanceRow;
 #[cfg_attr(not(test), allow(dead_code))]
 mod lifecycle;
 
-pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, ObjectStatus};
+pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 
 #[cfg(test)]
 mod seed;

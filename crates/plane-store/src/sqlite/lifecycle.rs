@@ -41,10 +41,38 @@ pub(crate) enum InstallOutcome {
 /// The outcome of a GC claim step (the guarded `present → deleting` CAS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClaimOutcome {
-    /// The object was claimed for unlink; `git_oid` locates the loose object the unlink step will remove.
-    Claimed { git_oid: [u8; GIT_OID_LEN] },
+    /// The object was claimed for unlink. `location` selects which store the unlink targets; `git_oid`
+    /// locates the loose git object (used when `location` is [`Location::Git`]; for an offloaded object the
+    /// unlink keys on the object id, and `git_oid` is the carrier value the row always carries).
+    Claimed {
+        location: Location,
+        git_oid: [u8; GIT_OID_LEN],
+    },
     /// The object was spared — it is reachable from a commit, named by a live lease, or not present.
     Spared,
+}
+
+/// Which physical store holds an object's bytes. The database is the sole authority for this; only the
+/// physical fetch/install/unlink dispatches on it — reachability (`commit_object`) and access reference the
+/// `object_id` regardless of where the bytes sit. `large-remote` is schema-reserved for the deferred
+/// S3-compatible backend; v0 never writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Location {
+    /// A loose object in the per-workspace git store (physically located by its `git_oid`).
+    Git,
+    /// Offloaded to the per-workspace local large-object store (physically located by its `object_id`; the
+    /// `git_oid` is still recorded as the tree-entry bridge key the render walk joins on).
+    LargeLocal,
+}
+
+impl Location {
+    /// The stored string form (matches the `object_presence.location` CHECK constraint).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Location::Git => "git",
+            Location::LargeLocal => "large-local",
+        }
+    }
 }
 
 impl Db {
@@ -73,15 +101,45 @@ impl Db {
         }
     }
 
+    /// The recorded physical [`Location`] of an object (a pool read; no transaction). `None` means no row
+    /// — a legacy straight-to-git object (the pre-fence `upload_candidate` path records no presence row), or
+    /// one never installed — and the caller treats that as `git`. Drives the migrate dedup-reuse belt (which
+    /// must re-materialize into the **recorded** store, never re-route by the new candidate's size) and the
+    /// single-object read dispatch.
+    pub(crate) async fn object_location(
+        &self,
+        ws: &WorkspaceId,
+        object_id: ObjectId,
+    ) -> Result<Option<Location>> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT location AS "location!" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2"#,
+            ws_s,
+            oid,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(parse_location(&r.location)?)),
+        }
+    }
+
     /// The install transition: `absent → present`, set ONLY after the caller has durably installed the
-    /// bytes at their final path. One immediate-write transaction: reject a denylisted blob; then the
-    /// guarded upsert (the `WHERE status = 'absent'` cannot fire on a `deleting` row, so resurrection is
-    /// impossible by construction); then, if the upsert was suppressed, classify the blocking state so the
-    /// caller can reuse / wait / reject. `git_oid` is the physical locator; `size` is operational only.
+    /// bytes at their final path **in the store named by `location`**. One immediate-write transaction:
+    /// reject a denylisted blob; then the guarded upsert (the `WHERE status = 'absent'` cannot fire on a
+    /// `deleting` row, so resurrection is impossible by construction); then, if the upsert was suppressed,
+    /// classify the blocking state so the caller can reuse / wait / reject. `git_oid` is always recorded —
+    /// the loose-object locator for a `git` object, and the tree-entry bridge key (for the render walk) for
+    /// a `large-local` one; `size` is operational only. Routing decides `location`; the CAS, the fence, and
+    /// the non-resurrectable `deleting` guard are unchanged by it.
     pub(crate) async fn install_object(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
+        location: Location,
         git_oid: &[u8; GIT_OID_LEN],
         size: i64,
         now: i64,
@@ -89,6 +147,7 @@ impl Db {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let goid = git_oid.as_slice();
+        let loc = location.as_str();
 
         let mut tx = self.begin_immediate().await?;
 
@@ -113,10 +172,10 @@ impl Db {
         let installed = sqlx::query!(
             r#"
             INSERT INTO object_presence (workspace_id, object_id, status, location, size, git_oid, status_updated_at)
-            VALUES (?1, ?2, 'present', 'git', ?3, ?4, ?5)
+            VALUES (?1, ?2, 'present', ?6, ?3, ?4, ?5)
             ON CONFLICT (workspace_id, object_id) DO UPDATE SET
                 status            = 'present',
-                location          = 'git',
+                location          = excluded.location,
                 size              = excluded.size,
                 git_oid           = excluded.git_oid,
                 status_updated_at = excluded.status_updated_at
@@ -128,6 +187,7 @@ impl Db {
             size,
             goid,
             now,
+            loc,
         )
         .fetch_optional(&mut *tx)
         .await
@@ -181,7 +241,7 @@ impl Db {
                     ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
                   WHERE plo.workspace_id = ?1 AND plo.object_id = ?2
                     AND (pl.expires_at IS NULL OR pl.expires_at > ?3))
-            RETURNING git_oid AS "git_oid: Vec<u8>"
+            RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!"
             "#,
             ws_s,
             oid,
@@ -192,10 +252,12 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         let outcome = match row {
             None => ClaimOutcome::Spared,
-            Some(r) => {
-                let git_oid = git_oid_from_row(r.git_oid)?;
-                ClaimOutcome::Claimed { git_oid }
-            }
+            // `location` selects the store the unlink targets; `git_oid` is the git locator (used for a
+            // `git` object). The keep-set re-check above is storage-independent, so the fence is unchanged.
+            Some(r) => ClaimOutcome::Claimed {
+                location: parse_location(&r.location)?,
+                git_oid: git_oid_from_row(r.git_oid)?,
+            },
         };
         tx.commit().await.map_err(AuthorityError::internal)?;
         Ok(outcome)
@@ -282,6 +344,36 @@ impl Db {
             .collect()
     }
 
+    /// Every PRESENT **large-local** object in the workspace as `(git_oid, object_id)` — the
+    /// location-dispatching render's offloaded set. Render anchors on the version's git tree structure
+    /// (`(path, mode, git_oid)` per file); a tree entry whose `git_oid` is in this set is offloaded and is
+    /// fetched from the large store by its `object_id`, while a git-resident leaf recovers its id by rehash
+    /// with NO database dependency. Big blobs are rare, so this set is small — no `git_oid` index is needed
+    /// (it uses the existing `(workspace_id, status)` index, then filters to `large-local`).
+    pub(crate) async fn large_local_objects(
+        &self,
+        ws: &WorkspaceId,
+    ) -> Result<Vec<([u8; GIT_OID_LEN], ObjectId)>> {
+        let ws_s = ws.as_str();
+        let rows = sqlx::query!(
+            r#"SELECT git_oid AS "git_oid: Vec<u8>", object_id AS "object_id!: Vec<u8>"
+               FROM object_presence
+               WHERE workspace_id = ?1 AND status = 'present' AND location = 'large-local'"#,
+            ws_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok((
+                    git_oid_from_row(r.git_oid)?,
+                    object_id_from_row(r.object_id)?,
+                ))
+            })
+            .collect()
+    }
+
     /// The object ids of every STALE `deleting` row in the workspace — ones a crashed GC left behind (older
     /// than the recovery threshold). This is the recovery sweep's ADVISORY candidate list (a pool read); the
     /// authoritative one-winner claim + the git locator come from [`Self::claim_stale_for_recovery`], so two
@@ -335,7 +427,7 @@ impl Db {
         object_id: ObjectId,
         older_than: i64,
         now: i64,
-    ) -> Result<Option<[u8; GIT_OID_LEN]>> {
+    ) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let mut tx = self.begin_immediate().await?;
@@ -344,7 +436,7 @@ impl Db {
                WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at < ?3
                  AND NOT EXISTS (
                      SELECT 1 FROM commit_object WHERE workspace_id = ?1 AND object_id = ?2)
-               RETURNING git_oid AS "git_oid: Vec<u8>""#,
+               RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!""#,
             ws_s,
             oid,
             older_than,
@@ -355,7 +447,7 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         let claimed = match row {
             None => None,
-            Some(r) => Some(git_oid_from_row(r.git_oid)?),
+            Some(r) => Some((parse_location(&r.location)?, git_oid_from_row(r.git_oid)?)),
         };
         tx.commit().await.map_err(AuthorityError::internal)?;
         Ok(claimed)
@@ -724,6 +816,17 @@ fn parse_status(s: &str) -> Result<ObjectStatus> {
     }
 }
 
+/// Parse a stored location string. `large-remote` is schema-reserved for the deferred S3-compatible backend
+/// and v0 writes none, so meeting it — or any unknown value — is store corruption (the read/unlink dispatch
+/// has no arm for it). The CHECK constraint already forbids anything outside the known set.
+fn parse_location(s: &str) -> Result<Location> {
+    match s {
+        "git" => Ok(Location::Git),
+        "large-local" => Ok(Location::LargeLocal),
+        _ => Err(AuthorityError::integrity(BadLocation)),
+    }
+}
+
 /// Convert a stored 32-byte object-id BLOB into an [`ObjectId`], or an integrity fault on a bad width.
 fn object_id_from_row(bytes: Vec<u8>) -> Result<ObjectId> {
     let arr: [u8; 32] = bytes
@@ -732,8 +835,9 @@ fn object_id_from_row(bytes: Vec<u8>) -> Result<ObjectId> {
     Ok(ObjectId(arr))
 }
 
-/// Convert a stored git-oid BLOB into a 20-byte array. A NULL or wrong-width locator on a row the fence is
-/// acting on is store corruption (a present/deleting `git` object always has its 20-byte locator set).
+/// Convert a stored git-oid BLOB into a 20-byte array. A NULL or wrong-width value on a row the fence is
+/// acting on is store corruption: every fenced object (git **and** large-local) records its 20-byte git oid
+/// — the loose-object locator for a `git` object, and the tree-entry bridge key for a `large-local` one.
 fn git_oid_from_row(bytes: Option<Vec<u8>>) -> Result<[u8; GIT_OID_LEN]> {
     let bytes = bytes.ok_or_else(|| AuthorityError::integrity(MissingGitOid))?;
     bytes
@@ -755,6 +859,10 @@ fn reparse_op(s: &str) -> Result<OpId> {
 #[derive(Debug, thiserror::Error)]
 #[error("stored object status is not a known value")]
 struct BadStatus;
+
+#[derive(Debug, thiserror::Error)]
+#[error("stored object location is not a known value")]
+struct BadLocation;
 
 #[derive(Debug, thiserror::Error)]
 #[error("stored content id is not 32 bytes")]

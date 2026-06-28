@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use topos_core::sign::{self, Commit};
-use topos_gitstore::{GitstoreError, ImportFile, StagedEntry, Store};
+use topos_gitstore::{GitstoreError, ImportFile, LargeObjectStore, StagedEntry, Store};
 
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
-use crate::sqlite::{InstallOutcome, ObjectStatus};
+use crate::sqlite::{InstallOutcome, Location, ObjectStatus};
 use crate::upload::CandidateUpload;
 
 /// How long an in-flight quarantine lives before the janitor may sweep it. Generous: in-process
@@ -67,10 +67,19 @@ pub(crate) async fn ingest(
             "a skill bundle must contain at least one file".to_owned(),
         ));
     }
-    // Reject a denylisted candidate blob BEFORE staging, so purged bytes are never persisted to disk (the
-    // object id is `sha256(bytes)`, exactly what `Store::stage` recomputes, so this needs no staging). A
-    // best-effort early check; the serializing check is the install CAS.
+    // Per-blob guards BEFORE staging, so an oversize or purged blob is never persisted to the quarantine
+    // (the object id is `sha256(bytes)`, exactly what `Store::stage` recomputes, so neither needs staging).
     for f in &candidate.files {
+        // Reject cap: a blob over the per-blob limit fails typed and stages nothing. (This guards the
+        // on-disk quarantine; the bytes are already in memory in `CandidateUpload` — a true memory cap is
+        // an HTTP-streaming concern, deferred — so this is a disk/stage guard, not a memory guard.)
+        if f.bytes.len() as u64 > authority.large_reject_cap() {
+            return Err(AuthorityError::RejectedUpload(
+                "a candidate blob exceeds the maximum allowed size".to_owned(),
+            ));
+        }
+        // Denylist: never (re-)introduce purged bytes. A best-effort early check; the serializing check is
+        // the install CAS.
         let oid = ObjectId(topos_core::digest::sha256(&f.bytes));
         if authority.db().is_tombstoned(ws, oid).await? {
             return Err(AuthorityError::RejectedUpload(
@@ -246,8 +255,11 @@ pub(crate) async fn migrate(
     migrate_finish(authority, ws, staged, finish_now).await
 }
 
-/// Install one object, honoring the fence: reuse if `present`; wait out `deleting` (no transaction held
-/// across the sleep, so GC's finalize can never be blocked) then re-copy; reject if `unavailable`.
+/// Install one object, honoring the fence + the size route: reuse if `present` (re-materializing into the
+/// object's RECORDED store if a crash lost it); wait out `deleting` (no transaction held across the sleep,
+/// so GC's finalize can never be blocked) then re-copy; reject if `unavailable`. **Routing is a Step-D
+/// concern only** — the CAS, the lease, and the non-resurrectable `deleting` guard are unchanged; only
+/// *which store* the bytes are written to (and recorded in `location`) varies, by the blob's size.
 async fn install_one(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -260,23 +272,18 @@ async fn install_one(
     for _ in 0..WAIT_MAX_POLLS {
         match authority.db().object_status(ws, object_id).await? {
             ObjectStatus::Present => {
-                // Dedup reuse — but never PIN a version over bytes a past crash silently removed. The WAL
-                // power-loss residual (see the `gc` module docs) can leave a `present` row whose loose object
-                // is already gone; reusing it blindly would let `migrate_finish`'s non-expiring lease root a
-                // version over missing bytes — a permanent, dedup-poisoning byte loss, not a self-healing one.
-                // Belt: stat the loose object on a FRESH main handle (gix's object cache can otherwise affirm
-                // a just-removed object); if a crash lost it, re-materialize from THIS candidate's quarantine
-                // — we hold byte-identical content. This re-asserts "no root over gone bytes" WITHOUT making
-                // the store the presence authority (the DB row stays `present`; we only refuse to root
-                // nothing). No GC can race the re-copy: this migrate's lease already spares the row.
-                let main = authority.store_for_write(ws)?;
-                if !main
-                    .object_exists(entry.git_oid)
-                    .map_err(AuthorityError::internal)?
-                {
-                    main.install_object_durable(quarantine, entry.git_oid)
-                        .map_err(AuthorityError::internal)?;
-                }
+                // Dedup reuse — but never PIN a version over bytes a past crash silently removed (the WAL
+                // power-loss residual, see the `gc` module docs). Re-materialize into the object's RECORDED
+                // store (NEVER re-route by this candidate's size — that would split-brain the bytes vs the
+                // row, and the GC unlink would then look in the wrong store). This migrate's lease already
+                // spares the row, so no GC can race the re-copy; the DB row stays `present` throughout (the
+                // store never becomes the presence authority — we only refuse to root nothing).
+                let location = authority
+                    .db()
+                    .object_location(ws, object_id)
+                    .await?
+                    .unwrap_or(Location::Git);
+                rematerialize_if_gone(authority, ws, quarantine, entry, location)?;
                 return Ok(()); // dedup: reuse the already-present (and now verified) bytes
             }
             ObjectStatus::Unavailable => {
@@ -292,20 +299,21 @@ async fn install_one(
                 continue;
             }
             ObjectStatus::Absent => {
-                // Open a FRESH main handle so a just-deleted object's bytes are actually re-written (gix's
-                // object cache can otherwise make `write_blob` skip a loose object it believes still exists).
-                // (Residual: on a workspace's FIRST migrate `store_for_write` newly creates the bare repo;
-                // `install_object_durable` fsyncs the loose object + its `objects/` dirs but NOT the repo's own
-                // creation — the `<ws>/` entry in `git_root` and the repo metadata — so under WAL +
-                // synchronous=NORMAL a crash could leave a `present` row over an unopenable/absent store. It is
-                // fail-safe — a later read faults Integrity, never wrong bytes — and is reconciled by the same
-                // power-durability barrier the destructive transitions need, see the `gc` module docs.)
-                let main = authority.store_for_write(ws)?;
-                main.install_object_durable(quarantine, entry.git_oid)
-                    .map_err(AuthorityError::internal)?;
+                // Fresh install: the size decides the store (≥ threshold → the large-object store, else git).
+                // Install the bytes durably FIRST, then the `absent → present` CAS records that location — so
+                // a `present` row always denotes durably-installed bytes, in either store.
+                let location = route_location(entry.size, authority.large_threshold());
+                install_bytes(authority, ws, quarantine, entry, location)?;
                 match authority
                     .db()
-                    .install_object(ws, object_id, &entry.git_oid, entry.size as i64, now)
+                    .install_object(
+                        ws,
+                        object_id,
+                        location,
+                        &entry.git_oid,
+                        entry.size as i64,
+                        now,
+                    )
                     .await?
                 {
                     InstallOutcome::Installed | InstallOutcome::AlreadyPresent => return Ok(()),
@@ -327,6 +335,77 @@ async fn install_one(
     // The object stayed `deleting` past the bound — a crashed GC the recovery sweep has not finalized. A
     // retry (after recovery) succeeds; surface it as a transient internal fault.
     Err(AuthorityError::internal(DeletingWaitTimedOut))
+}
+
+/// The size route: a file blob at/above the threshold is offloaded to the large-object store; a smaller one
+/// stays in git. Decides a FRESH install's location only — an existing object reuses its recorded location.
+fn route_location(size: u64, threshold: u64) -> Location {
+    if size >= threshold {
+        Location::LargeLocal
+    } else {
+        Location::Git
+    }
+}
+
+/// Physically install one staged blob into the store named by `location`, durably — a git loose object (a
+/// FRESH main handle each time, so gix's object cache can't make `write_blob` skip a just-removed object),
+/// or the per-workspace large-object store (verify-on-write `put`). The DB `absent → present` CAS that
+/// records the location runs only AFTER this returns.
+///
+/// (Residual: on a workspace's FIRST migrate `store_for_write` creates the bare repo but the repo's own
+/// creation isn't fsynced — the same documented power-durability gap the git fence carries; fail-safe, a
+/// later read faults Integrity, never wrong bytes. The large store carries the equivalent `sync_all`/
+/// `F_FULLFSYNC` residual.)
+fn install_bytes(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    quarantine: &Store,
+    entry: &StagedEntry,
+    location: Location,
+) -> Result<()> {
+    match location {
+        Location::Git => {
+            let main = authority.store_for_write(ws)?;
+            main.install_object_durable(quarantine, entry.git_oid)
+                .map_err(AuthorityError::internal)?;
+        }
+        Location::LargeLocal => {
+            let bytes = quarantine
+                .read_staged_blob(entry.git_oid)
+                .map_err(AuthorityError::internal)?;
+            authority
+                .large_store(ws)
+                .put(entry.object_id, &bytes)
+                .map_err(AuthorityError::internal)?;
+        }
+    }
+    Ok(())
+}
+
+/// The dedup-reuse belt: if the object's bytes are gone from its RECORDED store (a crash lost them), re-copy
+/// them from this candidate's quarantine — re-asserting "no root over gone bytes" without making the store
+/// the presence authority. `exists` is a belt only; the DB row's `present` status stays the authority.
+fn rematerialize_if_gone(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    quarantine: &Store,
+    entry: &StagedEntry,
+    location: Location,
+) -> Result<()> {
+    let present = match location {
+        Location::Git => authority
+            .store_for_write(ws)?
+            .object_exists(entry.git_oid)
+            .map_err(AuthorityError::internal)?,
+        Location::LargeLocal => authority
+            .large_store(ws)
+            .exists(entry.object_id)
+            .map_err(AuthorityError::internal)?,
+    };
+    if !present {
+        install_bytes(authority, ws, quarantine, entry, location)?;
+    }
+    Ok(())
 }
 
 /// The distinct object ids of a staged bundle's entries (a blob at two paths is one object).

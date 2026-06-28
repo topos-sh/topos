@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT location AS \"location!\" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "location!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7999708c16378271960c6a5d27956623b538a1cc62f96f8aaf4f838141ec125e"
+}

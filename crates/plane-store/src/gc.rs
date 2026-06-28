@@ -45,10 +45,12 @@
 //! created over it. When the pointer-move makes a long-idle `present` row load-bearing for dedup-reuse, the
 //! destructive transitions should be made power-durable (a checkpoint/`synchronous = FULL` barrier).
 
+use topos_gitstore::{LargeObjectStore, Store};
+
 use crate::authority::Authority;
 use crate::error::Result;
-use crate::id::WorkspaceId;
-use crate::sqlite::ClaimOutcome;
+use crate::id::{ObjectId, WorkspaceId};
+use crate::sqlite::{ClaimOutcome, Location};
 
 /// How long a `deleting` row must sit before the recovery sweep treats it as a crashed GC's leftover. A live
 /// `run_gc` stamps every claim with an accurate wall-clock (it advances `now` by the pass's real elapsed), so
@@ -77,13 +79,14 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
         // `claim_now` is also this actor's CLAIM TOKEN (the value the claim stamps into `status_updated_at`).
         let claim_now = now.saturating_add(started.elapsed().as_secs() as i64);
         // Claim — the guarded `present → deleting` (its own short txn; releases the write lock at once).
-        let git_oid = match authority
+        // `location` selects which store the unlink targets; the claim's keep-set re-check is unchanged.
+        let (location, git_oid) = match authority
             .db()
             .claim_for_delete(ws, object_id, claim_now)
             .await?
         {
             ClaimOutcome::Spared => continue,
-            ClaimOutcome::Claimed { git_oid } => git_oid,
+            ClaimOutcome::Claimed { location, git_oid } => (location, git_oid),
         };
         // Re-confirm ownership IMMEDIATELY before the physical unlink (no `.await` between this and the
         // synchronous delete): if a recovery sweep re-claimed this row (because the pass froze past the stale
@@ -96,10 +99,9 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
         {
             continue;
         }
-        // Unlink — remove the loose object OUTSIDE any transaction (the filesystem trails the DB).
-        store
-            .delete_loose_object(git_oid)
-            .map_err(crate::error::AuthorityError::internal)?;
+        // Unlink — remove the bytes OUTSIDE any transaction (the filesystem trails the DB), dispatching on
+        // the recorded location: a loose git-object delete, or a large-object-store unlink keyed on the id.
+        unlink_object(authority, ws, &store, location, object_id, git_oid)?;
         // Finalize — `deleting → absent` (its own short transaction), GATED on this actor's claim token so a
         // row a recovery sweep re-claimed is never finalized out from under it.
         let finalize_now = now.saturating_add(started.elapsed().as_secs() as i64);
@@ -136,13 +138,13 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
         for object_id in authority.db().stale_deleting(&ws, older_than).await? {
             // `claim_stale_for_recovery` stamps `status_updated_at = now`, so `now` is THIS sweeper's claim
             // token (the value its finalize/owner-check gate on).
-            let git_oid = match authority
+            let (location, git_oid) = match authority
                 .db()
                 .claim_stale_for_recovery(&ws, object_id, older_than, now)
                 .await?
             {
                 None => continue, // another sweeper already claimed it (or it was re-rooted / no longer stale)
-                Some(git_oid) => git_oid,
+                Some((location, git_oid)) => (location, git_oid),
             };
             // Re-confirm ownership right before the unlink (no `.await` between): leave the bytes to whoever
             // holds the current token, so the original live GC and this sweeper never both unlink.
@@ -153,9 +155,7 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
             {
                 continue;
             }
-            store
-                .delete_loose_object(git_oid)
-                .map_err(crate::error::AuthorityError::internal)?;
+            unlink_object(authority, &ws, &store, location, object_id, git_oid)?;
             authority
                 .db()
                 .finalize_delete(&ws, object_id, now, now)
@@ -200,4 +200,33 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
         }
     }
     Ok(swept)
+}
+
+/// Unlink one reclaimed object's bytes from the store its `location` names — a loose git-object delete, or a
+/// large-object-store unlink keyed on the object id (the large store is per-workspace, so the unlink can
+/// only ever touch this workspace's bytes). Both are idempotent (re-unlinking an already-gone object is a
+/// no-op), so the recovery sweep's re-run is safe. The DB transitions + the claim-token fence are unchanged
+/// — only the physical target differs by location.
+fn unlink_object(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    git_store: &Store,
+    location: Location,
+    object_id: ObjectId,
+    git_oid: [u8; 20],
+) -> Result<()> {
+    match location {
+        Location::Git => {
+            git_store
+                .delete_loose_object(git_oid)
+                .map_err(crate::error::AuthorityError::internal)?;
+        }
+        Location::LargeLocal => {
+            authority
+                .large_store(ws)
+                .delete(object_id.0)
+                .map_err(crate::error::AuthorityError::internal)?;
+        }
+    }
+    Ok(())
 }

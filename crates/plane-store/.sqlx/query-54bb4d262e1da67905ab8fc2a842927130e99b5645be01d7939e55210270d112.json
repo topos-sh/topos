@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT git_oid AS \"git_oid: Vec<u8>\", object_id AS \"object_id!: Vec<u8>\"\n               FROM object_presence\n               WHERE workspace_id = ?1 AND status = 'present' AND location = 'large-local'",
+  "describe": {
+    "columns": [
+      {
+        "name": "git_oid: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "object_id!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "54bb4d262e1da67905ab8fc2a842927130e99b5645be01d7939e55210270d112"
+}

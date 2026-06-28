@@ -2,13 +2,21 @@
 
 use std::path::{Path, PathBuf};
 
-use topos_gitstore::Store;
+use topos_gitstore::{LocalLargeStore, Store};
 
 use crate::error::{AuthorityError, Result};
 use crate::id::{ObjectId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::sqlite::Db;
 use crate::upload::{CandidateUpload, UploadReceipt};
+
+/// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
+/// packs/dedups small text-shaped blobs well but degrades on large binaries; below this they stay in git.
+pub(crate) const DEFAULT_LARGE_THRESHOLD: u64 = 1 << 20;
+
+/// The default per-blob hard reject cap (≈ 100 MiB): a blob larger than this is refused at ingest before
+/// any bytes are staged.
+pub(crate) const DEFAULT_LARGE_REJECT_CAP: u64 = 100 << 20;
 
 /// The plane's per-workspace storage authority — the **only** public type in this crate.
 ///
@@ -22,22 +30,58 @@ use crate::upload::{CandidateUpload, UploadReceipt};
 pub struct Authority {
     db: Db,
     git_root: PathBuf,
+    /// The confined root under which each workspace gets its **own** large-object store (a sibling of
+    /// `git_root`); big blobs are offloaded here at migrate. Per-workspace subdirs are the hard tenant
+    /// boundary (no cross-workspace dedup), exactly like `git_root`.
+    large_root: PathBuf,
+    /// Size at/above which a file blob is offloaded to the large-object store (operational config; never
+    /// enters any id/digest).
+    large_threshold: u64,
+    /// Per-blob hard reject cap, enforced at ingest.
+    large_reject_cap: u64,
 }
 
 impl Authority {
-    /// Open the authority over a SQLite database file and a git-store root directory (both created if
-    /// absent, with the schema migrated).
+    /// Open the authority over a SQLite database file, a git-store root, and a large-object-store root (all
+    /// created if absent, with the schema migrated). The size-routing threshold + reject cap default to
+    /// [`DEFAULT_LARGE_THRESHOLD`] / [`DEFAULT_LARGE_REJECT_CAP`]; override with
+    /// [`with_large_limits`](Self::with_large_limits).
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`] if the store root cannot be created or the database cannot be
-    /// opened or migrated.
-    pub async fn open_sqlite(db_path: &Path, git_root: &Path) -> Result<Self> {
+    /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
+    /// migrated.
+    pub async fn open_sqlite(db_path: &Path, git_root: &Path, large_root: &Path) -> Result<Self> {
         std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
+        std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
         let db = Db::open(db_path).await?;
         Ok(Self {
             db,
             git_root: git_root.to_path_buf(),
+            large_root: large_root.to_path_buf(),
+            large_threshold: DEFAULT_LARGE_THRESHOLD,
+            large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
         })
+    }
+
+    /// Override the size-routing threshold + per-blob reject cap (operational config — neither ever enters
+    /// a manifest, digest, or id). A consuming server wires these from its config; tests use it to force a
+    /// placement (a tiny threshold routes ordinary bytes to the large store, proving identity is the same
+    /// whichever store holds them).
+    #[must_use]
+    pub fn with_large_limits(mut self, threshold: u64, reject_cap: u64) -> Self {
+        self.large_threshold = threshold;
+        self.large_reject_cap = reject_cap;
+        self
+    }
+
+    /// The size at/above which a file blob is offloaded to the large-object store.
+    pub(crate) fn large_threshold(&self) -> u64 {
+        self.large_threshold
+    }
+
+    /// The per-blob hard reject cap enforced at ingest.
+    pub(crate) fn large_reject_cap(&self) -> u64 {
+        self.large_reject_cap
     }
 
     /// Read one object's bytes through the skill-scoped access rule.
@@ -150,5 +194,15 @@ impl Authority {
                 Err(_) => Store::open(&dir).map_err(AuthorityError::internal),
             },
         }
+    }
+
+    /// The per-workspace large-object store handle, rooted at `large_root/<ws>/`. `WorkspaceId` is a
+    /// validated, path-safe id (no separators, no `..`), so the root can never escape `large_root` and one
+    /// workspace's handle can never name another's bytes — cross-workspace isolation is the path itself, and
+    /// byte-identical content in two workspaces is two distinct physical objects (no cross-workspace dedup).
+    /// Construction stays inside this crate, so nothing outside the authority can fetch a large object by
+    /// bare hash. Infallible: the store creates its directories lazily on the first `put`.
+    pub(crate) fn large_store(&self, ws: &WorkspaceId) -> LocalLargeStore {
+        LocalLargeStore::new(self.large_root.join(ws.as_str()))
     }
 }
