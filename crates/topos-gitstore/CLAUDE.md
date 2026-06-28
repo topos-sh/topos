@@ -25,7 +25,14 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   the version's tree, re-hash each blob, return the one whose sha256 matches (the match **is** the
   verification); a content id absent from that tree is the typed `ObjectNotInVersion`. The plane's
   skill-scoped read drives this *after* authorization yields a witness version — there is **no**
-  read-by-bare-hash path. Keying on sha256 keeps a future large-object backend a one-branch change.
+  read-by-bare-hash path. (The git-resident / all-in-git read path; the authority's location-dispatching
+  read handles an offloaded object — see the two primitives below.)
+- `read_tree_structure` — recover a version's tree **structure** (`path, mode, git_oid` per file) **without
+  reading any blob bytes**, so a version containing offloaded blobs (absent from the git odb) walks fine.
+  The dumb gitstore half of the authority's location-dispatching whole-bundle render.
+- `read_git_blob_verified` — read one **git-resident** blob by git id, returning `(bytes, recomputed
+  sha256)`; the authority's render dispatches here for a leaf the DB locates in git. A missing object is the
+  typed `MissingObject` (it never *infers* offload from absence — location is the DB's fact).
 - `log` / `list_versions` — first-parent history + the ref-set reverse map, with duplicate-lineage rejected.
 - `durability_set` — the loose objects + version refs + their parent dirs the client fsyncs to make a write
   durable *before* any JSON references it.
@@ -41,20 +48,32 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   object + its parent dirs) so the authority may mark it present only after the bytes are durable;
   `commit_durable` builds a migrated version's tree from already-installed ids (`write_tree`, **never**
   re-writing a blob) and records the commit + version ref durably; `delete_loose_object` is the GC unlink;
+  `read_staged_blob` reads one staged blob's bytes from a quarantine (the large-install path's byte fetch);
   `object_exists` is an idempotency belt only. Unlike the client write path (which names a durability set for
-  the client to fsync), these server-side ops are self-durable and **return the path set they synced**. The
-  git tree + the read path (`render_verified` / `read_object_in_version`) are **unchanged**.
+  the client to fsync), these server-side ops are self-durable and **return the path set they synced**.
+  `write_tree` builds the tree via the **low-level plumbing editor** (not `repo.empty_tree().edit()`, which
+  validates child existence) so it can faithfully carry an **offloaded** blob's `(path, mode, git_oid)` even
+  though that blob's bytes never enter git; identity is unaffected (it's over real-byte sha256s, not the git
+  tree OID). The client write path (`write_bundle`) and `render_verified`/`read_object_in_version` are unchanged.
 
-## The `LargeObjectStore` seam (declared, **unwired**)
+## The large-object store — `LocalLargeStore` behind the `LargeObjectStore` trait (**wired**)
 
-A content-addressed `put`/`get`/`exists`/`delete` trait keyed by `blob_id = sha256(raw bytes)` — **no impl
-ships yet** (every blob lives in the git store). Because identity is recomputed over real bytes, a later
-size-routed local / S3-compatible backend is a pure drop-in behind this trait with zero id/digest impact.
+A content-addressed `put`/`get`/`exists`/`delete` trait keyed by `blob_id = sha256(raw bytes)`, with the v0
+**local-filesystem** impl `LocalLargeStore` (a dumb byte layer — **no access control, no database**). Layout
+under a per-workspace root: sharded finals `objects/aa/bb/<64-hex>` + same-filesystem `tmp/` staging.
+**Crash-safe two-phase install**: recompute `sha256 == blob_id` in memory → write a unique `O_EXCL` temp →
+`fsync` → atomic rename to the final shard → fsync the shard dir chain (always overwrite, so a re-put
+self-heals a crash-lost object). **Verify-on-read** (`get` re-hashes; a mismatch is the typed
+`BlobIntegrity`). `delete` is idempotent. Durability matches the git fence's `sync_all` convention (the
+macOS `F_FULLFSYNC` power-loss gap is the same documented residual). The authority constructs **one store per
+workspace** (rooted at `large_root/<ws>/`), so cross-workspace isolation is the path — no cross-workspace
+dedup; routing + the `location` dispatch live in `plane-store`. The deferred S3-compatible remote backend is
+a second impl of this same trait.
 
 ## Planned (lands later)
 
-Size-routing + the local large-object store impl + GC; `diff3` *execution* (three-way merge; the two-way
-`unified_diff` renderer lands above); the S3-compatible remote backend (a no-op extraction behind the seam).
+`diff3` *execution* (three-way merge; the two-way `unified_diff` renderer lands above); the S3-compatible
+remote large-object backend (a no-op extraction behind the `LargeObjectStore` trait).
 
 Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `imara-diff` (the diff engine), `topos-core`,
 `topos-types`, `thiserror`.

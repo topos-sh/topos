@@ -7,9 +7,9 @@ use gix::objs::tree::EntryKind;
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
 
-use crate::VERSION_REF_PREFIX;
 use crate::error::VerifyError;
 use crate::store::Store;
+use crate::{GIT_OID_LEN, VERSION_REF_PREFIX};
 
 /// The maximum directory nesting `render_verified` will follow — a forged store can't overflow the stack.
 /// Far beyond any real skill bundle's depth.
@@ -29,6 +29,17 @@ pub struct RenderedFile {
 pub struct RenderedBundle {
     pub files: Vec<RenderedFile>,
     pub bundle_digest: [u8; 32],
+}
+
+/// One leaf of a stored version's tree **structure**: its bundle-relative path, mode, and the git OID the
+/// tree entry records — recovered by walking the tree **without reading the blob's bytes**, so an offloaded
+/// blob (whose git object is intentionally absent) is yielded too. The authority's location-dispatching
+/// render joins this against `object_presence` to fetch each blob from git or the large-object store.
+#[derive(Debug, Clone)]
+pub struct TreeLeaf {
+    pub path: String,
+    pub mode: FileMode,
+    pub git_oid: [u8; GIT_OID_LEN],
 }
 
 /// One node of per-skill history (for `log`): the version, its parents, and the commit's display
@@ -133,6 +144,62 @@ impl Store {
             .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
         self.find_object_in_tree(&tree, object_id, 0)?
             .ok_or(VerifyError::ObjectNotInVersion)
+    }
+
+    /// Recover a stored version's tree **structure** — `(path, mode, git_oid)` per file — **without reading
+    /// any blob bytes**, so a version that contains offloaded blobs (absent from the git object store) is
+    /// walked fine (tree iteration reads only the tree objects' own bytes; sub-trees, which are never
+    /// offloaded, are loaded to recurse). This is the dumb gitstore half of the authority's
+    /// location-dispatching whole-bundle render: the authority joins each leaf's `git_oid` against
+    /// `object_presence` to learn the location, then fetches from git or the large-object store.
+    ///
+    /// # Errors
+    /// [`VerifyError::MissingVersion`] if the version is absent; [`VerifyError::MissingObject`] if a
+    /// sub-tree object is missing; [`VerifyError::NonUtf8Name`] / [`VerifyError::NonBlobEntry`] /
+    /// [`VerifyError::Malformed`] on an illegal or too-deep stored tree; [`VerifyError::Gix`] on a ref read.
+    pub fn read_tree_structure(&self, version_id: [u8; 32]) -> Result<Vec<TreeLeaf>, VerifyError> {
+        let commit_oid = self
+            .resolve_version(&version_id)?
+            .ok_or(VerifyError::MissingVersion)?;
+        let commit = self
+            .repo()
+            .find_object(commit_oid)
+            .map_err(|_| VerifyError::MissingObject)?
+            .try_into_commit()
+            .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+        let tree = commit
+            .tree()
+            .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+        let mut leaves = Vec::new();
+        self.walk_structure(&tree, "", 0, &mut leaves)?;
+        Ok(leaves)
+    }
+
+    /// Read one **git-resident** blob's bytes by its git id, returning `(bytes, recomputed sha256)`. The
+    /// authority's render dispatches here for a leaf the database locates in git, and trusts the bytes only
+    /// via the returned content id. This **never infers offload from absence**: a missing object is the
+    /// typed [`VerifyError::MissingObject`] (corruption for a rooted version) — whether a blob is offloaded
+    /// is the database's `location`, not a git miss.
+    ///
+    /// # Errors
+    /// [`VerifyError::MissingObject`] if the object is absent; [`VerifyError::NonBlobEntry`] if it is not a
+    /// blob; [`VerifyError::Gix`] if the git id is malformed.
+    pub fn read_git_blob_verified(
+        &self,
+        git_oid: [u8; GIT_OID_LEN],
+    ) -> Result<(Vec<u8>, [u8; 32]), VerifyError> {
+        let oid = gix::ObjectId::try_from(git_oid.as_slice())
+            .map_err(|e| VerifyError::Gix(format!("{e}")))?;
+        let object = self
+            .repo()
+            .find_object(oid)
+            .map_err(|_| VerifyError::MissingObject)?;
+        if object.kind != gix::objs::Kind::Blob {
+            return Err(VerifyError::NonBlobEntry);
+        }
+        let bytes = object.detach().data;
+        let content_sha256 = digest::sha256(&bytes);
+        Ok((bytes, content_sha256))
     }
 
     /// Walk `tree` (bounded like [`Store::render_verified`]'s walk), returning the first blob whose
@@ -305,6 +372,63 @@ impl Store {
                     });
                 }
                 // A symlink, gitlink, or any other entry kind the scanner would never have written.
+                _ => return Err(VerifyError::NonBlobEntry),
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk `tree` like [`Self::walk_tree`] but record only the leaf **structure** (`path, mode, git_oid`),
+    /// **never reading a blob object** — so an offloaded blob with an absent git object does not fault here.
+    /// Sub-trees (never offloaded) are loaded to recurse; a non-blob/non-tree entry is a forged/corrupt store.
+    fn walk_structure(
+        &self,
+        tree: &gix::Tree<'_>,
+        prefix: &str,
+        depth: usize,
+        out: &mut Vec<TreeLeaf>,
+    ) -> Result<(), VerifyError> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(VerifyError::Malformed("tree nesting too deep".into()));
+        }
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+            let name =
+                std::str::from_utf8(entry.filename()).map_err(|_| VerifyError::NonUtf8Name)?;
+            let path = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let oid = entry.oid().to_owned();
+            match entry.mode().kind() {
+                EntryKind::Tree => {
+                    let sub = self
+                        .repo()
+                        .find_object(oid)
+                        .map_err(|_| VerifyError::MissingObject)?
+                        .try_into_tree()
+                        .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+                    self.walk_structure(&sub, &path, depth + 1, out)?;
+                }
+                kind @ (EntryKind::Blob | EntryKind::BlobExecutable) => {
+                    let mode = if kind == EntryKind::BlobExecutable {
+                        FileMode::Executable
+                    } else {
+                        FileMode::Regular
+                    };
+                    // Record the locator from the tree entry itself — NO blob read, so an offloaded blob's
+                    // absent git object is fine. The git OID is the bridge the authority joins on `location`.
+                    let git_oid: [u8; GIT_OID_LEN] = oid
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| VerifyError::Malformed("git oid is not 20 bytes".into()))?;
+                    out.push(TreeLeaf {
+                        path,
+                        mode,
+                        git_oid,
+                    });
+                }
                 _ => return Err(VerifyError::NonBlobEntry),
             }
         }

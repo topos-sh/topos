@@ -664,3 +664,126 @@ fn stage_into_an_existing_quarantine_dir_re_stages_fresh() {
         "the prior candidate's object must be cleared, not preserved"
     );
 }
+
+// ===== The local-filesystem large-object store (the size-routed offload backend) =====
+
+use crate::error::GitstoreError;
+use crate::largeobj::{LargeObjectStore, LocalLargeStore};
+
+/// Reconstruct a blob's final shard path under a store root (the store keeps this private; the test rebuilds
+/// it to assert layout + to inject at-rest corruption).
+fn large_final_path(root: &std::path::Path, id: &[u8; 32]) -> PathBuf {
+    let hex = digest::to_hex(id);
+    root.join("objects")
+        .join(&hex[0..2])
+        .join(&hex[2..4])
+        .join(&hex)
+}
+
+#[test]
+fn large_store_round_trips_every_byte_and_shards_by_hash() {
+    let scratch = Scratch::new("large-rt");
+    let store = LocalLargeStore::new(scratch.0.clone());
+    // empty, small, and arbitrary-byte (incl. NUL/high) payloads all round-trip byte-exact.
+    for bytes in [
+        b"".to_vec(),
+        b"hello".to_vec(),
+        (0u16..512).map(|n| (n & 0xff) as u8).collect::<Vec<u8>>(),
+    ] {
+        let id = digest::sha256(&bytes);
+        store.put(id, &bytes).expect("put");
+        assert_eq!(
+            store.get(id).expect("get"),
+            bytes,
+            "round-trip changed bytes"
+        );
+        assert!(store.exists(id).expect("exists"));
+        // It landed at the sharded content-addressed path.
+        assert!(
+            large_final_path(&scratch.0, &id).is_file(),
+            "blob must be installed at objects/aa/bb/<hex>"
+        );
+    }
+}
+
+#[test]
+fn large_store_put_rejects_a_mislabeled_id_and_writes_nothing() {
+    let scratch = Scratch::new("large-bad-put");
+    let store = LocalLargeStore::new(scratch.0.clone());
+    let bytes = b"the real bytes";
+    let wrong_id = digest::sha256(b"a different content id");
+    assert!(matches!(
+        store.put(wrong_id, bytes),
+        Err(GitstoreError::BlobIntegrity)
+    ));
+    // Nothing reaches the final path under the wrong id, and no temp lingers as a referenced object.
+    assert!(!large_final_path(&scratch.0, &wrong_id).exists());
+    assert!(!store.exists(wrong_id).expect("exists"));
+}
+
+#[test]
+fn large_store_get_detects_at_rest_corruption() {
+    let scratch = Scratch::new("large-rot");
+    let store = LocalLargeStore::new(scratch.0.clone());
+    let bytes = b"authentic bytes that will be tampered with on disk";
+    let id = digest::sha256(bytes);
+    store.put(id, bytes).expect("put");
+    // Tamper the stored file in place (a bit-rot / swap), keeping the same path/id.
+    std::fs::write(large_final_path(&scratch.0, &id), b"tampered").expect("corrupt");
+    assert!(
+        matches!(store.get(id), Err(GitstoreError::BlobIntegrity)),
+        "verify-on-read must refuse bytes that no longer hash to the id"
+    );
+}
+
+#[test]
+fn large_store_delete_is_idempotent_and_put_self_heals() {
+    let scratch = Scratch::new("large-del");
+    let store = LocalLargeStore::new(scratch.0.clone());
+    let bytes = b"deletable + re-installable";
+    let id = digest::sha256(bytes);
+
+    store.put(id, bytes).expect("put");
+    assert!(store.exists(id).expect("exists"));
+    store.delete(id).expect("delete");
+    assert!(!store.exists(id).expect("exists after delete"));
+    // Deleting an already-absent object is a no-op (the recovery sweep re-running).
+    store.delete(id).expect("idempotent re-delete");
+    assert!(matches!(store.get(id), Err(GitstoreError::Io(_))));
+
+    // A re-put of byte-identical content re-installs (overwrite — the migrate re-materialize belt's path).
+    store.put(id, bytes).expect("re-put");
+    assert_eq!(store.get(id).expect("get"), bytes);
+    // And a re-put over an EXISTING (here truncated) file overwrites it with verified bytes (self-heal).
+    std::fs::write(large_final_path(&scratch.0, &id), b"truncated").expect("truncate");
+    store.put(id, bytes).expect("re-put over a damaged final");
+    assert_eq!(store.get(id).expect("get heals"), bytes);
+}
+
+#[test]
+fn large_store_per_root_isolation_has_no_cross_root_dedup() {
+    // Two workspaces are two separate roots: byte-identical content is two distinct physical objects, and
+    // one root's handle never sees the other's bytes (the hard tenant boundary is the path, not just an ACL).
+    let scratch = Scratch::new("large-tenant");
+    let root_a = scratch.0.join("wsA");
+    let root_b = scratch.0.join("wsB");
+    let a = LocalLargeStore::new(root_a.clone());
+    let b = LocalLargeStore::new(root_b.clone());
+    let bytes = b"identical content uploaded by two different workspaces";
+    let id = digest::sha256(bytes);
+
+    a.put(id, bytes).expect("put A");
+    assert!(a.exists(id).expect("A exists"));
+    assert!(
+        !b.exists(id).expect("B exists"),
+        "a different per-workspace root must NOT see workspace A's object"
+    );
+    b.put(id, bytes).expect("put B");
+    // Two distinct physical files under separate roots — no cross-workspace content dedup.
+    let (pa, pb) = (
+        large_final_path(&root_a, &id),
+        large_final_path(&root_b, &id),
+    );
+    assert_ne!(pa, pb);
+    assert!(pa.is_file() && pb.is_file(), "each root holds its own copy");
+}

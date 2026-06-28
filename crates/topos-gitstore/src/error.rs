@@ -24,6 +24,11 @@ pub enum GitstoreError {
     /// A filesystem operation on the store failed.
     #[error("store io error: {0}")]
     Io(String),
+    /// A content-addressed large object's bytes do not match their `blob_id` (`sha256(bytes) != blob_id`):
+    /// either a caller mis-declared the id on `put`, or `get`'s verify-on-read found at-rest corruption.
+    /// The bytes are never installed or returned — placement never weakens the byte-exact guarantee.
+    #[error("large-object bytes do not match their content id")]
+    BlobIntegrity,
 }
 
 /// A failure reading + **authenticating** a stored version. Every variant means "do not trust these

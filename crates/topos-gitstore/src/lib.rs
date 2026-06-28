@@ -27,10 +27,11 @@
 //!
 //! ## Placement-independent identity (the large-object offload is a drop-in)
 //!
-//! Every file — regardless of size, with no size cap this increment — is a real git blob addressed by
-//! `blob_id = sha256(raw bytes)`. Because identity is recomputed over real bytes, *which* store physically
-//! holds a blob never changes any id or digest. The [`largeobj`] seam is declared (unwired) so a later
-//! size-routed local / S3-compatible backend slots behind one read chokepoint with zero identity impact.
+//! Every file is a real content-addressed blob addressed by `blob_id = sha256(raw bytes)`. Because
+//! identity is recomputed over real bytes, *which* store physically holds a blob never changes any id or
+//! digest. The [`largeobj`] module wires the local-filesystem [`largeobj::LocalLargeStore`] behind the
+//! [`largeobj::LargeObjectStore`] trait; the authority crate routes a big blob there at migrate (keyed by
+//! the same `blob_id`) and dispatches reads/unlinks on the recorded location — with zero identity impact.
 
 mod diff;
 mod error;
@@ -46,7 +47,8 @@ mod tests;
 pub use diff::{DiffFile, unified_diff};
 pub use error::{GitstoreError, VerifyError};
 pub use fence::{GIT_OID_LEN, StagedBundle, StagedEntry};
-pub use read::{RenderedBundle, RenderedFile, VersionNode};
+pub use largeobj::{LargeObjectStore, LocalLargeStore};
+pub use read::{RenderedBundle, RenderedFile, TreeLeaf, VersionNode};
 pub use store::{ImportFile, Store, TreeHandle, WriteBatch};
 
 /// Re-exported for callers that build [`ImportFile`]s — the same two regular-file modes the kernel allows.

@@ -166,8 +166,16 @@ impl Store {
     }
 
     /// Build a candidate's tree in THIS (main) store from already-installed blobs — writing **no** blob
-    /// bytes (every entry's blob must already be fenced-installed). Mirrors paths + modes onto the recorded
-    /// git ids. Used by [`Self::commit_durable`]; never re-issues `write_blob`, so the fence is not bypassed.
+    /// bytes. Mirrors paths + modes onto the recorded git ids. Used by [`Self::commit_durable`]; never
+    /// re-issues `write_blob`, so the fence is not bypassed.
+    ///
+    /// Uses the **low-level (plumbing) tree editor**, which — unlike `repo.empty_tree().edit()` — does NOT
+    /// verify that each entry's blob object exists. That is load-bearing for the size-routed offload: an
+    /// **offloaded** blob's bytes live in the large-object store, so its git object is intentionally absent
+    /// here, and the high-level editor would refuse the whole tree. Identity is unaffected — `version_id` /
+    /// `bundle_digest` are over real-byte sha256s, never the git tree OID — and the tree still faithfully
+    /// carries every file's `(path, mode, git_oid)`, so the location-dispatching render can recover and
+    /// fetch each blob from the store the database records.
     ///
     /// # Errors
     /// [`GitstoreError::Gix`] on a tree-write failure.
@@ -175,16 +183,44 @@ impl Store {
         &self,
         entries: &[(&str, FileMode, [u8; GIT_OID_LEN])],
     ) -> Result<gix::ObjectId, GitstoreError> {
-        let mut editor = self.repo().empty_tree().edit().map_err(gix_err)?;
+        let repo = self.repo();
+        let mut editor = gix::objs::tree::Editor::new(
+            gix::objs::Tree {
+                entries: Vec::new(),
+            },
+            &repo.objects,
+            repo.object_hash(),
+        );
         for (path, mode, git_oid) in entries {
             let oid = oid_from_array(*git_oid)?;
             let kind = match mode {
                 FileMode::Regular => EntryKind::Blob,
                 FileMode::Executable => EntryKind::BlobExecutable,
             };
-            editor.upsert(*path, kind, oid).map_err(gix_err)?;
+            // The path is split into components (`a/b/c`), matching the high-level editor's behavior; the
+            // intermediate trees are created without requiring the leaf blob to be present.
+            editor.upsert(path.split('/'), kind, oid).map_err(gix_err)?;
         }
-        Ok(editor.write().map_err(gix_err)?.detach())
+        let tree_oid = editor
+            .write(|tree| repo.write_object(tree).map(gix::Id::detach))
+            .map_err(gix_err)?;
+        Ok(tree_oid)
+    }
+
+    /// Read one staged blob's raw bytes from THIS (quarantine) store by its git id — the dumb byte fetch a
+    /// size-routed migrate uses to copy an **offloaded** blob from the quarantine into the large-object
+    /// store (the large-side analog of [`Self::install_object_durable`]'s internal read for the git side).
+    /// Asserts the object is a blob; identity is re-checked by the large store's own `put`/verify-on-read.
+    ///
+    /// # Errors
+    /// [`GitstoreError::Gix`] if the object is absent or not a blob in this store.
+    pub fn read_staged_blob(&self, git_oid: [u8; GIT_OID_LEN]) -> Result<Vec<u8>, GitstoreError> {
+        let oid = oid_from_array(git_oid)?;
+        let object = self.repo().find_object(oid).map_err(gix_err)?;
+        if object.kind != gix::objs::Kind::Blob {
+            return Err(GitstoreError::Gix("staged object is not a blob".into()));
+        }
+        Ok(object.detach().data)
     }
 
     /// Record a migrated candidate's commit durably: build its tree from the installed blob ids, write the
