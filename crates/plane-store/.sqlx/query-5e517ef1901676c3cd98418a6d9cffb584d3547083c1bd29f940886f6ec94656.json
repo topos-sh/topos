@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT signed_record AS \"signed_record?: Vec<u8>\" FROM current\n               WHERE workspace_id = ?1 AND skill_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "signed_record?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5e517ef1901676c3cd98418a6d9cffb584d3547083c1bd29f940886f6ec94656"
+}

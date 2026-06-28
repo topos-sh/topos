@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT commit_id AS \"commit_id!: Vec<u8>\" FROM promotion_lease\n           WHERE workspace_id = ?1 AND op_id = ?2 AND expires_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "commit_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f25eb9ae40892fe5df2fb43a61100e137586b92c8f048bb1f2177cd7249ca764"
+}

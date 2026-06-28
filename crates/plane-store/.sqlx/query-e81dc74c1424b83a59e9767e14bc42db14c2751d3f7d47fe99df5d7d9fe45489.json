@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workspace_policy (workspace_id, review_required) VALUES (?1, ?2) ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e81dc74c1424b83a59e9767e14bc42db14c2751d3f7d47fe99df5d7d9fe45489"
+}

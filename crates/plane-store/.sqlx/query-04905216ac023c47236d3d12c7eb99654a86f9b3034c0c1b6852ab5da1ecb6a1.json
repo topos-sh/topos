@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET public_key = excluded.public_key, principal = excluded.principal, revoked = excluded.revoked",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "04905216ac023c47236d3d12c7eb99654a86f9b3034c0c1b6852ab5da1ecb6a1"
+}

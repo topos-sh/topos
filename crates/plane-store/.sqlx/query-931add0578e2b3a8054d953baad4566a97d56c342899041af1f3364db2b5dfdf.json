@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (workspace_id, skill_id) DO UPDATE SET commit_id = excluded.commit_id, epoch = excluded.epoch, seq = excluded.seq, signed_record = excluded.signed_record, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "931add0578e2b3a8054d953baad4566a97d56c342899041af1f3364db2b5dfdf"
+}

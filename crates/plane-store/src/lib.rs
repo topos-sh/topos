@@ -51,6 +51,8 @@ mod error;
 mod id;
 mod lineage;
 mod read;
+mod set_current;
+mod signer;
 mod sqlite;
 mod upload;
 
@@ -70,6 +72,7 @@ pub use authority::Authority;
 pub use error::{AuthorityError, Result};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
+pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadReceipt, UploadedFile};
 
 /// Re-exported for constructing [`UploadedFile`]s — the two regular-file modes the kernel allows.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (workspace_id, commit_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "fd1acef0280e09f84e00a4ad8553d1ad178be3105bfe6db5cde0e9ecbe5977be"
+}

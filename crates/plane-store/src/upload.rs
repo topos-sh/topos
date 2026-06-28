@@ -135,7 +135,14 @@ pub(crate) async fn upload_candidate(
     // records nothing the access rule could later read; the receipt is computed purely from the upload.
     match authority
         .db()
-        .record_authorized_commit(ws, skill, principal, CommitId(version_id), &object_ids)
+        .record_authorized_commit(
+            ws,
+            skill,
+            principal,
+            CommitId(version_id),
+            &object_ids,
+            tree.bundle_digest,
+        )
         .await?
     {
         RecordOutcome::Recorded => Ok(UploadReceipt {

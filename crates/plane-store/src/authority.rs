@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use topos_gitstore::{LocalLargeStore, Store};
 
 use crate::error::{AuthorityError, Result};
-use crate::id::{ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
+use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
+use crate::signer::PlaneSigner;
 use crate::sqlite::Db;
 use crate::upload::{CandidateUpload, UploadReceipt};
 
@@ -39,12 +41,16 @@ pub struct Authority {
     large_threshold: u64,
     /// Per-blob hard reject cap, enforced at ingest.
     large_reject_cap: u64,
+    /// The in-process plane signer — the ONLY private-key holder, loaded by
+    /// [`with_plane_key`](Self::with_plane_key). Absent until configured: the pointer-move requires it (a
+    /// typed precondition), while every other operation (read/upload/lineage/lifecycle) never signs.
+    signer: Option<PlaneSigner>,
 }
 
 impl Authority {
     /// Open the authority over a SQLite database file, a git-store root, and a large-object-store root (all
     /// created if absent, with the schema migrated). The size-routing threshold + reject cap default to
-    /// [`DEFAULT_LARGE_THRESHOLD`] / [`DEFAULT_LARGE_REJECT_CAP`]; override with
+    /// the crate's `DEFAULT_LARGE_THRESHOLD` / `DEFAULT_LARGE_REJECT_CAP`; override with
     /// [`with_large_limits`](Self::with_large_limits).
     ///
     /// # Errors
@@ -60,7 +66,20 @@ impl Authority {
             large_root: large_root.to_path_buf(),
             large_threshold: DEFAULT_LARGE_THRESHOLD,
             large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
+            signer: None,
         })
+    }
+
+    /// Load (or, on first run, generate + persist `0600`) the plane signing key from `path`, enabling the
+    /// pointer-move. The key is read once here — never per-op, never inside a transaction. Self-host needs
+    /// zero config (the key is generated on first run); an operator may pre-place a 32-byte seed at `path`
+    /// instead. At-rest encryption / KMS is the named next step.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if the key file cannot be read/created/validated.
+    pub fn with_plane_key(mut self, path: &Path) -> Result<Self> {
+        self.signer = Some(PlaneSigner::load_or_generate(path)?);
+        Ok(self)
     }
 
     /// Override the size-routing threshold + per-blob reject cap (operational config — neither ever enters
@@ -142,11 +161,113 @@ impl Authority {
         crate::lineage::check_lineage(self, ws, skill, candidates).await
     }
 
+    /// Publish a candidate as the skill's new `current` — a direct publish, or **genesis** for the first
+    /// version. The full backbone flow: a review-required preflight (uploads nothing if gated) → ingest +
+    /// migrate (the crash-safe quarantine → lease → install → record) → the one pure-DB pointer-move
+    /// transaction (compare-and-set, sign, re-root, durable receipt). Returns the durable, replayable
+    /// receipt; a retry with the same `op_id` + bound identity returns it byte-identically.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
+    /// configured ([`with_plane_key`](Self::with_plane_key)).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        op_id: &OpId,
+        candidate: CandidateUpload,
+        device: DeviceSignedOp,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        if let Some(receipt) = crate::set_current::publish_preflight(
+            self,
+            ws,
+            skill,
+            device.op,
+            &device.device_key_id,
+            op_id,
+            None,
+            None,
+            device.expected,
+            created_at,
+        )
+        .await?
+        {
+            return Ok(receipt);
+        }
+        let staged = crate::lifecycle::ingest(self, ws, op_id, candidate, now).await?;
+        crate::lifecycle::migrate(self, ws, &staged, now).await?;
+        crate::set_current::publish(self, ws, skill, &staged, &device, created_at, now).await
+    }
+
+    /// Revert the skill's `current` to a known-good prior version — a **forward** commit `{tree: good.tree,
+    /// parents: [current]}` that advances `seq` (the pointer never moves backward). Bypasses the review gate
+    /// (it restores already-consented bytes — the in-v0 safety net).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish); plus a git-store fault constructing the forward commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn revert(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        good: CommitId,
+        device: DeviceSignedOp,
+        author: &str,
+        message: &str,
+        op_id: &OpId,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        crate::set_current::revert(
+            self, ws, skill, good, &device, author, message, op_id, created_at, now,
+        )
+        .await
+    }
+
+    /// The plane's raw 32-byte Ed25519 **public** key — for a follower to pin the trust root out-of-band.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no plane key is configured.
+    pub fn plane_public_key(&self) -> Result<[u8; 32]> {
+        Ok(self.plane_signer()?.public_key())
+    }
+
+    /// The plane's signing key id (the `key_id` in a signed pointer + an OK receipt).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no plane key is configured.
+    pub fn plane_key_id(&self) -> Result<String> {
+        Ok(self.plane_signer()?.key_id().to_owned())
+    }
+
+    /// Read back a skill's signed `current` record — the serialized `SignedCurrentRecord` a follower's
+    /// pointer fetch returns. `None` until the pointer has been moved (signed).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn read_signed_record(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+    ) -> Result<Option<Vec<u8>>> {
+        self.db.read_signed_record(ws, skill).await
+    }
+
     // ── pub(crate) internals the port modules drive ──────────────────────────────────────────────
 
     /// The SQLite backend handle (raw SQL stays inside `mod sqlite`).
     pub(crate) fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// The configured plane signer, or a typed precondition fault — the pointer-move requires a key.
+    pub(crate) fn plane_signer(&self) -> Result<&PlaneSigner> {
+        self.signer
+            .as_ref()
+            .ok_or_else(|| AuthorityError::internal(NoPlaneKey))
     }
 
     /// The per-workspace git-store directory — one component under the confined root. `WorkspaceId` is
@@ -206,3 +327,9 @@ impl Authority {
         LocalLargeStore::new(self.large_root.join(ws.as_str()))
     }
 }
+
+/// The pointer-move was attempted with no plane signing key configured (a precondition fault, not a
+/// protocol outcome — wired as an internal error so no key state crosses the public boundary).
+#[derive(Debug, thiserror::Error)]
+#[error("no plane signing key configured (call with_plane_key)")]
+struct NoPlaneKey;

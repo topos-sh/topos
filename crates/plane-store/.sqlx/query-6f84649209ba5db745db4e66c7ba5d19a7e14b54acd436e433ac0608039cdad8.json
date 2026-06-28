@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE current SET epoch = ?3, seq = ?4 WHERE workspace_id = ?1 AND skill_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "6f84649209ba5db745db4e66c7ba5d19a7e14b54acd436e433ac0608039cdad8"
+}

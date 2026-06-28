@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT commit_id AS \"commit_id!: Vec<u8>\", epoch AS \"epoch!: i64\", seq AS \"seq!: i64\"\n           FROM current WHERE workspace_id = ?1 AND skill_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "commit_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "epoch!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "seq!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fed923913154317b74c04c3b1ea48d938eb131580eae4159d5898026e1dbc2b0"
+}

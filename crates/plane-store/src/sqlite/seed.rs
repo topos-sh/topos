@@ -119,6 +119,97 @@ impl Db {
         Ok(())
     }
 
+    /// Register a fixture device — `(device_key_id) -> (public_key, principal, revoked)` — the pointer-move's
+    /// in-transaction authorization resolves against. Real issuance lands later behind the enrollment port.
+    pub(crate) async fn seed_device(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        public_key: &[u8; 32],
+        principal: &Principal,
+        revoked: bool,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let pk = public_key.as_slice();
+        let principal_s = principal.as_str();
+        let revoked_i = i64::from(revoked);
+        sqlx::query!(
+            "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET \
+               public_key = excluded.public_key, principal = excluded.principal, revoked = excluded.revoked",
+            ws_s,
+            device_key_id,
+            pk,
+            principal_s,
+            revoked_i,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Revoke a registered device (the device-side revocation: `revoked = 1`). A revoke committed before a
+    /// promotion is serialized ahead of the pointer-move's in-transaction device read and blocks the move.
+    pub(crate) async fn revoke_device(&self, ws: &WorkspaceId, device_key_id: &str) -> Result<()> {
+        let ws_s = ws.as_str();
+        sqlx::query!(
+            "UPDATE device_registry SET revoked = 1 WHERE workspace_id = ?1 AND device_key_id = ?2",
+            ws_s,
+            device_key_id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Force a skill's `current` generation (test-only) — simulates a backup/restore that bumps `epoch`
+    /// while reusing `seq`, so the restore-ABA test can prove the CAS compares the WHOLE `(epoch, seq)` pair
+    /// (a seq-only CAS would wrongly accept a stale base at the reused `seq`).
+    pub(crate) async fn force_current_generation(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        epoch: i64,
+        seq: i64,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        sqlx::query!(
+            "UPDATE current SET epoch = ?3, seq = ?4 WHERE workspace_id = ?1 AND skill_id = ?2",
+            ws_s,
+            skill_s,
+            epoch,
+            seq,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Set a workspace's review-required policy (fixture-seeded; there is no public set-policy verb yet).
+    pub(crate) async fn set_review_required(
+        &self,
+        ws: &WorkspaceId,
+        review_required: bool,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let rr = i64::from(review_required);
+        sqlx::query!(
+            "INSERT INTO workspace_policy (workspace_id, review_required) VALUES (?1, ?2) \
+             ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
+            ws_s,
+            rr,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
     /// Stage the per-skill `current` pointer (created, never moved this increment; the signed record
     /// stays absent). Requires the commit's provenance to exist first (the foreign key).
     pub(crate) async fn seed_current(

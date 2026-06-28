@@ -221,6 +221,55 @@ pub(crate) async fn migrate_finish(
     Ok(())
 }
 
+/// Stage a SERVER-CONSTRUCTED forward commit (a revert): its objects are already present in the main store
+/// (the revert restores a retained version's tree), so there is **nothing to install** — just lease the
+/// object set, write the commit durably, and make the lease non-expiring. The pointer-move then promotes it
+/// through the SAME transaction a publish uses, so the lease-completion gate + the re-rooting handoff behave
+/// identically. No upload, no quarantine — the entries + object set come from the (present) target version.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stage_forward_commit(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    op_id: &OpId,
+    version_id: CommitId,
+    bundle_digest: [u8; 32],
+    entries: &[(String, topos_core::digest::FileMode, [u8; 20])],
+    parents: &[CommitId],
+    object_ids: &[ObjectId],
+    author: &str,
+    message: &str,
+    now: i64,
+) -> Result<()> {
+    // Lease the object set BEFORE recording the commit (the pointer-move's lease-completion gate requires the
+    // committed lease, and the GC keep-set protects the objects meanwhile — exactly as migrate does).
+    authority
+        .db()
+        .insert_lease(ws, op_id, version_id, object_ids, now + LEASE_TTL_SECS)
+        .await?;
+
+    let main = authority.store_for_write(ws)?;
+    let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
+        .iter()
+        .map(|(p, m, g)| (p.as_str(), *m, *g))
+        .collect();
+    let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
+    main.commit_durable(
+        version_id.0,
+        &parent_bytes,
+        &entry_refs,
+        bundle_digest,
+        author,
+        message,
+    )
+    .map_err(map_stage_reject)?;
+
+    authority
+        .db()
+        .commit_lease(ws, op_id, version_id, now)
+        .await?;
+    Ok(())
+}
+
 /// Remove a quarantine dir, treating "already gone" as success. Returns whether the dir is now gone (so the
 /// caller may safely drop its tracking row); any other error leaves it for the janitor to retry.
 pub(crate) fn remove_quarantine_dir(dir: &std::path::Path) -> bool {
@@ -408,8 +457,11 @@ fn rematerialize_if_gone(
     Ok(())
 }
 
-/// The distinct object ids of a staged bundle's entries (a blob at two paths is one object).
-fn distinct_object_ids(entries: &[StagedEntry]) -> Vec<ObjectId> {
+/// The distinct object ids of a staged bundle's entries (a blob at two paths is one object). The
+/// pointer-move write derives the candidate's reachability + availability set from this same function —
+/// the authoritative in-process candidate tree — so the `commit_object` edges it writes match exactly the
+/// object set `migrate_lease` rooted.
+pub(crate) fn distinct_object_ids(entries: &[StagedEntry]) -> Vec<ObjectId> {
     let mut seen = std::collections::BTreeSet::new();
     entries
         .iter()

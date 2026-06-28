@@ -152,10 +152,12 @@ impl Db {
         principal: &Principal,
         commit: CommitId,
         objects: &[ObjectId],
+        bundle_digest: [u8; 32],
     ) -> Result<RecordOutcome> {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
         let cid = commit.0.as_slice();
+        let digest = bundle_digest.as_slice();
 
         let mut tx = self.begin_immediate().await?;
 
@@ -169,11 +171,12 @@ impl Db {
         // (2) Provenance, owner-guarded by the primary key. Insert-if-absent, then read the owner: if a
         // different skill already owns this commit id, deny without naming the other skill.
         sqlx::query!(
-            "INSERT INTO skill_commit (workspace_id, commit_id, skill_id) VALUES (?1, ?2, ?3) \
+            "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (workspace_id, commit_id) DO NOTHING",
             ws_s,
             cid,
             skill_s,
+            digest,
         )
         .execute(&mut *tx)
         .await
@@ -304,6 +307,9 @@ struct MissingProvenanceRow;
 mod lifecycle;
 
 pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
+
+// The pointer-move transaction (the `set-current` write) + its receipt/policy/device-registry helpers.
+mod set_current;
 
 #[cfg(test)]
 mod seed;
