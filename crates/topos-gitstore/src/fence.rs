@@ -199,9 +199,13 @@ impl Store {
             };
             // Restore the component validation the high-level editor applied (the plumbing editor skips it):
             // reject `.git`/`.gitmodules` + their HFS+/NTFS aliases, path separators, and Windows
-            // devices/illegal chars, exactly as the client write path does — so the fenced migrate can never
-            // record a tree the normal upload would refuse. (The kernel `check_path` covers `.`/`..`/NUL/
-            // absolute; this covers the rest.) Symlinks are never written here, so `mode = None`.
+            // devices/illegal chars — so the fenced migrate can never record a tree the client write path
+            // (which validates the same way via the high-level editor) would refuse. We pin all protections
+            // on (`Options::default`) rather than reading a repo's git config: a server distributing bundles
+            // to heterogeneous clients should reject every platform's aliases regardless of its own host, and
+            // it agrees with the client on the security-critical `.git`/`.gitmodules` literals (rejected
+            // under any options). (The kernel `check_path` covers `.`/`..`/NUL/absolute; this covers the
+            // rest.) Symlinks are never written here, so `mode = None`.
             for component in path.split('/') {
                 gix::validate::path::component(
                     component.into(),
