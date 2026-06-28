@@ -74,6 +74,29 @@ same-process code.) The error type holds this line too: internal faults carry a 
   re-routes by a new candidate's size). Per-workspace large-object roots ⇒ **no cross-workspace dedup**. The
   legacy `upload_candidate` path stays all-git/unrouted (superseded when the pointer-move lands). Backend is
   the **local FS only** — the S3-compatible remote backend + the online backfill are the named next steps.
+- **The pointer-move write (`set-current`) — publish · genesis · revert.** The `current` row this layer only
+  created now **moves**, **signed**, in **one `BEGIN IMMEDIATE` pure-DB transaction** (no filesystem op
+  inside it): receipt-replay → in-transaction authoritative authz (a device-op signature verified against the
+  registry's **non-revoked** public key bound to a **rostered** principal — a revoke committed before the
+  promotion blocks it) → **compare-and-set on the whole `(epoch, seq)` pair** (CONFLICT carries the live
+  generation; a restore that bumps `epoch` while reusing `seq` is caught) → availability (every candidate
+  object `present` + not tombstoned) + a **lease-completion gate** (the committed lease proves the migrate
+  finished) → same-skill lineage + the **first-parent assert** → provenance + reachability written **before**
+  the pointer advance (the immediate FK) and **before** the lease release (so the GC keep-set covers the
+  objects continuously across the re-root — no reclaim window) → an **in-process Ed25519 signer** (the only
+  private-key holder; load-or-generate `0600`; signs the JCS pointer preimage) → a durable **all-outcome
+  receipt** keyed `(workspace_id, device_key_id, op_id)` (a lost-ack retry replays it byte-for-byte). A
+  candidate is re-verified **renderable** before the txn (the migrate path defers that re-check to here).
+  **`revert --to <good>`** is a **forward** commit `{tree: good.tree, parents: [current]}` (`seq` advances,
+  the pointer never moves backward); good's tree digest is read from its provenance row (migration `0003`
+  added a `bundle_digest` column — the git commit does not persist it). The **review-required typed-fail
+  gate** is built (a direct publish under the fixture-seeded policy short-circuits to `APPROVAL_REQUIRED`
+  having ingested nothing; genesis + revert bypass it). The cross-skill lineage predicate is now **enforced
+  transactionally** here. Migration `0003` adds `op_receipts` + `workspace_policy` + a fixture-seeded
+  `device_registry`. Two-parent author merges are rejected wholesale (a later increment). Driven in-process
+  by the interleaving tests (concurrent-publish → one OK + one stable CONFLICT; the ABA traps; lost-ack
+  replay; revoke-blocks-promotion; post-promote GC-reachability; genesis; first-parent) — **no HTTP, no
+  client**.
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 
@@ -88,11 +111,16 @@ domain-typed boundary with no change to callers.
 
 The large-object store's **S3-compatible remote backend** (a second `LargeObjectStore` impl + a
 `large-remote` `location` arm — a no-op extraction) and its **idempotent online backfill** (copy → verify →
-flip `location` → `git repack`), both additive + client-invisible; the pointer-move write (compare-and-set on
-`(epoch, seq)`, the in-process Ed25519 signer, durable all-outcome receipts) that *moves* the `current`
-row this layer only creates **and** consumes a migrated candidate's lease; the cross-skill lineage
-predicate's transactional **enforcement**; the `purge` verb + force-unlink (the tombstones table + denylist
-check already exist); Postgres (SQLite-first); proposals / the review gate; per-skill encryption-at-rest.
+flip `location` → `git repack`), both additive + client-invisible; the **propose → review-approve promotion**
+(the `publish --propose` path, the `review --approve` promotion, the `proposals`/`approvals` tables — the
+immediate follow-on; the `set_current` core is already factored to share its compare-and-set/sign/receipt
+transaction, and the typed-fail `APPROVAL_REQUIRED` gate is the only review surface built so far); the client
+**pull engine** that materializes a signed pointer; the **HTTP plane** (`set-current` is exercised in-process
+only); **at-rest key encryption / KMS** (the plane key is a plaintext `0600` seed for now); the `purge` verb +
+force-unlink (the tombstones table + denylist check already exist); Postgres (SQLite-first — the interleaving
+tests assert on outcome/invariant, never an error code, so the Postgres arm is a pure later extension);
+two-parent author merges; real device/roster issuance + revocation routes (the registry is fixture-seeded);
+per-skill encryption-at-rest.
 
 ## Build note
 
@@ -105,3 +133,12 @@ runtime-tokio, macros, migrate — no TLS); `tokio` with only the `time` feature
 (the migrate deleting-wait uses a bounded-backoff sleep while it polls outside any write transaction) —
 arch-clean because the client takes no edge to `plane-store`; `tokio`'s `rt` + `macros` are dev-only (to
 drive `#[tokio::test]`). The async runtime itself is still the caller's, via sqlx's `runtime-tokio` feature.
+
+The **pointer-move signer** adds, to **this crate only** (never the client — `check-arch` forbids the
+`topos → plane-store` edge, so none of these reach the CLI): `ed25519-dalek` with `std` + `zeroize` (the
+shared workspace pin stays `default-features = false` so `topos-core` keeps its verify-only `no_std` path; the
+`zeroize` feature restores `SigningKey`'s zero-on-drop that the stripped default would lose), `zeroize`
+(wiping the raw seed buffer around `from_bytes`), `getrandom` (the OS CSPRNG for first-run key generation),
+`base64` (base64url-unpadded for the signed pointer's signature value), `uuid` (parsing the canonical op id
+into the 16 bytes the device-op signature binds), and `serde_json` (serializing the signed-`current` record
+DTO into the stored BLOB). The plane private key lives **only** here; `topos-core` stays no-key verify-only.

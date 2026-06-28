@@ -46,14 +46,26 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > (the same `version_id`/`bundle_digest` whichever store holds the bytes — **no pointer files**); reads
 > (single-object and whole-bundle render) and the GC unlink **dispatch on `location`**, still through the
 > skill-scoped access rule (404-not-403, never by bare hash); and there is **no cross-workspace dedup**. The
-> database leads and the filesystem trails throughout. Still to come: the large-object store's
-> **S3-compatible remote backend + online backfill** (additive, client-invisible); the pointer-move write
-> (the `(epoch,seq)` compare-and-set + the in-process signer + durable receipts) that *moves* the `current`
-> pointer this layer only creates; the HTTP plane; signing-at-rest; the four-state sync machine + the `pull`
-> engine; the byte-writing materialization (the atomic dir-swap that an *update* uses to overwrite a harness
-> dir); the OpenClaw/Hermes adapters; identity/roster issuance; and Postgres. `sqlx` is referenced by
-> `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum` stays declared
-> but unreferenced until the HTTP plane lands.
+> database leads and the filesystem trails throughout. The **pointer-move write** (`set-current`: publish ·
+> genesis · revert) that *moves* the `current` pointer this layer only created is now built too: **one
+> `BEGIN IMMEDIATE` pure-DB transaction** (no filesystem op inside it) does receipt-replay → in-transaction
+> authoritative device authz (a device-op signature against a **non-revoked** registered key bound to a
+> **rostered** principal — a revoke committed first blocks the move) → a **compare-and-set on the whole
+> `(epoch,seq)` pair** (CONFLICT carries the live generation; a restore that bumps `epoch` while reusing `seq`
+> is caught) → object-availability + a lease-completion gate → same-skill lineage + the **first-parent
+> assert** → provenance + reachability written **before** the pointer advance and the lease release (so a
+> concurrent GC never has a window to reclaim the freshly-current bytes) → an **in-process Ed25519 signer**
+> (the only private-key holder; load-or-generate `0600`) → a durable **all-outcome receipt** keyed
+> `(workspace, device_key_id, op_id)` (a lost-ack retry replays it byte-for-byte). `revert` is a **forward**
+> commit (`seq` advances; the pointer never moves backward); the **review-required typed-fail gate** fails a
+> direct publish closed (`APPROVAL_REQUIRED`, ingesting nothing). It is exercised **in-process** (no HTTP, no
+> client) by deterministic interleaving tests. Still to come: the large-object store's **S3-compatible remote
+> backend + online backfill** (additive, client-invisible); the **propose → review-approve promotion** (the
+> immediate follow-on; the typed gate is the only review surface so far); the HTTP plane; at-rest key
+> encryption; the four-state sync machine + the `pull` engine; the byte-writing materialization (the atomic
+> dir-swap that an *update* uses to overwrite a harness dir); the OpenClaw/Hermes adapters; identity/roster +
+> device issuance; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the client build —
+> `check-arch` forbids that edge); `axum` stays declared but unreferenced until the HTTP plane lands.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
