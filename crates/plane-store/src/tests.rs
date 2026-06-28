@@ -46,7 +46,11 @@ impl Fixture {
             &dir.join("large"),
         )
         .await
-        .expect("open authority");
+        .expect("open authority")
+        // Every fixture gets a plane signing key (load-or-generate, 0600) — the pointer-move tests need it;
+        // it is simply unused by the read/upload/lifecycle tests.
+        .with_plane_key(&dir.join("plane.key"))
+        .expect("load plane key");
         if let Some((threshold, reject_cap)) = limits {
             authority = authority.with_large_limits(threshold, reject_cap);
         }
@@ -470,8 +474,10 @@ async fn two_writers_serialize_without_a_busy_error() {
     let os1 = [ObjectId([0x01; 32])];
     let os2 = [ObjectId([0x02; 32])];
     let (r1, r2) = tokio::join!(
-        a.db().record_authorized_commit(&w, &s, &p, c1, &os1),
-        a.db().record_authorized_commit(&w, &s, &p, c2, &os2),
+        a.db()
+            .record_authorized_commit(&w, &s, &p, c1, &os1, [0xC1; 32]),
+        a.db()
+            .record_authorized_commit(&w, &s, &p, c2, &os2, [0xC2; 32]),
     );
     assert_eq!(r1.unwrap(), RecordOutcome::Recorded);
     assert_eq!(r2.unwrap(), RecordOutcome::Recorded);
@@ -2188,4 +2194,956 @@ async fn gc_reclaims_large_objects_when_no_git_repo_exists() {
         ObjectStatus::Absent
     );
     assert!(!a.large_store(&w).exists(obj.0).unwrap());
+}
+
+// ── the pointer-move write (`set-current`): genesis · publish · revert · the gate · interleavings ──────
+//
+// These drive the WHOLE backbone in-process against a real SQLite + git store: ingest → migrate → the one
+// serializable pointer-move transaction. A test acts as the client device — it signs the device-op over the
+// SERVER-rehashed candidate values (exactly what the txn reconstructs), so a valid signature is the binding.
+
+use ed25519_dalek::Signer as _;
+use topos_core::sign::{
+    CurrentPointer, DeviceOp, DeviceOpFields, device_op_preimage, verify_pointer,
+};
+use topos_types::{Generation, SignedCurrentRecord, TerminalOutcome};
+
+use crate::DeviceSignedOp;
+
+const NOW: i64 = 1_000_000;
+const CREATED_AT: &str = "2026-06-28T00:00:00Z";
+
+fn gn(epoch: u64, seq: u64) -> Generation {
+    Generation { epoch, seq }
+}
+
+/// A deterministic device signing key (the test's "client device"); its public key is seeded into the
+/// device registry, so the in-transaction authorization verifies the device-op against it.
+fn dev_key(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+/// Register a device + roster its principal so the pointer-move's in-transaction authorization passes.
+async fn register(
+    fx: &Fixture,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    dkid: &str,
+    key: &ed25519_dalek::SigningKey,
+    principal: &str,
+) {
+    let p = prin(principal);
+    fx.authority
+        .db()
+        .seed_device(ws, dkid, &key.verifying_key().to_bytes(), &p, false)
+        .await
+        .unwrap();
+    fx.authority.db().seed_roster(ws, skill, &p).await.unwrap();
+}
+
+/// Sign a device-op over the SERVER-trusted candidate identity (commit id + bundle digest + scope) — the
+/// same fields the transaction rebuilds, so an honest device's signature verifies there.
+#[allow(clippy::too_many_arguments)]
+fn sign_op(
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_kind: DeviceOp,
+    op_id: &OpId,
+    expected: Generation,
+    commit: [u8; 32],
+    digest: [u8; 32],
+) -> [u8; 64] {
+    let op_id_bytes = uuid::Uuid::parse_str(op_id.as_str()).unwrap().into_bytes();
+    let fields = DeviceOpFields {
+        workspace_id: ws.as_str(),
+        skill_id: skill.as_str(),
+        op: op_kind,
+        op_id: op_id_bytes,
+        device_key_id: dkid,
+        expected_epoch: expected.epoch,
+        expected_seq: expected.seq,
+        commit_id: commit,
+        bundle_digest: digest,
+    };
+    key.sign(&device_op_preimage(&fields).unwrap()).to_bytes()
+}
+
+/// Ingest + sign-over-the-staged-values + migrate, returning the staged candidate + the signed device op —
+/// so a test can drive the pointer-move itself (and inject a revoke/GC between migrate and the txn).
+#[allow(clippy::too_many_arguments)]
+async fn prepare(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_kind: DeviceOp,
+    op_id_str: &str,
+    candidate: CandidateUpload,
+    expected: Generation,
+) -> (lifecycle::StagedCandidate, DeviceSignedOp) {
+    let op_id = op(op_id_str);
+    let staged = lifecycle::ingest(&fx.authority, ws, &op_id, candidate, NOW)
+        .await
+        .unwrap();
+    let signature = sign_op(
+        key,
+        dkid,
+        ws,
+        skill,
+        op_kind,
+        &op_id,
+        expected,
+        staged.version_id.0,
+        staged.bundle_digest,
+    );
+    lifecycle::migrate(&fx.authority, ws, &staged, NOW)
+        .await
+        .unwrap();
+    (
+        staged,
+        DeviceSignedOp {
+            device_key_id: dkid.to_owned(),
+            op: op_kind,
+            signature,
+            expected,
+        },
+    )
+}
+
+/// The common case: prepare + drive the pointer-move, returning the receipt.
+#[allow(clippy::too_many_arguments)]
+async fn publish(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id_str: &str,
+    candidate: CandidateUpload,
+    expected: Generation,
+) -> crate::SetCurrentReceipt {
+    let (staged, device) = prepare(
+        fx,
+        key,
+        dkid,
+        ws,
+        skill,
+        DeviceOp::PublishDirect,
+        op_id_str,
+        candidate,
+        expected,
+    )
+    .await;
+    crate::set_current::publish(&fx.authority, ws, skill, &staged, &device, CREATED_AT, NOW)
+        .await
+        .unwrap()
+}
+
+/// A normal 1-parent publish candidate.
+fn child(parent: CommitId, files: Vec<UploadedFile>) -> CandidateUpload {
+    CandidateUpload {
+        files,
+        parents: vec![parent],
+        author: "d_test".to_owned(),
+        message: "topos publish".to_owned(),
+    }
+}
+
+fn hex32(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    out
+}
+
+fn b64_sig(s: &str) -> [u8; 64] {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+/// Reconstruct the `CurrentPointer` STRICTLY from {scope, record} of a stored signed record and verify it
+/// (key_id / schema_version are NOT part of the signed bytes). `scope` lets a test force a wrong scope.
+fn verify_record(bytes: &[u8], ws: &str, skill: &str, pubkey: &[u8; 32]) -> bool {
+    let rec: SignedCurrentRecord = serde_json::from_slice(bytes).unwrap();
+    let ptr = CurrentPointer {
+        workspace_id: ws,
+        skill_id: skill,
+        version_id: hex32(&rec.record.version_id),
+        epoch: rec.record.generation.epoch,
+        seq: rec.record.generation.seq,
+    };
+    verify_pointer(&ptr, &b64_sig(&rec.signature.value), pubkey)
+}
+
+#[tokio::test]
+async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies() {
+    let fx = Fixture::new("sc-genesis").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(11);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    let r = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "11111111-1111-4111-8111-111111111111",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert!(r.is_ok());
+    assert_eq!(r.current, Some(gn(1, 1)));
+
+    // Read the signed record back + verify under the plane public key (the signer round-trip).
+    let pubkey = fx.authority.plane_public_key().unwrap();
+    let record = fx
+        .authority
+        .read_signed_record(&w, &s)
+        .await
+        .unwrap()
+        .expect("signed");
+    assert!(verify_record(&record, "w_acme", "s_deploy", &pubkey));
+
+    // A one-bit flip fails; a wrong scope fails (the pointer cannot be replayed into another skill/ws).
+    let mut tampered = record.clone();
+    let i = tampered.len() / 2;
+    tampered[i] ^= 0x01;
+    // (The tampered bytes may not even deserialize; either way it must NOT verify.)
+    let tampered_ok = std::panic::catch_unwind(|| {
+        serde_json::from_slice::<SignedCurrentRecord>(&tampered)
+            .map(|_| ())
+            .is_ok()
+    })
+    .unwrap_or(false);
+    if tampered_ok {
+        assert!(!verify_record(&tampered, "w_acme", "s_deploy", &pubkey));
+    }
+    assert!(!verify_record(&record, "w_acme", "s_OTHER", &pubkey));
+    assert!(!verify_record(&record, "w_OTHER", "s_deploy", &pubkey));
+}
+
+#[tokio::test]
+async fn publish_advances_seq_within_the_epoch() {
+    let fx = Fixture::new("sc-advance").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(12);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "00000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a", b"1")]),
+        gn(0, 0),
+    )
+    .await;
+    assert_eq!(g.current, Some(gn(1, 1)));
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let r = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "00000000-0000-4000-8000-000000000002",
+        child(c0, vec![file("a", b"2")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(r.current, Some(gn(1, 2)));
+}
+
+/// Interleaving A — two publishes based on the same generation: exactly one OK, the other a stable CONFLICT
+/// carrying the live generation; the pointer advances exactly once.
+#[tokio::test]
+async fn concurrent_publishes_one_ok_one_conflict() {
+    let fx = Fixture::new("sc-concurrent").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(13);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "aaaaaaaa-0000-4000-8000-000000000000",
+        genesis(vec![file("a", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert_eq!(g.current, Some(gn(1, 1)));
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Prepare two distinct candidates, both based on (1,1); then drive the two pointer-moves concurrently.
+    let (sa, da) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        child(c0, vec![file("a", b"A")]),
+        gn(1, 1),
+    )
+    .await;
+    let (sb, db) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "aaaaaaaa-0000-4000-8000-000000000002",
+        child(c0, vec![file("a", b"B")]),
+        gn(1, 1),
+    )
+    .await;
+    let (ra, rb) = tokio::join!(
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW),
+    );
+    let (ra, rb) = (ra.unwrap(), rb.unwrap());
+    let outcomes = [ra.outcome, rb.outcome];
+    assert!(
+        outcomes.contains(&TerminalOutcome::Ok),
+        "one must be OK: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&TerminalOutcome::Conflict),
+        "one must CONFLICT: {outcomes:?}"
+    );
+    // The conflicter carries the LIVE generation, and the pointer advanced exactly once.
+    let conflict = if ra.outcome == TerminalOutcome::Conflict {
+        &ra
+    } else {
+        &rb
+    };
+    assert_eq!(conflict.current, Some(gn(1, 2)));
+}
+
+/// Interleaving C — a revert advances `seq` across a byte round-trip, so a stale move at the pre-revert
+/// generation CONFLICTs (a digest-only CAS would wrongly accept it; the whole-(epoch,seq) CAS catches it).
+#[tokio::test]
+async fn revert_advances_seq_and_a_stale_publish_conflicts() {
+    let fx = Fixture::new("sc-revert").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(14);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // genesis X(β) → (1,1); publish Y(γ) → (1,2).
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "cccccccc-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"beta")]),
+        gn(0, 0),
+    )
+    .await;
+    let x = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "cccccccc-0000-4000-8000-000000000001",
+        child(x, vec![file("f", b"gamma")]),
+        gn(1, 1),
+    )
+    .await;
+
+    // revert --to X → R(tree=β, parents=[Y]) → (1,3). seq advances; bytes return to β.
+    let rop = op("cccccccc-0000-4000-8000-000000000002");
+    let rsig = sign_revert(&fx, &key, "dk_a", &w, &s, x, &rop, gn(1, 2)).await;
+    let rdev = DeviceSignedOp {
+        device_key_id: "dk_a".to_owned(),
+        op: DeviceOp::Revert,
+        signature: rsig,
+        expected: gn(1, 2),
+    };
+    let rev = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            x,
+            rdev,
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(rev.is_ok(), "revert outcome: {:?}", rev.outcome);
+    assert_eq!(rev.current, Some(gn(1, 3)));
+
+    // A stale publish pinned to the PRE-revert generation (1,2) → CONFLICT (live (1,3)), even though the
+    // live tree is byte-identical to what it based on.
+    let y = fx.authority.db().read_current_commit(&w, &s).await.unwrap();
+    let _ = y;
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "cccccccc-0000-4000-8000-000000000003",
+        child(x, vec![file("f", b"delta")]),
+        gn(1, 2),
+    )
+    .await;
+    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(stale.outcome, TerminalOutcome::Conflict);
+    assert_eq!(stale.current, Some(gn(1, 3)));
+}
+
+/// The restore-ABA: a backup/restore that bumps `epoch` while reusing `seq`. A stale op at the OLD
+/// generation (matching `seq`, lower `epoch`) CONFLICTs — a seq-only CAS would wrongly accept it.
+#[tokio::test]
+async fn restore_aba_matching_seq_bumped_epoch_conflicts() {
+    let fx = Fixture::new("sc-aba").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(15);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "dddddddd-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "dddddddd-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await; // (1,2)
+
+    // Restore bumps epoch but reuses seq: (1,2) → (2,2).
+    fx.authority
+        .db()
+        .force_current_generation(&w, &s, 2, 2)
+        .await
+        .unwrap();
+    let c1 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A stale op pinned to (1,2) — matching seq, lower epoch — must CONFLICT.
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dddddddd-0000-4000-8000-000000000002",
+        child(c1, vec![file("f", b"2")]),
+        gn(1, 2),
+    )
+    .await;
+    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(stale.outcome, TerminalOutcome::Conflict);
+    assert_eq!(stale.current, Some(gn(2, 2)));
+}
+
+/// Interleaving E — a lost-ack retry: the original op committed (seq=2), the team moved on (seq=3), and the
+/// retry returns the BYTE-IDENTICAL original receipt (the original signed record), not a spurious conflict.
+#[tokio::test]
+async fn lost_ack_retry_replays_the_identical_receipt() {
+    let fx = Fixture::new("sc-lostack").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(16);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "eeeeeeee-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Op K commits at (1,2). Keep staged + device so we can replay the SAME op.
+    let (sk, dk) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "eeeeeeee-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"k")]),
+        gn(1, 1),
+    )
+    .await;
+    let first = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(first.current, Some(gn(1, 2)));
+    let ck = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The team moves on to (1,3).
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "eeeeeeee-0000-4000-8000-000000000002",
+        child(ck, vec![file("f", b"next")]),
+        gn(1, 2),
+    )
+    .await;
+
+    // Retry op K (its ack was lost): the replay returns the ORIGINAL receipt byte-for-byte (the (1,2) signed
+    // record), even though current is now (1,3).
+    let retry = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(retry, first);
+    assert_eq!(retry.current, Some(gn(1, 2)));
+}
+
+/// A device revoked BEFORE the promotion (committed ahead of the pointer-move txn) blocks the move.
+#[tokio::test]
+async fn a_revoke_before_promotion_blocks_the_move() {
+    let fx = Fixture::new("sc-revoke").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(17);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "f0000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Prepare a publish, then revoke the device BETWEEN migrate and the pointer-move.
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "f0000000-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    fx.authority.db().revoke_device(&w, "dk_a").await.unwrap();
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    // The pointer did NOT move.
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c0)
+    );
+}
+
+/// After a successful promote + lease-release, a GC pass does NOT reclaim the new `current`'s objects (the
+/// `skill_commit` + `commit_object` edges root them) — the re-rooting handoff has no reclaim window.
+#[tokio::test]
+async fn post_promote_gc_does_not_reclaim_current_objects() {
+    let fx = Fixture::new("sc-gcreach").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(18);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    let body = b"the current bytes";
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "10000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", body)]),
+        gn(0, 0),
+    )
+    .await;
+    let obj = object_id(body);
+    assert_eq!(
+        fx.authority.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+
+    // A full GC pass reclaims NOTHING current reaches.
+    let reclaimed = gc::run_gc(&fx.authority, &w, NOW + 1_000_000)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed, 0);
+    assert_eq!(
+        fx.authority.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+}
+
+/// A first-parent mismatch (the candidate's first parent is an in-skill ancestor that is NOT current) is
+/// DENIED even when the CAS matches — the parent assert is orthogonal to the generation compare.
+#[tokio::test]
+async fn first_parent_mismatch_is_denied_even_when_the_cas_matches() {
+    let fx = Fixture::new("sc-firstparent").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(19);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // genesis c0 → (1,1); publish c1 (parents=[c0]) → (1,2). current = c1.
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "20000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "20000000-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    let c1 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A candidate parented on c0 (an in-skill ancestor — lineage passes) but NOT on current (c1), pinned to
+    // the matching generation (1,2). The CAS passes; the first-parent assert rejects it.
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "20000000-0000-4000-8000-000000000002",
+        child(c0, vec![file("f", b"2")]),
+        gn(1, 2),
+    )
+    .await;
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c1)
+    ); // unmoved
+    // The receipt carries the live commit id for a clock-anomaly alarm.
+    let detail = r.details.unwrap();
+    assert_eq!(detail["code"], "FIRST_PARENT_MISMATCH");
+}
+
+/// A two-parent author-merge candidate is rejected wholesale in the backbone (merges are a later increment).
+#[tokio::test]
+async fn a_two_parent_merge_is_denied() {
+    let fx = Fixture::new("sc-merge").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(20);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "30000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "30000000-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    let c1 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A 2-parent candidate [c1, c0] (both in-skill, parents[0]==current) — rejected for parents.len() > 1.
+    let candidate = CandidateUpload {
+        files: vec![file("f", b"m")],
+        parents: vec![c1, c0],
+        author: "d_test".to_owned(),
+        message: "merge".to_owned(),
+    };
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "30000000-0000-4000-8000-000000000002",
+        candidate,
+        gn(1, 2),
+    )
+    .await;
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+}
+
+/// The review-required gate: a direct publish preflight short-circuits to APPROVAL_REQUIRED having ingested
+/// nothing; and the in-transaction read is authoritative if a migrate somehow happened first.
+#[tokio::test]
+async fn review_required_gates_a_direct_publish() {
+    let fx = Fixture::new("sc-gate").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(21);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+    fx.authority
+        .db()
+        .set_review_required(&w, true)
+        .await
+        .unwrap();
+
+    // Genesis BYPASSES the gate (someone must create the first version; it cannot be proposed against a
+    // base that does not exist) — even under review-required, it promotes.
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "40000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert!(g.is_ok());
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A NON-genesis direct publish IS gated. Preflight: APPROVAL_REQUIRED, having ingested/migrated nothing.
+    let op_id = op("40000000-0000-4000-8000-000000000001");
+    let pre = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &op_id,
+        None,
+        None,
+        gn(1, 1),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pre.unwrap().outcome, TerminalOutcome::ApprovalRequired);
+
+    // The in-txn gate is authoritative too: a direct publish that DID migrate first still fails closed, and
+    // the pointer does not move.
+    let (ss, ds) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "40000000-0000-4000-8000-000000000002",
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::ApprovalRequired);
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c0)
+    );
+}
+
+/// Sign a revert device-op: the server constructs the forward commit, so the test signs over the SAME values
+/// the txn will (good's digest determines the forward version_id).
+#[allow(clippy::too_many_arguments)]
+async fn sign_revert(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    good: CommitId,
+    op_id: &OpId,
+    expected: Generation,
+) -> [u8; 64] {
+    use topos_core::sign::{self, Commit};
+    let good_digest = fx
+        .authority
+        .db()
+        .skill_commit_bundle_digest(ws, good)
+        .await
+        .unwrap()
+        .unwrap();
+    let current = fx
+        .authority
+        .db()
+        .read_current_commit(ws, skill)
+        .await
+        .unwrap()
+        .unwrap();
+    let version_id = sign::commit_id(&Commit {
+        parents: &[current.0],
+        tree: good_digest,
+        author: "d_test",
+        message: "topos revert",
+    })
+    .unwrap();
+    sign_op(
+        key,
+        dkid,
+        ws,
+        skill,
+        DeviceOp::Revert,
+        op_id,
+        expected,
+        version_id,
+        good_digest,
+    )
 }
