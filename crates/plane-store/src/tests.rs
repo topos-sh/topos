@@ -1946,6 +1946,48 @@ async fn offloaded_dedup_reuse_and_the_re_materialize_belt() {
 }
 
 #[tokio::test]
+async fn dedup_reuse_honors_the_recorded_location_when_the_threshold_diverges() {
+    // The load-bearing Present-branch rule: a dedup-reuse re-materializes into the object's RECORDED store,
+    // it NEVER re-routes by the new candidate's size. Construct a genuine divergence: migrate under a HUGE
+    // threshold (the blob lands in git), then — simulating an operator lowering the threshold — migrate the
+    // SAME bytes via a SECOND authority over the same stores with a tiny threshold (whose size-route would
+    // now pick large-local). The object must stay in git; the large store must never receive it.
+    let fx = Fixture::with_large_limits("recorded-loc", 1 << 30, 1 << 30).await; // huge → routes to git
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x1D);
+    let obj = object_id(&body);
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    assert_eq!(
+        a.db().object_location(&w, obj).await.unwrap(),
+        Some(Location::Git)
+    );
+    assert!(!a.large_store(&w).exists(obj.0).unwrap());
+
+    // A second authority over the SAME stores, now with a tiny threshold (its size-route would say large).
+    let a2 = Authority::open_sqlite(
+        &fx.dir.join("plane.db"),
+        &fx.dir.join("stores"),
+        &fx.dir.join("large"),
+    )
+    .await
+    .expect("open a second authority over the same stores")
+    .with_large_limits(1, 1 << 30);
+    ingest_migrate(&a2, &w, "op2", vec![file("model.bin", &body)], 200).await;
+
+    // The recorded location is still git, and the large store never received the bytes — the belt honored
+    // the recorded location instead of re-routing the existing object by the new candidate's size.
+    assert_eq!(
+        a2.db().object_location(&w, obj).await.unwrap(),
+        Some(Location::Git)
+    );
+    assert!(
+        !a2.large_store(&w).exists(obj.0).unwrap(),
+        "a dedup-reuse must not re-route an existing git object to the large store by the new size"
+    );
+}
+
+#[tokio::test]
 async fn recovery_sweep_reclaims_a_crashed_offloaded_deleting_object() {
     // "a crashed deleting must still recover" — for an OFFLOADED object: a GC claim that crashed before
     // finalizing leaves a stale `deleting` large-local row; the recovery sweep re-claims it and the unlink
