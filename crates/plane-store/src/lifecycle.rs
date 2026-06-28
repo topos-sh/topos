@@ -81,8 +81,13 @@ pub(crate) async fn ingest(
 
     let quarantine_dir = authority.workspace_quarantine_dir(ws, op_id);
 
-    // Record the quarantine objdir (GC-excluded) before staging, so a crash mid-stage leaves a janitor-able
-    // row. The stored objdir is reference metadata only — the janitor rebuilds the path from the ids.
+    // Record the quarantine objdir (GC-excluded) before staging, so a crash mid-stage normally leaves a
+    // janitor-able row. The stored objdir is reference metadata only — the janitor rebuilds the path from the
+    // ids. (Residual: under WAL + synchronous=NORMAL this row's commit is durable only at the next
+    // checkpoint, while `Store::stage` fsyncs the staged dir; a crash in that window can lose the row yet keep
+    // the dir — a low-severity, disk-only ORPHAN the row-driven janitor cannot see. Reconciled when durable
+    // quarantine tracking / a filesystem-reconciling janitor lands with the large-object store; it is never a
+    // safety issue — the orphan is unreferenced bytes outside every read/GC path.)
     authority
         .db()
         .insert_quarantine(

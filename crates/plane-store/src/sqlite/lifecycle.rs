@@ -271,9 +271,26 @@ impl Db {
     /// Atomically claim a STALE `deleting` row for recovery — the one-winner guard that makes the recovery
     /// sweep safe under concurrency. Bumps `status_updated_at` to now (so a second concurrent sweep no
     /// longer sees it as stale) while KEEPING it `deleting`, and returns its git locator only to the winner.
-    /// A `None` result means another sweeper already claimed it (or it is no longer a stale `deleting` row)
-    /// — the caller must NOT unlink. Keeping the row `deleting` across the unlink preserves the
-    /// unlink-before-`absent` ordering, so a concurrent migrate cannot reinstall the bytes mid-recovery.
+    /// A `None` result means another sweeper already claimed it (or it is no longer a stale unrooted
+    /// `deleting` row) — the caller must NOT unlink. Keeping the row `deleting` across the unlink preserves
+    /// the unlink-before-`absent` ordering, so a concurrent migrate cannot reinstall the bytes mid-recovery.
+    ///
+    /// Re-verifies the **read-authorization surface AT DELETE TIME** — the `commit_object` edge — exactly as
+    /// [`Self::claim_for_delete`] does, so a stale `deleting` row that became read-authorized after the
+    /// crashed claim is spared rather than unlinked. A crashed GC's stale row is NOT guaranteed unrooted: the
+    /// legacy `upload_candidate` path records a `commit_object` edge over identical content without consulting
+    /// `object_presence`, so the row can become readable later; without this guard the recovery unlink would
+    /// reclaim a now-readable, committed object's bytes (byte loss). A re-rooted row is SPARED (left
+    /// `deleting`, its `status_updated_at` un-bumped); since `deleting` is non-resurrectable the bytes stay on
+    /// disk and readable, while a re-migrate of that exact content is the only blocked op (a rare, no-data-loss
+    /// residual the later pointer-move's lease→edge handoff removes).
+    ///
+    /// Unlike `claim_for_delete`, this deliberately does **NOT** check the promotion lease. A live lease over
+    /// a `present` object means "in use, do not reclaim"; but over a *`deleting`* object it means a migrate's
+    /// `install_one` is **waiting** for recovery to flip it to `absent` so it can re-copy (the migrate leased
+    /// its full set *before* the wait). Sparing it on the lease would strand that waiter until the lease TTL
+    /// lapses. A lease alone is not readable (the read path authorizes via `commit_object`, never a lease), so
+    /// finalizing a leased-but-unedged `deleting` row loses no readable bytes — the waiter simply re-installs.
     pub(crate) async fn claim_stale_for_recovery(
         &self,
         ws: &WorkspaceId,
@@ -287,6 +304,8 @@ impl Db {
         let row = sqlx::query!(
             r#"UPDATE object_presence SET status_updated_at = ?4
                WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at < ?3
+                 AND NOT EXISTS (
+                     SELECT 1 FROM commit_object WHERE workspace_id = ?1 AND object_id = ?2)
                RETURNING git_oid AS "git_oid: Vec<u8>""#,
             ws_s,
             oid,
@@ -518,6 +537,45 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         rows.into_iter().map(|r| reparse_op(&r.op_id)).collect()
+    }
+
+    /// Atomically claim an EXPIRED quarantine slot for the janitor's sweep: delete the row **iff it is still
+    /// expired** (`expires_at <= now`), returning whether this call won the claim. A concurrent re-ingest that
+    /// reused the op id and refreshed `expires_at` into the future before this CAS is NOT claimed, so the
+    /// janitor never sweeps a *visibly* refreshed quarantine (the [`Self::expired_quarantine_ops`] candidate
+    /// list is point-in-time and advisory; this CAS is the guard, mirroring the GC claim). A later rm failure
+    /// leaves only an orphan dir — the same low-severity, disk-only residual a lost-WAL row leaves (see
+    /// `lifecycle::ingest`), never a wrongly-swept *refreshed* quarantine.
+    ///
+    /// Residual (narrow, liveness-only): the claim frees the `(workspace_id, op_id)` PK before the janitor's
+    /// `rm -rf`, so a retry reusing that op id can re-insert and begin staging into the same id-derived path
+    /// inside the claim→rm window; the rm then removes the re-staged dir and its migrate fails (and retries).
+    /// This needs op-id REUSE (the norm is a fresh op id per attempt) AND a multi-threaded caller, and loses
+    /// no committed bytes. The full close (a per-ingest generation so reuse can never alias a being-swept dir)
+    /// lands with the wired pointer-move / large-object janitor — the same wired-future bucket as the live-GC
+    /// claim→unlink window (see the `gc` module docs).
+    pub(crate) async fn claim_expired_quarantine(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &OpId,
+        now: i64,
+    ) -> Result<bool> {
+        let ws_s = ws.as_str();
+        let op_s = op_id.as_str();
+        let mut tx = self.begin_immediate().await?;
+        let row = sqlx::query!(
+            r#"DELETE FROM upload_quarantine
+               WHERE workspace_id = ?1 AND op_id = ?2 AND expires_at <= ?3
+               RETURNING op_id AS "op_id!""#,
+            ws_s,
+            op_s,
+            now,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        tx.commit().await.map_err(AuthorityError::internal)?;
+        Ok(row.is_some())
     }
 
     /// Distinct workspaces holding an expired quarantine — the only cross-workspace read the janitor runs.

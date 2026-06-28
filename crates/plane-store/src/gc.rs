@@ -10,9 +10,26 @@
 //! row — the legacy straight-to-git upload path (no presence row) is invisible to it.
 //!
 //! **Recovery sweep:** finalizes a STALE `deleting` (one a crashed GC left behind), each via a one-winner
-//! re-claim so two concurrent sweeps never both unlink. **Janitor:** sweeps expired/abandoned quarantines,
-//! rebuilding the `rm -rf` path from the re-validated ids (never trusting the stored objdir string) and
-//! keeping the tracking row whenever the removal fails.
+//! re-claim that re-verifies the **read-authorization surface at delete time** (no `commit_object` edge), so
+//! a crashed claim's row that the legacy upload path re-rooted before recovery runs is spared, not reclaimed.
+//! It deliberately does NOT re-check the lease: a lease over a *`deleting`* object is a migrate WAITING for
+//! recovery to clear it (its `install_one` re-copies once the row reaches `absent`), so sparing it would
+//! strand that waiter — and a lease alone is never readable, so finalizing it loses no readable bytes. Two
+//! concurrent sweeps never both unlink. **Janitor:** sweeps expired/abandoned quarantines, rebuilding the
+//! `rm -rf` path from the re-validated ids (never trusting the stored objdir string) and claiming each row
+//! (delete-if-still-expired) BEFORE the unlink, so a re-ingest that reused the op id is never swept out from
+//! under its in-flight migrate.
+//!
+//! **The keep-set re-check is at claim time, not the physical unlink.** Both the live claim and the recovery
+//! re-claim re-verify the keep-set inside their transaction, then release the single-writer lock before the
+//! out-of-transaction unlink. A `commit_object` edge committed by the *legacy* `upload_candidate` path
+//! strictly inside that (claim, unlink] window is therefore not re-seen. The live GC closes this by
+//! construction (no `.await`/yield between the claim and the synchronous unlink, so on a single writer
+//! nothing interleaves there); the residual is only a multi-threaded legacy-upload-vs-GC race on identical
+//! content, and it is fail-safe (verify-on-read never serves wrong bytes; any later upload of that
+//! content-addressed blob restores it). The durable closure is the **lease→edge handoff** the go-forward
+//! fenced publish performs (a migrated version's only edge-writer holds its lease across the edge write, and
+//! `claim_for_delete` spares any live-leased object), which supersedes the raw legacy edge-add.
 //!
 //! **Power-loss note (self-healing):** under WAL + `synchronous = NORMAL` a fsync'd unlink can briefly get
 //! ahead of the not-yet-checkpointed claim/finalize commits, so a crash can leave a `present` row over
@@ -73,6 +90,10 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
         // The stale list is advisory; the per-object claim is the one-winner guard (mirroring run_gc's
         // claim) — it keeps the row `deleting` across the unlink and hands the git locator to exactly one
         // sweeper, so two concurrent recoveries can't both unlink and a migrate can't reinstall mid-sweep.
+        // It ALSO re-verifies the read-authorization surface at delete time (the `commit_object` edge), so a
+        // stale `deleting` row that a legacy `upload_candidate` re-rooted after the crashed claim is spared
+        // rather than unlinked — closing the recovery byte-loss path. (It does NOT re-check the lease: a lease
+        // over a `deleting` object is a waiting migrate recovery must unblock, not a reason to spare.)
         for object_id in authority.db().stale_deleting(&ws, older_than).await? {
             let git_oid = match authority
                 .db()
@@ -94,7 +115,9 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
 
 /// Sweep every expired/abandoned upload quarantine across all workspaces, removing its objdir whole. The
 /// destructive `rm -rf` path is REBUILT from the re-validated `(WorkspaceId, OpId)` — never the stored
-/// `objdir` string — so a poisoned path string can never escape the quarantine root.
+/// `objdir` string — so a poisoned path string can never escape the quarantine root. Each candidate is
+/// **claimed (delete-if-still-expired) before the unlink**, so a re-ingest that reused the op id and
+/// refreshed the row's expiry is never swept out from under its in-flight migrate.
 pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Result<usize> {
     let mut swept = 0;
     for ws in authority
@@ -103,13 +126,24 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
         .await?
     {
         for op_id in authority.db().expired_quarantine_ops(&ws, now).await? {
-            let dir = authority.workspace_quarantine_dir(&ws, &op_id);
-            // Drop the tracking row ONLY if the dir is actually gone — the row is the only way to rebuild
-            // this rm -rf path, so a transient removal failure must keep it for the next pass to retry.
-            if crate::lifecycle::remove_quarantine_dir(&dir) {
-                authority.db().delete_quarantine(&ws, &op_id).await?;
-                swept += 1;
+            // Atomically CLAIM the expired slot before touching the filesystem: this removes the tracking
+            // row only if it is STILL expired, so a concurrent re-ingest that reused this op id (refreshing
+            // `expires_at` into the future) is NOT claimed and its active, re-staged quarantine is spared.
+            // Only the winner proceeds to the unlink.
+            if !authority
+                .db()
+                .claim_expired_quarantine(&ws, &op_id, now)
+                .await?
+            {
+                continue;
             }
+            // Rebuild the rm -rf path from the re-validated ids (never the stored objdir string) and remove
+            // the dir whole. The row is already gone, so a transient rm failure leaves only an orphan dir —
+            // the same low-severity, disk-only residual a lost-WAL tracking row leaves (see
+            // `lifecycle::ingest`) — never a wrongly-swept active quarantine.
+            let dir = authority.workspace_quarantine_dir(&ws, &op_id);
+            crate::lifecycle::remove_quarantine_dir(&dir);
+            swept += 1;
         }
     }
     Ok(swept)

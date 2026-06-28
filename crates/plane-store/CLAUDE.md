@@ -50,8 +50,10 @@ same-process code.) The error type holds this line too: internal faults carry a 
   denylist), **migrate** (lease the full object set *before* migrating, server-side dedup, durable install,
   then record a real version + make the lease non-expiring on success), the **three-step mark-then-claim GC**
   (claim → unlink-outside-any-transaction → finalize; the keep-set is **exactly the read-authorization surface**
-  — any `commit_object` edge ∪ a live lease — so a readable object is never reclaimed), a **recovery sweep**, and
-  a **quarantine janitor**. GC acts only on objects with an `object_presence` row, so the legacy straight-to-git
+  — any `commit_object` edge ∪ a live lease — so a readable object is never reclaimed), a **recovery sweep** (which
+  re-verifies the `commit_object` edge on its re-claim — so a crashed-GC `deleting` row a legacy edge re-rooted is
+  spared, not reclaimed — but NOT the lease, since a lease over a `deleting` object is a waiting migrate it must
+  unblock), and a **quarantine janitor** (claim-before-rm, so a re-ingest that reuses an op id is never swept). GC acts only on objects with an `object_presence` row, so the legacy straight-to-git
   upload path stays readable. It moves no pointer and the fence is wired to no public verb yet — the in-crate
   tests drive it (deterministic interleavings for the dedup race, the snapshot-then-delete race, cross-workspace
   isolation, and crash recovery). `topos-gitstore` gained the three dumb byte primitives it needs (quarantine

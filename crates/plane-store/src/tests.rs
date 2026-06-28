@@ -1103,6 +1103,11 @@ async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end() {
     let body = b"half-unlinked";
     let staged = ingest_migrate(a, &w, "op", vec![file("X.md", body)], 100).await;
     let oid = object_id(body);
+    // Abandon the migrate so the object is genuinely unrooted — only such an object can be GC-claimed, so
+    // this is the realistic precondition for a crashed GC (the recovery claim now re-verifies the keep-set,
+    // so a still-rooted `deleting` row is spared, not finalized — see
+    // `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge`).
+    a.db().release_lease(&w, &op("op")).await.unwrap();
     // Simulate a GC that claimed the object (present → deleting) long ago, then crashed before finalizing.
     a.db()
         .seed_deleting_object(&w, oid, &staged.entries[0].git_oid, 10)
@@ -1208,4 +1213,207 @@ async fn quarantines_are_per_workspace_and_the_janitor_is_scoped() {
     assert_eq!(gc::quarantine_janitor(a, 200).await.unwrap(), 1);
     assert!(!qa.exists(), "A's expired quarantine swept");
     assert!(qb.exists(), "B's quarantine spared (its TTL is far off)");
+}
+
+// ── review hardening: recovery keep-set re-check · deleting-wait · janitor reuse-guard ───────────────
+
+#[tokio::test]
+async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge() {
+    // The recovery byte-loss guard (the companion to
+    // `gc_spares_an_object_a_legacy_commit_still_references_even_if_fenced`, but for the RECOVERY path, where
+    // the edge arrives AFTER the claim). A crashed GC leaves a stale `deleting` row; before recovery runs, a
+    // legacy `upload_candidate` of identical bytes records a `commit_object` edge with no `object_presence`
+    // consult, so the object becomes read-authorized. recovery_sweep must re-verify the keep-set at delete
+    // time and SPARE it, never unlink a now-readable, committed object's bytes. Fails (Integrity on the final
+    // read) if `claim_stale_for_recovery` drops its keep-set guard.
+    let fx = Fixture::new("e-recover-reroot").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_pr"));
+    let p = prin("dev_p");
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    let body = b"shared content the recovery must not reclaim";
+
+    // (1) Fenced migrate of `body`, then abandon -> present, unrooted (a normal GC candidate).
+    ingest_migrate(a, &w, "op", vec![file("B.md", body)], 100).await;
+    a.db().release_lease(&w, &op("op")).await.unwrap();
+    let oid = object_id(body);
+
+    // (2) A GC claims it (present -> deleting) then "crashes" before unlink/finalize: the row is `deleting`
+    // with an old status_updated_at and the bytes are still on disk.
+    assert!(matches!(
+        a.db().claim_for_delete(&w, oid, 200).await.unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+
+    // (3) A legacy upload of the SAME bytes records a `commit_object` edge — the object is now readable even
+    // though its row is `deleting`.
+    a.upload_candidate(&p, &w, &s, genesis(vec![file("B.md", body)]))
+        .await
+        .unwrap();
+    assert_eq!(a.read_object(&p, &w, &s, oid).await.unwrap(), body);
+
+    // (4) Recovery runs far past the stale threshold. It must SPARE the re-rooted object (recovered == 0),
+    // leaving it `deleting` (non-resurrectable) with its bytes intact — the read keeps working.
+    assert_eq!(
+        gc::recovery_sweep(a, 1_000_000).await.unwrap(),
+        0,
+        "recovery must not reclaim a now-readable, commit-referenced object"
+    );
+    assert_eq!(
+        a.db().object_status(&w, oid).await.unwrap(),
+        ObjectStatus::Deleting
+    );
+    assert_eq!(
+        a.read_object(&p, &w, &s, oid).await.unwrap(),
+        body,
+        "the committed object's bytes survive recovery"
+    );
+}
+
+#[tokio::test]
+async fn recovery_finalizes_a_leased_deleting_row_to_unblock_a_waiting_migrate() {
+    // A migrate that hits a crashed-GC's stale `deleting` row leases its full object set (including this
+    // object) BEFORE `install_one` waits for `absent`. Recovery MUST still finalize the stale row to unblock
+    // that waiter — a lease over a `deleting` object means "waiting to re-install", not "readable" (only a
+    // `commit_object` edge spares; see `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge`).
+    // Regression: a recovery guard that also checked the lease would strand the migrate until the lease TTL
+    // lapsed.
+    let fx = Fixture::new("e-recover-leased").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"crashed then re-leased by a waiting migrate";
+    // A real object + store (so recovery can open the store and unlink the loose object); then abandon it.
+    let staged = ingest_migrate(a, &w, "mig", vec![file("X.md", body)], 100).await;
+    let o = object_id(body);
+    a.db().release_lease(&w, &op("mig")).await.unwrap();
+    // A crashed GC left it stale `deleting`.
+    a.db()
+        .seed_deleting_object(&w, o, &staged.entries[0].git_oid, 10)
+        .await
+        .unwrap();
+    // A NEW migrate (a retry of the same content) leases the object set and is now waiting in install_one for
+    // `absent` — the lease was taken BEFORE the wait.
+    a.db()
+        .insert_lease(&w, &op("retry"), staged.version_id, &[o], 9_999)
+        .await
+        .unwrap();
+    // Recovery still finalizes it (recovered == 1) so the waiter can re-copy — the lease must not spare it.
+    assert_eq!(gc::recovery_sweep(a, 1_000_000).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn migrate_install_waits_out_deleting_then_recopies() {
+    // Exercises install_one's deleting-wait branch (the sole justification for the normal `tokio` time dep):
+    // an object mid-GC (`deleting`) is NEVER resurrected by a concurrent migrate — the install waits for
+    // `absent`, then re-copies the bytes. A regression that treated `deleting` as a dedup reuse (e.g.
+    // `return Ok(())`) would leave the row `deleting` and fail the final `Present` assertion.
+    let fx = Fixture::new("e-deleting-wait").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"installed only after the unlink finishes";
+    let staged = lifecycle::ingest(a, &w, &op("d"), genesis(vec![file("X.md", body)]), 100)
+        .await
+        .unwrap();
+    let oid = ObjectId(staged.entries[0].object_id);
+    // Seed the object as `deleting` (a GC mid-unlink) so the install must wait it out, not reuse it.
+    a.db()
+        .seed_deleting_object(&w, oid, &staged.entries[0].git_oid, 10)
+        .await
+        .unwrap();
+
+    // Run the install concurrently with a task that finalizes the unlink (deleting -> absent). `join!` is
+    // polled in order, so install_one observes `deleting` first and enters its (transaction-free) wait; the
+    // flip then commits, and the install's next poll sees `absent` and re-copies.
+    let install = lifecycle::migrate_install(a, &w, &staged, 200);
+    let finish_unlink = async {
+        a.db().finalize_delete(&w, oid, 200).await.unwrap();
+    };
+    let (install_res, ()) = tokio::join!(install, finish_unlink);
+    install_res.expect("install succeeds after the deleting row clears");
+
+    assert_eq!(
+        a.db().object_status(&w, oid).await.unwrap(),
+        ObjectStatus::Present,
+        "the migrate re-copied the bytes only after `absent`, never resurrecting `deleting`"
+    );
+}
+
+#[tokio::test]
+async fn tombstone_does_not_interrupt_an_in_flight_deletion() {
+    // `insert_tombstone`'s `WHERE status IN ('present','absent')` deliberately leaves a `deleting` row alone
+    // (flipping it to `unavailable` would strand the unlink — `finalize_delete` only fires on `deleting`).
+    // The blob is still denylisted, and the in-flight unlink still completes to `absent`.
+    let fx = Fixture::new("t-tomb-deleting").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"dying-but-denylisted");
+    a.db()
+        .seed_deleting_object(&w, o, &goid(7), 10)
+        .await
+        .unwrap();
+    a.db().insert_tombstone(&w, o, "leaked", 100).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Deleting,
+        "a tombstone must not interrupt an in-flight unlink"
+    );
+    assert!(a.db().is_tombstoned(&w, o).await.unwrap());
+    // The unlink still finalizes normally.
+    a.db().finalize_delete(&w, o, 200).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn claim_expired_quarantine_spares_a_refreshed_reused_op() {
+    // The janitor's claim-before-rm guard: a quarantine row whose expiry was refreshed into the future (op-id
+    // reuse by a retry) must NOT be claimed for sweeping at a `now` past the OLD expiry — only a still-expired
+    // row is. This is what stops the janitor from rm'ing an active, re-staged quarantine out from under an
+    // in-flight migrate.
+    let fx = Fixture::new("t-q-claim").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let dir = a.workspace_quarantine_dir(&w, &op("k"));
+    a.db()
+        .insert_quarantine(&w, &op("k"), &dir.to_string_lossy(), 150)
+        .await
+        .unwrap();
+    // A retry reuses the op id and refreshes the expiry far into the future (the active in-flight upload).
+    a.db()
+        .insert_quarantine(&w, &op("k"), &dir.to_string_lossy(), 10_000)
+        .await
+        .unwrap();
+    // At now = 200 (past the OLD 150 expiry) the refreshed row is spared, and stays tracked.
+    assert!(
+        !a.db()
+            .claim_expired_quarantine(&w, &op("k"), 200)
+            .await
+            .unwrap(),
+        "a refreshed (reused) quarantine must not be claimed"
+    );
+    assert_eq!(
+        a.db().expired_quarantine_ops(&w, 10_000).await.unwrap(),
+        vec![op("k")],
+        "the active quarantine row survives"
+    );
+    // Once it truly expires, the claim wins and removes the row.
+    assert!(
+        a.db()
+            .claim_expired_quarantine(&w, &op("k"), 10_001)
+            .await
+            .unwrap()
+    );
+    assert!(
+        a.db()
+            .expired_quarantine_ops(&w, 10_001)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
