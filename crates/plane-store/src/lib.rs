@@ -24,7 +24,7 @@
 //!   canonical rules, writes the objects, and records provenance + reachability only after an
 //!   authoritative roster check — in one transaction. Dedup is invisible. No pointer is moved.
 //! - **The cross-skill lineage predicate** ([`Authority::check_lineage`]) — built read-only here.
-//! - **The DB-authoritative object-lifecycle / garbage-collection fence (git-only).** A GC-excluded upload
+//! - **The DB-authoritative object-lifecycle / garbage-collection fence.** A GC-excluded upload
 //!   quarantine; the fenced `object_presence` compare-and-swap state machine
 //!   (`present`/`deleting`/`absent`/`unavailable`, a `deleting` object non-resurrectable); promotion leases
 //!   that root a commit's full object set before any byte migrates; migrate-into-git (lease-before-migrate,
@@ -32,12 +32,19 @@
 //!   unlink-outside-any-transaction → finalize; keep-set = exactly the read-authorization surface) with a
 //!   recovery sweep + a quarantine janitor; and the tombstones denylist. The database leads, the filesystem
 //!   trails. It moves no pointer and is wired to no verb yet — the in-crate tests drive it.
+//! - **The size-routed large-object store (offload).** At migrate a file blob >= a configurable threshold is
+//!   physically offloaded to a per-workspace content-addressed side store (`location = large-local`), keyed
+//!   by the same `blob_id`; smaller blobs stay in git; a per-blob reject cap fails typed at ingest. Identity
+//!   is placement-independent (no pointer files); reads (single-object and whole-bundle render) and the GC
+//!   unlink dispatch on `location`, still through the skill-scoped access rule; per-workspace roots ⇒ no
+//!   cross-workspace dedup. Backend is the local filesystem (`LocalLargeStore` in `topos-gitstore`).
 //!
 //! ## Deliberately not here yet
 //!
-//! The size-routed large-object store, the pointer-move write (compare-and-set, the in-process signer,
-//! durable receipts), the HTTP surface, identity/roster issuance, and Postgres are later work. The
-//! `current` pointer table is created and seedable but never moved; nothing is signed.
+//! The large-object store's S3-compatible remote backend + online backfill (additive, client-invisible), the
+//! pointer-move write (compare-and-set, the in-process signer, durable receipts), the HTTP surface,
+//! identity/roster issuance, and Postgres are later work. The `current` pointer table is created and seedable
+//! but never moved; nothing is signed.
 
 mod authority;
 mod error;

@@ -42,7 +42,7 @@ are asserted byte-equal in tests.
 The plane + enrollment + signing-at-rest; the `pull` sync engine + the four-state sync machine; the
 **byte-writing materialization** (the atomic dir-swap, for an *update* that overwrites a harness skill
 dir — this increment writes nothing into a skill dir, so the swap is deferred); `publish`/`review`/
-`revert`; the `diff current..<hash>` + `log --team` plane halves; the large-object offload; the
+`revert`; the `diff current..<hash>` + `log --team` plane halves; the
 OpenClaw/Hermes harness adapters (Claude Code is the reference).
 
 ## Architectural layering (enforced at the dependency graph)

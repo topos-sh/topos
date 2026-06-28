@@ -83,7 +83,7 @@ domain-typed. That boundary is exactly the seam a future `enum Db { Sqlite, Pg }
 no change to callers — so the second backend is an add, not a reshape. This follows the workspace's
 governing posture: concrete first, extract on the second implementation.
 
-## The object-lifecycle / garbage-collection fence (git-only)
+## The object-lifecycle / garbage-collection fence
 
 The database is the single authority for every object's byte status; the git store holds dumb bytes and
 always *trails* the database. No git ref is used for reachability, and no operation stats the store to decide
@@ -103,8 +103,8 @@ presence — `object_presence` is the sole presence authority. A few decisions e
   loose-object locator), written in the same compare-and-swap that flips it to `present`. The database is
   already the lifecycle authority, so the locator belongs with it — one crash-consistent artifact (the row)
   instead of two (a row plus a separate ref that a crash could strand). `topos-gitstore` stays a dumb byte
-  layer keyed by `git_oid`. (This row is also the carrier the later large-object store needs to recover an
-  offloaded blob's identity.)
+  layer keyed by `git_oid`. (This row is also the carrier the size-routed large-object store uses to recover
+  an offloaded blob's identity — see below.)
 - **`deleting` is non-resurrectable by construction.** The only writer of `present` is the install
   compare-and-swap, whose `WHERE status = 'absent'` structurally cannot fire on a `deleting` row. A migrate
   that meets a `deleting` object waits for `absent` (polling **outside** any write transaction, so it can
@@ -123,12 +123,39 @@ presence — `object_presence` is the sole presence authority. A few decisions e
   unlink — not reachable in production this increment (the fenced ingress has no public verb), and closed when
   the pointer-move routes all writes through the fence.
 
+## The size-routed large-object store (offload)
+
+Built on the fence: at migrate (`install_one`, the migrate's install step) a **file blob** is routed by
+**size** — at/above a configurable ~1 MiB threshold it is physically offloaded to a per-workspace
+content-addressed **`LocalLargeStore`** (`object_presence.location = large-local`), below it stays a git
+loose object (`git`); commits and trees always stay in git. A per-blob ~100 MiB reject cap fails typed at
+**ingest**, before any bytes are staged. A few decisions earn their keep:
+
+- **Identity is placement-independent, and there are no pointer files.** `version_id` / `bundle_digest` are
+  topos's own sha256 over real bytes, computed at ingest *before* any routed write, so which store holds a
+  blob changes no id/digest. The git tree faithfully carries an offloaded blob's `git_oid` (the migrate tree
+  is built with the low-level plumbing editor, which tolerates a child object that is absent from git) — no
+  LFS pointer object, no `.gitattributes`. `size`/`location` are operational and never enter the manifest.
+- **The DB owns `location`; reads + the GC unlink dispatch on it.** A single-object `read_object` looks up
+  the *present* row's `location` and fetches from git or the large store — always after the same skill-scoped
+  authz join (404-not-403, never by bare hash); a post-authz miss in either store is `Integrity`, never
+  not-found. Whole-bundle `render_version` is **tree-driven** (the migrate writes no `commit_object` edges
+  yet): it walks the version's tree structure and joins the offloaded subset by `git_oid`, re-verifying every
+  byte to its content id. The GC unlink step dispatches on `location` (a loose-object delete, or a
+  `LocalLargeStore::delete` keyed on the object id); the lease, the CAS, the `deleting` fence, and recovery
+  are unchanged.
+- **Per-workspace roots; no cross-workspace dedup.** Each workspace gets its own large-object root, so
+  byte-identical content in two workspaces is two distinct physical objects and the hard tenant boundary is
+  the path, not just an ACL. `LocalLargeStore` is a dumb byte layer (crash-safe two-phase install,
+  verify-on-read); routing + the `location` dispatch live here in `plane-store`.
+
 ## What this deliberately is not, yet
 
-The size-routed large-object store (offload big blobs under the same `blob_id`, dispatching the read + the GC
-unlink on `object_presence.location`), the pointer-move write (the compare-and-set, the in-process signer,
-durable receipts) that *moves* the `current` pointer this layer only creates **and** consumes a migrated
-candidate's lease, the `purge` verb + force-unlink (the tombstones table + denylist check already exist), the
-HTTP surface, identity/roster issuance, and Postgres are each a clean follow-on against this foundation. The
-lineage predicate is built and tested read-only so wiring it into the pointer-move transaction is a small
-change.
+The large-object store's **S3-compatible remote backend** (a second `LocalLargeStore`-shaped impl + a
+`large-remote` `location` arm) and its **idempotent online backfill** (copy → verify → flip `location` →
+`git repack`) — both additive and client-invisible — the pointer-move write (the compare-and-set, the
+in-process signer, durable receipts) that *moves* the `current` pointer this layer only creates **and**
+consumes a migrated candidate's lease, the `purge` verb + force-unlink (the tombstones table + denylist check
+already exist), the HTTP surface, identity/roster issuance, and Postgres are each a clean follow-on against
+this foundation. The lineage predicate is built and tested read-only so wiring it into the pointer-move
+transaction is a small change.

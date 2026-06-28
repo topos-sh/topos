@@ -4,9 +4,10 @@
 -- always TRAILS the database. No git ref is ever used for reachability, and no operation stats the store to
 -- decide presence — `object_presence` is the sole presence authority. Every row carries `workspace_id` and
 -- every query binds it (isolation is this binding, never a directory). Tables are STRICT + WITHOUT ROWID;
--- content ids are the raw 32-byte sha256 BLOBs the kernel/git layer pass, width-checked. This layer keeps
--- everything in the git store (`location` is always `git`); the size-routed large-object store is the next
--- step and the `location`/`size`/`git_oid` columns are shaped for it.
+-- content ids are the raw 32-byte sha256 BLOBs the kernel/git layer pass, width-checked. The
+-- `location`/`size`/`git_oid` columns this migration adds are exercised by the size-routed large-object
+-- store (offload): `location` records which physical store holds the bytes (`git` or `large-local`), and the
+-- read/GC-unlink paths dispatch on it; the digest/identity never depend on it.
 
 -- BYTE STATUS — the fenced state machine, one row per (workspace, object).
 --   absent  : the bytes are not installed (represented by EITHER no row OR a row in this state after a GC)

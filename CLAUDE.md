@@ -31,11 +31,12 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > bare hash); full-tree upload with server rehash that records provenance + reachability only after an
 > authoritative roster check; and the cross-skill lineage predicate — all directly tested against a real
 > database + git store (it moves no pointer and signs nothing yet). The **DB-authoritative object-lifecycle /
-> garbage-collection fence** over that store is now built too (git-only): a GC-excluded upload **quarantine**;
+> garbage-collection fence** over that store is built too: a GC-excluded upload **quarantine**;
 > the fenced **`object_presence`** state machine (`present`/`deleting`/`absent`/`unavailable`) whose
 > guarded compare-and-swaps make a `deleting` object non-resurrectable; **promotion leases** that root a
-> commit's full object set before any byte migrates; **migrate-into-git** (lease-before-migrate, server-side
-> dedup, durable install) recording a real version; **transactional mark-then-claim GC** (claim → unlink →
+> commit's full object set before any byte migrates; **migrate** (lease-before-migrate, server-side
+> dedup, durable install — now size-routing to git or the large-object store) recording a real version;
+> **transactional mark-then-claim GC** (claim → unlink →
 > finalize, the unlink outside any transaction, the keep-set exactly the read-authorization surface) with a
 > recovery sweep + a quarantine janitor; and the **tombstones denylist** (no `purge` verb yet). The
 > **size-routed large-object store** is now built on that fence: at migrate, a file blob ≥ a configurable
