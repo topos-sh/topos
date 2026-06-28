@@ -181,10 +181,15 @@ impl LargeObjectStore for LocalLargeStore {
         let path = self.final_path(&blob_id);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // Idempotent: already gone. Do NOT return early — still fsync the shard below, exactly as the
+            // git loose-object delete does. A prior unlink may have removed the file but crashed before the
+            // dir-entry deletion was made durable; a recovery pass seeing not-found here must persist that
+            // deletion (else a power loss could resurrect an untracked blob the DB has finalized to absent).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_err(e)),
         }
-        // fsync the shard dir so the removal is durable (mirrors the git loose-object delete).
+        // fsync the shard dir so the removal is durable (mirrors the git loose-object delete). `fsync_path`
+        // tolerates a missing shard dir (returns Ok), so this is safe even when nothing was there.
         if let Some(shard) = path.parent() {
             fsync_path(shard)?;
         }
