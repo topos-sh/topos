@@ -259,7 +259,26 @@ async fn install_one(
     let mut backoff = WAIT_BACKOFF_START;
     for _ in 0..WAIT_MAX_POLLS {
         match authority.db().object_status(ws, object_id).await? {
-            ObjectStatus::Present => return Ok(()), // dedup: reuse the already-present bytes
+            ObjectStatus::Present => {
+                // Dedup reuse — but never PIN a version over bytes a past crash silently removed. The WAL
+                // power-loss residual (see the `gc` module docs) can leave a `present` row whose loose object
+                // is already gone; reusing it blindly would let `migrate_finish`'s non-expiring lease root a
+                // version over missing bytes — a permanent, dedup-poisoning byte loss, not a self-healing one.
+                // Belt: stat the loose object on a FRESH main handle (gix's object cache can otherwise affirm
+                // a just-removed object); if a crash lost it, re-materialize from THIS candidate's quarantine
+                // — we hold byte-identical content. This re-asserts "no root over gone bytes" WITHOUT making
+                // the store the presence authority (the DB row stays `present`; we only refuse to root
+                // nothing). No GC can race the re-copy: this migrate's lease already spares the row.
+                let main = authority.store_for_write(ws)?;
+                if !main
+                    .object_exists(entry.git_oid)
+                    .map_err(AuthorityError::internal)?
+                {
+                    main.install_object_durable(quarantine, entry.git_oid)
+                        .map_err(AuthorityError::internal)?;
+                }
+                return Ok(()); // dedup: reuse the already-present (and now verified) bytes
+            }
             ObjectStatus::Unavailable => {
                 return Err(AuthorityError::RejectedUpload(
                     "a candidate blob is on the denylist".to_owned(),
@@ -275,6 +294,12 @@ async fn install_one(
             ObjectStatus::Absent => {
                 // Open a FRESH main handle so a just-deleted object's bytes are actually re-written (gix's
                 // object cache can otherwise make `write_blob` skip a loose object it believes still exists).
+                // (Residual: on a workspace's FIRST migrate `store_for_write` newly creates the bare repo;
+                // `install_object_durable` fsyncs the loose object + its `objects/` dirs but NOT the repo's own
+                // creation — the `<ws>/` entry in `git_root` and the repo metadata — so under WAL +
+                // synchronous=NORMAL a crash could leave a `present` row over an unopenable/absent store. It is
+                // fail-safe — a later read faults Integrity, never wrong bytes — and is reconciled by the same
+                // power-durability barrier the destructive transitions need, see the `gc` module docs.)
                 let main = authority.store_for_write(ws)?;
                 main.install_object_durable(quarantine, entry.git_oid)
                     .map_err(AuthorityError::internal)?;

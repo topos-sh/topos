@@ -508,7 +508,8 @@ async fn claim_unreferenced_present_then_finalize_to_absent() {
         a.db().object_status(&w, o).await.unwrap(),
         ObjectStatus::Deleting
     );
-    a.db().finalize_delete(&w, o, 300).await.unwrap();
+    // Finalize is gated on the claim token (the `now` the claim stamped: 200).
+    a.db().finalize_delete(&w, o, 200, 300).await.unwrap();
     assert_eq!(
         a.db().object_status(&w, o).await.unwrap(),
         ObjectStatus::Absent
@@ -1330,7 +1331,8 @@ async fn migrate_install_waits_out_deleting_then_recopies() {
     // flip then commits, and the install's next poll sees `absent` and re-copies.
     let install = lifecycle::migrate_install(a, &w, &staged, 200);
     let finish_unlink = async {
-        a.db().finalize_delete(&w, oid, 200).await.unwrap();
+        // The seeded `deleting` row's token is its status_updated_at (10).
+        a.db().finalize_delete(&w, oid, 10, 200).await.unwrap();
     };
     let (install_res, ()) = tokio::join!(install, finish_unlink);
     install_res.expect("install succeeds after the deleting row clears");
@@ -1362,8 +1364,8 @@ async fn tombstone_does_not_interrupt_an_in_flight_deletion() {
         "a tombstone must not interrupt an in-flight unlink"
     );
     assert!(a.db().is_tombstoned(&w, o).await.unwrap());
-    // The unlink still finalizes normally.
-    a.db().finalize_delete(&w, o, 200).await.unwrap();
+    // The unlink still finalizes normally (the seeded `deleting` row's token is its status_updated_at, 10).
+    a.db().finalize_delete(&w, o, 10, 200).await.unwrap();
     assert_eq!(
         a.db().object_status(&w, o).await.unwrap(),
         ObjectStatus::Absent
@@ -1416,4 +1418,104 @@ async fn claim_expired_quarantine_spares_a_refreshed_reused_op() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
+    // A pre-merge review finding: a recovery sweep that re-claims a `deleting` row a live GC claimed (because a
+    // long/frozen pass let it look stale) must FENCE OFF that original claimant — only one actor may unlink +
+    // finalize, or a re-migrate's freshly re-installed bytes could be deleted out from under it (a
+    // phantom-`present` byte loss). The fence is the claim token (`status_updated_at`): both
+    // `confirm_deleting_owner` (gating the unlink) and the token-gated `finalize_delete` reject a superseded
+    // claimant. Driven at the SQL layer with explicit timestamps (no real clock) so the interleaving is
+    // deterministic.
+    let fx = Fixture::new("t-claim-fence").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let o = object_id(b"contended");
+    a.db()
+        .install_object(&w, o, &goid(9), 1, 100)
+        .await
+        .unwrap();
+
+    // (1) The live GC claims it with token T=100 (a back-dated, pass-fixed `now`).
+    match a.db().claim_for_delete(&w, o, 100).await.unwrap() {
+        ClaimOutcome::Claimed { git_oid } => assert_eq!(git_oid, goid(9)),
+        ClaimOutcome::Spared => panic!("expected claimed"),
+    }
+    // (2) A recovery sweep finds it stale (sua=100 < older_than=200) and re-claims it with token T=500.
+    assert_eq!(
+        a.db()
+            .claim_stale_for_recovery(&w, o, 200, 500)
+            .await
+            .unwrap(),
+        Some(goid(9)),
+        "recovery re-claims the stale deleting row"
+    );
+
+    // (3) The superseded original GC has LOST ownership: its owner-check fails (so it skips its unlink)…
+    assert!(
+        !a.db().confirm_deleting_owner(&w, o, 100).await.unwrap(),
+        "the superseded GC must not still own the row"
+    );
+    // …and its token-gated finalize is a no-op (it must NOT flip the row recovery now owns).
+    a.db().finalize_delete(&w, o, 100, 600).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Deleting,
+        "a superseded finalize must not advance the row"
+    );
+
+    // (4) The recovery owner (token=500) confirms ownership and finalizes the row exactly once.
+    assert!(a.db().confirm_deleting_owner(&w, o, 500).await.unwrap());
+    a.db().finalize_delete(&w, o, 500, 600).await.unwrap();
+    assert_eq!(
+        a.db().object_status(&w, o).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn migrate_re_materializes_a_present_row_whose_bytes_a_crash_removed() {
+    // A pre-merge review finding: a `present` row whose loose object a past crash silently removed (the
+    // WAL power-loss residual) must NOT be blindly dedup-reused — `migrate_finish`'s non-expiring lease would
+    // then root a version over gone bytes (a permanent, dedup-poisoning byte loss). install_one's belt stats
+    // the loose object and re-materializes it from the candidate's quarantine instead of dedup-skipping.
+    let fx = Fixture::new("e-belt").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"resurrect me from quarantine";
+    let v1 = ingest_migrate(a, &w, "op1", vec![file("SKILL.md", body)], 100).await;
+    let git_oid = v1.entries[0].git_oid;
+
+    // Simulate the crash residual: physically remove the loose object but LEAVE the row `present`.
+    a.open_store(&w)
+        .unwrap()
+        .delete_loose_object(git_oid)
+        .unwrap();
+    assert!(
+        !a.open_store(&w).unwrap().object_exists(git_oid).unwrap(),
+        "precondition: the bytes are physically gone"
+    );
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present,
+        "but the DB row still says present (the residual a migrate must not trust blindly)"
+    );
+
+    // A re-migrate of the same content hits install_one's Present branch — the belt must re-materialize the
+    // bytes from this candidate's quarantine rather than dedup-skip over the gone object.
+    let v2 = ingest_migrate(a, &w, "op2", vec![file("SKILL.md", body)], 200).await;
+
+    assert!(
+        a.open_store(&w).unwrap().object_exists(git_oid).unwrap(),
+        "the belt re-materialized the loose object"
+    );
+    // The version now renders byte-exact (the bytes are back at their final path).
+    let store = a.open_store(&w).unwrap();
+    let rendered = store
+        .render_verified(v2.version_id.0, v2.bundle_digest)
+        .expect("render after the belt heals the missing bytes");
+    assert_eq!(rendered.files.len(), 1);
+    assert_eq!(rendered.files[0].bytes, body);
 }

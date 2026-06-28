@@ -202,21 +202,30 @@ impl Db {
     }
 
     /// The GC finalize step: `deleting → absent`, after the loose object has been unlinked OUTSIDE any
-    /// transaction. Guarded on `status = 'deleting'`, so it is idempotent against a concurrent recovery.
+    /// transaction. Guarded on `status = 'deleting'` **and the claimant's fence token** (`status_updated_at =
+    /// claim_token`, the value this actor's own claim stamped) — so it is idempotent against a concurrent
+    /// recovery AND can never flip a row a recovery sweep has since re-claimed (a re-claim bumps the token):
+    /// only the current owner finalizes. A superseded finalize matches no row — a harmless no-op. The token
+    /// is the `now`/`older_than` the claimant passed to [`Self::claim_for_delete`] /
+    /// [`Self::claim_stale_for_recovery`] (each stamps it into `status_updated_at`), so the caller already
+    /// holds it — no value is threaded back out of the claim.
     pub(crate) async fn finalize_delete(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
+        claim_token: i64,
         now: i64,
     ) -> Result<()> {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let mut tx = self.begin_immediate().await?;
         sqlx::query!(
-            "UPDATE object_presence SET status = 'absent', status_updated_at = ?3 \
-             WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting'",
+            "UPDATE object_presence SET status = 'absent', status_updated_at = ?4 \
+             WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' \
+               AND status_updated_at = ?3",
             ws_s,
             oid,
+            claim_token,
             now,
         )
         .execute(&mut *tx)
@@ -224,6 +233,35 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         tx.commit().await.map_err(AuthorityError::internal)?;
         Ok(())
+    }
+
+    /// Whether THIS actor still owns the `deleting` claim it took — `status = 'deleting'` AND the row's
+    /// `status_updated_at` still equals the `claim_token` the claimant stamped. The GC + recovery unlink
+    /// steps consult this IMMEDIATELY before the physical `delete_loose_object` (with no `.await` between the
+    /// check and the synchronous unlink), so a row a concurrent recovery sweep re-claimed — which bumps the
+    /// token — is never also unlinked by the superseded original claimant. Exactly one actor ever removes the
+    /// bytes, closing the recovery-vs-live-GC race that would otherwise unlink a row another actor finalized
+    /// and a re-migrate then re-installed (a phantom-`present` byte loss). A pool read: it sees the latest
+    /// committed claim.
+    pub(crate) async fn confirm_deleting_owner(
+        &self,
+        ws: &WorkspaceId,
+        object_id: ObjectId,
+        claim_token: i64,
+    ) -> Result<bool> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT 1 AS "one!: i64" FROM object_presence
+               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at = ?3"#,
+            ws_s,
+            oid,
+            claim_token,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.is_some())
     }
 
     /// Every `present` object in the workspace — the GC candidate scan (a pool read; advisory only, since

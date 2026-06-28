@@ -615,3 +615,52 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 }
+
+#[test]
+fn stage_into_an_existing_quarantine_dir_re_stages_fresh() {
+    // A pre-merge review finding: `ingest` may re-stage under a reused op id (the authority's quarantine row is
+    // an upsert, so reuse is a supported retry path), so `stage` must tolerate a pre-existing quarantine dir —
+    // `init_bare` alone rejects a non-empty one. A re-stage yields a FRESH quarantine holding exactly the new
+    // candidate, never the stale prior one.
+    let q = Scratch::new("fence-restage");
+    let first = [ImportFile {
+        path: "a.md",
+        mode: FileMode::Regular,
+        bytes: b"first",
+    }];
+    let s1 = Store::stage(&q.0, &first).expect("first stage");
+    assert_eq!(s1.entries.len(), 1);
+
+    // Re-stage into the SAME dir with different content — must succeed (not fail on the leftover repo).
+    let second = [
+        ImportFile {
+            path: "a.md",
+            mode: FileMode::Regular,
+            bytes: b"second",
+        },
+        ImportFile {
+            path: "b.md",
+            mode: FileMode::Regular,
+            bytes: b"more",
+        },
+    ];
+    let s2 = Store::stage(&q.0, &second).expect("re-stage into the existing quarantine dir");
+    assert_eq!(s2.entries.len(), 2);
+
+    // The re-staged quarantine holds the NEW objects and not the stale first one (cleared, not merged).
+    let q_store = Store::open(&q.0).expect("open re-staged quarantine");
+    for e in &s2.entries {
+        assert!(
+            q_store
+                .object_exists(e.git_oid)
+                .expect("new object present"),
+            "the re-staged candidate's objects must be present"
+        );
+    }
+    assert!(
+        !q_store
+            .object_exists(s1.entries[0].git_oid)
+            .expect("stale check"),
+        "the prior candidate's object must be cleared, not preserved"
+    );
+}

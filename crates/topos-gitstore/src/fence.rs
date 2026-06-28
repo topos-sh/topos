@@ -75,6 +75,15 @@ impl Store {
         if let Some(parent) = quarantine_dir.parent() {
             std::fs::create_dir_all(parent).map_err(|e| GitstoreError::Io(format!("{e}")))?;
         }
+        // Stage into a FRESH quarantine: `init_bare` rejects a non-empty directory, so a retry / re-ingest
+        // that reuses the op id (the authority's quarantine row is an upsert, so reuse is a supported path)
+        // would otherwise fail on the leftover repo. Clear any prior contents first — the quarantine holds
+        // only this op's in-flight bytes, never anything to preserve — so the staged tree is exactly THIS
+        // candidate's.
+        if quarantine_dir.exists() {
+            std::fs::remove_dir_all(quarantine_dir)
+                .map_err(|e| GitstoreError::Io(format!("{e}")))?;
+        }
         let quarantine = Store::init(quarantine_dir)?;
         let mut entries = Vec::with_capacity(files.len());
         for f in files {
@@ -92,7 +101,11 @@ impl Store {
                 size: f.bytes.len() as u64,
             });
         }
-        // Persist the quarantine durably (its bytes are the source migrate copies from).
+        // Persist the quarantine durably (its bytes are the source migrate copies from). (Residual: this
+        // syncs the quarantine repo's own object + dir entries but not its `<op_id>` entry in the parent
+        // `<ws>.quarantine/`; under WAL + synchronous=NORMAL a crash could lose a freshly-staged quarantine
+        // while its authority row survives — a transient, re-uploadable loss of IN-FLIGHT bytes, never
+        // committed data, in the same deferred power-durability bucket as the upload-side fsync gaps.)
         fsync_batch(&quarantine.durability_set()?)?;
         Ok(StagedBundle {
             entries,
@@ -138,9 +151,12 @@ impl Store {
         Ok(batch)
     }
 
-    /// Whether a git object is present in this store (a `gix` existence check across loose + packed). This
-    /// is an **idempotency belt only** — the authority's `object_presence` row is the sole presence/dedup
-    /// authority; no fence decision is ever made by statting the store.
+    /// Whether a git object is present in this store (a `gix` existence check across loose + packed). This is
+    /// an **idempotency / integrity belt only** — the authority's `object_presence` row is the sole
+    /// presence/dedup AUTHORITY; the store is never statted to DECIDE presence/dedup. The one sanctioned use
+    /// is defensive: before a migrate roots a version over a row the DB already calls `present`, it stats the
+    /// bytes and re-materializes them if a past crash (the WAL power-loss residual) removed the loose object —
+    /// re-asserting "no root over gone bytes" without overriding the DB's status.
     ///
     /// # Errors
     /// [`GitstoreError::Gix`] on an object-database fault.

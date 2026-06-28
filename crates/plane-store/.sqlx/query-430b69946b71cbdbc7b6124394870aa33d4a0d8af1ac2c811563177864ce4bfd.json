@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE object_presence SET status = 'absent', status_updated_at = ?4 WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "430b69946b71cbdbc7b6124394870aa33d4a0d8af1ac2c811563177864ce4bfd"
+}
