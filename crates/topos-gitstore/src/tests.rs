@@ -787,3 +787,116 @@ fn large_store_per_root_isolation_has_no_cross_root_dedup() {
     assert_ne!(pa, pb);
     assert!(pa.is_file() && pb.is_file(), "each root holds its own copy");
 }
+
+/// Build a version whose tree references an OFFLOADED blob (staged, but never installed into the main git
+/// store) — the on-disk shape the size-routed migrate produces — and return (main store, staged bundle).
+fn version_with_one_offloaded_blob(root: &std::path::Path) -> (Store, crate::StagedBundle) {
+    let q_dir = root.join("q");
+    let main_dir = root.join("main");
+    let small: &[u8] = b"# small prose, stays in git\n";
+    let big: &[u8] = b"PRETEND THIS IS A BIG OFFLOADED BLOB whose bytes never enter the git store";
+    let nested: &[u8] = b"#!/bin/sh\necho nested git blob\n";
+    let files = [
+        ImportFile {
+            path: "small.txt",
+            mode: FileMode::Regular,
+            bytes: small,
+        },
+        ImportFile {
+            path: "big.bin",
+            mode: FileMode::Regular,
+            bytes: big,
+        },
+        ImportFile {
+            path: "scripts/run.sh",
+            mode: FileMode::Executable,
+            bytes: nested,
+        },
+    ];
+    let staged = Store::stage(&q_dir, &files).expect("stage");
+    let quarantine = Store::open(&q_dir).expect("open quarantine");
+    let main = Store::init(&main_dir).expect("init main");
+    // Install every blob EXCEPT big.bin into the main store — big.bin is "offloaded" (absent from git).
+    for e in &staged.entries {
+        if e.path != "big.bin" {
+            main.install_object_durable(&quarantine, e.git_oid)
+                .expect("install git-resident blob");
+        }
+    }
+    let entries: Vec<(&str, FileMode, [u8; 20])> = staged
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.mode, e.git_oid))
+        .collect();
+    let vid = sign::commit_id(&Commit {
+        parents: &[],
+        tree: staged.bundle_digest,
+        author: AUTHOR,
+        message: MESSAGE,
+    })
+    .expect("vid");
+    main.commit_durable(vid, &[], &entries, staged.bundle_digest, AUTHOR, MESSAGE)
+        .expect("commit_durable tolerates the absent offloaded blob");
+    (main, staged)
+}
+
+#[test]
+fn read_tree_structure_yields_every_leaf_including_an_offloaded_one() {
+    let scratch = Scratch::new("tree-struct");
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    let (main, staged) = version_with_one_offloaded_blob(&scratch.0);
+    let vid = sign::commit_id(&Commit {
+        parents: &[],
+        tree: staged.bundle_digest,
+        author: AUTHOR,
+        message: MESSAGE,
+    })
+    .expect("vid");
+
+    // The structure walk yields ALL files (paths/modes/git_oids) without reading any blob — so the offloaded
+    // big.bin (absent from git) is yielded fine, with the git_oid the tree entry recorded.
+    let leaves = main.read_tree_structure(vid).expect("read_tree_structure");
+    let mut by_path: std::collections::HashMap<&str, &crate::TreeLeaf> =
+        leaves.iter().map(|l| (l.path.as_str(), l)).collect();
+    let mut paths: Vec<&str> = by_path.keys().copied().collect();
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["big.bin", "scripts/run.sh", "small.txt"]);
+    for e in &staged.entries {
+        let leaf = by_path
+            .remove(e.path.as_str())
+            .expect("leaf for staged entry");
+        assert_eq!(
+            leaf.git_oid, e.git_oid,
+            "leaf git_oid matches the staged entry"
+        );
+        assert_eq!(leaf.mode, e.mode, "leaf mode matches");
+    }
+}
+
+#[test]
+fn read_git_blob_verified_returns_bytes_or_a_typed_miss_for_an_offloaded_blob() {
+    let scratch = Scratch::new("git-blob-verified");
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    let (main, staged) = version_with_one_offloaded_blob(&scratch.0);
+
+    let small = staged
+        .entries
+        .iter()
+        .find(|e| e.path == "small.txt")
+        .unwrap();
+    let big = staged.entries.iter().find(|e| e.path == "big.bin").unwrap();
+
+    // A git-resident blob comes back with its bytes + recomputed sha256 (== the staged object_id).
+    let (bytes, sha) = main
+        .read_git_blob_verified(small.git_oid)
+        .expect("git-resident blob reads");
+    assert_eq!(digest::sha256(&bytes), small.object_id);
+    assert_eq!(sha, small.object_id);
+
+    // The offloaded blob's git object is absent → the typed MissingObject (NEVER inferred as "offloaded";
+    // the database's location is what decides offload — this dumb primitive only reports the git miss).
+    assert!(matches!(
+        main.read_git_blob_verified(big.git_oid),
+        Err(VerifyError::MissingObject)
+    ));
+}

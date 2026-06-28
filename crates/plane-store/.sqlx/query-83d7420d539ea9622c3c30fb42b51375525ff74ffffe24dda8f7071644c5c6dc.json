@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT location AS \"location!\" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2",
+  "query": "SELECT location AS \"location!\" FROM object_presence\n               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'present'",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "7999708c16378271960c6a5d27956623b538a1cc62f96f8aaf4f838141ec125e"
+  "hash": "83d7420d539ea9622c3c30fb42b51375525ff74ffffe24dda8f7071644c5c6dc"
 }

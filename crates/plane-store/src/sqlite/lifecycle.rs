@@ -101,11 +101,16 @@ impl Db {
         }
     }
 
-    /// The recorded physical [`Location`] of an object (a pool read; no transaction). `None` means no row
-    /// — a legacy straight-to-git object (the pre-fence `upload_candidate` path records no presence row), or
-    /// one never installed — and the caller treats that as `git`. Drives the migrate dedup-reuse belt (which
-    /// must re-materialize into the **recorded** store, never re-route by the new candidate's size) and the
-    /// single-object read dispatch.
+    /// The recorded physical [`Location`] of a **`present`** object (a pool read; no transaction). `None`
+    /// means there is no *live* location — no row at all (a legacy straight-to-git object, whose pre-fence
+    /// `upload_candidate` path records no presence row), one never installed, OR a non-`present` row (a
+    /// reclaimed `absent`/`deleting`/`unavailable` one). The caller treats `None` as `git`. **The
+    /// `status = 'present'` filter is load-bearing for reads:** after a large-local object is GC'd its row
+    /// lingers as `absent` with `location = 'large-local'`; if the same bytes are then re-uploaded via the
+    /// legacy git path (which adds a `commit_object` edge but no presence row), an authorized read must NOT
+    /// be routed to the deleted side-store object — `None` here sends it to the git witness instead. Drives
+    /// the migrate dedup-reuse belt (always called on a `present` row, so the filter is transparent there)
+    /// and the single-object read dispatch.
     pub(crate) async fn object_location(
         &self,
         ws: &WorkspaceId,
@@ -114,7 +119,8 @@ impl Db {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let row = sqlx::query!(
-            r#"SELECT location AS "location!" FROM object_presence WHERE workspace_id = ?1 AND object_id = ?2"#,
+            r#"SELECT location AS "location!" FROM object_presence
+               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'present'"#,
             ws_s,
             oid,
         )

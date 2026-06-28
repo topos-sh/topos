@@ -1789,6 +1789,21 @@ async fn cross_workspace_offload_has_no_dedup_and_stays_isolated() {
         a.read_object(&p, &wb, &s, obj).await,
         Err(AuthorityError::NotFound)
     ));
+
+    // Strong no-dedup guard: reclaiming B's (unrooted) copy must leave A's byte-identical object intact — if
+    // the two workspaces shared one physical file, GC in B would destroy A's bytes too. (A is rooted by the
+    // commit_object edge above; B is unrooted once its lease is released, so it is GC-eligible.)
+    a.db().release_lease(&wb, &op("opb")).await.unwrap();
+    assert_eq!(gc::run_gc(a, &wb, 1_000_000).await.unwrap(), 1);
+    assert!(
+        !a.large_store(&wb).exists(obj.0).unwrap(),
+        "B's copy is reclaimed by B's GC"
+    );
+    assert!(
+        a.large_store(&wa).exists(obj.0).unwrap(),
+        "A's byte-identical object survives a GC in B — two distinct physical objects, no cross-ws dedup"
+    );
+    assert_eq!(a.read_object(&p, &wa, &s, obj).await.unwrap(), body);
 }
 
 #[tokio::test]
@@ -1835,4 +1850,185 @@ async fn a_live_lease_spares_an_offloaded_object_from_gc() {
         ObjectStatus::Present
     );
     assert!(a.large_store(&w).exists(obj.0).unwrap());
+}
+
+#[tokio::test]
+async fn a_legacy_git_reupload_after_a_large_gc_reads_from_git_not_a_stale_location() {
+    // Regression: a reclaimed large-local object leaves an `absent` row that STILL records
+    // `location = large-local`. If the same bytes are then re-uploaded via the legacy straight-to-git path
+    // (a `commit_object` edge, no presence row), an authorized read must dispatch to GIT — `object_location`
+    // honors only a `present` row, so the stale location can never mis-route a valid read to the deleted
+    // side-store object (which would spuriously fault Integrity).
+    let fx = Fixture::with_large_limits("stale-loc", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let s = skill("s_pr");
+    let p = prin("dev_read");
+    let body = blob(2048, 0x7E);
+    let obj = object_id(&body);
+
+    // 1. Offload it, then abandon + GC it → the row goes `absent` but keeps `location = large-local`.
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+    assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    // The stale `absent` row records `large-local`, but `object_location` must report no LIVE location.
+    assert_eq!(a.db().object_location(&w, obj).await.unwrap(), None);
+
+    // 2. Re-upload the SAME bytes via the legacy git path (writes a git blob + commit_object, no presence row).
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    a.upload_candidate(&p, &w, &s, genesis(vec![file("model.bin", &body)]))
+        .await
+        .expect("legacy re-upload");
+
+    // 3. The authorized read returns the git bytes — never mis-routed to the deleted large object.
+    assert_eq!(a.read_object(&p, &w, &s, obj).await.unwrap(), body);
+}
+
+#[tokio::test]
+async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound() {
+    // The skill-scoped-read invariant: a post-authz fetch failure on the LARGE surface is an Integrity fault,
+    // never NotFound — so the indistinguishable 404 still only ever comes from the access join, not a miss.
+    let fx = Fixture::with_large_limits("auth-integrity", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let s = skill("s_pr");
+    let p = prin("dev_read");
+    let body = blob(2048, 0x4D);
+    let obj = object_id(&body);
+    let staged = ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    a.db()
+        .seed_commit(&w, &s, staged.version_id, &[obj])
+        .await
+        .unwrap();
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    // The object is authorized + offloaded; now remove the large bytes out-of-band (a provenance/store
+    // divergence). The read is reachable only AFTER authz, so surfacing the fault discloses nothing.
+    a.large_store(&w).delete(obj.0).unwrap();
+    assert!(
+        matches!(
+            a.read_object(&p, &w, &s, obj).await,
+            Err(AuthorityError::Integrity(_))
+        ),
+        "a gone offloaded object on an authorized read must be Integrity, never NotFound"
+    );
+}
+
+#[tokio::test]
+async fn offloaded_dedup_reuse_and_the_re_materialize_belt() {
+    // The migrate Present branch for a large-local object: a second migrate of the same bytes dedup-reuses
+    // the existing row, and — if a crash lost the large bytes — the belt re-materializes them from the
+    // candidate's quarantine into the RECORDED store (large-local), never re-routing by size.
+    let fx = Fixture::with_large_limits("dedup-belt", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x2B);
+    let obj = object_id(&body);
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    assert!(a.large_store(&w).exists(obj.0).unwrap());
+
+    // Simulate a crash that lost the large bytes, then a second migrate of the SAME content — install_one
+    // hits Present, reads the recorded large-local location, and re-materializes from op2's quarantine.
+    a.large_store(&w).delete(obj.0).unwrap();
+    assert!(!a.large_store(&w).exists(obj.0).unwrap());
+    ingest_migrate(a, &w, "op2", vec![file("model.bin", &body)], 200).await;
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+    assert!(
+        a.large_store(&w).exists(obj.0).unwrap(),
+        "the dedup-reuse belt must re-materialize a crash-lost large object into the recorded store"
+    );
+}
+
+#[tokio::test]
+async fn recovery_sweep_reclaims_a_crashed_offloaded_deleting_object() {
+    // "a crashed deleting must still recover" — for an OFFLOADED object: a GC claim that crashed before
+    // finalizing leaves a stale `deleting` large-local row; the recovery sweep re-claims it and the unlink
+    // dispatches to the LARGE store, then finalizes it absent.
+    let fx = Fixture::with_large_limits("recover-offload", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x6C);
+    let obj = object_id(&body);
+    ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+    // A GC claims it (present → deleting) at t=100 but "crashes" before unlinking/finalizing.
+    assert!(matches!(
+        a.db().claim_for_delete(&w, obj, 100).await.unwrap(),
+        ClaimOutcome::Claimed {
+            location: Location::LargeLocal,
+            ..
+        }
+    ));
+    assert!(a.large_store(&w).exists(obj.0).unwrap()); // bytes still on disk (crash before unlink)
+
+    // The recovery sweep, far past the stale threshold, finalizes it — unlinking the LARGE object.
+    assert_eq!(gc::recovery_sweep(a, 100_000).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    assert!(
+        !a.large_store(&w).exists(obj.0).unwrap(),
+        "recovery must physically unlink the offloaded object from the large store"
+    );
+}
+
+#[tokio::test]
+async fn routing_boundaries_at_threshold_and_cap_are_exact() {
+    // threshold 1024 (offload at/above), cap 2048 (reject above).
+    let fx = Fixture::with_large_limits("boundary", 1024, 2048).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let at = blob(1024, 0x01); // == threshold → large
+    let below = blob(1023, 0x02); // < threshold → git
+    ingest_migrate(
+        a,
+        &w,
+        "op1",
+        vec![file("at.bin", &at), file("below.bin", &below)],
+        100,
+    )
+    .await;
+    assert_eq!(
+        a.db().object_location(&w, object_id(&at)).await.unwrap(),
+        Some(Location::LargeLocal),
+        "a blob exactly at the threshold offloads (>=)"
+    );
+    assert_eq!(
+        a.db().object_location(&w, object_id(&below)).await.unwrap(),
+        Some(Location::Git),
+        "a blob one byte below the threshold stays in git"
+    );
+
+    // Exactly at the cap is accepted; one byte over is rejected at ingest.
+    let at_cap = blob(2048, 0x03);
+    ingest_migrate(a, &w, "op2", vec![file("atcap.bin", &at_cap)], 200).await;
+    assert_eq!(
+        a.db()
+            .object_location(&w, object_id(&at_cap))
+            .await
+            .unwrap(),
+        Some(Location::LargeLocal)
+    );
+    let over_cap = blob(2049, 0x04);
+    assert!(
+        matches!(
+            lifecycle::ingest(
+                a,
+                &w,
+                &op("op3"),
+                genesis(vec![file("over.bin", &over_cap)]),
+                300
+            )
+            .await,
+            Err(AuthorityError::RejectedUpload(_))
+        ),
+        "a blob one byte over the cap is rejected at ingest"
+    );
 }
