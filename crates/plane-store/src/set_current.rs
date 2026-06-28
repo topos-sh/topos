@@ -101,6 +101,13 @@ pub(crate) async fn publish(
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
+    // The publish entry promotes a direct publish only (the public `Authority::publish` rejects any other
+    // device op before ingest; a revert has its own server-constructed path). The promote path's review
+    // gate keys on `PublishDirect`, so a non-direct op here would be a gate bypass — never let one through.
+    debug_assert!(
+        matches!(device.op, DeviceOp::PublishDirect),
+        "set_current::publish requires a PublishDirect device op"
+    );
     let object_ids = lifecycle::distinct_object_ids(&staged.entries);
     drive(
         authority,
@@ -118,6 +125,34 @@ pub(crate) async fn publish(
         now,
     )
     .await
+}
+
+/// Reject a publish whose device op is not `PublishDirect` — a review-gate-bypass guard. A permanent,
+/// receipted failure that uploaded/migrated/leased **nothing** (it runs before ingest).
+pub(crate) async fn reject_non_publish_op(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id: &OpId,
+    device: &DeviceSignedOp,
+    created_at: &str,
+) -> Result<SetCurrentReceipt> {
+    authority
+        .db()
+        .record_pretxn(pretxn(
+            ws,
+            &device.device_key_id,
+            op_id.as_str(),
+            device_op_command(device.op),
+            skill,
+            None,
+            None,
+            device.expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("a direct publish must be signed as PublishDirect"),
+            created_at,
+        ))
+        .await
 }
 
 /// Drive a **revert** to a known-good prior version: build the forward commit `{tree: good.tree, parents:
@@ -146,8 +181,13 @@ pub(crate) async fn revert(
     let command = device_op_command(device.op);
 
     // good's tree digest (recorded on its provenance row; render needs a KNOWN digest, so it cannot
-    // discover this) — absent/legacy ⇒ a faithful revert cannot be constructed.
-    let Some(good_digest) = authority.db().skill_commit_bundle_digest(ws, good).await? else {
+    // discover this), SCOPED TO THIS SKILL — reverting to another skill's commit is refused here, so the
+    // forward commit can never graft a foreign tree under this skill. Absent/legacy/foreign ⇒ refused.
+    let Some(good_digest) = authority
+        .db()
+        .skill_commit_bundle_digest(ws, skill, good)
+        .await?
+    else {
         return authority
             .db()
             .record_pretxn(pretxn(
@@ -165,6 +205,26 @@ pub(crate) async fn revert(
             ))
             .await;
     };
+
+    // Idempotent replay BEFORE rebuilding the forward commit. The forward commit re-parents on the LIVE
+    // `current`, so after the first revert commits a retry would derive a DIFFERENT commit id, and the
+    // in-transaction replay (which compares the commit) would burn the op as OP_ID_REUSED rather than
+    // replaying the original OK. Keying on the stable (command, skill, target digest, expected) replays it.
+    if let Some(replayed) = authority
+        .db()
+        .replay_revert(
+            ws,
+            &device.device_key_id,
+            op_id.as_str(),
+            skill,
+            good_digest,
+            device.expected,
+        )
+        .await?
+    {
+        return Ok(replayed);
+    }
+
     // The current pointer is the forward commit's first parent.
     let Some(current) = authority.db().read_current_commit(ws, skill).await? else {
         return authority
@@ -287,30 +347,12 @@ async fn drive(
             .await;
     };
 
-    // Re-verify the migrated candidate is renderable BEFORE the transaction. The migrate path explicitly
-    // defers this renderability re-check to the pointer-move: a `present` row whose bytes a crash lost, or
-    // a stalled commit_durable, surfaces here as a retryable failure rather than a pointer to missing bytes.
-    if crate::read::render_version(authority, cand.ws, cand.commit.0, cand.bundle_digest)
-        .await
-        .is_err()
-    {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                cand.ws,
-                &device.device_key_id,
-                cand.op_id.as_str(),
-                command,
-                cand.skill,
-                Some(cand.commit),
-                Some(cand.bundle_digest),
-                device.expected,
-                TerminalOutcome::RetryableFailure,
-                detail_msg("the migrated candidate is not renderable; re-drive migrate"),
-                created_at,
-            ))
-            .await;
-    }
+    // Re-verify the migrated candidate is renderable BEFORE the transaction (the migrate path defers this
+    // renderability re-check to the pointer-move). A failure is a genuine fault — a `present` row whose bytes
+    // a crash lost, a corrupt blob, or a database error — so PROPAGATE it (Integrity/Internal): it rolls the
+    // attempt back and surfaces a corruption/DB alarm, never a *receipted* `RETRYABLE_FAILURE` (which a retry
+    // would replay forever as a sticky terminal even after the underlying fault cleared).
+    crate::read::render_version(authority, cand.ws, cand.commit.0, cand.bundle_digest).await?;
 
     let signer = authority.plane_signer()?;
     let input = PromoteInput {
@@ -370,6 +412,13 @@ pub(crate) async fn publish_preflight(
     {
         return Ok(None);
     }
+    // NOTE (safe only while policy is immutable): this gated receipt binds `commit/digest = None` (nothing
+    // is ingested yet), whereas the in-txn promote path binds `commit = Some(candidate)`. A single op id
+    // that took the in-txn path on one attempt and this preflight on another would see those bound
+    // identities disagree and burn as OP_ID_REUSED. That split requires `review_required` to FLIP between
+    // attempts — impossible in v0, where the policy is fixture-seeded with no mutation surface. Unifying the
+    // bound (the client's claimed commit/digest, or keying the gate on stable fields) lands with the
+    // set-policy verb + the propose path, which ship together.
     let receipt = authority
         .db()
         .record_pretxn(pretxn(
@@ -451,13 +500,15 @@ pub(crate) fn detail_msg(msg: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "message": msg }))
 }
 
-/// Parse a canonical UUID op-id string into the raw 16 bytes the device-op signature binds. `None` if the
-/// string is not a parseable UUID (the receipt key stays the canonical string; the 16 bytes derive from it
-/// alone, so the key and the signed identity can never split).
+/// Parse a **canonical** lowercase-hyphenated UUID op-id string into the raw 16 bytes the device-op
+/// signature binds. `None` unless the string is *exactly* its canonical hyphenated form — `parse_str` also
+/// accepts the simple (32-hex) and braced spellings, which decode to the SAME 16 bytes, so without this
+/// check two distinct receipt-key strings could map to one signed identity and split the idempotency slot
+/// (a varied-form retry would miss its receipt and re-execute). Requiring the canonical form keeps the
+/// receipt key (the string) 1:1 with the signed identity (the 16 bytes), so they can never split.
 fn parse_op_id(op_id: &str) -> Option<[u8; 16]> {
-    uuid::Uuid::parse_str(op_id)
-        .ok()
-        .map(uuid::Uuid::into_bytes)
+    let uuid = uuid::Uuid::parse_str(op_id).ok()?;
+    (uuid.as_hyphenated().to_string() == op_id).then(|| uuid.into_bytes())
 }
 
 /// The revert commit frame was rejected by the kernel (an internal fault — the inputs are server-derived).

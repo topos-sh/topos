@@ -181,6 +181,16 @@ impl Authority {
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        // A direct publish must be signed as exactly that. Forwarding an arbitrary device op (e.g. a
+        // `Revert`-labelled candidate of new bytes) would skip the direct-publish review gate while still
+        // reaching the promote path — a review bypass. Reject anything but `PublishDirect` BEFORE ingesting
+        // (so a misuse uploads/migrates/leases nothing).
+        if !matches!(device.op, topos_core::sign::DeviceOp::PublishDirect) {
+            return crate::set_current::reject_non_publish_op(
+                self, ws, skill, op_id, &device, created_at,
+            )
+            .await;
+        }
         if let Some(receipt) = crate::set_current::publish_preflight(
             self,
             ws,

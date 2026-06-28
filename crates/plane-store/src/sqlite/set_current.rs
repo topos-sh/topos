@@ -83,20 +83,26 @@ impl Db {
         Ok(outcome)
     }
 
-    /// The recorded bundle digest of a commit's provenance row (revert reads the target's tree digest here —
-    /// the git commit does not persist it). `None` if the commit is unknown or its digest is unrecorded
-    /// (a legacy pre-pointer-move version), in which case it cannot be a revert target.
+    /// The recorded bundle digest of a commit's provenance row **scoped to the requesting skill** (revert
+    /// reads the target's tree digest here — the git commit does not persist it). The `skill_id` filter is
+    /// load-bearing security: it forbids reverting to a commit owned by **another** skill in the same
+    /// workspace (which would graft that skill's tree under this skill's `commit_object` edges and leak its
+    /// bytes). `None` if the commit is not a version of this skill, or its digest is unrecorded (a legacy
+    /// pre-pointer-move version) — either way it cannot be a revert target.
     pub(crate) async fn skill_commit_bundle_digest(
         &self,
         ws: &WorkspaceId,
+        skill: &SkillId,
         commit: CommitId,
     ) -> Result<Option<[u8; 32]>> {
         let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
         let cid = commit.0.as_slice();
         let row = sqlx::query!(
             r#"SELECT bundle_digest AS "bundle_digest?: Vec<u8>" FROM skill_commit
-               WHERE workspace_id = ?1 AND commit_id = ?2"#,
+               WHERE workspace_id = ?1 AND skill_id = ?2 AND commit_id = ?3"#,
             ws_s,
+            skill_s,
             cid,
         )
         .fetch_optional(self.pool())
@@ -106,6 +112,36 @@ impl Db {
             Some(bytes) => Ok(Some(blob32(&bytes)?)),
             None => Ok(None),
         }
+    }
+
+    /// Idempotent replay for a **revert**, keyed on the op id and compared on the STABLE request identity
+    /// (command + skill + target tree digest + expected generation) — **not** the server-derived forward
+    /// commit id, which re-parents on the live `current` and so changes after the first revert commits (the
+    /// in-transaction replay, which does compare the commit, would then spuriously see a mismatch and burn
+    /// the op as `OP_ID_REUSED` instead of replaying the original `OK`). Run this BEFORE rebuilding the
+    /// forward commit: `Some(receipt)` replays a prior result (a true retry — or a permanent `OP_ID_REUSED`
+    /// if the same op id was reused for a different target/generation); `None` means proceed (a fresh op).
+    pub(crate) async fn replay_revert(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        op_id: &str,
+        skill: &SkillId,
+        good_digest: [u8; 32],
+        expected: Generation,
+    ) -> Result<Option<SetCurrentReceipt>> {
+        let Some(stored) = get_receipt(self.pool(), ws, device_key_id, op_id).await? else {
+            return Ok(None);
+        };
+        let stable_match = stored.command == "revert"
+            && stored.skill_id == skill.as_str()
+            && stored.bundle_digest == Some(good_digest)
+            && stored.expected == expected;
+        Ok(Some(if stable_match {
+            stored.into_receipt()
+        } else {
+            permanent_key_reuse(op_id)
+        }))
     }
 
     /// The commit id `current` points at for a skill, if a pointer exists (revert's first parent).
@@ -355,9 +391,9 @@ async fn run(
             Some(p0) if *p0 == cur.commit => {}
             _ => return first_parent_mismatch(tx, input, &bound, cur).await,
         }
-        // The review-required gate (typed fail): a DIRECT publish only — revert + genesis bypass it.
+        // The review-required gate (typed fail): a DIRECT publish only — revert + genesis bypass it. The
+        // lease is released by the terminal-receipt writer (every non-OK outcome releases it).
         if matches!(input.op, DeviceOp::PublishDirect) && review_required {
-            delete_lease(tx, input.ws, input.op_id).await?;
             return approval_required(tx, input, &bound).await;
         }
     }
@@ -567,6 +603,11 @@ async fn write_terminal(
         details,
     };
     insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    // Release the candidate's promotion lease: a terminal non-OK abandons this candidate, and its lease was
+    // made non-expiring by a successful migrate, so without this its objects would be GC-rooted forever. The
+    // delete is idempotent (a no-op if the lease is absent or only expiring). A retry of the SAME op_id
+    // replays this receipt before reaching here; a rebase is a new op_id with its own fresh lease.
+    delete_lease(tx, input.ws, input.op_id).await?;
     Ok(stored.into_receipt())
 }
 
@@ -611,7 +652,7 @@ async fn replay(
     op_id: &str,
     bound: &BoundIdentity<'_>,
 ) -> Result<Replay> {
-    match get_receipt(tx, ws, device_key_id, op_id).await? {
+    match get_receipt(&mut **tx, ws, device_key_id, op_id).await? {
         None => Ok(Replay::Fresh),
         Some(stored) => {
             if stored.command == bound.command
@@ -813,9 +854,14 @@ async fn insert_skill_commit(
     let cid = commit.0.as_slice();
     let skill_s = skill.as_str();
     let digest = bundle_digest.as_slice();
+    // Backfill the digest if a row already exists with none (a commit recorded before the pointer-move
+    // path, or by a digest-less writer) — otherwise that version, once current, could never be a revert
+    // target. COALESCE keeps an existing digest (idempotent) and never changes the owning skill (the
+    // cross-skill-adoption check already ran, so the existing row is this skill's).
     sqlx::query!(
         "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT (workspace_id, commit_id) DO NOTHING",
+         ON CONFLICT (workspace_id, commit_id) \
+         DO UPDATE SET bundle_digest = COALESCE(skill_commit.bundle_digest, excluded.bundle_digest)",
         ws_s,
         cid,
         skill_s,
@@ -900,12 +946,15 @@ async fn delete_lease(
     Ok(())
 }
 
-async fn get_receipt(
-    tx: &mut Transaction<'_, Sqlite>,
+async fn get_receipt<'e, E>(
+    executor: E,
     ws: &WorkspaceId,
     device_key_id: &str,
     op_id: &str,
-) -> Result<Option<StoredReceipt>> {
+) -> Result<Option<StoredReceipt>>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
     let ws_s = ws.as_str();
     let row = sqlx::query!(
         r#"SELECT command AS "command!", skill_id AS "skill_id!",
@@ -919,7 +968,7 @@ async fn get_receipt(
         device_key_id,
         op_id,
     )
-    .fetch_optional(&mut **tx)
+    .fetch_optional(executor)
     .await
     .map_err(AuthorityError::internal)?;
     let Some(r) = row else { return Ok(None) };

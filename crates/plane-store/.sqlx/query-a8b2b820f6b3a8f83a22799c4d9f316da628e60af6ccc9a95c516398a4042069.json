@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT bundle_digest AS \"bundle_digest?: Vec<u8>\" FROM skill_commit\n               WHERE workspace_id = ?1 AND skill_id = ?2 AND commit_id = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "bundle_digest?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a8b2b820f6b3a8f83a22799c4d9f316da628e60af6ccc9a95c516398a4042069"
+}

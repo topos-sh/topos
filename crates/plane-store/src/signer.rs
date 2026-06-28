@@ -170,10 +170,21 @@ enum CreateOutcome {
     Failed(&'static str),
 }
 
-/// Create the key file **exclusively** (`O_EXCL`) with mode `0600` and write the seed, so the seed is
-/// owner-only from creation (no write-then-chmod window). `Raced` if another process created it first.
+/// Publish the key file **atomically**: write the seed to a unique sibling temp (`O_EXCL`, mode `0600`),
+/// fully `fsync` it, then **hard-link** it onto the real path. The link is create-only (fails if the path
+/// already exists) **and** atomic, so the key path is never observable at a partial length — a crash
+/// mid-write leaves only an orphan temp, never a 0-byte key that would wedge the next startup with a
+/// "must be exactly 32 bytes" error. A lost create race surfaces as `Raced` (the loser loads the winner's
+/// key — no split brain), exactly as a plain `O_EXCL` create did.
 fn create_seed_file(path: &Path, seed: &[u8; SEED_LEN]) -> CreateOutcome {
     use std::io::Write;
+
+    // A unique temp name in the same directory (so the hard-link stays on one filesystem).
+    let mut nonce = [0u8; 8];
+    if getrandom::getrandom(&mut nonce).is_err() {
+        return CreateOutcome::Failed("could not gather entropy for the temp key file");
+    }
+    let temp = path.with_extension(format!("tmp.{}", topos_core::digest::to_hex(&nonce)));
 
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -182,18 +193,24 @@ fn create_seed_file(path: &Path, seed: &[u8; SEED_LEN]) -> CreateOutcome {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut file = match opts.open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return CreateOutcome::Raced,
-        Err(_) => return CreateOutcome::Failed("could not create (0600)"),
-    };
-    if file.write_all(seed).is_err() {
-        return CreateOutcome::Failed("could not write the seed");
-    }
-    if file.sync_all().is_err() {
-        return CreateOutcome::Failed("could not fsync the seed");
-    }
-    CreateOutcome::Created
+    let result = (|| -> std::result::Result<CreateOutcome, &'static str> {
+        let mut file = opts
+            .open(&temp)
+            .map_err(|_| "could not create the temp key file (0600)")?;
+        file.write_all(seed)
+            .map_err(|_| "could not write the seed")?;
+        file.sync_all().map_err(|_| "could not fsync the seed")?;
+        drop(file);
+        // Atomic, create-only publish: the link succeeds iff `path` does not already exist.
+        match std::fs::hard_link(&temp, path) {
+            Ok(()) => Ok(CreateOutcome::Created),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(CreateOutcome::Raced),
+            Err(_) => Err("could not publish the key file"),
+        }
+    })();
+    // Best-effort cleanup of the temp link (the published `path` link, if any, persists independently).
+    let _ = std::fs::remove_file(&temp);
+    result.unwrap_or_else(CreateOutcome::Failed)
 }
 
 #[cfg(test)]

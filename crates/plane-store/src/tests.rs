@@ -3117,7 +3117,7 @@ async fn sign_revert(
     let good_digest = fx
         .authority
         .db()
-        .skill_commit_bundle_digest(ws, good)
+        .skill_commit_bundle_digest(ws, skill, good)
         .await
         .unwrap()
         .unwrap();
@@ -3146,4 +3146,340 @@ async fn sign_revert(
         version_id,
         good_digest,
     )
+}
+
+/// A revert may only target a version of the SAME skill — reverting to another skill's commit (same
+/// workspace) is refused, so the forward commit can never graft a foreign tree under this skill's edges.
+#[tokio::test]
+async fn revert_to_another_skills_commit_is_refused() {
+    let fx = Fixture::new("sc-xskill-revert").await;
+    let w = ws("w_acme");
+    let (s1, s2) = (skill("s_one"), skill("s_two"));
+    let key = dev_key(30);
+    register(&fx, &w, &s1, "dk_a", &key, "p_dev").await;
+    register(&fx, &w, &s2, "dk_a", &key, "p_dev").await;
+
+    // s2 creates a commit c2 (owned by s2); s1 has its own current.
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s2,
+        "30000000-0000-4000-8000-aaaaaaaaaaaa",
+        genesis(vec![file("f", b"s2 secret")]),
+        gn(0, 0),
+    )
+    .await;
+    let c2 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s2)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s1,
+        "30000000-0000-4000-8000-bbbbbbbbbbbb",
+        genesis(vec![file("f", b"s1 bytes")]),
+        gn(0, 0),
+    )
+    .await;
+    let s1_before = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s1)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // s1 reverts to c2 (s2's commit) — refused; the skill-scoped digest lookup returns nothing.
+    let rop = op("30000000-0000-4000-8000-cccccccccccc");
+    let rdev = DeviceSignedOp {
+        device_key_id: "dk_a".to_owned(),
+        op: DeviceOp::Revert,
+        signature: [0u8; 64],
+        expected: gn(1, 1),
+    };
+    let r = fx
+        .authority
+        .revert(
+            &w,
+            &s1,
+            c2,
+            rdev,
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    // s1's pointer did not move (no foreign tree grafted).
+    assert_eq!(
+        fx.authority
+            .db()
+            .read_current_commit(&w, &s1)
+            .await
+            .unwrap(),
+        Some(s1_before)
+    );
+}
+
+/// A candidate of new bytes submitted to the PUBLISH entry signed as a non-direct op (e.g. `Revert`) is
+/// rejected before ingest — otherwise it would skip the review gate while reaching the promote path.
+#[tokio::test]
+async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest() {
+    let fx = Fixture::new("sc-opbypass").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(31);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+    fx.authority
+        .db()
+        .set_review_required(&w, true)
+        .await
+        .unwrap();
+
+    let op_id = op("31000000-0000-4000-8000-000000000000");
+    let dev = DeviceSignedOp {
+        device_key_id: "dk_a".to_owned(),
+        op: DeviceOp::Revert,
+        signature: [0u8; 64],
+        expected: gn(0, 0),
+    };
+    let r = fx
+        .authority
+        .publish(
+            &w,
+            &s,
+            &op_id,
+            genesis(vec![file("f", b"sneaky")]),
+            dev,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    // Nothing was promoted, and (ingested nothing) no quarantine row was opened.
+    assert!(
+        fx.authority
+            .db()
+            .read_current_commit(&w, &s)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A CONFLICTed publish releases its (non-expiring) promotion lease, so the abandoned candidate's unique
+/// objects become GC-reclaimable rather than rooted forever.
+#[tokio::test]
+async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable() {
+    let fx = Fixture::new("sc-conflict-lease").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(32);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "32000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Two candidates based on (1,1); B carries a UNIQUE object. A wins, B conflicts.
+    let b_body = b"unique-to-the-loser";
+    let (sa, da) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "32000000-0000-4000-8000-00000000000a",
+        child(c0, vec![file("f", b"A")]),
+        gn(1, 1),
+    )
+    .await;
+    let (sb, db) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "32000000-0000-4000-8000-00000000000b",
+        child(c0, vec![file("f", b_body)]),
+        gn(1, 1),
+    )
+    .await;
+    let b_obj = object_id(b_body);
+
+    assert!(
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    let rb = crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(rb.outcome, TerminalOutcome::Conflict);
+
+    // B's unique object is present but now unrooted (no edge, lease released) → a GC pass reclaims it.
+    assert_eq!(
+        fx.authority.db().object_status(&w, b_obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+    let reclaimed = gc::run_gc(&fx.authority, &w, NOW + 1_000_000)
+        .await
+        .unwrap();
+    assert!(
+        reclaimed >= 1,
+        "the abandoned candidate's object must be reclaimable"
+    );
+    assert_eq!(
+        fx.authority.db().object_status(&w, b_obj).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+/// A revert's lost-ack retry replays the ORIGINAL OK — not OP_ID_REUSED — even though `current` has
+/// advanced and a fresh forward commit would re-parent on it (the op id replays on its stable identity).
+#[tokio::test]
+async fn a_revert_lost_ack_retry_replays_the_original_ok() {
+    let fx = Fixture::new("sc-revert-replay").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(33);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "33000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"beta")]),
+        gn(0, 0),
+    )
+    .await;
+    let x = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "33000000-0000-4000-8000-000000000001",
+        child(x, vec![file("f", b"gamma")]),
+        gn(1, 1),
+    )
+    .await;
+
+    // First revert (op K) → (1,3).
+    let rop = op("33000000-0000-4000-8000-000000000002");
+    let rsig = sign_revert(&fx, &key, "dk_a", &w, &s, x, &rop, gn(1, 2)).await;
+    let rdev = DeviceSignedOp {
+        device_key_id: "dk_a".to_owned(),
+        op: DeviceOp::Revert,
+        signature: rsig,
+        expected: gn(1, 2),
+    };
+    let first = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            x,
+            rdev.clone(),
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(first.is_ok());
+    assert_eq!(first.current, Some(gn(1, 3)));
+
+    // Retry the SAME op K (its ack was lost). current is now the forward commit; a fresh revert would
+    // re-parent on that and derive a different commit id — but the op id replays the byte-identical OK.
+    let retry = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            x,
+            rdev,
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry, first);
+    assert_eq!(retry.current, Some(gn(1, 3)));
+}
+
+/// A non-canonical UUID op id (the valid-but-unhyphenated 32-hex form) is rejected — its string is a
+/// distinct receipt key that decodes to the SAME 16 signed bytes, so accepting it would split the
+/// idempotency slot. Requiring the canonical hyphenated form keeps the key 1:1 with the signed identity.
+#[tokio::test]
+async fn a_non_canonical_uuid_op_id_is_rejected() {
+    let fx = Fixture::new("sc-opid-canon").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(34);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // 32-hex simple form of a valid UUID (no hyphens) — accepted by OpId::parse + uuid::parse_str, rejected
+    // by the canonical-form check.
+    let r = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "34000000000040008000000000000000",
+        genesis(vec![file("f", b"x")]),
+        gn(0, 0),
+    )
+    .await;
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    assert!(
+        fx.authority
+            .db()
+            .read_current_commit(&w, &s)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
