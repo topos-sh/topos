@@ -37,17 +37,33 @@ pub(crate) async fn read_object(
         None => return Err(AuthorityError::NotFound),
     };
 
-    // Step two: fetch + verify the bytes from the store the database records, dispatching on `location`. A
-    // legacy straight-to-git object has no presence row (`None`) and defaults to git. The witness already
-    // proved reachability, so there is no benign miss left: ANY post-authz failure in EITHER store is a
-    // provenance/store divergence (corruption) → an Integrity fault, kept distinct from the not-found path
-    // (so the indistinguishable 404 holds across the new large-object surface), never served by bare hash.
-    match authority.db().object_location(ws, object_id).await? {
-        Some(Location::LargeLocal) => authority
+    // Step two: fetch + verify the bytes from the store the database records, dispatching on `location`. The
+    // witness already proved reachability, so there is no benign miss left: ANY post-authz failure in EITHER
+    // store is a provenance/store divergence (corruption) → an Integrity fault, kept distinct from the
+    // not-found path (so the indistinguishable 404 holds across the large-object surface), never by bare hash.
+    match authority.db().object_dispatch(ws, object_id).await? {
+        // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
+        Some((Location::LargeLocal, _)) => authority
             .large_store(ws)
             .get(object_id.0)
             .map_err(AuthorityError::integrity),
-        Some(Location::Git) | None => {
+        // Git-resident: read the loose object DIRECTLY by its locator and re-verify the content id — NOT a
+        // whole-version-tree walk, which would fault on an offloaded sibling's absent git object in a mixed
+        // bundle before reaching the requested blob.
+        Some((Location::Git, git_oid)) => {
+            let store = authority.open_store(ws)?;
+            let (bytes, content_sha256) = store
+                .read_git_blob_verified(git_oid)
+                .map_err(AuthorityError::integrity)?;
+            if content_sha256 == object_id.0 {
+                Ok(bytes)
+            } else {
+                Err(AuthorityError::integrity(GitLocatorMismatch))
+            }
+        }
+        // No live presence row: a legacy straight-to-git object — its version is all-git, so the tree walk is
+        // safe — read by content id from the witness version.
+        None => {
             let store = authority.open_store(ws)?;
             store
                 .read_object_in_version(witness.0, object_id.0)
@@ -55,6 +71,10 @@ pub(crate) async fn read_object(
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("a present object's git locator does not resolve to its content id")]
+struct GitLocatorMismatch;
 
 /// Assemble + verify a whole bundle for a version, dispatching each file to the store the database records.
 ///

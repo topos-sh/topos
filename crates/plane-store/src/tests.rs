@@ -2074,3 +2074,45 @@ async fn routing_boundaries_at_threshold_and_cap_are_exact() {
         "a blob one byte over the cap is rejected at ingest"
     );
 }
+
+#[tokio::test]
+async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds() {
+    // Regression: a git-resident object in a version that ALSO contains an offloaded blob must read fine. The
+    // git arm reads the loose object directly by its locator, NOT by walking the whole version tree — which
+    // would fault on the offloaded sibling's intentionally-absent git object before reaching the requested
+    // blob (and return a spurious Integrity for a perfectly valid read).
+    let fx = Fixture::with_large_limits("mixed-read", 1024, 1 << 30).await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let s = skill("s_pr");
+    let p = prin("dev_read");
+    let small: &[u8] = b"a small git-resident file, well below the threshold";
+    let big = blob(2048, 0x5E); // >= threshold → offloaded (its git object is absent)
+    let (small_id, big_id) = (object_id(small), object_id(&big));
+    let staged = ingest_migrate(
+        a,
+        &w,
+        "op1",
+        vec![file("small.txt", small), file("big.bin", &big)],
+        100,
+    )
+    .await;
+    assert_eq!(
+        a.db().object_location(&w, small_id).await.unwrap(),
+        Some(Location::Git)
+    );
+    assert_eq!(
+        a.db().object_location(&w, big_id).await.unwrap(),
+        Some(Location::LargeLocal)
+    );
+    a.db()
+        .seed_commit(&w, &s, staged.version_id, &[small_id, big_id])
+        .await
+        .unwrap();
+    a.db().seed_roster(&w, &s, &p).await.unwrap();
+
+    // The git-resident file reads correctly despite the offloaded sibling…
+    assert_eq!(a.read_object(&p, &w, &s, small_id).await.unwrap(), small);
+    // …and the offloaded file reads too (dispatched to the large store).
+    assert_eq!(a.read_object(&p, &w, &s, big_id).await.unwrap(), big);
+}

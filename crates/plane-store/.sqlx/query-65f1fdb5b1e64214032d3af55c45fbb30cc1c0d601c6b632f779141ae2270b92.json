@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT location AS \"location!\", git_oid AS \"git_oid: Vec<u8>\"\n               FROM object_presence\n               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'present'",
+  "describe": {
+    "columns": [
+      {
+        "name": "location!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "git_oid: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "65f1fdb5b1e64214032d3af55c45fbb30cc1c0d601c6b632f779141ae2270b92"
+}

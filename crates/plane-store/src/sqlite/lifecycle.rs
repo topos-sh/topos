@@ -133,6 +133,39 @@ impl Db {
         }
     }
 
+    /// The [`Location`] **and** git locator of a **`present`** object — `(location, git_oid)` for a present
+    /// row, else `None` (no live row: a legacy git object, or one never installed / reclaimed). This drives
+    /// the single-object read dispatch: the git arm reads the loose object **directly by `git_oid`** rather
+    /// than walking the version's tree, so a git-resident object in a MIXED bundle — one that also contains
+    /// an offloaded blob whose git object is intentionally absent — reads correctly (a whole-tree re-hash
+    /// would fault on the absent offloaded sibling before reaching the requested blob). `None` falls back to
+    /// the tree walk, which is safe there because a no-row object's version is all-git (legacy).
+    pub(crate) async fn object_dispatch(
+        &self,
+        ws: &WorkspaceId,
+        object_id: ObjectId,
+    ) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT location AS "location!", git_oid AS "git_oid: Vec<u8>"
+               FROM object_presence
+               WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'present'"#,
+            ws_s,
+            oid,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some((
+                parse_location(&r.location)?,
+                git_oid_from_row(r.git_oid)?,
+            ))),
+        }
+    }
+
     /// The install transition: `absent → present`, set ONLY after the caller has durably installed the
     /// bytes at their final path **in the store named by `location`**. One immediate-write transaction:
     /// reject a denylisted blob; then the guarded upsert (the `WHERE status = 'absent'` cannot fire on a
