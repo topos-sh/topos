@@ -67,7 +67,10 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
     if candidates.is_empty() {
         return Ok(0);
     }
-    let store = authority.open_store(ws)?;
+    // The git store is opened LAZILY (cached), only when a `git`-located object is actually unlinked — so a
+    // workspace whose first migrate routed every blob to the large store (and crashed before `migrate_finish`
+    // created the git repo) can still have its large-local rows reclaimed instead of aborting on a missing repo.
+    let mut git_store: Option<Store> = None;
     let started = tokio::time::Instant::now();
     let mut reclaimed = 0;
     for object_id in candidates {
@@ -101,7 +104,7 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
         }
         // Unlink — remove the bytes OUTSIDE any transaction (the filesystem trails the DB), dispatching on
         // the recorded location: a loose git-object delete, or a large-object-store unlink keyed on the id.
-        unlink_object(authority, ws, &store, location, object_id, git_oid)?;
+        unlink_object(authority, ws, &mut git_store, location, object_id, git_oid)?;
         // Finalize — `deleting → absent` (its own short transaction), GATED on this actor's claim token so a
         // row a recovery sweep re-claimed is never finalized out from under it.
         let finalize_now = now.saturating_add(started.elapsed().as_secs() as i64);
@@ -127,7 +130,9 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
         .workspaces_with_stale_deleting(older_than)
         .await?
     {
-        let store = authority.open_store(&ws)?;
+        // Opened lazily (cached), only for a `git`-located unlink — so a workspace with only large-local
+        // rows and no git repo still recovers (see `run_gc`).
+        let mut git_store: Option<Store> = None;
         // The stale list is advisory; the per-object claim is the one-winner guard (mirroring run_gc's
         // claim) — it keeps the row `deleting` across the unlink and hands the git locator to exactly one
         // sweeper, so two concurrent recoveries can't both unlink and a migrate can't reinstall mid-sweep.
@@ -155,7 +160,7 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
             {
                 continue;
             }
-            unlink_object(authority, &ws, &store, location, object_id, git_oid)?;
+            unlink_object(authority, &ws, &mut git_store, location, object_id, git_oid)?;
             authority
                 .db()
                 .finalize_delete(&ws, object_id, now, now)
@@ -207,17 +212,26 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
 /// only ever touch this workspace's bytes). Both are idempotent (re-unlinking an already-gone object is a
 /// no-op), so the recovery sweep's re-run is safe. The DB transitions + the claim-token fence are unchanged
 /// — only the physical target differs by location.
+///
+/// The git store is opened **lazily** into `git_store` (cached for the pass) on the first `git` unlink, so a
+/// workspace that has only `large-local` objects — and therefore may have no git repo yet — never tries to
+/// open one.
 fn unlink_object(
     authority: &Authority,
     ws: &WorkspaceId,
-    git_store: &Store,
+    git_store: &mut Option<Store>,
     location: Location,
     object_id: ObjectId,
     git_oid: [u8; 20],
 ) -> Result<()> {
     match location {
         Location::Git => {
+            if git_store.is_none() {
+                *git_store = Some(authority.open_store(ws)?);
+            }
             git_store
+                .as_ref()
+                .expect("git store opened above")
                 .delete_loose_object(git_oid)
                 .map_err(crate::error::AuthorityError::internal)?;
         }

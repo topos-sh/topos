@@ -197,6 +197,19 @@ impl Store {
                 FileMode::Regular => EntryKind::Blob,
                 FileMode::Executable => EntryKind::BlobExecutable,
             };
+            // Restore the component validation the high-level editor applied (the plumbing editor skips it):
+            // reject `.git`/`.gitmodules` + their HFS+/NTFS aliases, path separators, and Windows
+            // devices/illegal chars, exactly as the client write path does — so the fenced migrate can never
+            // record a tree the normal upload would refuse. (The kernel `check_path` covers `.`/`..`/NUL/
+            // absolute; this covers the rest.) Symlinks are never written here, so `mode = None`.
+            for component in path.split('/') {
+                gix::validate::path::component(
+                    component.into(),
+                    None,
+                    gix::validate::path::component::Options::default(),
+                )
+                .map_err(|e| GitstoreError::RejectPath(format!("{component:?}: {e}")))?;
+            }
             // The path is split into components (`a/b/c`), matching the high-level editor's behavior; the
             // intermediate trees are created without requiring the leaf blob to be present.
             editor.upsert(path.split('/'), kind, oid).map_err(gix_err)?;

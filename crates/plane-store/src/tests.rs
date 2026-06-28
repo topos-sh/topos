@@ -2116,3 +2116,76 @@ async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds() {
     // …and the offloaded file reads too (dispatched to the large store).
     assert_eq!(a.read_object(&p, &w, &s, big_id).await.unwrap(), big);
 }
+
+#[tokio::test]
+async fn fenced_migrate_rejects_a_dotgit_path() {
+    // The fenced migrate must reject a `.git` path exactly as the client write path does — the kernel
+    // check_path allows `.git` (it only bars `.`/`..`/NUL/absolute), so ingest stages it, but the migrate's
+    // tree build (the plumbing editor + restored component validation) refuses it, so no `.git` bundle is
+    // ever recorded.
+    let fx = Fixture::new("dotgit").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let staged = lifecycle::ingest(
+        a,
+        &w,
+        &op("op1"),
+        genesis(vec![file(".git/config", b"[core]\n")]),
+        100,
+    )
+    .await
+    .expect("ingest stages (check_path allows .git)");
+    assert!(
+        matches!(
+            lifecycle::migrate(a, &w, &staged, 100).await,
+            Err(AuthorityError::RejectedUpload(_))
+        ),
+        "the fenced migrate must reject a .git path at the tree build"
+    );
+}
+
+#[tokio::test]
+async fn gc_reclaims_large_objects_when_no_git_repo_exists() {
+    // A workspace whose FIRST migrate routed every blob to the large store, then crashed before
+    // migrate_finish created the git repo: the large-local rows must still be reclaimable. GC opens the git
+    // store lazily (only for a git unlink), so it does not abort on the missing repo.
+    let fx = Fixture::with_large_limits("no-git-gc", 1, 1 << 30).await; // tiny threshold → all blobs offload
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = blob(2048, 0x4F);
+    let obj = object_id(&body);
+
+    // ingest + lease + install, but NOT migrate_finish (which is what creates the main git repo) — a crash
+    // before finish. The blob is offloaded, so no git object/repo was ever created.
+    let staged = lifecycle::ingest(
+        a,
+        &w,
+        &op("op1"),
+        genesis(vec![file("big.bin", &body)]),
+        100,
+    )
+    .await
+    .expect("ingest");
+    lifecycle::migrate_lease(a, &w, &staged, 100).await.unwrap();
+    lifecycle::migrate_install(a, &w, &staged, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Present
+    );
+    assert!(a.large_store(&w).exists(obj.0).unwrap());
+    assert!(
+        !fx.dir.join("stores").join("w_acme").exists(),
+        "no git repo was created (all blobs offloaded)"
+    );
+
+    // Abandon the crashed migrate's lease, then GC — it must reclaim the large-local object WITHOUT a git repo.
+    a.db().release_lease(&w, &op("op1")).await.unwrap();
+    assert_eq!(gc::run_gc(a, &w, 1_000_000).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, obj).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    assert!(!a.large_store(&w).exists(obj.0).unwrap());
+}

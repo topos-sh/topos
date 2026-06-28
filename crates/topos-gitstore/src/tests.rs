@@ -900,3 +900,30 @@ fn read_git_blob_verified_returns_bytes_or_a_typed_miss_for_an_offloaded_blob() 
         Err(VerifyError::MissingObject)
     ));
 }
+
+#[test]
+fn write_tree_rejects_a_dotgit_component_like_the_high_level_editor() {
+    // The plumbing tree build must still reject the dangerous path components the high-level (client) editor
+    // rejects — a `.git` directory and the like — even though it skips the child-existence check for offload.
+    let scratch = Scratch::new("wt-validate");
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    let store = Store::init(&scratch.0).unwrap();
+    let oid = store.repo().write_blob(b"x").unwrap().detach();
+    let git_oid: [u8; 20] = oid.as_slice().try_into().unwrap();
+
+    for bad in [".git/config", "a/.git/b"] {
+        assert!(
+            matches!(
+                store.write_tree(&[(bad, FileMode::Regular, git_oid)]),
+                Err(GitstoreError::RejectPath(_))
+            ),
+            "a .git component ({bad}) must be rejected"
+        );
+    }
+    // A normal nested path is accepted.
+    assert!(
+        store
+            .write_tree(&[("scripts/run.sh", FileMode::Regular, git_oid)])
+            .is_ok()
+    );
+}

@@ -149,7 +149,14 @@ impl LargeObjectStore for LocalLargeStore {
             let _ = std::fs::remove_file(&temp_path);
             return Err(e);
         }
-        fsync_dir_chain(shard, &self.objects_dir())
+        // fsync the new directory chain up to AND INCLUDING the shared large-object root — so on a
+        // workspace's FIRST put, the freshly-created `<ws>/objects/aa/bb` directory ENTRIES (not just the
+        // renamed file's data) are durable, and the new per-workspace dir's entry in the shared root is too.
+        // `self.root.parent()` is that shared root (created at startup); a missing parent falls back to the
+        // per-workspace root. (Same `sync_all` convention as the git fence; macOS `F_FULLFSYNC` is the only
+        // residual.)
+        let durable_up_to = self.root.parent().unwrap_or(self.root.as_path());
+        fsync_dir_chain(shard, durable_up_to)
     }
 
     fn get(&self, blob_id: [u8; 32]) -> Result<Vec<u8>, GitstoreError> {
@@ -219,9 +226,10 @@ fn write_and_sync(file: &mut std::fs::File, bytes: &[u8]) -> Result<(), Gitstore
     file.sync_all().map_err(io_err)
 }
 
-/// fsync every directory from `leaf` up to and including `stop_at` (the `objects/` root), so a
-/// newly-created shard chain's directory entries are durable, not just the renamed file's data. `leaf` is
-/// always a descendant of `stop_at` (both derive from `objects_dir`), so the walk terminates.
+/// fsync every directory from `leaf` up to and including `stop_at`, so a newly-created shard chain's
+/// directory entries are durable, not just the renamed file's data. `stop_at` must be an ancestor of `leaf`
+/// (the caller passes the large-object root, of which every shard path is a descendant), so the walk
+/// terminates.
 fn fsync_dir_chain(leaf: &Path, stop_at: &Path) -> Result<(), GitstoreError> {
     let mut dir = Some(leaf);
     while let Some(d) = dir {

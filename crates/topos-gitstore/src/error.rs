@@ -11,6 +11,11 @@ pub enum GitstoreError {
     /// A bundle path failed the kernel's canonical reject rules (absolute / `..` / NUL / collision / …).
     #[error("bundle path rejected by the canonical rules: {0:?}")]
     Reject(RejectReason),
+    /// A tree path component is invalid per git's own rules (a `.git`/`.gitmodules` directory and its
+    /// HFS+/NTFS aliases, a Windows device/illegal char, an embedded path separator) — the protections the
+    /// high-level tree editor applies, restored for the plumbing build the offload uses. A client problem.
+    #[error("tree path component rejected: {0}")]
+    RejectPath(String),
     /// The caller-supplied `version_id` does not equal the kernel `commit_id` recomputed from the same
     /// arguments — a ref that would lie about its own identity. Refused before any ref is written.
     #[error("supplied version_id does not match the recomputed commit id")]

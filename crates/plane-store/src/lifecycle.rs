@@ -433,6 +433,9 @@ fn map_stage_reject(e: GitstoreError) -> AuthorityError {
         GitstoreError::Reject(reason) => {
             AuthorityError::RejectedUpload(format!("canonical rule violated: {reason:?}"))
         }
+        GitstoreError::RejectPath(msg) => {
+            AuthorityError::RejectedUpload(format!("invalid path component: {msg}"))
+        }
         GitstoreError::MissingParent => AuthorityError::RejectedUpload(
             "a parent version is not present in this workspace".into(),
         ),
