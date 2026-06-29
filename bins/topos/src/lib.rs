@@ -24,13 +24,17 @@ pub(crate) mod fs_seam;
 pub(crate) mod identity;
 pub(crate) mod ids;
 pub(crate) mod logfile;
+pub(crate) mod materialize;
 pub(crate) mod ops;
+pub(crate) mod plane;
 pub(crate) mod render;
 pub(crate) mod scan;
 pub(crate) mod sidecar;
 
 #[cfg(test)]
 mod durability_tests;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod verb_tests;
 

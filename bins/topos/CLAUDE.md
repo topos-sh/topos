@@ -8,7 +8,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
 ## Implemented (the local, accountless core)
 
 - **The fs/syscall seam** (`fs_seam`) — every durable mutation goes through one `FsOps` trait. `RealFs`
-  uses `rustix` (safe; no `unsafe`): `F_FULLFSYNC` on macOS, `flock` for the per-skill writer lock. A
+  uses `rustix` (safe; no `unsafe`): `F_FULLFSYNC` on macOS, `flock` for the per-skill writer lock, a
+  mode-preserving staged write, and a **namespace-atomic directory swap** (`RENAME_EXCHANGE` on Linux /
+  `RENAME_SWAP` on macOS) — the primitive a byte-writing *update* uses to overwrite a harness dir. A
   test-only `FaultFs` fails the Nth op for the crash gate.
 - **Crash-safe docs** (`atomic`, `doc`) — atomic write (temp → fsync → rename → fsync-dir; never in
   place) + a fail-closed `schema_version` migration dispatch (an unknown/newer doc is never handed to
@@ -29,9 +31,22 @@ renderer over the SAME typed outcomes (one value, two presentations).
   already-tracked dir with `ALREADY_TRACKED`), `list [--footprint]` (the tracked bucket; others render
   empty; footprint = the `~/.topos/` walk plus any harness config topos holds an entry in), `diff`
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
-  [--quiet]` (the session-start currency entry point — a **no-op skeleton** that exits 0 and is byte-silent
-  under `--quiet`, until the sync engine lands), `uninstall` (**scrub the currency hook**, then remove the
-  binary + `~/.topos/`, touch no skill bytes).
+  [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
+  `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).
+- **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
+  `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
+  the signed `current` pointer through the `PlaneSource` seam, signature + workspace/skill scope
+  authentication, the anti-rollback floor (`observed` rises only on a verified strictly-higher record;
+  never auto-applies a record at or below the floor) and the reused-tuple ALARM, a draft snapshot-on-touch
+  before any decision, fetch + re-verify (digest == tree == `commit_id`) + an ancestor-backfilling durable
+  record into the sidecar store, the post-fetch heal (a crash-after-swap advances `applied` with no second
+  swap, never a false divergence), the consent decision (the kernel's one policy), and **crash-safe
+  byte-writing materialization** (staging sibling → fsync → atomic dir-swap → fsync parent → `map → lock →
+  sync` commit; `applied` advances only post-swap). `pull <skill>` accepts a pending update (the explicit
+  command is the consent a confirm-each offer solicited); `pull <skill>@<hash>` goes back to a version
+  locally (sets `held`, never lowers the floor). The plane response + follow-state are **fixture-fed**
+  this increment (the inert production sources follow nothing, so production `pull` is an honest no-op);
+  the HTTP transport + real enrollment land later.
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
 message, so injectable id/time sources make `add` deterministic. Golden `--json` fixtures (add/list/diff/log)
@@ -39,11 +54,11 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-The plane + enrollment + signing-at-rest; the `pull` sync engine + the four-state sync machine; the
-**byte-writing materialization** (the atomic dir-swap, for an *update* that overwrites a harness skill
-dir — this increment writes nothing into a skill dir, so the swap is deferred); `publish`/`review`/
-`revert`; the `diff current..<hash>` + `log --team` plane halves; the
-OpenClaw/Hermes harness adapters (Claude Code is the reference).
+The HTTP plane transport + enrollment + signing-at-rest; `follow`/`unfollow`; `publish`/`review`/`revert`;
+the diff3 3-way merge that resolves a DIVERGED draft (this increment detects + snapshots + surfaces only);
+the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters (Claude Code
+is the reference — only it guarantees the swap completes before skills resolve; the others leave a named,
+bounded multi-file-read residual).
 
 ## Architectural layering (enforced at the dependency graph)
 
@@ -54,5 +69,7 @@ The sidecar keys skills by id; harness skill directories stay byte-pristine, so 
 your skills.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `clap`, `serde`/`serde_json`,
-`uuid`, `rustix` (safe fsync/flock), `hex` (decode sidecar id fields), `anyhow`, `thiserror`. (The plane
-transport + device-key signer land later.)
+`uuid`, `rustix` (safe fsync/flock + the atomic dir-swap), `hex` (decode sidecar id fields), `base64`
+(**decode-only**: the signed pointer's base64url `Signature.value`, verify-side — not the private-key
+signing edge `check-arch` forbids), `anyhow`, `thiserror`; a test-only `ed25519-dalek` dev-dependency signs
+fixture pointers. (The HTTP plane transport + device-key signer land later.)

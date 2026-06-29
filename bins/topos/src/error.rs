@@ -57,6 +57,20 @@ pub(crate) enum ClientError {
     /// No tracked skill matches the given name.
     #[error("no tracked skill named '{name}'")]
     NoSuchSkill { name: String },
+    /// The placement cannot be materialized safely (a non-directory sits where a skill dir belongs, a
+    /// symlink cannot be resolved to a directory, or the filesystem supports no safe swap) — refused
+    /// rather than risk clobbering or a torn write.
+    #[error("the skill placement cannot be materialized safely: {reason}")]
+    PlacementUnsupported { reason: String },
+    /// The plane could not be read for an explicitly-targeted skill (unreachable, not served, or a
+    /// malformed response). A bare currency sweep isolates such failures per skill instead of erroring.
+    #[error("plane read failed: {0}")]
+    Plane(String),
+    /// A go-back (`pull <skill>@<hash>`) named a version this client cannot anchor — it is absent from
+    /// the local history, so its generation is unknown and it cannot be installed without a fabricated
+    /// floor. Refused.
+    #[error("cannot go back to version '{version}': not in this skill's local history")]
+    UnknownGoBackVersion { version: String },
 }
 
 impl ClientError {
@@ -76,6 +90,9 @@ impl ClientError {
             ClientError::AlreadyTracked { .. } => "ALREADY_TRACKED",
             ClientError::AmbiguousName { .. } => "AMBIGUOUS_NAME",
             ClientError::NoSuchSkill { .. } => "NO_SUCH_SKILL",
+            ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
+            ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
+            ClientError::Plane(_) => "PLANE_ERROR",
         }
     }
 
@@ -83,10 +100,11 @@ impl ClientError {
     pub(crate) fn outcome(&self) -> TerminalOutcome {
         match self {
             ClientError::AmbiguousName { .. } => TerminalOutcome::AmbiguousName,
-            // A transient filesystem failure is retryable — whether it surfaced client-side or in the store.
-            ClientError::Io(_) | ClientError::Gitstore(GitstoreError::Io(_)) => {
-                TerminalOutcome::RetryableFailure
-            }
+            // A transient filesystem or plane-read failure is retryable — whether it surfaced
+            // client-side, in the store, or reading the plane.
+            ClientError::Io(_)
+            | ClientError::Gitstore(GitstoreError::Io(_))
+            | ClientError::Plane(_) => TerminalOutcome::RetryableFailure,
             _ => TerminalOutcome::PermanentFailure,
         }
     }

@@ -31,19 +31,28 @@ pub fn run() -> ExitCode {
     // Claude Code's own config home (`$CLAUDE_CONFIG_DIR` else `$HOME/.claude`) so a relocated config is
     // honored; it touches that home only when adopting a recognized skill or on uninstall.
     let harness = ClaudeCode::new(ClaudeCode::resolve_home(), &fs);
+    // The plane + follow-state sources. Production wires the INERT pair (no enrollment, no HTTP transport
+    // yet), so `pull` follows nothing and stays a truthful no-op; the sync engine, floor, and materializer
+    // are real and exercised by fixture-driven tests. The pinned plane key lands with enrollment.
+    let plane = crate::plane::InertPlane;
+    let follow = crate::plane::InertFollow;
+    let plane_key = [0u8; 32];
 
     // Recovery runs at the start of every command.
     if let Err(e) = recover(&fs, &layout) {
         return emit_err(json, cmd_name, &e);
     }
 
-    // Only `add` authors a commit, so only `add` loads (and on first use, mints) the device identity —
-    // `uninstall` must never create or require it before tearing the home down.
+    // `add` and `pull` author commits (adoption / a draft snapshot before a divergence), so both load
+    // (and on first use, mint) the device identity — `uninstall` must never create or require it before
+    // tearing the home down.
     let device_id = match &command {
-        Command::Add { .. } => match identity::load_or_create_device_id(&fs, &layout) {
-            Ok(d) => d,
-            Err(e) => return emit_err(json, cmd_name, &e),
-        },
+        Command::Add { .. } | Command::Pull { .. } => {
+            match identity::load_or_create_device_id(&fs, &layout) {
+                Ok(d) => d,
+                Err(e) => return emit_err(json, cmd_name, &e),
+            }
+        }
         _ => String::new(),
     };
     let ctx = Ctx {
@@ -53,6 +62,9 @@ pub fn run() -> ExitCode {
         device_id,
         layout,
         harness: &harness,
+        plane: &plane,
+        plane_key,
+        follow: &follow,
     };
 
     match command {
@@ -67,12 +79,12 @@ pub fn run() -> ExitCode {
             finish(json, cmd_name, ops::diff(&ctx, &skill), render::diff_tty)
         }
         Command::Log { skill } => finish(json, cmd_name, ops::log(&ctx, &skill), render::log_tty),
-        Command::Pull { quiet } => {
-            let result = ops::pull(&ctx);
+        Command::Pull { skill, quiet } => {
+            let result = build_pull_scope(skill).and_then(|scope| ops::pull(&ctx, scope));
             if quiet {
-                // Byte-silent stdout: the session-start hook injects stdout into the session context, so
-                // the no-op emits nothing. An error (none today) surfaces on stderr with a non-zero exit
-                // — never on stdout, even under `--json` (which `--quiet` overrides for the hook path).
+                // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
+                // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
+                // stdout, even under `--json` (which `--quiet` overrides for the hook path).
                 match result {
                     Ok(_) => ExitCode::SUCCESS,
                     Err(e) => {
@@ -123,6 +135,24 @@ fn emit_err(json: bool, command: &str, err: &ClientError) -> ExitCode {
         eprintln!("{}", render::err_tty(err));
     }
     ExitCode::FAILURE
+}
+
+/// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
+/// pending update; `<name>@<hash>` = go back to that version's bytes.
+fn build_pull_scope(skill: Option<String>) -> Result<ops::PullScope, ClientError> {
+    let Some(arg) = skill else {
+        return Ok(ops::PullScope::AllFollowed);
+    };
+    match arg.split_once('@') {
+        None => Ok(ops::PullScope::One {
+            name: arg,
+            mode: ops::TargetMode::AcceptPending,
+        }),
+        Some((name, hash)) => Ok(ops::PullScope::One {
+            name: name.to_owned(),
+            mode: ops::TargetMode::GoBack(ops::parse_hex32(hash)?),
+        }),
+    }
 }
 
 /// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort).

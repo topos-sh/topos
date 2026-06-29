@@ -120,6 +120,8 @@ struct Harness {
     ids: SeqIds,
     clock: FixedClock,
     harness: NoHarness,
+    plane: crate::plane::InertPlane,
+    follow: crate::plane::InertFollow,
 }
 impl Harness {
     fn new(tag: &str) -> Self {
@@ -129,6 +131,8 @@ impl Harness {
             ids: SeqIds::new("t"),
             clock: FixedClock(FIXED_MILLIS),
             harness: NoHarness,
+            plane: crate::plane::InertPlane,
+            follow: crate::plane::InertFollow,
         }
     }
     fn ctx(&self) -> Ctx<'_> {
@@ -143,6 +147,9 @@ impl Harness {
             device_id: DEVICE_ID.to_owned(),
             layout: Layout::new(&self.home.0),
             harness,
+            plane: &self.plane,
+            plane_key: [0u8; 32],
+            follow: &self.follow,
         }
     }
 }
@@ -485,6 +492,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     // The temp source is not under any harness home, so recognition is a no-op (no extra durable ops);
     // a borrow-free stub keeps the fault sweep's op count exactly the sidecar adoption's.
     let no_harness = NoHarness;
+    // `add` never reads the plane/follow seams; the inert pair satisfies `Ctx` without extra durable ops.
+    let no_plane = crate::plane::InertPlane;
+    let no_follow = crate::plane::InertFollow;
 
     // How many durable ops a clean add performs (so we fault each). A non-faulting FaultFs counts them.
     let probe_home = Scratch::new("probe");
@@ -498,6 +508,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         device_id: DEVICE_ID.to_owned(),
         layout: Layout::new(&probe_home.0),
         harness: &no_harness,
+        plane: &no_plane,
+        plane_key: [0u8; 32],
+        follow: &no_follow,
     };
     ops::add(&probe_ctx, &root).unwrap();
     let max_ops = probe_fs.ops_attempted();
@@ -515,6 +528,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
+            plane: &no_plane,
+            plane_key: [0u8; 32],
+            follow: &no_follow,
         };
         let result = ops::add(&ctx, &root);
 
@@ -536,6 +552,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
+            plane: &no_plane,
+            plane_key: [0u8; 32],
+            follow: &no_follow,
         };
         let tracked = ops::list(&clean_ctx, None, false).unwrap().tracked;
 
@@ -765,8 +784,9 @@ fn install_currency_trigger_is_crash_safe_across_the_fault_table() {
 
 #[test]
 fn pull_is_an_honest_empty_no_op() {
+    // The inert follow source (production) follows nothing, so the bare sweep is an honest empty no-op.
     let h = Harness::new("pull");
-    let data = ops::pull(&h.ctx()).unwrap();
+    let data = ops::pull(&h.ctx(), ops::PullScope::AllFollowed).unwrap();
     assert!(data.skills.is_empty(), "nothing is followed yet");
     assert_eq!(data.proposals_awaiting, 0);
 }

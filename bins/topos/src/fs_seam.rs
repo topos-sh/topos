@@ -17,6 +17,20 @@ pub(crate) struct LockGuard {
     _file: File,
 }
 
+/// What a path is, by `lstat` (the final component is **not** dereferenced — a symlink is reported as
+/// such, never as its target). The materializer branches on this: absent (`None`) is a first install, a
+/// real `Dir` takes the atomic swap, a `Symlink` is canonicalized to its target dir, and `Other` (a
+/// regular file or device where a skill dir belongs) is refused rather than clobbered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    /// A real directory.
+    Dir,
+    /// A symbolic link (the link itself, not its target).
+    Symlink,
+    /// Any other existing entry (regular file, device, fifo, …).
+    Other,
+}
+
 /// The durable-mutation seam. Read-only inspection of the user's *source* dir is **not** here — that is
 /// the scanner's `std::fs` walk; this seam covers only what must survive a crash under `~/.topos/`.
 pub(crate) trait FsOps {
@@ -48,6 +62,19 @@ pub(crate) trait FsOps {
     fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard>;
     /// Try to acquire an exclusive lock without blocking; `None` if another holder has it.
     fn try_lock_exclusive(&self, path: &Path) -> io::Result<Option<LockGuard>>;
+    /// `lstat` a path: `None` if absent, else its [`PathKind`] (the final symlink is **not** followed).
+    /// Read-only — used to pick the materialization strategy without touching bytes.
+    fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>>;
+    /// Write a staged file with its EXACT bundle mode (`0o755` if executable, else `0o644`) — the file
+    /// mode is part of the consent-bound digest, so the materialized bit must match the approved bytes.
+    /// Creates/truncates and forces the mode (defeating `umask`); **no fsync** (the caller fsyncs).
+    fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()>;
+    /// Atomically exchange two EXISTING directories in one namespace operation (`RENAME_EXCHANGE` on
+    /// Linux / `RENAME_SWAP` via `renameatx_np` on macOS — safe `rustix`, no `unsafe`). After it, each
+    /// path names what the other held. The single primitive that lets an *update* land new bytes onto a
+    /// populated harness dir with no torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS
+    /// without the syscall) so the caller can fall back.
+    fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()>;
 }
 
 /// The production seam: `std::fs` + `rustix` safe syscalls.
@@ -183,6 +210,64 @@ impl FsOps for RealFs {
             Err(e) => Err(io::Error::from(e)),
         }
     }
+
+    fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => Ok(Some(PathKind::Symlink)),
+            Ok(m) if m.is_dir() => Ok(Some(PathKind::Dir)),
+            Ok(_) => Ok(Some(PathKind::Other)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode: u32 = if executable { 0o755 } else { 0o644 };
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)?;
+        f.write_all(bytes)?;
+        // `create(mode)` is masked by `umask` and ignored if the file already existed, so force the exact
+        // mode — the executable bit is part of the bundle digest, so the placed bytes must match it.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        ))]
+        {
+            // EXCHANGE = renameat2(RENAME_EXCHANGE) on Linux / renameatx_np(RENAME_SWAP) on macOS — one
+            // atomic namespace swap of two existing dirs. Safe rustix wrapper (no `unsafe`).
+            rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                a,
+                rustix::fs::CWD,
+                b,
+                rustix::fs::RenameFlags::EXCHANGE,
+            )
+            .map_err(io::Error::from)
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        )))]
+        {
+            let _ = (a, b);
+            Err(io::Error::from(rustix::io::Errno::NOSYS))
+        }
+    }
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
@@ -278,6 +363,14 @@ mod fault {
             self.tick()?;
             self.inner.remove_dir_all(path)
         }
+        fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
+            self.tick()?;
+            self.inner.write_staged(path, bytes, executable)
+        }
+        fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+            self.tick()?;
+            self.inner.exchange_dir(a, b)
+        }
         // Reads + locks never fault — only durable mutations are crash-relevant.
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             self.inner.read_opt(path)
@@ -287,6 +380,9 @@ mod fault {
         }
         fn exists(&self, path: &Path) -> bool {
             self.inner.exists(path)
+        }
+        fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
+            self.inner.path_kind(path)
         }
         fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
             self.inner.lock_exclusive(path)

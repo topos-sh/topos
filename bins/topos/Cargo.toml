@@ -23,8 +23,18 @@ serde_json.workspace = true
 uuid.workspace = true
 rustix.workspace = true
 hex.workspace = true
+# DECODE-ONLY: the signed `current` pointer's base64url-unpadded Signature.value (86 chars), verified
+# against the pinned plane key. This is the public verify-side codec, NOT the private-key signing edge
+# (no key, no RNG) — so it does not cross the architectural line check-arch enforces (no plane-store/sqlx).
+base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# TEST-ONLY: sign fixture `current` pointers with a throwaway plane key so the verify path is exercised
+# end-to-end. A dev-dependency never enters the production graph, so it does not cross check-arch's line
+# (the client production build stays verify-only via topos-core).
+ed25519-dalek = { version = "2" }
 
 [lints]
 workspace = true

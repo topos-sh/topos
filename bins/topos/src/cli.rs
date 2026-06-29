@@ -42,9 +42,13 @@ pub(crate) enum Command {
         /// The skill name.
         skill: String,
     },
-    /// Check for and apply updates to followed skills — the session-start currency entry point. A no-op
-    /// until the sync engine lands (nothing is followed yet); the installed hook runs `pull --quiet`.
+    /// Check for and apply updates to followed skills — the session-start currency entry point. Bare =
+    /// the sweep over every followed skill (the installed hook runs `pull --quiet`). `<skill>` accepts a
+    /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
     Pull {
+        /// Optional target: `<name>` accepts a pending update / resumes a hold; `<name>@<hash>` goes back
+        /// to that version's bytes. Omitted = sweep every followed skill.
+        skill: Option<String>,
         /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
         /// still go to stderr with a non-zero exit. Overrides `--json`.
         #[arg(long)]

@@ -5,13 +5,14 @@ mod diff;
 mod list;
 mod log;
 mod pull;
+mod sync_engine;
 mod uninstall;
 
 pub(crate) use add::add;
 pub(crate) use diff::diff;
 pub(crate) use list::list;
 pub(crate) use log::log;
-pub(crate) use pull::pull;
+pub(crate) use pull::{PullScope, TargetMode, pull};
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
 
 use topos_types::persisted::Lock;
@@ -55,7 +56,7 @@ fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(String, Lock), ClientErro
 /// Fails **closed** on uppercase: the persisted + result schemas pin `^[0-9a-f]{64}$`, and `diff` echoes
 /// the original string straight into its `--json`, so an uppercase byte (which `hex::decode_to_slice`
 /// would accept case-insensitively) must be rejected here, not passed through as schema-invalid output.
-fn parse_hex32(hex_str: &str) -> Result<[u8; 32], ClientError> {
+pub(crate) fn parse_hex32(hex_str: &str) -> Result<[u8; 32], ClientError> {
     if hex_str.bytes().any(|b| b.is_ascii_uppercase()) {
         return Err(ClientError::Corrupt("hex id must be lowercase".into()));
     }

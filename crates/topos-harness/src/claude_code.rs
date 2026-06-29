@@ -148,7 +148,13 @@ impl HarnessAdapter for ClaudeCode<'_> {
         };
         for entry in entries.flatten() {
             // The command name is the directory name, so a non-UTF-8 name can't be a skill we manage.
-            if entry.file_name().to_str().is_none() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // Skip dot-prefixed entries: a transient `.topos-staging-*` / `.topos-old-*` dir the
+            // materializer builds beside a skill dir is never a real skill, even with a `SKILL.md`
+            // inside — so a concurrent discovery during the sub-second swap window can't surface it.
+            if name.starts_with('.') {
                 continue;
             }
             let path = entry.path();

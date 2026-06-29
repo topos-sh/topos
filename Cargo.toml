@@ -51,11 +51,13 @@ unicode-normalization = { version = "0.1", default-features = false } # topos-co
 # default-features = false keeps topos-core's verify path no_std (no RNG/std); the signing consumers
 # (plane-store / client) opt back into `std` + `zeroize` for the in-process / device signer.
 ed25519-dalek = { version = "2", default-features = false }  # topos-core verify + caller sign (ONE shared impl)
-# The in-process plane signer's deps — plane-store ONLY (the client never gets the signing edge:
-# check-arch forbids topos -> plane-store; topos-core stays verify-only no_std).
-base64 = "0.22"               # base64url-UNPADDED for the signed pointer's Signature.value (86 chars)
-zeroize = "1"                 # wipe the raw plane-key seed buffer (SigningKey self-zeroizes via dalek's `zeroize` feature)
-getrandom = "0.2"             # OS CSPRNG for first-run plane-key generation (seed -> SigningKey::from_bytes)
+# The signing edge — plane-store ONLY (the client never gets the PRIVATE-key signing edge: check-arch
+# forbids topos -> plane-store; topos-core stays verify-only no_std). base64 is the EXCEPTION: it is the
+# public verify-side codec for the signed pointer's Signature.value, so the CLIENT decodes it (verify-only)
+# too — decode-only is not the signing edge (no key, no RNG), and check-arch only bans the plane-store edge.
+base64 = "0.22"               # base64url-UNPADDED for the signed pointer's Signature.value (86 chars): plane ENCODES, client DECODES (verify-only)
+zeroize = "1"                 # signing edge (plane-store only): wipe the raw plane-key seed buffer (SigningKey self-zeroizes via dalek's `zeroize` feature)
+getrandom = "0.2"             # signing edge (plane-store only): OS CSPRNG for first-run plane-key generation (seed -> SigningKey::from_bytes)
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases
 sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
