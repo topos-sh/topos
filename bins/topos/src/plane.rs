@@ -67,16 +67,27 @@ pub(crate) enum PlaneError {
     Malformed(String),
 }
 
+/// What the client already holds as `current` — the conditional-GET validator. The source returns
+/// [`PointerFetch::NotModified`] ONLY when its current matches BOTH the generation AND the commit, so a
+/// record that reuses the same `(epoch,seq)` for a DIFFERENT `version_id` is always returned (and caught
+/// as a reused-tuple ALARM) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
+/// commit-sensitive, not just `<epoch>.<seq>`.)
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct KnownCurrent {
+    pub generation: Generation,
+    pub version_id: [u8; 32],
+}
+
 /// The client's read side of `current` + the version bytes. No write side (the client never moves the
 /// pointer). No network this increment (fixtures); the HTTP wire is a later leaf.
 pub(crate) trait PlaneSource {
-    /// Conditional GET of a skill's signed `current` pointer. `known` is the client's `observed`
-    /// generation (the ETag): the source returns [`PointerFetch::NotModified`] when the pointer has not
-    /// moved past it, else the signed record.
+    /// Conditional GET of a skill's signed `current` pointer. `known` is what the client already holds
+    /// (its `observed` generation AND the commit recorded there): the source returns
+    /// [`PointerFetch::NotModified`] only when its current matches both, else the signed record.
     fn get_current(
         &self,
         skill_id: &str,
-        known: Option<Generation>,
+        known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError>;
 
     /// Fetch a specific version's bytes + commit frame (for the durable write + the re-verify gate).
@@ -151,7 +162,7 @@ impl PlaneSource for InertPlane {
     fn get_current(
         &self,
         _skill_id: &str,
-        _known: Option<Generation>,
+        _known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
         Err(PlaneError::Unavailable(
             "no plane transport is wired yet".into(),

@@ -24,8 +24,8 @@ use crate::ctx::Ctx;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, PlaneError, PlaneSource,
-    PointerFetch,
+    FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, KnownCurrent, PlaneError,
+    PlaneSource, PointerFetch,
 };
 use crate::sidecar::Layout;
 use crate::{doc, ops};
@@ -111,15 +111,17 @@ impl PlaneSource for FixturePlane {
     fn get_current(
         &self,
         skill_id: &str,
-        known: Option<Generation>,
+        known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
         let Some(rec) = self.records.get(skill_id) else {
             return Err(PlaneError::NotFound);
         };
-        // The conditional GET (ETag "<epoch>.<seq>"): a client already at the served generation gets 304.
+        // The conditional GET: 304 only when the client already holds this EXACT (generation, version_id),
+        // so a same-generation record naming a different commit is always returned (the tuple-reuse path).
         if let Some(k) = known
-            && k.epoch == rec.record.generation.epoch
-            && k.seq == rec.record.generation.seq
+            && k.generation.epoch == rec.record.generation.epoch
+            && k.generation.seq == rec.record.generation.seq
+            && to_hex(&k.version_id) == rec.record.version_id
         {
             return Ok(PointerFetch::NotModified);
         }
@@ -739,10 +741,141 @@ fn crash_after_swap_heals_without_false_divergence() {
     assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 1, seq: 1 });
 }
 
+#[test]
+fn at_floor_tuple_reuse_is_an_alarm() {
+    // The plane re-serves the SAME (epoch,seq) the client already holds, but naming a DIFFERENT commit.
+    // The conditional GET must NOT 304 it away (it keys on the commit too) — it is a reused-tuple ALARM.
+    let rig = Rig::new("atfloor");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let evil = mk_version(
+        &[genesis],
+        &[("SKILL.md", FileMode::Regular, b"# EVIL at the same tuple\n")],
+        "d_evil",
+        "evil",
+    );
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    // Fast-forward to v1 @ (1,1).
+    {
+        let ctx = rig.ctx(&plane, &foll);
+        ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    }
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+    // Now re-serve (1,1) but pointing at `evil` (a different commit at the same tuple).
+    plane.set_current(&id, signed(WS, &id, evil.id, 1, 1));
+    let before = snapshot(&rig.placement());
+    let ctx = rig.ctx(&plane, &foll);
+    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        only(&data).action,
+        PullAction::Alarm,
+        "a same-tuple different-commit record must alarm, not 304"
+    );
+    assert_eq!(snapshot(&rig.placement()), before, "nothing applied");
+}
+
+#[test]
+fn confirm_each_accept_reoffers_a_version_that_moved() {
+    // A confirm-each skill is offered v1; the plane advances to v2 BEFORE the user accepts. The explicit
+    // `pull <skill>` must RE-OFFER v2 (re-disclose its digest), never silently apply the undisclosed v2.
+    let rig = Rig::new("moved");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let v2files: &[(&str, FileMode, &[u8])] = &[("SKILL.md", FileMode::Regular, b"# v2\n")];
+    let v2 = mk_version(&[v1.id], v2files, "d_pub", "v2");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.add_version(&id, &v2);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::ConfirmEach);
+    // The sweep offers v1 (raises the floor, does not apply).
+    {
+        let ctx = rig.ctx(&plane, &foll);
+        let d = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+        assert_eq!(only(&d).action, PullAction::Offered);
+    }
+    // The plane moves to v2 before the user accepts.
+    plane.set_current(&id, signed(WS, &id, v2.id, 1, 2));
+    let ctx = rig.ctx(&plane, &foll);
+    let d = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name,
+            mode: ops::TargetMode::AcceptPending,
+        },
+    )
+    .unwrap();
+    let row = only(&d);
+    assert_eq!(
+        row.action,
+        PullAction::Offered,
+        "a version discovered during the accept is re-offered, not applied"
+    );
+    assert_eq!(row.offer.as_ref().unwrap().version_id, to_hex(&v2.id));
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(BASE)),
+        "v2 never applied"
+    );
+}
+
+#[test]
+fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
+    // The never-clobber rail applies to go-back too: an explicit `pull <skill>@<old>` over an EDITED
+    // placement must snapshot the draft into the sidecar store FIRST, so the unsaved edits stay recoverable.
+    let rig = Rig::new("goback-draft");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    // Fast-forward to v1 (so v1 is in the store + recorded; the placement is clean at v1).
+    {
+        let ctx = rig.ctx(&plane, &foll);
+        ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    }
+    // Edit the placement → an unsaved local draft on top of v1.
+    let edited: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# my unsaved edit\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
+    write_tree(&rig.placement(), edited);
+    // The draft snapshot the engine must make: a commit on the current base (v1) carrying the edited bytes.
+    let draft = mk_version(&[v1.id], edited, DEVICE, "topos: draft snapshot");
+
+    // Go back to genesis.
+    let ctx = rig.ctx(&plane, &foll);
+    let data = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name,
+            mode: ops::TargetMode::GoBack(genesis),
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&data).action, PullAction::Held);
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(BASE)),
+        "old bytes installed"
+    );
+    // CRITICAL: the unsaved draft was snapshotted into the store BEFORE the overwrite — it is recoverable.
+    let store = topos_gitstore::Store::open(&rig.layout().published(&id).store).unwrap();
+    assert!(
+        store.list_versions().unwrap().contains(&draft.id),
+        "the unsaved draft must be snapshotted before a go-back overwrites it"
+    );
+}
+
 /// A plane that returns a structurally-malformed response (a corrupt/forged record or bytes).
 struct MalformedPlane;
 impl PlaneSource for MalformedPlane {
-    fn get_current(&self, _: &str, _: Option<Generation>) -> Result<PointerFetch, PlaneError> {
+    fn get_current(&self, _: &str, _: Option<KnownCurrent>) -> Result<PointerFetch, PlaneError> {
         Err(PlaneError::Malformed("corrupt current record".into()))
     }
     fn fetch_version(

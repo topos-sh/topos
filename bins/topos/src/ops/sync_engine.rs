@@ -26,8 +26,9 @@ use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
+use crate::fs_seam::PathKind;
 use crate::materialize::{self, MaterializeReport, MaterializeReq, NextMapCore};
-use crate::plane::{FollowContext, FollowMode, PlaneError, PointerFetch, gen_cmp};
+use crate::plane::{FollowContext, FollowMode, KnownCurrent, PlaneError, PointerFetch, gen_cmp};
 use crate::scan::{self, ScannedBundle};
 use crate::{doc, logfile, sidecar};
 
@@ -55,19 +56,24 @@ pub(crate) fn sync_one(
     validate_recorded_unique(&sync.recorded)?;
     let name = lock.name.clone();
 
-    // An explicit pull resumes a held skill (clears the one-FF suppression); persisted with the next write.
-    let mut dirty = false;
-    if explicit && sync.held {
-        sync.held = false;
-        dirty = true;
-    }
+    // The conditional-GET validator: what the client currently holds (its floor generation AND the commit
+    // recorded there) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd.
+    let known_commit = recorded_commit(&sync, sync.observed)?;
+    // Whether THIS pull discovered a strictly-newer version (raised the floor). A confirm-each skill must
+    // re-offer such a version rather than let an explicit accept apply bytes it never disclosed.
+    let mut raised = false;
 
     // ---- checkForUpdates ----
-    match ctx.plane.get_current(skill_id, Some(sync.observed)) {
+    match ctx.plane.get_current(
+        skill_id,
+        Some(KnownCurrent {
+            generation: sync.observed,
+            version_id: known_commit,
+        }),
+    ) {
         Ok(PointerFetch::NotModified) => {}
         Ok(PointerFetch::Record(rec)) => {
             let Some(authed) = authenticate(&rec, skill_id, follow, &ctx.plane_key) else {
-                persist_if_dirty(ctx, &sp, &sync, dirty)?;
                 return Ok(alarm(&name, &sync, PullAction::Alarm));
             };
             match sync::evaluate_floor(
@@ -76,10 +82,7 @@ pub(crate) fn sync_one(
                 kgen(sync.observed),
                 &kernel_recorded(&sync)?,
             ) {
-                v if v.is_alarm() => {
-                    persist_if_dirty(ctx, &sp, &sync, dirty)?;
-                    return Ok(alarm(&name, &sync, PullAction::Alarm));
-                }
+                v if v.is_alarm() => return Ok(alarm(&name, &sync, PullAction::Alarm)),
                 sync::FloorVerdict::Forward => {
                     // A verified, strictly-higher record raises the floor — durable NOW (it must survive a
                     // failed apply as the retry target), independent of whether the apply succeeds.
@@ -89,7 +92,7 @@ pub(crate) fn sync_one(
                         commit_id: to_hex(&authed.version_id),
                     });
                     doc::write_doc(ctx.fs, &sp.sync, &sync)?;
-                    dirty = false;
+                    raised = true;
                 }
                 sync::FloorVerdict::CorruptNoRecord => {
                     return Err(ClientError::Corrupt(
@@ -100,67 +103,69 @@ pub(crate) fn sync_one(
                 _ => {}
             }
         }
-        Err(PlaneError::NotFound) => {
-            persist_if_dirty(ctx, &sp, &sync, dirty)?;
-            return Ok(state_row(&name, &sync, PullAction::UpToDate));
-        }
+        Err(PlaneError::NotFound) => return Ok(state_row(&name, &sync, PullAction::UpToDate)),
         Err(PlaneError::Unavailable(m)) => {
-            persist_if_dirty(ctx, &sp, &sync, dirty)?;
+            // Targeted: surface the failure. Bare sweep: fall through to drive `applied` toward `observed`
+            // from the LOCAL store — a pending apply whose target is already local still completes when the
+            // plane is unreachable; one that needs a fetch fails per-skill below, never a false UpToDate.
             if explicit {
                 return Err(ClientError::Plane(m));
             }
-            return Ok(state_row(&name, &sync, PullAction::UpToDate));
         }
-        Err(PlaneError::Malformed(_)) => {
-            persist_if_dirty(ctx, &sp, &sync, dirty)?;
-            return Ok(alarm(&name, &sync, PullAction::Alarm));
-        }
+        Err(PlaneError::Malformed(_)) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
     }
 
-    // ---- plan: drive toward `observed` (even on a 304 — a prior apply may be pending) ----
-    if gen_cmp(sync.applied, sync.observed) == core::cmp::Ordering::Equal {
-        persist_if_dirty(ctx, &sp, &sync, dirty)?;
-        return Ok(state_row(&name, &sync, PullAction::UpToDate));
-    }
-    // A held skill (a deliberate go-back pin) suppresses exactly one auto fast-forward; only an explicit
-    // `topos pull <skill>` resumes it (which cleared `held` above). The bare sweep leaves it put.
-    if sync.held && !explicit {
-        persist_if_dirty(ctx, &sp, &sync, dirty)?;
-        return Ok(state_row(&name, &sync, PullAction::Held));
-    }
-    let target_commit = recorded_commit(&sync, sync.observed)?;
-
+    // ---- plan: classify via the kernel's four-state transition, driving toward `observed` ----
+    let applied_eq_observed = gen_cmp(sync.applied, sync.observed) == core::cmp::Ordering::Equal;
     let work = compute_work(ctx, &map, &lock)?;
     let work_eq_base = match &work {
         WorkState::Absent => true, // nothing on disk to clobber → a clean install
         WorkState::Present { eq_base, .. } => *eq_base,
         WorkState::Unscannable => {
-            // Never silently fast-forward over an unreadable placement — fail closed (no swap).
-            persist_if_dirty(ctx, &sp, &sync, dirty)?;
+            // An unreadable placement matters only if there is a pending update; never silently
+            // fast-forward over it (fail closed), but if already current there is nothing to do.
+            if applied_eq_observed {
+                return Ok(state_row(&name, &sync, PullAction::UpToDate));
+            }
             return Ok(alarm(&name, &sync, PullAction::Alarm));
         }
     };
+    match sync::decide_state(work_eq_base, applied_eq_observed) {
+        // ① CURRENT / ③ DRAFT — no pending remote update (a draft is surfaced by `list`/`diff`, never nagged).
+        sync::SyncStatus::Current | sync::SyncStatus::Draft => {
+            return Ok(state_row(&name, &sync, PullAction::UpToDate));
+        }
+        // ② BEHIND / ④ DIVERGED — an update is pending; fall through to fetch + apply.
+        sync::SyncStatus::Behind | sync::SyncStatus::Diverged => {}
+    }
 
-    // snapshot-on-touch FIRST: a draft is committed to the sidecar store BEFORE any fetch or decision.
-    let draft_id: Option<String> = match &work {
-        WorkState::Present {
-            digest_hex,
-            eq_base: false,
-        } => Some(snapshot_draft(ctx, &sp, &lock, digest_hex)?),
-        _ => None,
-    };
+    // A held skill (a deliberate go-back pin) suppresses exactly one auto fast-forward; an explicit
+    // `topos pull <skill>` falls through and applies, and the successful apply clears `held` — so a FAILED
+    // explicit resume (an alarm/error before the apply) leaves the hold intact.
+    if sync.held && !explicit {
+        return Ok(state_row(&name, &sync, PullAction::Held));
+    }
 
-    // fetch + record the target durably (the integrity gate: write_bundle + commit re-derive the id and
+    // Fetch + record the target durably (the integrity gate: write_bundle + commit re-derive the id and
     // refuse a lying ref; render-on-read re-hashes). Backfill any missing ancestors so `commit` has parents.
+    // A failed integrity check is a loud per-skill ALARM, not a silent skip.
+    let target_commit = recorded_commit(&sync, sync.observed)?;
     let store = Store::open(&sp.store)?;
-    let target_digest = ensure_local(ctx, &store, skill_id, target_commit, 0)?;
-    let bundle = store.render_verified(target_commit, target_digest)?;
+    let target_digest = match ensure_local(ctx, &store, skill_id, target_commit, 0) {
+        Ok(d) => d,
+        Err(e) if is_integrity_error(&e) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
+        Err(e) => return Err(e),
+    };
+    fsync_store(ctx, &store)?; // once, after the whole backfill — git bytes durable before any JSON
+    let bundle = match store.render_verified(target_commit, target_digest) {
+        Ok(b) => b,
+        // A digest mismatch on the rendered bytes is an integrity stop, not a transient error.
+        Err(_) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
+    };
     let target_digest_hex = to_hex(&target_digest);
-
     let work_eq_target = match &work {
         WorkState::Present { digest_hex, .. } => *digest_hex == target_digest_hex,
-        WorkState::Absent => false,
-        WorkState::Unscannable => unreachable!("handled above"),
+        _ => false,
     };
 
     // ---- apply ----
@@ -172,25 +177,31 @@ pub(crate) fn sync_one(
     match sync::refine_after_fetch(work_eq_base, work_eq_target) {
         ApplyClass::AlreadyAtTarget => {
             // The bytes already equal the target (a crash after a prior swap, or an idempotent re-pull):
-            // advance `applied` with NO swap, never a false DIVERGED.
+            // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &lock, &sync, &t)?;
             Ok(applied_row(&name, &sync, target_commit))
         }
         ApplyClass::CleanForward => {
-            let situation = situation_for(follow, explicit);
-            let decision = topos_core::consent::decide(situation);
-            if decision.applies_bytes() {
+            // A swap happens only here, and only when `work_eq_base` (a clean follower) — so a swap never
+            // overwrites a local draft.
+            if topos_core::consent::decide(situation_for(follow, explicit, raised)).applies_bytes()
+            {
                 apply_forward(ctx, &sp, &map, &lock, &sync, skill_id, &t)?;
                 Ok(applied_row(&name, &sync, target_commit))
             } else {
                 // confirm-each / TOFU: re-disclose the digest as a one-tap offer; nothing materializes.
-                persist_if_dirty(ctx, &sp, &sync, dirty)?;
                 Ok(offer_row(&name, &sync, target_commit, &target_digest_hex))
             }
         }
         ApplyClass::Diverged => {
-            // ④ local edits AND a newer remote: the draft is already snapshotted; surface, never clobber.
-            persist_if_dirty(ctx, &sp, &sync, dirty)?;
+            // ④ a GENUINE local draft vs a newer remote. Snapshot-on-touch NOW (the fetch never touched the
+            // placement and NO swap happens here), then surface — the draft is preserved, never clobbered.
+            let draft_id = match &work {
+                WorkState::Present { scanned, .. } => {
+                    Some(snapshot_draft(ctx, &sp, &lock, scanned)?)
+                }
+                _ => None,
+            };
             Ok(diverged_row(&name, &sync, target_commit, draft_id))
         }
     }
@@ -224,10 +235,39 @@ pub(crate) fn go_back(
             version: target_hex.clone(),
         })?;
 
-    // The target's bytes must already be in the local store (a previously-applied version).
+    // Snapshot-on-touch FIRST. A go-back is an explicit OVERWRITE of the placement, so it must never
+    // silently lose an unsaved local draft (the never-clobber rail applies here exactly as in the sweep).
+    // Classify the working tree under the held flock: an unreadable placement fails closed; a draft is
+    // committed to the sidecar store before the swap (recoverable); a clean/absent one proceeds.
+    let work = compute_work(ctx, &map, &lock)?;
+    match &work {
+        WorkState::Unscannable => {
+            return Err(ClientError::PlacementUnsupported {
+                reason: "the placement cannot be read; refusing a go-back that might clobber it"
+                    .into(),
+            });
+        }
+        WorkState::Present {
+            eq_base: false,
+            scanned,
+            ..
+        } => {
+            snapshot_draft(ctx, &sp, &lock, scanned)?;
+        }
+        _ => {}
+    }
+
+    // The target's bytes must be readable from the local store (a previously-applied version); a
+    // recorded-but-unreadable version (e.g. a dangling ref) is refused with the typed go-back error
+    // rather than surfacing a raw integrity error.
     let store = Store::open(&sp.store)?;
-    let target_digest = store_bundle_digest(&store, target)?;
+    let target_digest = store_bundle_digest_opt(&store, target)?.ok_or_else(|| {
+        ClientError::UnknownGoBackVersion {
+            version: target_hex.clone(),
+        }
+    })?;
     let bundle = store.render_verified(target, target_digest)?;
+    fsync_store(ctx, &store)?;
     let target_digest_hex = to_hex(&target_digest);
 
     // `ExplicitLocalPull` → `MaterializeLocal`: a direct local command authorizes installing these bytes;
@@ -287,12 +327,20 @@ pub(crate) fn current_state(ctx: &Ctx<'_>, skill_id: &str) -> Result<PullSkill, 
 
 /// Map the follow-state + invocation to the consent situation. A follower only ever receives an
 /// already-approved `current` (the gate is server-side), so a forward move under `review_required` is
-/// `ReviewRequiredApproved`; auto is `FollowedAutoNewVersion`; confirm-each is `FollowedConfirmEach`. An
-/// explicit `topos pull <skill>` is the user's `ExplicitLocalPull` — a direct local command that
-/// authorizes the apply (and re-binds the digest), so it applies even in confirm-each.
-fn situation_for(follow: &FollowContext, explicit: bool) -> topos_core::consent::Situation {
+/// `ReviewRequiredApproved`; auto is `FollowedAutoNewVersion`; confirm-each is `FollowedConfirmEach`.
+///
+/// An explicit `topos pull <skill>` is the user accepting a **previously-disclosed** pending version: it
+/// maps to `ExplicitLocalPull` (a direct local command that authorizes the apply and re-binds the digest)
+/// ONLY when this pull did NOT discover a newer version (`!raised`). If the pointer advanced during the
+/// accept (`raised`), that newer version was never offered, so it goes through the follow-mode gate — a
+/// confirm-each skill re-offers it (re-disclosing its digest) rather than applying bytes it never showed.
+fn situation_for(
+    follow: &FollowContext,
+    explicit: bool,
+    raised: bool,
+) -> topos_core::consent::Situation {
     use topos_core::consent::Situation;
-    if explicit {
+    if explicit && !raised {
         Situation::ExplicitLocalPull
     } else if follow.review_required {
         Situation::ReviewRequiredApproved
@@ -422,16 +470,15 @@ fn map_core(map: &PlacementMap, target: [u8; 32], target_digest_hex: &str) -> Ne
 // The store side: snapshot a draft, backfill + record a fetched version, read a stored digest.
 // ---------------------------------------------------------------------------------------------
 
-/// Snapshot the current working bytes into the sidecar store as a commit on `base_commit`, so a draft is
-/// never lost when a divergence is surfaced. Returns the snapshot `version_id` (the saved draft).
+/// Snapshot the working bytes (already scanned by `compute_work`, so the saved draft is byte-consistent
+/// with the decision that surfaced it — scanned exactly once) into the sidecar store as a commit on
+/// `base_commit`, so a draft is never lost. Returns the snapshot `version_id` (the saved draft).
 fn snapshot_draft(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
     lock: &Lock,
-    _work_digest_hex: &str,
+    scanned: &ScannedBundle,
 ) -> Result<String, ClientError> {
-    let placement = lock_placement(ctx, sp)?;
-    let scanned = scan::scan(Path::new(&placement))?;
     let base = super::parse_hex32(&lock.base_commit)?;
     let draft_id = sign::commit_id(&Commit {
         parents: &[base],
@@ -515,11 +562,15 @@ fn ensure_local(
                 to_hex(&version_id)
             ))
         })?;
-    fsync_store(ctx, store)?;
+    // No fsync here — the caller fsyncs the store ONCE after the whole backfill, so durability cost is
+    // proportional to the bytes written, not re-syncing the growing store per ancestor commit.
     Ok(tree.bundle_digest)
 }
 
-/// The `bundle_digest` of a stored version, or `None` if the version is not present.
+/// The `bundle_digest` of a stored version, or `None` if it is not present **or not readable**. A present
+/// ref whose objects cannot be rendered (a dangling ref left by a crash between the ref write and the
+/// object fsync) is treated as absent, so `ensure_local` re-fetches + re-commits and heals it rather than
+/// wedging forever, and a go-back to such a version is refused as unknown.
 fn store_bundle_digest_opt(
     store: &Store,
     version_id: [u8; 32],
@@ -527,7 +578,7 @@ fn store_bundle_digest_opt(
     if !store.list_versions()?.contains(&version_id) {
         return Ok(None);
     }
-    Ok(Some(store_bundle_digest(store, version_id)?))
+    Ok(store_bundle_digest(store, version_id).ok())
 }
 
 /// The `bundle_digest` of a present stored version (recomputed via the tree-structure walk → kernel digest
@@ -554,8 +605,13 @@ fn store_bundle_digest(store: &Store, version_id: [u8; 32]) -> Result<[u8; 32], 
 enum WorkState {
     /// The placement directory does not exist — a clean first install (nothing to clobber).
     Absent,
-    /// The placement scanned cleanly; `eq_base` is whether it matches the locked base bytes.
-    Present { digest_hex: String, eq_base: bool },
+    /// The placement scanned cleanly; `eq_base` is whether it matches the locked base bytes. Carries the
+    /// scan so a draft is snapshotted from the exact bytes the decision was made on (scanned once).
+    Present {
+        digest_hex: String,
+        eq_base: bool,
+        scanned: ScannedBundle,
+    },
     /// The placement exists but cannot be scanned safely — fail closed, never overwrite it.
     Unscannable,
 }
@@ -568,16 +624,24 @@ fn compute_work(ctx: &Ctx<'_>, map: &PlacementMap, lock: &Lock) -> Result<WorkSt
         return Ok(WorkState::Absent);
     };
     let p = Path::new(placement);
-    if ctx.fs.path_kind(p)?.is_none() {
-        return Ok(WorkState::Absent);
+    match ctx.fs.path_kind(p)? {
+        None => return Ok(WorkState::Absent),
+        // A dangling symlink (its target is gone — e.g. a crash in the rename-dance absent window) is
+        // effectively ABSENT: the next pull first-installs into the resolved target and recovers, rather
+        // than alarming forever on an "unscannable" placement.
+        Some(PathKind::Symlink) if std::fs::canonicalize(p).is_err() => {
+            return Ok(WorkState::Absent);
+        }
+        _ => {}
     }
     match scan::scan(p) {
-        Ok(ScannedBundle { bundle_digest, .. }) => {
-            let digest_hex = to_hex(&bundle_digest);
+        Ok(scanned) => {
+            let digest_hex = to_hex(&scanned.bundle_digest);
             let eq_base = digest_hex == lock.bundle_digest;
             Ok(WorkState::Present {
                 digest_hex,
                 eq_base,
+                scanned,
             })
         }
         Err(_) => Ok(WorkState::Unscannable),
@@ -727,9 +791,12 @@ fn first_placement(map: &PlacementMap) -> Result<String, ClientError> {
         .ok_or_else(|| ClientError::Corrupt("placement map has no placement".into()))
 }
 
-fn lock_placement(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> Result<String, ClientError> {
-    let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
-    first_placement(&map)
+/// Whether an error is an INTEGRITY stop (forged/corrupt fetched bytes — surface a loud per-skill ALARM)
+/// versus a transient failure to propagate. A `commit` id-mismatch (`Corrupt`) or a `render_verified`
+/// digest mismatch (`Verify`) means the served bytes did not authenticate; an `Io`/`Plane`/store error is
+/// transient.
+fn is_integrity_error(e: &ClientError) -> bool {
+    matches!(e, ClientError::Corrupt(_) | ClientError::Verify(_))
 }
 
 fn fsync_store(ctx: &Ctx<'_>, store: &Store) -> Result<(), ClientError> {
@@ -750,18 +817,6 @@ fn read_required<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ClientError> {
     doc::read_doc(ctx.fs, path)?
         .ok_or_else(|| ClientError::Corrupt(format!("missing {what} for a followed skill")))
-}
-
-fn persist_if_dirty(
-    ctx: &Ctx<'_>,
-    sp: &sidecar::SkillPaths,
-    sync: &SyncState,
-    dirty: bool,
-) -> Result<(), ClientError> {
-    if dirty {
-        doc::write_doc(ctx.fs, &sp.sync, sync)?;
-    }
-    Ok(())
 }
 
 // ---- PullSkill row builders ----

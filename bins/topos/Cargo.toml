@@ -33,8 +33,9 @@ thiserror.workspace = true
 [dev-dependencies]
 # TEST-ONLY: sign fixture `current` pointers with a throwaway plane key so the verify path is exercised
 # end-to-end. A dev-dependency never enters the production graph, so it does not cross check-arch's line
-# (the client production build stays verify-only via topos-core).
-ed25519-dalek = { version = "2" }
+# (the client production build stays verify-only via topos-core). Pinned through the workspace set,
+# adding only `std` for signing (no key-gen / zeroize needed here).
+ed25519-dalek = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

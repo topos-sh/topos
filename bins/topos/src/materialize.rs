@@ -402,6 +402,18 @@ fn probe_path(parent: &Path, skill_id: &str, slot: char) -> PathBuf {
     parent.join(format!(".topos-probe-{skill_id}-{slot}"))
 }
 
+/// The placement-side `.topos-*` siblings this materializer may create for a skill (staging / graveyard /
+/// probe dirs). Exposed so crash recovery can sweep them beside the placement — outside `~/.topos/` — even
+/// when the next command is not another pull of this skill, so they are never orphaned by `uninstall`.
+pub(crate) fn litter_siblings(parent: &Path, skill_id: &str) -> Vec<PathBuf> {
+    vec![
+        staging_path(parent, skill_id),
+        graveyard_path(parent, skill_id),
+        probe_path(parent, skill_id, 'a'),
+        probe_path(parent, skill_id, 'b'),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,6 +984,101 @@ mod tests {
             materialize(
                 &RealFs,
                 &req("topos_d", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+            )
+            .unwrap();
+            assert_eq!(
+                dir_snapshot(&placement),
+                Some(expected(NEW)),
+                "fail_at={fail_at}: no converge"
+            );
+        }
+    }
+
+    /// The first-install path (absent placement) under the crash gate: faults leave the placement ABSENT
+    /// or NEW-complete — never partial — and `applied` advances only once the bytes are in and the docs are
+    /// written; a clean re-run converges.
+    #[test]
+    fn crash_gate_first_install_leaves_absent_or_new_complete() {
+        let g_new = Generation { epoch: 1, seq: 1 };
+        let new_digest = digest_hex(NEW);
+        let n_ops = {
+            let parent = Scratch::new("fi-count");
+            let home = Scratch::new("fi-count-home");
+            let placement = parent.0.join("demo"); // absent
+            let bundle = rendered(NEW);
+            let lock = lock_of("topos_fi", NEW, &"1".repeat(64));
+            let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
+            let prior = prior_map(
+                &placement.to_string_lossy(),
+                &"0".repeat(64),
+                SwapCapability::AtomicExchange,
+            );
+            let d = docs_under(&home.0, "topos_fi");
+            let fs = FaultFs::new(0);
+            materialize(
+                &fs,
+                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+            )
+            .unwrap();
+            fs.ops_attempted()
+        };
+
+        for fail_at in 1..=n_ops {
+            let parent = Scratch::new(&format!("fi-{fail_at}"));
+            let home = Scratch::new(&format!("fi-{fail_at}-home"));
+            let placement = parent.0.join("demo"); // absent
+            let bundle = rendered(NEW);
+            let lock = lock_of("topos_fi", NEW, &"1".repeat(64));
+            let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
+            let prior = prior_map(
+                &placement.to_string_lossy(),
+                &"0".repeat(64),
+                SwapCapability::AtomicExchange,
+            );
+            let d = docs_under(&home.0, "topos_fi");
+            // Seed an OLD sync so a pre-commit fault leaves a readable lagging `applied`.
+            doc::write_doc(
+                &RealFs,
+                &d.sp.sync,
+                &sync_at(
+                    Generation { epoch: 0, seq: 0 },
+                    Generation { epoch: 0, seq: 0 },
+                    &"0".repeat(64),
+                    &"0".repeat(64),
+                ),
+            )
+            .unwrap();
+
+            let fs = FaultFs::new(fail_at);
+            let _ = materialize(
+                &fs,
+                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+            );
+
+            // (a) absent or new-complete — never a partial directory.
+            let snap = dir_snapshot(&placement);
+            let ok = snap.is_none() || snap.as_deref() == Some(&expected(NEW));
+            assert!(
+                ok,
+                "fail_at={fail_at}: first-install left a partial dir: {snap:?}"
+            );
+
+            // (b) `applied` advances only with the new bytes in place AND all docs written.
+            if let Ok(bytes) = std::fs::read(&d.sp.sync)
+                && let Ok(s) = load_versioned::<SyncState>(&bytes, 1)
+                && s.applied == g_new
+            {
+                assert_eq!(
+                    snap.as_deref(),
+                    Some(&expected(NEW)[..]),
+                    "fail_at={fail_at}"
+                );
+            }
+
+            // (c) a clean re-run converges.
+            materialize(
+                &RealFs,
+                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
             )
             .unwrap();
             assert_eq!(

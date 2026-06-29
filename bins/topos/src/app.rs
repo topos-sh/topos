@@ -139,20 +139,26 @@ fn emit_err(json: bool, command: &str, err: &ClientError) -> ExitCode {
 
 /// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
 /// pending update; `<name>@<hash>` = go back to that version's bytes.
+///
+/// A go-back suffix is recognized only when the part after the LAST `@` is a valid 64-char lowercase-hex
+/// version id; otherwise the whole argument is the skill name. So a skill whose name contains `@` (e.g.
+/// `team@cli`) is accepted as a name, and `team@cli@<hash>` still goes back correctly.
 fn build_pull_scope(skill: Option<String>) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
         return Ok(ops::PullScope::AllFollowed);
     };
-    match arg.split_once('@') {
-        None => Ok(ops::PullScope::One {
-            name: arg,
-            mode: ops::TargetMode::AcceptPending,
-        }),
-        Some((name, hash)) => Ok(ops::PullScope::One {
+    if let Some((name, suffix)) = arg.rsplit_once('@')
+        && let Ok(hash) = ops::parse_hex32(suffix)
+    {
+        return Ok(ops::PullScope::One {
             name: name.to_owned(),
-            mode: ops::TargetMode::GoBack(ops::parse_hex32(hash)?),
-        }),
+            mode: ops::TargetMode::GoBack(hash),
+        });
     }
+    Ok(ops::PullScope::One {
+        name: arg,
+        mode: ops::TargetMode::AcceptPending,
+    })
 }
 
 /// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort).

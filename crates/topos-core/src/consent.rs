@@ -37,7 +37,8 @@ pub enum Situation {
     TeamRevertFollowed,
 }
 
-/// Which satisfier authorizes the apply (mlp-spec's three, plus the explicit-local and none cases).
+/// Which satisfier authorizes the apply (the product's three — direct human / standing-follow /
+/// reviewer-delegated — plus the explicit-local and none cases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Satisfier {
     /// (a) A direct human yes on the digest.
