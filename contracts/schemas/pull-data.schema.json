@@ -43,6 +43,62 @@
         "remote_version_id"
       ]
     },
+    "ConflictPathKind": {
+      "description": "How a single path conflicts. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A textual three-way overlap — diff3 markers were written at the path.",
+          "type": "string",
+          "const": "content"
+        },
+        {
+          "description": "A non-UTF-8 file with a true three-way divergence — theirs kept at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "binary_content"
+        },
+        {
+          "description": "Mine modified the file; theirs deleted it — mine kept at the path.",
+          "type": "string",
+          "const": "modify_delete"
+        },
+        {
+          "description": "Mine deleted the file; theirs modified it — theirs kept at the path.",
+          "type": "string",
+          "const": "delete_modify"
+        },
+        {
+          "description": "Both sides added the path with different content — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "add_add"
+        },
+        {
+          "description": "A consent-significant mode disagreement — theirs' bytes + mode at the path.",
+          "type": "string",
+          "const": "mode_mode"
+        },
+        {
+          "description": "A side (or the merged output) exceeded the client size cap — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "oversize"
+        }
+      ]
+    },
+    "ConflictPathReport": {
+      "description": "One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConflictPathKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ]
+    },
     "Generation": {
       "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
       "type": "object",
@@ -61,6 +117,57 @@
       "required": [
         "epoch",
         "seq"
+      ]
+    },
+    "MergeReport": {
+      "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
+      "type": "object",
+      "properties": {
+        "base_version_id": {
+          "description": "The three-way base (the draft's fork point).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "clean": {
+          "description": "Whether the merge was clean (`true` → draft-on-current, publishable) or blocked (`false`).",
+          "type": "boolean"
+        },
+        "conflicts": {
+          "description": "The conflicting paths when `clean` is `false` — the agent's resolution checklist.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConflictPathReport"
+          }
+        },
+        "drop_diff": {
+          "description": "For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result_digest": {
+          "description": "The merged/conflict tree's `bundle_digest`.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result_version_id": {
+          "description": "The forward 1-parent commit carrying the merged (or conflict-marked) tree.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "theirs_version_id": {
+          "description": "`current` (theirs) the draft was merged onto.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "base_version_id",
+        "theirs_version_id",
+        "result_version_id",
+        "result_digest",
+        "clean"
       ]
     },
     "Offer": {
@@ -100,9 +207,19 @@
           "const": "offered"
         },
         {
-          "description": "State ④ — a local draft conflicts with a newer remote.",
+          "description": "State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a\nconfirm-each follower's bare sweep, which offers the merge rather than running it).",
           "type": "string",
           "const": "diverged"
+        },
+        {
+          "description": "State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.",
+          "type": "string",
+          "const": "merged"
+        },
+        {
+          "description": "State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked\nuntil the author resolves (or escapes).",
+          "type": "string",
+          "const": "conflicted"
         },
         {
           "description": "A transient local hold (e.g. a local go-back is pinned).",
@@ -131,6 +248,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/Conflict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge": {
+          "description": "Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeReport"
             },
             {
               "type": "null"

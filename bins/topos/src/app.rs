@@ -79,8 +79,13 @@ pub fn run() -> ExitCode {
             finish(json, cmd_name, ops::diff(&ctx, &skill), render::diff_tty)
         }
         Command::Log { skill } => finish(json, cmd_name, ops::log(&ctx, &skill), render::log_tty),
-        Command::Pull { skill, quiet } => {
-            let result = build_pull_scope(skill).and_then(|scope| ops::pull(&ctx, scope));
+        Command::Pull {
+            skill,
+            onto_current,
+            quiet,
+        } => {
+            let result =
+                build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(&ctx, scope));
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
@@ -138,18 +143,33 @@ fn emit_err(json: bool, command: &str, err: &ClientError) -> ExitCode {
 }
 
 /// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
-/// pending update; `<name>@<hash>` = go back to that version's bytes.
+/// pending update; `<name>@<hash>` = go back to that version's bytes; `--onto-current` = the escape.
 ///
 /// A go-back suffix is recognized only when the part after the LAST `@` is a valid 64-char lowercase-hex
 /// version id; otherwise the whole argument is the skill name. So a skill whose name contains `@` (e.g.
 /// `team@cli`) is accepted as a name, and `team@cli@<hash>` still goes back correctly.
-fn build_pull_scope(skill: Option<String>) -> Result<ops::PullScope, ClientError> {
+///
+/// `--onto-current` (the escape) requires a `<skill>` target and is mutually exclusive with `@<hash>`.
+fn build_pull_scope(
+    skill: Option<String>,
+    onto_current: bool,
+) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
+        if onto_current {
+            return Err(ClientError::PlacementUnsupported {
+                reason: "--onto-current requires a <skill> target".into(),
+            });
+        }
         return Ok(ops::PullScope::AllFollowed);
     };
     if let Some((name, suffix)) = arg.rsplit_once('@')
         && let Ok(hash) = ops::parse_hex32(suffix)
     {
+        if onto_current {
+            return Err(ClientError::PlacementUnsupported {
+                reason: "--onto-current is not valid with @<hash>".into(),
+            });
+        }
         return Ok(ops::PullScope::One {
             name: name.to_owned(),
             mode: ops::TargetMode::GoBack(hash),
@@ -157,7 +177,11 @@ fn build_pull_scope(skill: Option<String>) -> Result<ops::PullScope, ClientError
     }
     Ok(ops::PullScope::One {
         name: arg,
-        mode: ops::TargetMode::AcceptPending,
+        mode: if onto_current {
+            ops::TargetMode::OntoCurrent
+        } else {
+            ops::TargetMode::AcceptPending
+        },
     })
 }
 

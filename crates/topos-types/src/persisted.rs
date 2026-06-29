@@ -126,6 +126,86 @@ pub enum SwapCapability {
     Unsupported,
 }
 
+/// `skills/<id>/conflict.json` — the durable record that the working tree holds an **unresolved** author
+/// merge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single
+/// source of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a pre-swap
+/// recovery journal: it is written + fsynced BEFORE the conflict tree is swapped onto the placement, so a
+/// crash mid-materialize is healed by rendering the already-committed `result_commit` (pinned by
+/// `conflicted_digest`), never by re-merging on-disk marker bytes. Cleared only by a clean resolution (a
+/// clean merge) or the disclosed escape — never by an incidental edit.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConflictState {
+    #[schemars(extend("const" = 1))]
+    pub schema_version: u32,
+    /// The three-way base the conflict was computed against (the draft's fork point).
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub base_commit: String,
+    /// The base's `bundle_digest` — a render pin so recovery verifies offline without re-derivation.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub base_digest: String,
+    /// `current` (theirs) at the time the conflict was recorded.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub current_commit: String,
+    /// `current`'s `bundle_digest` — the render pin recovery uses to rebuild the `lock`-as-base.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub current_digest: String,
+    /// The author's draft (mine) snapshot the conflict was computed from (recoverable).
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub draft_commit: String,
+    /// The draft's `bundle_digest` — a render pin for the recoverable draft.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub draft_digest: String,
+    /// The conflict tree committed as a forward 1-parent commit on `current_commit` — the deterministic
+    /// render target recovery re-materializes (so it never re-merges on-disk markers).
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub result_commit: String,
+    /// The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the on-disk heal signal and
+    /// the `render_verified` pin. Disk re-scanning to this exact digest means "the materialize completed".
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub conflicted_digest: String,
+    pub reason: ConflictReason,
+    /// The conflicting paths, sorted by raw path bytes (the agent's resolution checklist).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<ConflictPath>,
+}
+
+/// Why a merge could not be applied cleanly. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictReason {
+    /// A genuine three-way merge with at least one unresolved path.
+    ThreeWay,
+    /// Unrelated histories — no recorded base; a 2-way manual choice is required.
+    NoBase,
+}
+
+/// One conflicting path + how it conflicts. **Field-set pinned**; `kind`'s value set is INFERRED.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConflictPath {
+    pub path: String,
+    pub kind: ConflictPathKind,
+}
+
+/// How a single path conflicts. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPathKind {
+    /// A textual three-way overlap — diff3 markers were written at the path.
+    Content,
+    /// A non-UTF-8 file with a true three-way divergence — theirs kept at the path, mine in a sidecar.
+    BinaryContent,
+    /// Mine modified the file; theirs deleted it — mine kept at the path.
+    ModifyDelete,
+    /// Mine deleted the file; theirs modified it — theirs kept at the path.
+    DeleteModify,
+    /// Both sides added the path with different content — theirs at the path, mine in a sidecar.
+    AddAdd,
+    /// A consent-significant mode disagreement — theirs' bytes + mode at the path.
+    ModeMode,
+    /// A side (or the merged output) exceeded the client size cap — theirs at the path, mine in a sidecar.
+    Oversize,
+}
+
 /// `ops/<op_id>.json` — the durable request identity, persisted BEFORE the first network send so an
 /// uncertain write can be reconciled against the receipt. **Field-set pinned.**
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

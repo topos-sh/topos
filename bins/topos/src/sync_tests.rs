@@ -21,7 +21,7 @@ use topos_types::{
 };
 
 use crate::ctx::Ctx;
-use crate::fs_seam::RealFs;
+use crate::fs_seam::{FaultFs, FsOps, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
     FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, KnownCurrent, PlaneError,
@@ -267,8 +267,17 @@ impl Rig {
         Layout::new(&self.home.0)
     }
     fn ctx<'a>(&'a self, plane: &'a dyn PlaneSource, follow: &'a dyn FollowSource) -> Ctx<'a> {
+        self.ctx_fs(&self.fs, plane, follow)
+    }
+    /// A [`Ctx`] over an arbitrary [`FsOps`] (the crash gate injects a [`FaultFs`]).
+    fn ctx_fs<'a>(
+        &'a self,
+        fs: &'a dyn FsOps,
+        plane: &'a dyn PlaneSource,
+        follow: &'a dyn FollowSource,
+    ) -> Ctx<'a> {
         Ctx {
-            fs: &self.fs,
+            fs,
             ids: &self.ids,
             clock: &self.clock,
             device_id: DEVICE.to_owned(),
@@ -302,6 +311,18 @@ impl Rig {
         let mut s = self.read_sync(id);
         f(&mut s);
         doc::write_doc(&self.fs, &self.layout().published(id).sync, &s).unwrap();
+    }
+    fn patch_lock(&self, id: &str, f: impl FnOnce(&mut topos_types::persisted::Lock)) {
+        let p = self.layout().published(id).lock;
+        let mut l: topos_types::persisted::Lock = doc::read_doc(&self.fs, &p).unwrap().unwrap();
+        f(&mut l);
+        doc::write_doc(&self.fs, &p, &l).unwrap();
+    }
+    fn open_store(&self, id: &str) -> topos_gitstore::Store {
+        topos_gitstore::Store::open(&self.layout().published(id).store).unwrap()
+    }
+    fn conflict_exists(&self, id: &str) -> bool {
+        self.layout().published(id).conflict.exists()
     }
 }
 
@@ -465,11 +486,15 @@ fn confirm_each_offers_then_explicit_pull_accepts() {
     assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 1, seq: 1 });
 }
 
+/// Full-auto: an AUTO follower's bare sweep RESOLVES a diverged draft. Here the local edit
+/// overlaps theirs' edit to `SKILL.md`, so the merge conflicts: the complete conflict tree is materialized
+/// (markers carrying BOTH sides, the other files merged clean), the draft is snapshotted recoverably, and
+/// a durable conflict record blocks publish. The edit is never lost — it lives inside the markers.
 #[test]
-fn draft_diverges_and_is_never_clobbered() {
+fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
     let rig = Rig::new("diverge");
     let (id, _name, genesis) = rig.adopt(BASE);
-    // Edit the placement → a local draft.
+    // Edit SKILL.md (overlaps theirs' SKILL.md edit → a conflict) and leave run.sh at base.
     let edited: &[(&str, FileMode, &[u8])] = &[
         ("SKILL.md", FileMode::Regular, b"# my local edit\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
@@ -485,17 +510,42 @@ fn draft_diverges_and_is_never_clobbered() {
     let ctx = rig.ctx(&plane, &foll);
     let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
-    assert_eq!(row.action, PullAction::Diverged);
-    let conflict = row.conflict.as_ref().expect("a conflict panel");
-    assert_eq!(conflict.remote_version_id, to_hex(&v1.id));
+
+    // Resolved (not merely surfaced): a conflict, with a merge report listing the conflicting path.
+    assert_eq!(row.action, PullAction::Conflicted);
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert!(!mr.clean);
+    assert_eq!(mr.theirs_version_id, to_hex(&v1.id));
+    assert!(mr.conflicts.iter().any(|c| c.path == "SKILL.md"));
+
+    // The COMPLETE conflict tree is on the placement: SKILL.md has diff3 markers carrying BOTH sides; the
+    // non-overlapping files are merged clean (run.sh → theirs, the new ref/notes.md → theirs).
+    let skill = std::fs::read_to_string(rig.placement().join("SKILL.md")).unwrap();
     assert!(
-        conflict.local_version_id.is_some(),
-        "the draft was snapshotted"
+        skill.contains("<<<<<<<") && skill.contains(">>>>>>>"),
+        "{skill}"
     );
-    // NEVER clobbered: the placement still holds the local edit, not the remote bytes.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(edited)));
-    // `applied` did not advance (nothing was auto-applied).
-    assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 0, seq: 0 });
+    assert!(
+        skill.contains("my local edit") && skill.contains("# v1"),
+        "the edit must survive inside the markers: {skill}"
+    );
+    assert_eq!(
+        std::fs::read(rig.placement().join("run.sh")).unwrap(),
+        b"#!/bin/sh\necho v1\n"
+    );
+    assert!(rig.placement().join("ref/notes.md").exists());
+
+    // Never clobbered: the pre-merge draft is snapshotted into the sidecar store (recoverable).
+    let draft = mk_version(&[genesis], edited, DEVICE, "topos: draft snapshot");
+    let store = topos_gitstore::Store::open(&rig.layout().published(&id).store).unwrap();
+    assert!(
+        store.list_versions().unwrap().contains(&draft.id),
+        "the diverged draft must be snapshotted before the merge overwrites the placement"
+    );
+
+    // A durable conflict record blocks publish; the pending update is consumed into the (blocked) draft.
+    assert!(rig.layout().published(&id).conflict.exists());
+    assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 1, seq: 1 });
 }
 
 #[test]
@@ -921,4 +971,690 @@ fn bad_signature_is_an_alarm() {
     assert_eq!(only(&data).action, PullAction::Alarm);
     assert_eq!(snapshot(&rig.placement()), Some(expect(BASE)));
     assert_eq!(rig.read_sync(&id).observed, Generation { epoch: 0, seq: 0 });
+}
+
+// =================================================================================================
+// Author-side merge resolution (the diff3 increment): clean merge, the fixpoint, confirm-each surface,
+// the escape, conflict-blocks-publish, no-base, structural author-only, binary sidecars, and the crash
+// gate. These drive the full resolve through the public `ops::pull` entry point against a real store.
+// =================================================================================================
+
+/// A static bundle fixture (path, mode, bytes).
+type FileSet = &'static [(&'static str, FileMode, &'static [u8])];
+
+/// Three single-file versions whose edits are on disjoint lines → a clean three-way merge.
+fn clean_trio() -> (FileSet, FileSet, FileSet) {
+    (
+        &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")], // base
+        &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")],  // mine (edited line 1)
+        &[("SKILL.md", FileMode::Regular, b"line1\nline2\nTHEIRS\n")], // theirs (edited line 3)
+    )
+}
+
+/// A clean three-way merge: an AUTO follower's bare sweep combines both edits into a draft-on-current —
+/// `applied == observed`, `base == theirs`, no conflict record, publishable.
+#[test]
+fn auto_sweep_clean_merge_lands_draft_on_current() {
+    let (base, mine, theirs) = clean_trio();
+    let rig = Rig::new("clean");
+    let (id, _name, genesis) = rig.adopt(base);
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Merged);
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert!(mr.clean);
+    assert_eq!(mr.theirs_version_id, to_hex(&v1.id));
+
+    // Both edits are combined on disk; nothing is a conflict marker.
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"MINE\nline2\nTHEIRS\n"
+    );
+    assert!(
+        !rig.conflict_exists(&id),
+        "a clean merge writes no conflict record"
+    );
+
+    // draft-on-current: the pending update is consumed; the working tree reads as a draft on `current`.
+    let s = rig.read_sync(&id);
+    assert_eq!(s.applied, Generation { epoch: 1, seq: 1 });
+    assert_eq!(s.base_commit, to_hex(&v1.id));
+}
+
+/// The clean merge is a stable fixpoint: a re-pull with `current` unchanged is a no-op (never re-merged,
+/// never clobbered); and when `current` moves again the merged draft is re-resolved, NEVER fast-forwarded
+/// over — so the author's edit is never lost across rounds.
+#[test]
+fn clean_merge_is_a_stable_fixpoint_with_no_lost_update() {
+    let (base, mine, theirs) = clean_trio();
+    let rig = Rig::new("fixpoint");
+    let (id, _name, genesis) = rig.adopt(base);
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Merged
+    );
+
+    // (1) Re-pull, `current` unchanged → UpToDate (the draft is not nagged, not re-merged, not clobbered).
+    let again = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&again).action, PullAction::UpToDate);
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"MINE\nline2\nTHEIRS\n"
+    );
+
+    // (2) `current` moves to v2 (an edit on line 3, disjoint from MINE's line-1 edit with an unchanged
+    // line 2 between them so diff3 merges cleanly) → the merged draft re-resolves, NOT a fast-forward.
+    let v2files: &[(&str, FileMode, &[u8])] =
+        &[("SKILL.md", FileMode::Regular, b"line1\nline2\nV2\n")];
+    let v2 = mk_version(&[v1.id], v2files, "d_pub", "v2");
+    let mut plane2 = FixturePlane::default();
+    plane2.add_version(&id, &v1);
+    plane2.add_version(&id, &v2);
+    plane2.set_current(&id, signed(WS, &id, v2.id, 1, 2));
+    let row =
+        only(&ops::pull(&rig.ctx(&plane2, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_ne!(
+        row.action,
+        PullAction::FastForwarded,
+        "a fast-forward would clobber the merged draft (lost update)"
+    );
+    assert_eq!(row.action, PullAction::Merged);
+    // MINE's original line-1 edit survived two merge rounds.
+    let final_skill = std::fs::read(rig.placement().join("SKILL.md")).unwrap();
+    assert!(
+        final_skill.starts_with(b"MINE\n"),
+        "lost update: {final_skill:?}"
+    );
+}
+
+/// A confirm-each follower's BARE sweep surfaces a divergence — it never auto-merges (that would land
+/// theirs-incorporated bytes without the one-tap). The placement is left exactly as the author left it.
+#[test]
+fn confirm_each_bare_sweep_surfaces_without_merging() {
+    let (base, mine, theirs) = clean_trio();
+    let rig = Rig::new("confirm");
+    let (id, _name, genesis) = rig.adopt(base);
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::ConfirmEach);
+
+    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Diverged);
+    assert!(
+        row.merge.is_none(),
+        "confirm-each bare sweep must not merge"
+    );
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(mine)),
+        "left untouched"
+    );
+    assert!(!rig.conflict_exists(&id));
+    assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 0, seq: 0 });
+
+    // The explicit accept (the one-tap) then runs the merge.
+    let accepted = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::AcceptPending,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&accepted).action, PullAction::Merged);
+}
+
+/// The disclosed escape (`--onto-current`): commit MY bytes on top of `current`, dropping the merge. It
+/// always produces a clean, publishable draft-on-current (no deadlock), discloses what it drops, and the
+/// pre-escape bytes stay recoverable in the sidecar store.
+#[test]
+fn escape_commits_mine_on_current_and_is_publishable() {
+    let rig = Rig::new("escape");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    // An overlapping edit (would conflict if merged) — the escape sidesteps the merge entirely.
+    let mine: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# my way\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let data = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Merged);
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert!(mr.clean);
+    assert!(mr.drop_diff.is_some(), "the escape discloses what it drops");
+
+    // The placement holds exactly MY bytes (theirs was dropped); publishable (no conflict record).
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(!rig.conflict_exists(&id));
+    let s = rig.read_sync(&id);
+    assert_eq!(s.applied, Generation { epoch: 1, seq: 1 });
+    assert_eq!(s.base_commit, to_hex(&v1.id));
+
+    // The pre-escape draft is recoverable: MINE re-parented on `current` is a real commit in the store.
+    let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
+    assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
+}
+
+/// A conflict blocks publish and the block PERSISTS — a bare re-sweep keeps reporting it (healing a
+/// crashed materialize), and editing the working tree does NOT clear it (the guard is presence-based, not
+/// a digest/marker scan). Only the escape (or a clean re-merge) clears it.
+#[test]
+fn conflict_blocks_and_persists_until_escaped() {
+    let rig = Rig::new("persist");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Auto sweep → conflict (overlapping SKILL.md) → blocked.
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // A bare re-sweep keeps reporting the block (does not silently clear or advance).
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // The author edits the markers by hand — the block STILL stands (presence-based, not a marker scan).
+    write_tree(
+        &rig.placement(),
+        &[
+            ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
+            ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+            ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+        ],
+    );
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(
+        rig.conflict_exists(&id),
+        "an edit must not clear the conflict"
+    );
+
+    // The escape resolves it: the block clears + a publishable draft-on-current results.
+    let escaped = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert!(!rig.conflict_exists(&id), "the escape clears the block");
+}
+
+/// Unrelated histories (no renderable base) fall back to a 2-way manual choice — never a silent merge:
+/// MINE is kept on disk, a 2-way diff is disclosed, and publish is blocked until the author resolves.
+#[test]
+fn no_base_falls_back_to_two_way_never_silent() {
+    let rig = Rig::new("nobase");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# independent\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    // Sever the recorded base so it cannot be rendered (an unrelated/pruned-base history).
+    rig.patch_lock(&id, |l| {
+        l.base_commit = "f".repeat(64);
+        l.bundle_digest = "e".repeat(64);
+    });
+
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Conflicted);
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert!(!mr.clean);
+    assert!(mr.drop_diff.is_some(), "a 2-way diff is disclosed");
+    // MINE is never silently overwritten by theirs.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(rig.conflict_exists(&id));
+}
+
+/// Structural author-only: the merge code is unreachable from a clean follower state. A behind-clean pull
+/// fast-forwards (never merges); a draft with no pending update is a no-op (never merges); neither writes
+/// a conflict record nor produces a `Merged`/`Conflicted` outcome.
+#[test]
+fn merge_unreachable_from_clean_follower_states() {
+    // BEHIND (clean): no local edit; a pending update fast-forwards, it does NOT enter the merge.
+    {
+        let rig = Rig::new("reach-behind");
+        let (id, _name, genesis) = rig.adopt(BASE); // placement == base (no edit)
+        let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+        let mut plane = FixturePlane::default();
+        plane.add_version(&id, &v1);
+        plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+        let foll = follow(&id, FollowMode::Auto);
+        let row =
+            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+        assert_eq!(row.action, PullAction::FastForwarded);
+        assert!(row.merge.is_none());
+        assert!(!rig.conflict_exists(&id));
+    }
+    // DRAFT (no pending): a local edit but `current` unchanged → a no-op; never the merge.
+    {
+        let rig = Rig::new("reach-draft");
+        let (id, _name, genesis) = rig.adopt(BASE);
+        write_tree(
+            &rig.placement(),
+            &[("SKILL.md", FileMode::Regular, b"# draft\n")],
+        );
+        let v0 = mk_version(&[genesis], BASE, "d_pub", "v0"); // not used as a move
+        let _ = v0;
+        let mut plane = FixturePlane::default();
+        // `current` is the genesis the client already has applied → nothing pending.
+        plane.set_current(&id, signed(WS, &id, genesis, 0, 0));
+        let foll = follow(&id, FollowMode::Auto);
+        let row =
+            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+        assert!(
+            matches!(row.action, PullAction::UpToDate),
+            "a draft with no pending update is a no-op, got {:?}",
+            row.action
+        );
+        assert!(row.merge.is_none());
+        assert!(!rig.conflict_exists(&id));
+    }
+}
+
+/// A binary (non-UTF-8) file diverging three ways is never line-merged: theirs is kept at the path and
+/// mine in a `.topos-mine` sidecar, and the materialized tree scans back to the recorded conflict digest
+/// (the sidecar round-trips through the scanner — the heal signal stays valid).
+#[test]
+fn binary_conflict_keeps_both_sides_via_sidecar() {
+    let rig = Rig::new("binary");
+    // 0xFF is never a valid UTF-8 lead byte → genuinely binary content (so it is never line-merged).
+    let base: &[(&str, FileMode, &[u8])] = &[("logo.bin", FileMode::Regular, &[0xffu8, 1, 2])];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: &[(&str, FileMode, &[u8])] = &[("logo.bin", FileMode::Regular, &[0xffu8, 9, 9])];
+    write_tree(&rig.placement(), mine);
+    let theirs_files: &[(&str, FileMode, &[u8])] =
+        &[("logo.bin", FileMode::Regular, &[0xffu8, 7, 7])];
+    let v1 = mk_version(&[genesis], theirs_files, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Conflicted);
+    // theirs kept at the path, mine in the sidecar.
+    assert_eq!(
+        std::fs::read(rig.placement().join("logo.bin")).unwrap(),
+        &[0xffu8, 7, 7]
+    );
+    assert_eq!(
+        std::fs::read(rig.placement().join("logo.bin.topos-mine")).unwrap(),
+        &[0xffu8, 9, 9]
+    );
+    // The on-disk tree scans back to the recorded conflict digest (sidecars survive the scanner).
+    let cs: topos_types::persisted::ConflictState =
+        doc::read_doc(&rig.fs, &rig.layout().published(&id).conflict)
+            .unwrap()
+            .unwrap();
+    let scanned = crate::scan::scan(&rig.placement()).unwrap();
+    assert_eq!(to_hex(&scanned.bundle_digest), cs.conflicted_digest);
+}
+
+/// The release-blocker crash gate: fault every fs op during an auto conflict resolve and assert (a) a
+/// completed conflict tree is NEVER on disk without its guard record (a marker tree is never publishable),
+/// and (b) a clean re-run always converges to the blocked conflict state — the placement holding a
+/// complete tree throughout (never torn).
+#[test]
+fn resolve_crash_gate_converges_and_never_unguards_markers() {
+    let mine: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    // Capture the completed conflict tree + op count from a clean run.
+    let (conflict_tree, n_ops) = {
+        let rig = Rig::new("cg-count");
+        let (id, _name, genesis) = rig.adopt(BASE);
+        write_tree(&rig.placement(), mine);
+        let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+        let mut plane = FixturePlane::default();
+        plane.add_version(&id, &v1);
+        plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+        let foll = follow(&id, FollowMode::Auto);
+        let fs = FaultFs::new(0);
+        ops::pull(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
+        (snapshot(&rig.placement()), fs.ops_attempted())
+    };
+    assert!(n_ops > 4, "expected several durable ops, got {n_ops}");
+
+    for fail_at in 1..=n_ops {
+        let rig = Rig::new(&format!("cg-{fail_at}"));
+        let (id, _name, genesis) = rig.adopt(BASE);
+        write_tree(&rig.placement(), mine);
+        let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+        let mut plane = FixturePlane::default();
+        plane.add_version(&id, &v1);
+        plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+        let foll = follow(&id, FollowMode::Auto);
+
+        // Fault the Nth op (may error mid-resolve).
+        let fs = FaultFs::new(fail_at);
+        let _ = ops::pull(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed);
+
+        // SAFETY: if the completed conflict tree is on disk, its guard record MUST be present (a marker
+        // tree is never publishable). It is written + fsynced before the swap, so this holds at every fault.
+        if snapshot(&rig.placement()) == conflict_tree {
+            assert!(
+                rig.conflict_exists(&id),
+                "fail_at={fail_at}: a conflict tree is on disk without its guard record"
+            );
+        }
+
+        // A clean re-run converges: blocked conflict, complete conflict tree on disk, applied == observed.
+        let row =
+            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+        assert_eq!(
+            row.action,
+            PullAction::Conflicted,
+            "fail_at={fail_at}: did not converge to a blocked conflict"
+        );
+        assert!(
+            rig.conflict_exists(&id),
+            "fail_at={fail_at}: no guard after converge"
+        );
+        assert_eq!(
+            snapshot(&rig.placement()),
+            conflict_tree,
+            "fail_at={fail_at}: placement did not converge to the complete conflict tree"
+        );
+        assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 1, seq: 1 });
+    }
+}
+
+// --- review-driven regression tests ---
+
+/// Escaping a recorded conflict WITHOUT editing must commit the author's ORIGINAL draft (drop the merge),
+/// never the raw conflict-marker tree — otherwise the markers would become a publishable bundle.
+#[test]
+fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
+    let rig = Rig::new("escape-unedited");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Auto sweep → conflict (overlapping SKILL.md) → the placement holds markers.
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(
+        std::fs::read_to_string(rig.placement().join("SKILL.md"))
+            .unwrap()
+            .contains("<<<<<<<")
+    );
+
+    // Escape WITHOUT editing → commits MINE (the original draft), not the markers; clears the block.
+    let escaped = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert!(!rig.conflict_exists(&id), "escape clears the block");
+    // The placement is exactly MINE again — no markers anywhere.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(
+        !std::fs::read_to_string(rig.placement().join("SKILL.md"))
+            .unwrap()
+            .contains("<<<<<<<"),
+        "the escape must not commit unresolved markers"
+    );
+}
+
+/// Escaping a recorded conflict AFTER hand-editing it commits the author's resolution (the edited bytes).
+#[test]
+fn escape_of_edited_conflict_commits_the_resolution() {
+    let rig = Rig::new("escape-edited");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // The author hand-resolves (removes markers) and then escapes.
+    let resolved: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
+    write_tree(&rig.placement(), resolved);
+    let escaped = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert!(!rig.conflict_exists(&id));
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(resolved)),
+        "the escape commits the author's hand resolution"
+    );
+}
+
+/// A confirm-each accept must NOT merge a version whose digest was raised (newly discovered) in the same
+/// pull — it re-offers instead, never applying undisclosed bytes.
+#[test]
+fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
+    let rig = Rig::new("ce-raised");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let edited: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), edited);
+    let foll = follow(&id, FollowMode::ConfirmEach);
+
+    // Step 1: a bare sweep discloses the divergence vs v1 (observed → (1,1)), surfaced not merged.
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut p1 = FixturePlane::default();
+    p1.add_version(&id, &v1);
+    p1.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&p1, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Diverged
+    );
+    assert_eq!(rig.read_sync(&id).observed, Generation { epoch: 1, seq: 1 });
+
+    // Step 2: the plane has moved to v2 (1,2). An explicit accept would now merge an UNDISCLOSED version —
+    // it must re-offer instead.
+    let v2files: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# v2\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v2\n"),
+    ];
+    let v2 = mk_version(&[v1.id], v2files, "d_pub", "v2");
+    let mut p2 = FixturePlane::default();
+    p2.add_version(&id, &v1);
+    p2.add_version(&id, &v2);
+    p2.set_current(&id, signed(WS, &id, v2.id, 1, 2));
+    let row = ops::pull(
+        &rig.ctx(&p2, &foll),
+        ops::PullScope::One {
+            name: "pr-describe".into(),
+            mode: ops::TargetMode::AcceptPending,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        only(&row).action,
+        PullAction::Diverged,
+        "an accept must re-offer a version raised in the same call, not merge it"
+    );
+    assert!(only(&row).merge.is_none());
+    assert!(!rig.conflict_exists(&id));
+}
+
+/// A `.topos-mine` sidecar must be disambiguated against the kernel's collision rule (NFC + case-fold),
+/// not just exact bytes — otherwise a publisher-added path that case-folds to the sidecar name wedges the
+/// resolution into a `Corrupt` digest error instead of a clean conflict.
+#[test]
+fn sidecar_avoids_case_fold_collision_with_a_real_path() {
+    let rig = Rig::new("sidecar-collide");
+    let base: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 1, 2])];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 9, 9])];
+    write_tree(&rig.placement(), mine);
+    // theirs changes the binary AND adds a path that ASCII-case-folds to `logo.bin.topos-mine`.
+    let theirs_files: FileSet = &[
+        ("logo.bin", FileMode::Regular, &[0xffu8, 7, 7]),
+        (
+            "LOGO.BIN.TOPOS-MINE",
+            FileMode::Regular,
+            b"real theirs file\n",
+        ),
+    ];
+    let v1 = mk_version(&[genesis], theirs_files, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(
+        row.action,
+        PullAction::Conflicted,
+        "the binary conflict must resolve cleanly, not error on a digest collision"
+    );
+    // theirs at the path, theirs' real file kept, and mine's sidecar DISAMBIGUATED away from the collision.
+    assert_eq!(
+        std::fs::read(rig.placement().join("logo.bin")).unwrap(),
+        &[0xffu8, 7, 7]
+    );
+    assert!(rig.placement().join("LOGO.BIN.TOPOS-MINE").exists());
+    assert_eq!(
+        std::fs::read(rig.placement().join("logo.bin.topos-mine-1")).unwrap(),
+        &[0xffu8, 9, 9],
+        "the sidecar was disambiguated to avoid the case-fold collision"
+    );
+    // The materialized tree scans back to the recorded conflict digest (no kernel rejection).
+    let cs: topos_types::persisted::ConflictState =
+        doc::read_doc(&rig.fs, &rig.layout().published(&id).conflict)
+            .unwrap()
+            .unwrap();
+    let scanned = crate::scan::scan(&rig.placement()).unwrap();
+    assert_eq!(to_hex(&scanned.bundle_digest), cs.conflicted_digest);
+}
+
+/// A recorded conflict must NOT hide the reused-tuple anti-rollback ALARM: even while blocked, the served
+/// `current` is authenticated, so a plane reusing `(epoch,seq)` for a different commit still alarms.
+#[test]
+fn recorded_conflict_does_not_hide_the_reused_tuple_alarm() {
+    let rig = Rig::new("conflict-alarm");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // A compromised plane reuses (1,1) for a DIFFERENT commit. The bare sweep must ALARM despite the block.
+    let forged: FileSet = &[("SKILL.md", FileMode::Regular, b"# forged\n")];
+    let v2 = mk_version(&[genesis], forged, "d_pub", "v2");
+    let mut compromised = FixturePlane::default();
+    compromised.add_version(&id, &v2);
+    compromised.set_current(&id, signed(WS, &id, v2.id, 1, 1)); // same generation, different commit
+    let row = ops::pull(&rig.ctx(&compromised, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        only(&row).action,
+        PullAction::Alarm,
+        "a reused tuple must alarm even while a conflict is pending"
+    );
+    assert!(
+        rig.conflict_exists(&id),
+        "the alarm does not clear the conflict record"
+    );
 }

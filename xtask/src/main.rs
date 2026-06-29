@@ -109,6 +109,10 @@ fn schemas() -> Vec<(&'static str, String)> {
             "persisted-op",
             emit(schemars::schema_for!(topos_types::persisted::OpRecord)),
         ),
+        (
+            "persisted-conflict",
+            emit(schemars::schema_for!(topos_types::persisted::ConflictState)),
+        ),
     ]
 }
 
@@ -188,9 +192,10 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
+    use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        AddData, DiffData, DiffSource, ListData, LogData, PullAction, PullData, PullSkill,
-        SkillEntry,
+        AddData, ConflictPathReport, DiffData, DiffSource, ListData, LogData, MergeReport,
+        PullAction, PullData, PullSkill, SkillEntry,
     };
     use topos_types::{
         ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
@@ -240,6 +245,75 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 action: PullAction::UpToDate,
                 offer: None,
                 conflict: None,
+                merge: None,
+            }],
+            proposals_awaiting: 0,
+        })
+        .expect("PullData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // A `pull` that auto-resolved a diverged draft cleanly → a draft-on-current (publishable).
+    let fx_merged = "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f";
+    let pull_merged = JsonEnvelope {
+        schema_version: 1,
+        command: "pull".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PullData {
+            skills: vec![PullSkill {
+                skill: "pr-describe".to_owned(),
+                observed: Generation { epoch: 1, seq: 7 },
+                applied: Generation { epoch: 1, seq: 7 },
+                action: PullAction::Merged,
+                offer: None,
+                conflict: None,
+                merge: Some(MergeReport {
+                    base_version_id: fx_version.to_owned(),
+                    theirs_version_id: fx_digest.to_owned(),
+                    result_version_id: fx_merged.to_owned(),
+                    result_digest: fx_digest.to_owned(),
+                    clean: true,
+                    conflicts: vec![],
+                    drop_diff: None,
+                }),
+            }],
+            proposals_awaiting: 0,
+        })
+        .expect("PullData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // A `pull` whose merge conflicted → a complete conflict tree on disk + publish blocked until resolved.
+    let pull_conflicted = JsonEnvelope {
+        schema_version: 1,
+        command: "pull".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PullData {
+            skills: vec![PullSkill {
+                skill: "pr-describe".to_owned(),
+                observed: Generation { epoch: 1, seq: 7 },
+                applied: Generation { epoch: 1, seq: 7 },
+                action: PullAction::Conflicted,
+                offer: None,
+                conflict: None,
+                merge: Some(MergeReport {
+                    base_version_id: fx_version.to_owned(),
+                    theirs_version_id: fx_digest.to_owned(),
+                    result_version_id: fx_merged.to_owned(),
+                    result_digest: fx_merged.to_owned(),
+                    clean: false,
+                    conflicts: vec![ConflictPathReport {
+                        path: "SKILL.md".to_owned(),
+                        kind: ConflictPathKind::Content,
+                    }],
+                    drop_diff: None,
+                }),
             }],
             proposals_awaiting: 0,
         })
@@ -409,6 +483,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
+        ("json/pull.merged", emit_json(&pull_merged)),
+        ("json/pull.conflicted", emit_json(&pull_conflicted)),
         ("json/add.ok", emit_json(&add_ok)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
@@ -605,7 +681,8 @@ fn lints_opt_in(toml: &str) -> bool {
 fn check_arch() -> Result<()> {
     // The client is never an authority: no edge to the server store, SQL, or a SQLite C lib.
     assert_excludes("topos", &["plane-store", "sqlx", "libsqlite3-sys"])?;
-    // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates — only crypto primitives.
+    // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates, no diff/merge engines — only
+    // crypto primitives. (`diffy`/`imara-diff` are byte execution; they live in `topos-gitstore`.)
     assert_excludes(
         "topos-core",
         &[
@@ -614,6 +691,8 @@ fn check_arch() -> Result<()> {
             "sqlx",
             "axum",
             "gix",
+            "diffy",
+            "imara-diff",
             "reqwest",
             "ureq",
             "hyper",

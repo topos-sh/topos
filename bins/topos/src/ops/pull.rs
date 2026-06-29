@@ -28,8 +28,11 @@ pub(crate) enum PullScope {
 
 /// How a targeted single-skill pull behaves.
 pub(crate) enum TargetMode {
-    /// `topos pull <skill>` — accept a pending update / resume a held skill (no `@hash`).
+    /// `topos pull <skill>` — accept a pending update / resume a held skill / resolve a divergence (no `@hash`).
     AcceptPending,
+    /// `topos pull <skill> --onto-current` — the disclosed escape: commit MY bytes on top of `current`,
+    /// dropping the merge (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging.
+    OntoCurrent,
     /// `topos pull <skill>@<hash>` — install an older version's bytes locally (a deliberate go-back).
     GoBack([u8; 32]),
 }
@@ -48,7 +51,8 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullData, ClientEr
                 if !follow.following {
                     continue;
                 }
-                match sync_engine::sync_one(ctx, &skill_id, &follow, false) {
+                match sync_engine::sync_one(ctx, &skill_id, &follow, sync_engine::Invocation::Sweep)
+                {
                     Ok(row) => skills.push(row),
                     // A hard per-skill failure (corrupt docs, store/io) must not abort the whole sweep —
                     // diagnose on stderr (never stdout, which the hook injects) and leave that skill put.
@@ -64,7 +68,11 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullData, ClientEr
             let (skill_id, _lock) = super::resolve_skill(ctx, &name)?;
             let row = match mode {
                 TargetMode::GoBack(hash) => sync_engine::go_back(ctx, &skill_id, hash)?,
-                TargetMode::AcceptPending => {
+                TargetMode::AcceptPending | TargetMode::OntoCurrent => {
+                    let inv = match mode {
+                        TargetMode::OntoCurrent => sync_engine::Invocation::Escape,
+                        _ => sync_engine::Invocation::Accept,
+                    };
                     match ctx
                         .follow
                         .followed()
@@ -72,7 +80,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullData, ClientEr
                         .find(|(id, _)| *id == skill_id)
                     {
                         Some((_, follow)) if follow.following => {
-                            sync_engine::sync_one(ctx, &skill_id, &follow, true)?
+                            sync_engine::sync_one(ctx, &skill_id, &follow, inv)?
                         }
                         // Tracked but not followed → there is no `current` to pull; report the local state.
                         _ => sync_engine::current_state(ctx, &skill_id)?,

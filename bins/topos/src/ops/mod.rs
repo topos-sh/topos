@@ -4,6 +4,7 @@ mod add;
 mod diff;
 mod list;
 mod log;
+mod merge_resolve;
 mod pull;
 mod sync_engine;
 mod uninstall;

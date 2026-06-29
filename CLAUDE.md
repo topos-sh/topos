@@ -73,11 +73,25 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > `(workspace, device_key_id, op_id)` (a lost-ack retry replays it byte-for-byte). `revert` is a **forward**
 > commit (`seq` advances; the pointer never moves backward); the **review-required typed-fail gate** fails a
 > direct publish closed (`APPROVAL_REQUIRED`, ingesting nothing). It is exercised **in-process** (no HTTP, no
-> client) by deterministic interleaving tests. Still to come: the large-object store's **S3-compatible remote
+> client) by deterministic interleaving tests. The **author-side three-way (diff3) merge** that *resolves*
+> a DIVERGED draft (the prior layer only detected + snapshotted + refused) is now built too: a pure kernel
+> **policy** (file-set reconciliation over `(path, mode, content-id)` → a plan + an outcome, plus the
+> presence-based **publish guard**), a `topos-gitstore` **execution** (`diffy`, pinned exact + golden — its
+> conflict bytes are a consent artifact; non-UTF-8 is never line-merged; client-side size caps before
+> allocation), and a client **resolution** reachable only through a `DivergedWitness` capability token (the
+> structural author-only gate — followers never merge). A **clean** merge lands a **draft-on-current**
+> (forward 1-parent commit on `current`; `applied = observed`); a **conflict** materializes the complete
+> marker tree (both sides kept via `.topos-mine` sidecars where there are no merge bytes) plus a durable
+> **`conflict.json`** that is both the publish-block fact and a **pre-swap recovery journal** (a crash
+> mid-materialize re-renders the recorded result, never re-merging on-disk markers; a clean re-run always
+> converges — proven by a fault-injection sweep). The disclosed **escape** (`pull <skill> --onto-current`)
+> commits the author's bytes on `current` with a drop-diff (always available — no deadlock); unrelated
+> histories fall back to a **2-way** manual choice, never a silent merge. Still to come: the large-object
+> store's **S3-compatible remote
 > backend + online backfill** (additive, client-invisible); the **propose → review-approve promotion** (the
 > immediate follow-on; the typed gate is the only review surface so far); the HTTP plane (the transport
-> that feeds the now-built client pull engine real responses); at-rest key encryption; the **diff3 3-way
-> merge** that resolves a detected DIVERGED draft; `follow`/enrollment + identity/roster + device issuance;
+> that feeds the now-built client pull engine real responses); at-rest key encryption;
+> `follow`/enrollment + identity/roster + device issuance;
 > the OpenClaw/Hermes adapters; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the
 > client build — `check-arch` forbids that edge); `axum` stays declared but unreferenced until the HTTP
 > plane lands.

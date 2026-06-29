@@ -46,9 +46,13 @@ pub(crate) enum Command {
     /// the sweep over every followed skill (the installed hook runs `pull --quiet`). `<skill>` accepts a
     /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
     Pull {
-        /// Optional target: `<name>` accepts a pending update / resumes a hold; `<name>@<hash>` goes back
-        /// to that version's bytes. Omitted = sweep every followed skill.
+        /// Optional target: `<name>` accepts a pending update / resumes a hold / resolves a divergence;
+        /// `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill.
         skill: Option<String>,
+        /// Resolve a diverged draft via the escape: commit YOUR bytes on top of `current`, dropping the
+        /// merge (the dropped changes are disclosed). Requires a `<skill>` target; not valid with `@<hash>`.
+        #[arg(long = "onto-current")]
+        onto_current: bool,
         /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
         /// still go to stderr with a non-zero exit. Overrides `--json`.
         #[arg(long)]

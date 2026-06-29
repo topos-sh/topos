@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConflictState",
+  "description": "`skills/<id>/conflict.json` — the durable record that the working tree holds an **unresolved** author\nmerge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single\nsource of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a pre-swap\nrecovery journal: it is written + fsynced BEFORE the conflict tree is swapped onto the placement, so a\ncrash mid-materialize is healed by rendering the already-committed `result_commit` (pinned by\n`conflicted_digest`), never by re-merging on-disk marker bytes. Cleared only by a clean resolution (a\nclean merge) or the disclosed escape — never by an incidental edit.",
+  "type": "object",
+  "properties": {
+    "base_commit": {
+      "description": "The three-way base the conflict was computed against (the draft's fork point).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "base_digest": {
+      "description": "The base's `bundle_digest` — a render pin so recovery verifies offline without re-derivation.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "conflicted_digest": {
+      "description": "The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the on-disk heal signal and\nthe `render_verified` pin. Disk re-scanning to this exact digest means \"the materialize completed\".",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "current_commit": {
+      "description": "`current` (theirs) at the time the conflict was recorded.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "current_digest": {
+      "description": "`current`'s `bundle_digest` — the render pin recovery uses to rebuild the `lock`-as-base.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "draft_commit": {
+      "description": "The author's draft (mine) snapshot the conflict was computed from (recoverable).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "draft_digest": {
+      "description": "The draft's `bundle_digest` — a render pin for the recoverable draft.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "paths": {
+      "description": "The conflicting paths, sorted by raw path bytes (the agent's resolution checklist).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ConflictPath"
+      }
+    },
+    "reason": {
+      "$ref": "#/$defs/ConflictReason"
+    },
+    "result_commit": {
+      "description": "The conflict tree committed as a forward 1-parent commit on `current_commit` — the deterministic\nrender target recovery re-materializes (so it never re-merges on-disk markers).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "base_commit",
+    "base_digest",
+    "current_commit",
+    "current_digest",
+    "draft_commit",
+    "draft_digest",
+    "result_commit",
+    "conflicted_digest",
+    "reason"
+  ],
+  "$defs": {
+    "ConflictPath": {
+      "description": "One conflicting path + how it conflicts. **Field-set pinned**; `kind`'s value set is INFERRED.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConflictPathKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ]
+    },
+    "ConflictPathKind": {
+      "description": "How a single path conflicts. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A textual three-way overlap — diff3 markers were written at the path.",
+          "type": "string",
+          "const": "content"
+        },
+        {
+          "description": "A non-UTF-8 file with a true three-way divergence — theirs kept at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "binary_content"
+        },
+        {
+          "description": "Mine modified the file; theirs deleted it — mine kept at the path.",
+          "type": "string",
+          "const": "modify_delete"
+        },
+        {
+          "description": "Mine deleted the file; theirs modified it — theirs kept at the path.",
+          "type": "string",
+          "const": "delete_modify"
+        },
+        {
+          "description": "Both sides added the path with different content — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "add_add"
+        },
+        {
+          "description": "A consent-significant mode disagreement — theirs' bytes + mode at the path.",
+          "type": "string",
+          "const": "mode_mode"
+        },
+        {
+          "description": "A side (or the merged output) exceeded the client size cap — theirs at the path, mine in a sidecar.",
+          "type": "string",
+          "const": "oversize"
+        }
+      ]
+    },
+    "ConflictReason": {
+      "description": "Why a merge could not be applied cleanly. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A genuine three-way merge with at least one unresolved path.",
+          "type": "string",
+          "const": "three_way"
+        },
+        {
+          "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
+          "type": "string",
+          "const": "no_base"
+        }
+      ]
+    }
+  }
+}

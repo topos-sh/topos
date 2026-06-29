@@ -47,6 +47,21 @@ renderer over the SAME typed outcomes (one value, two presentations).
   locally (sets `held`, never lowers the floor). The plane response + follow-state are **fixture-fed**
   this increment (the inert production sources follow nothing, so production `pull` is an honest no-op);
   the HTTP transport + real enrollment land later.
+- **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft (not just detects it).
+  Reachable only through a `DivergedWitness` capability token minted in the sync engine's diverged arm (the
+  structural author-only gate; followers never reach merge code). The kernel `topos-core::merge` plans +
+  decides; `topos-gitstore::merge` runs the per-file diff3; this assembles the **complete** resolved (or
+  conflict-marked) tree, commits it as a **forward 1-parent** commit on `current`, and places it via the
+  same crash-safe dir-swap. A **clean** merge lands a **draft-on-current** (state ③ with `base = current`,
+  `applied = observed`) — publishable. A **conflict** writes the complete marker tree (binary / file-set
+  conflicts keep both sides via a `.topos-mine` sidecar) AND a durable **`conflict.json`** that is both the
+  publish-block fact (presence-based) and a pre-swap recovery journal (a crash mid-materialize is healed by
+  re-rendering the recorded result, never by re-merging on-disk markers). The disclosed **escape**
+  (`pull <skill> --onto-current`) commits the author's bytes on `current` (dropping the merge, disclosing
+  what it drops) — always available, so no deadlock. Unrelated histories (no renderable base) fall back to
+  a **2-way** manual choice, never a silent merge. Per the full-auto posture, an `auto` follower's
+  bare sweep resolves unattended; a confirm-each follower is surfaced. Materialization never fires the
+  currency/harness hook.
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
 message, so injectable id/time sources make `add` deterministic. Golden `--json` fixtures (add/list/diff/log)
@@ -54,8 +69,8 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-The HTTP plane transport + enrollment + signing-at-rest; `follow`/`unfollow`; `publish`/`review`/`revert`;
-the diff3 3-way merge that resolves a DIVERGED draft (this increment detects + snapshots + surfaces only);
+The HTTP plane transport + enrollment + signing-at-rest; `follow`/`unfollow`; `publish`/`review`/`revert`
+(the **publish guard** over `conflict.json` is built + unit-tested now, wired when networked publish lands);
 the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters (Claude Code
 is the reference — only it guarantees the swap completes before skills resolve; the others leave a named,
 bounded multi-file-read residual).

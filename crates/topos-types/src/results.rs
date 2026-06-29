@@ -38,6 +38,9 @@ pub struct PullSkill {
     pub offer: Option<Offer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<Conflict>,
+    /// Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<MergeReport>,
 }
 
 /// What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the
@@ -51,8 +54,14 @@ pub enum PullAction {
     FastForwarded,
     /// State ② confirm-each / first-receive — a one-tap offer is waiting.
     Offered,
-    /// State ④ — a local draft conflicts with a newer remote.
+    /// State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a
+    /// confirm-each follower's bare sweep, which offers the merge rather than running it).
     Diverged,
+    /// State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.
+    Merged,
+    /// State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked
+    /// until the author resolves (or escapes).
+    Conflicted,
     /// A transient local hold (e.g. a local go-back is pinned).
     Held,
     /// A reused/replayed generation tuple was seen — a loud integrity alarm.
@@ -78,6 +87,40 @@ pub struct Conflict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub local_version_id: Option<String>,
+}
+
+/// The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED
+/// fields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),
+/// not this exact shape.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MergeReport {
+    /// The three-way base (the draft's fork point).
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub base_version_id: String,
+    /// `current` (theirs) the draft was merged onto.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub theirs_version_id: String,
+    /// The forward 1-parent commit carrying the merged (or conflict-marked) tree.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub result_version_id: String,
+    /// The merged/conflict tree's `bundle_digest`.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub result_digest: String,
+    /// Whether the merge was clean (`true` → draft-on-current, publishable) or blocked (`false`).
+    pub clean: bool,
+    /// The conflicting paths when `clean` is `false` — the agent's resolution checklist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ConflictPathReport>,
+    /// For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_diff: Option<String>,
+}
+
+/// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConflictPathReport {
+    pub path: String,
+    pub kind: crate::persisted::ConflictPathKind,
 }
 
 // =================================================================================================
@@ -307,6 +350,7 @@ mod tests {
                 action: PullAction::UpToDate,
                 offer: None,
                 conflict: None,
+                merge: None,
             }],
             proposals_awaiting: 0,
         };

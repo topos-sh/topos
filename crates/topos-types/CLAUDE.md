@@ -2,7 +2,8 @@
 
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
 ([`results`]), the frozen terminal-outcome enum, the closed `SignatureAlg`, the signed-`current`-record
-envelope, the error taxonomy, and the on-disk client documents ([`persisted`]: sync / lock / map / op).
+envelope, the error taxonomy, and the on-disk client documents ([`persisted`]: sync / lock / map / op /
+conflict — the last records an unresolved author merge: the publish-block fact + the recovery journal).
 These are **deserialization shapes** — the app libs parse them into `topos-core`'s validated domain types
 at the HTTP/CLI boundary (parse-don't-validate, so the kernel never holds an invalid deserialized state).
 

@@ -19,13 +19,16 @@ pub(crate) struct Layout {
     home: PathBuf,
 }
 
-/// The four per-skill paths under a base directory (a published `skills/<id>/` or a staging dir).
+/// The per-skill paths under a base directory (a published `skills/<id>/` or a staging dir).
 #[derive(Debug, Clone)]
 pub(crate) struct SkillPaths {
     pub store: PathBuf,
     pub lock: PathBuf,
     pub map: PathBuf,
     pub sync: PathBuf,
+    /// The durable unresolved-merge-conflict record — present only while a conflict is unresolved (the
+    /// publish guard's source of truth + the pre-swap recovery journal). Absent in the common case.
+    pub conflict: PathBuf,
 }
 
 impl SkillPaths {
@@ -35,6 +38,7 @@ impl SkillPaths {
             lock: base.join("lock.json"),
             map: base.join("map.json"),
             sync: base.join("sync.json"),
+            conflict: base.join("conflict.json"),
         }
     }
 }
