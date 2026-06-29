@@ -60,6 +60,11 @@ zeroize = "1"                 # signing edge (plane-store only): wipe the raw pl
 getrandom = "0.2"             # signing edge (plane-store only): OS CSPRNG for first-run plane-key generation (seed -> SigningKey::from_bytes)
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases
+# topos-gitstore: the per-file three-way (diff3) content merge ENGINE. PINNED EXACT — its conflict-marker
+# bytes are a consent-path artifact (re-digested + human-approved), so an upgrade must be a deliberate,
+# golden-vector-reviewed change, never a silent semver bump. `default-features = false` keeps the optional
+# `binary` (zlib-rs) + `color` (anstyle) deps out — the merge needs neither.
+diffy = { version = "=0.5.0", default-features = false, features = ["std"] }
 sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no ORM (held at 0.8.6 for the offline-metadata drift gate)
 # The async runtime is the SERVER's (sqlx is async-native): it reaches plane-store's library via sqlx's
 # `runtime-tokio` feature, and is a dev-dependency there to drive `#[tokio::test]`. The client never gets

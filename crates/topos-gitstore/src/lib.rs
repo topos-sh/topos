@@ -36,6 +36,7 @@
 mod diff;
 mod error;
 mod fence;
+mod merge;
 mod read;
 mod store;
 
@@ -48,6 +49,7 @@ pub use diff::{DiffFile, unified_diff};
 pub use error::{GitstoreError, VerifyError};
 pub use fence::{GIT_OID_LEN, StagedBundle, StagedEntry};
 pub use largeobj::{LargeObjectStore, LocalLargeStore};
+pub use merge::{MERGE_INPUT_CAP, MERGE_OUTPUT_CAP, MergeError, MergeFileResult, merge_file};
 pub use read::{RenderedBundle, RenderedFile, TreeLeaf, VersionNode};
 pub use store::{ImportFile, Store, TreeHandle, WriteBatch};
 

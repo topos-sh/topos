@@ -41,6 +41,14 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   mode-change, binary detection, the no-newline marker) is **owned here**, so the committed `diff` golden
   stays byte-stable across imara-diff releases. The `diff` verb calls this; the `current..<hash>` plane half
   reuses it later.
+- `merge_file` (`merge`) — the per-file three-way (diff3) content **execution** behind the kernel's merge
+  policy: `merge_file(base, mine, theirs) -> Clean(bytes) | Conflict(bytes-with-markers) | Binary`, over
+  `diffy` (pinned **exact**; its conflict bytes are a consent artifact locked by a byte-golden, so an
+  upgrade is a reviewed change). Fixes `ConflictStyle::Diff3` (base section present) and **lengthens the
+  conflict markers until unique** vs the content (no embedded `<<<<<<<` line can forge a boundary). A
+  non-UTF-8 side is **never line-merged** (`Binary` → the client keeps both sides). Client-side input +
+  expanded-output **size caps** are checked **before** allocation (typed `MergeError`; the server's ingest
+  caps don't exist on the client). Bytes are never normalized (CRLF/EOF survive).
 - **The object-lifecycle fence primitives** (`fence.rs`) — the dumb byte ops the plane's server-side
   garbage-collection fence drives, holding **no database and no access control**: `stage` writes a candidate's
   blobs into a per-op quarantine object store (returning each blob's `object_id`/`git_oid`/size + the kernel
@@ -72,8 +80,7 @@ a second impl of this same trait.
 
 ## Planned (lands later)
 
-`diff3` *execution* (three-way merge; the two-way `unified_diff` renderer lands above); the S3-compatible
-remote large-object backend (a no-op extraction behind the `LargeObjectStore` trait).
+The S3-compatible remote large-object backend (a no-op extraction behind the `LargeObjectStore` trait).
 
-Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `imara-diff` (the diff engine), `topos-core`,
-`topos-types`, `thiserror`.
+Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `imara-diff` (the diff engine), `diffy`
+(pinned exact — the diff3 merge engine), `topos-core`, `topos-types`, `thiserror`.

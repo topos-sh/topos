@@ -20,6 +20,9 @@ gix = { workspace = true, features = ["sha1", "tree-editor"] }
 # The diff ENGINE for the unified-diff renderer (pure-Rust histogram/Myers). The unified-diff FORMATTING is
 # owned in `diff.rs`, so the committed `diff` golden stays byte-stable across imara-diff releases.
 imara-diff = { workspace = true }
+# The per-file three-way (diff3) content-merge ENGINE. Pinned exact + golden-vectored: its conflict-marker
+# bytes are a consent artifact, so an upgrade is a reviewed change. Used only by `merge.rs`.
+diffy = { workspace = true }
 
 [lints]
 workspace = true
