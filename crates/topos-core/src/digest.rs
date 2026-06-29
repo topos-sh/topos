@@ -157,6 +157,17 @@ pub fn bundle_digest(entries: &[ManifestEntry]) -> Result<[u8; 32], RejectReason
     Ok(sha256(canonical_manifest(entries)?.as_bytes()))
 }
 
+/// Normalize a path to the form the collision rules compare on — NFC then ASCII case-fold. Two paths whose
+/// normalized forms are EQUAL would collapse to one file on a normalizing / case-insensitive filesystem,
+/// which is exactly what [`canonical_manifest`] rejects (as exact / NFC / case-fold collisions). A client
+/// that derives a new path (e.g. a conflict `.topos-mine` sidecar) compares candidates under this so it
+/// never generates a name the digest would later reject. (Full Unicode case-fold stays the documented
+/// version-sensitive residual — see [`RejectReason::CaseFoldCollision`].)
+#[must_use]
+pub fn normalize_for_collision(path: &str) -> String {
+    path.nfc().collect::<String>().to_ascii_lowercase()
+}
+
 /// Reject paths that would collapse to the same file on a real filesystem: exact duplicates, NFC
 /// normalization collisions, and ASCII case-fold collisions. (Full Unicode case-fold is the documented
 /// version-sensitive residual — see [`RejectReason::CaseFoldCollision`].)
@@ -282,6 +293,26 @@ mod tests {
     #[test]
     fn empty_bundle_is_the_digest_of_the_empty_manifest() {
         assert_eq!(bundle_digest(&[]).unwrap(), sha256(b""));
+    }
+
+    #[test]
+    fn normalize_for_collision_folds_case_and_nfc() {
+        // Two paths that the manifest would reject as collisions normalize to the SAME string, so a client
+        // can dedup derived paths under the same rule.
+        assert_eq!(
+            normalize_for_collision("LOGO.BIN.TOPOS-MINE"),
+            normalize_for_collision("logo.bin.topos-mine")
+        );
+        // Precomposed "café" vs decomposed "cafe\u{301}" normalize equal.
+        assert_eq!(
+            normalize_for_collision("caf\u{e9}"),
+            normalize_for_collision("cafe\u{301}")
+        );
+        // Genuinely distinct paths stay distinct.
+        assert_ne!(
+            normalize_for_collision("a.topos-mine"),
+            normalize_for_collision("a.topos-mine-1")
+        );
     }
 
     #[test]

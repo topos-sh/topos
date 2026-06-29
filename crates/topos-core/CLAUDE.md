@@ -17,10 +17,14 @@ Implemented (each behind a known-answer / truth-table test):
   the anti-rollback floor + reused-tuple-ALARM evaluation (epoch-dominant generation order), and the
   post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind a
   truth-table/matrix test.
+- ✅ the **author-merge policy** (`merge`) — the three-way file-set **reconciliation** over
+  `(path, mode, content_sha256)` metadata → a per-path `MergePlan`; the `MergeOutcome` **decision** over
+  the plan + the byte-merge verdicts; and the **publish guard** (`publish_blocked`, presence-based over a
+  durable conflict fact — never a marker scan). Metadata only: emits a *plan*, never bytes; the byte-level
+  diff3 *execution* is `topos-gitstore`'s. Behind a per-row truth-table test.
 
 Planned (land behind a golden vector as their wire encoding / mechanics freeze):
-- the `(epoch, seq)` compare-and-set *decision*; diff3 hunk planning; first-parent + same-skill lineage
-  assertions.
+- the `(epoch, seq)` compare-and-set *decision*; first-parent + same-skill lineage assertions.
 
 ## Hard constraints
 

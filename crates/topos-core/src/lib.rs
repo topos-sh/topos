@@ -33,5 +33,6 @@ extern crate alloc;
 
 pub mod consent;
 pub mod digest;
+pub mod merge;
 pub mod sign;
 pub mod sync;
