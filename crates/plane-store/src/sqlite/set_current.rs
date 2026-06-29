@@ -15,9 +15,13 @@ use topos_types::{
 };
 
 use super::Db;
+use super::proposals::{
+    ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, read_open_proposal,
+    resolve_proposal, set_proposal_status,
+};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
-use crate::set_current::{PretxnReceipt, PromoteInput, SetCurrentReceipt};
+use crate::set_current::{PretxnReceipt, PromoteInput, RejectInput, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 
 /// The JCS / I-JSON safe-integer bound (2^53 − 1) the pointer preimage enforces — a generation a follower
@@ -34,6 +38,27 @@ impl Db {
     ) -> Result<SetCurrentReceipt> {
         let mut tx = self.begin_immediate().await?;
         match run(&mut tx, &input, signer).await {
+            Ok(receipt) => {
+                tx.commit().await.map_err(AuthorityError::internal)?;
+                Ok(receipt)
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(AuthorityError::internal)?;
+                Err(e)
+            }
+        }
+    }
+
+    /// The standalone `review --reject` / proposer-withdraw transaction. NOT a pointer move — it never enters
+    /// [`run`]: `current` is untouched, nothing is signed, there is no lease. One `BEGIN IMMEDIATE` mirrors the
+    /// promotion's discipline where it overlaps — receipt-replay first, then in-transaction authorization (the
+    /// SAME device-op frame, `op = ReviewReject`) — then resolves the proposal and classifies it: `open` ⇒
+    /// flip to `rejected`; already `rejected` ⇒ idempotent OK (a lost-ack retry under a different op_id); and
+    /// `accepted` or absent ⇒ a typed DENIED. One path serves both reviewer-reject and proposer-withdraw;
+    /// `resolved_by` records who.
+    pub(crate) async fn review_reject_txn(&self, r: RejectInput<'_>) -> Result<SetCurrentReceipt> {
+        let mut tx = self.begin_immediate().await?;
+        match reject_run(&mut tx, &r).await {
             Ok(receipt) => {
                 tx.commit().await.map_err(AuthorityError::internal)?;
                 Ok(receipt)
@@ -142,6 +167,35 @@ impl Db {
         } else {
             permanent_key_reuse(op_id)
         }))
+    }
+
+    /// The `(epoch, seq)` generation `current` points at for a skill, if a pointer exists (a pool read). The
+    /// approve path uses it to classify a pre-transaction render fault: a fault on a proposal whose base still
+    /// equals this is genuine corruption; a fault on one whose base no longer matches is a stale proposal the
+    /// transaction will `CONFLICT` cleanly.
+    pub(crate) async fn read_current_generation(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+    ) -> Result<Option<Generation>> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        let row = sqlx::query!(
+            r#"SELECT epoch AS "epoch!: i64", seq AS "seq!: i64" FROM current
+               WHERE workspace_id = ?1 AND skill_id = ?2"#,
+            ws_s,
+            skill_s,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(Generation {
+                epoch: i64_to_u64(r.epoch)?,
+                seq: i64_to_u64(r.seq)?,
+            })),
+        }
     }
 
     /// The commit id `current` points at for a skill, if a pointer exists (revert's first parent).
@@ -286,6 +340,13 @@ async fn run(
     let current = read_current(tx, input.ws, input.skill).await?;
     let new_gen = match &current {
         None => {
+            // Only a DIRECT publish may create the genesis pointer. A propose needs an existing base (a
+            // proposal cannot be opened against a `current` that does not exist), and there is nothing to
+            // approve or revert without one. The orchestration rejects these pre-ingest; this is the
+            // in-transaction backstop — a typed DENIED, not a confusing genesis.
+            if !matches!(input.op, DeviceOp::PublishDirect) {
+                return denied(tx, input, &bound, "no current pointer to act against").await;
+            }
             if !input.parents.is_empty() {
                 return denied(
                     tx,
@@ -337,16 +398,22 @@ async fn run(
             .await;
         }
     }
-    match lease_committed_commit(tx, input.ws, input.op_id).await? {
-        Some(c) if c == input.candidate_commit.0 => {}
-        _ => {
-            return retryable(
-                tx,
-                input,
-                &bound,
-                "the candidate's promotion lease is not committed",
-            )
-            .await;
+    // The lease-completion gate proves migrate finished for an UPLOADED candidate (publish / propose / revert
+    // each hold a committed lease over their candidate). `review --approve` uploads and leases NOTHING — the
+    // candidate is already durably in the main store, rooted by its proposal — so there is no lease to gate
+    // on; skip it. (Its availability is still checked above, against the shared `present`/tombstone predicate.)
+    if !matches!(input.op, DeviceOp::ReviewApprove) {
+        match lease_committed_commit(tx, input.ws, input.op_id).await? {
+            Some(c) if c == input.candidate_commit.0 => {}
+            _ => {
+                return retryable(
+                    tx,
+                    input,
+                    &bound,
+                    "the candidate's promotion lease is not committed",
+                )
+                .await;
+            }
         }
     }
 
@@ -398,9 +465,44 @@ async fn run(
         }
     }
 
-    // (7) PROMOTE. Provenance + reachability FIRST (the immediate `current → skill_commit` FK; and the
-    // re-root must precede the lease release). The candidate's bundle digest is recorded here so a future
-    // revert can resolve its tree.
+    // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,
+    // seq)` CAS, availability, lineage, the first-parent assert, all of which ran for EVERY op). A direct
+    // publish and a revert PROMOTE; `--propose` opens a proposal (no pointer move, nothing signed); `review
+    // --approve` promotes the locked proposal sideways through the SAME promote plus the status handoff.
+    // (`review --reject` never reaches `run` — it is a standalone status-flip transaction.)
+    match input.op {
+        DeviceOp::PublishDirect | DeviceOp::Revert => {
+            promote(tx, input, signer, new_gen, &bound).await
+        }
+        DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &device.principal).await,
+        DeviceOp::ReviewApprove => {
+            approve_arm(
+                tx,
+                input,
+                signer,
+                new_gen,
+                &bound,
+                review_required,
+                &device.principal,
+            )
+            .await
+        }
+        DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
+    }
+}
+
+/// Record provenance + reachability, sign the advanced pointer, and persist it with the durable OK receipt —
+/// the shared pointer-advance for a direct publish, a revert, AND the accepted half of a proposal. The
+/// `commit_object` edges it writes PERMANENTLY root the candidate's objects (the accepted-trunk root), so for
+/// an approve this write IS the handoff from the proposal's gated `proposal_object` root to the trunk. Does
+/// NOT touch the lease — the caller decides (publish/revert release theirs after this; approve has none).
+async fn advance_current(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PromoteInput<'_>,
+    signer: &PlaneSigner,
+    new_gen: Generation,
+    bound: &BoundIdentity<'_>,
+) -> Result<SetCurrentReceipt> {
     insert_skill_commit(
         tx,
         input.ws,
@@ -412,9 +514,6 @@ async fn run(
     for obj in input.object_ids {
         insert_commit_object(tx, input.ws, input.candidate_commit, *obj).await?;
     }
-
-    // (8) Sign the new pointer (a pure in-memory call — no I/O in the txn) and advance `current` with the
-    // signed record in one write.
     let pointer = CurrentPointer {
         workspace_id: input.ws.as_str(),
         skill_id: input.skill.as_str(),
@@ -434,8 +533,6 @@ async fn run(
         input.now,
     )
     .await?;
-
-    // (9) Durable OK receipt (carries the signed record so a retry re-serves it after `current` advances).
     let stored = StoredReceipt {
         op_id: input.op_id.to_owned(),
         command: bound.command.to_owned(),
@@ -451,10 +548,267 @@ async fn run(
         details: None,
     };
     insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    Ok(stored.into_receipt())
+}
 
-    // (10) Release the lease — AFTER the edges root the objects, so the keep-set never had a gap.
+/// A direct publish / revert: advance `current`, then release the lease — AFTER the edges root the objects,
+/// so the GC keep-set never had a gap.
+async fn promote(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PromoteInput<'_>,
+    signer: &PlaneSigner,
+    new_gen: Generation,
+    bound: &BoundIdentity<'_>,
+) -> Result<SetCurrentReceipt> {
+    let receipt = advance_current(tx, input, signer, new_gen, bound).await?;
     delete_lease(tx, input.ws, input.op_id).await?;
+    Ok(receipt)
+}
 
+/// `publish --propose`: open a proposal — record provenance, the proposal row, and its GATED object roots —
+/// WITHOUT moving `current` or signing anything. The proposal is born NON-STALE (the CAS proved `current.es
+/// == expected_es`, which is recorded as its base). Then release the migrate lease: the `proposal_object`
+/// rows now root the objects (the lease → proposal-root handoff, done INSIDE the one transaction, so a
+/// concurrent GC sees old-lease-or-new-root, never neither). An idempotent re-propose of the same
+/// candidate+base under a NEW op_id finds the existing open proposal and returns NEEDS_REVIEW without
+/// inserting a duplicate (the partial-unique index is the structural backstop).
+async fn propose_arm(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PromoteInput<'_>,
+    bound: &BoundIdentity<'_>,
+    proposer: &Principal,
+) -> Result<SetCurrentReceipt> {
+    let base = input.expected;
+    // Provenance first (the `proposals.commit_id` foreign key targets `skill_commit`).
+    insert_skill_commit(
+        tx,
+        input.ws,
+        input.candidate_commit,
+        input.skill,
+        input.candidate_bundle_digest,
+    )
+    .await?;
+    if read_open_proposal(tx, input.ws, input.skill, input.candidate_commit, base)
+        .await?
+        .is_none()
+    {
+        // The candidate's first parent == `current.commit_id` (asserted in the shared body); recorded as the
+        // authoritative first-parent source a later `review --approve` re-asserts against the live `current`.
+        let base_commit = input
+            .parents
+            .first()
+            .copied()
+            .ok_or_else(|| AuthorityError::internal(ProposeWithoutBase))?;
+        insert_proposal(
+            tx,
+            input.ws,
+            input.op_id,
+            input.skill,
+            input.candidate_commit,
+            base_commit,
+            base,
+            proposer,
+            input.created_at,
+        )
+        .await?;
+        for obj in input.object_ids {
+            insert_proposal_object(tx, input.ws, input.op_id, *obj).await?;
+        }
+    }
+    let stored = StoredReceipt {
+        op_id: input.op_id.to_owned(),
+        command: bound.command.to_owned(),
+        skill_id: input.skill.as_str().to_owned(),
+        commit: Some(input.candidate_commit),
+        bundle_digest: Some(input.candidate_bundle_digest),
+        expected: input.expected,
+        outcome: TerminalOutcome::NeedsReview,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: input.created_at.to_owned(),
+        details: None,
+    };
+    insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    delete_lease(tx, input.ws, input.op_id).await?;
+    Ok(stored.into_receipt())
+}
+
+/// `review --approve`: promote the locked open proposal SIDEWAYS to `current`. The shared body already ran
+/// the CAS (a stale base ⇒ CONFLICT *before* here), availability (against the shared `present`/tombstone
+/// predicate, no lease gate), and the first-parent assert. Here: lock + assert the open proposal under the
+/// write lock; enforce four-eyes under `review_required`; record the approval; advance `current` (whose
+/// `commit_object` write is the handoff from the gated `proposal_object` root to the permanent trunk root);
+/// flip the proposal to `accepted`. No lease to release.
+async fn approve_arm(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PromoteInput<'_>,
+    signer: &PlaneSigner,
+    new_gen: Generation,
+    bound: &BoundIdentity<'_>,
+    review_required: bool,
+    reviewer: &Principal,
+) -> Result<SetCurrentReceipt> {
+    let base = input.expected; // == current.es (the CAS proved it) ⇒ this is NOT a stale CONFLICT
+    let Some(proposal) =
+        read_open_proposal(tx, input.ws, input.skill, input.candidate_commit, base).await?
+    else {
+        // The CAS passed (current.es == base), so the base is fresh — yet no OPEN proposal matches it: the
+        // proposal was already accepted, or rejected. A resolved/absent target, not a stale base ⇒ DENIED.
+        return denied(
+            tx,
+            input,
+            bound,
+            "no open proposal for this candidate and base",
+        )
+        .await;
+    };
+    // Four-eyes (the anti-poisoning gate): fires ONLY under `review_required`, where the gate's value needs
+    // a SECOND actor. With it off, a solo author may approve their own proposal (a deferred self-publish).
+    if review_required && reviewer.as_str() == proposal.proposer.as_str() {
+        return denied(
+            tx,
+            input,
+            bound,
+            "the proposer may not approve their own proposal under review-required",
+        )
+        .await;
+    }
+    insert_approval(
+        tx,
+        input.ws,
+        input.candidate_commit,
+        base,
+        reviewer,
+        input.created_at,
+    )
+    .await?;
+    let receipt = advance_current(tx, input, signer, new_gen, bound).await?;
+    set_proposal_status(
+        tx,
+        input.ws,
+        &proposal.id,
+        ProposalStatus::Accepted,
+        reviewer,
+    )
+    .await?;
+    Ok(receipt)
+}
+
+// --- review --reject / proposer-withdraw (a standalone status-flip transaction, not a pointer move) ---
+
+async fn reject_run(
+    tx: &mut Transaction<'_, Sqlite>,
+    r: &RejectInput<'_>,
+) -> Result<SetCurrentReceipt> {
+    let bound = BoundIdentity {
+        command: crate::set_current::device_op_command(r.op),
+        skill_id: r.skill.as_str(),
+        commit: Some(r.commit),
+        bundle_digest: Some(r.bundle_digest),
+        expected: r.expected,
+    };
+
+    // (1) Replay — a same-op_id retry replays the stored receipt; a different bound identity is key-reuse.
+    match replay(tx, r.ws, r.device_key_id, r.op_id, &bound).await? {
+        Replay::Hit(receipt) => return Ok(receipt),
+        Replay::Mismatch => return Ok(permanent_key_reuse(r.op_id)),
+        Replay::Fresh => {}
+    }
+
+    // (2) Authorization — the SAME in-transaction device-op verification the promotion runs (a non-revoked
+    // registered key bound to a rostered principal), over the `ReviewReject`-typed frame. A revoke serialized
+    // ahead of this blocks the reject.
+    let Some(device) = resolve_device(tx, r.ws, r.device_key_id).await? else {
+        return reject_denied(tx, r, "device unknown or revoked").await;
+    };
+    if device.revoked {
+        return reject_denied(tx, r, "device unknown or revoked").await;
+    }
+    let fields = DeviceOpFields {
+        workspace_id: r.ws.as_str(),
+        skill_id: r.skill.as_str(),
+        op: r.op,
+        op_id: r.op_id_bytes,
+        device_key_id: r.device_key_id,
+        expected_epoch: r.expected.epoch,
+        expected_seq: r.expected.seq,
+        commit_id: r.commit.0,
+        bundle_digest: r.bundle_digest,
+    };
+    if !verify_device_op(&fields, r.signature, &device.public_key) {
+        return reject_denied(tx, r, "device signature invalid").await;
+    }
+    if !super::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
+        return reject_denied(tx, r, "principal not rostered for the skill").await;
+    }
+
+    // (3) Resolve + classify the proposal (under the write lock). One reject path serves reviewer-reject and
+    // proposer-withdraw; `resolved_by` records the acting principal either way.
+    match resolve_proposal(tx, r.ws, r.skill, r.commit, r.expected).await? {
+        Some((id, ProposalStatus::Open)) => {
+            set_proposal_status(tx, r.ws, &id, ProposalStatus::Rejected, &device.principal).await?;
+            reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_REJECTED").await
+        }
+        // Idempotent: a lost-ack retry under a NEW op_id (the original op_id replays at step 1) — already done.
+        Some((_, ProposalStatus::Rejected)) => {
+            reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_ALREADY_REJECTED").await
+        }
+        // An accepted proposal is terminal the other way; absent means there is nothing to reject.
+        Some((_, ProposalStatus::Accepted)) => {
+            reject_denied(tx, r, "the proposal is already accepted").await
+        }
+        None => reject_denied(tx, r, "no open proposal for this candidate and base").await,
+    }
+}
+
+/// Write a reject terminal receipt (no pointer data, no lease — reject moves nothing). `code` distinguishes a
+/// fresh rejection from an idempotent re-reject in the receipt `details`, so a caller branches on it rather
+/// than on the `Ok` outcome (which a reject shares with a promotion).
+async fn reject_terminal(
+    tx: &mut Transaction<'_, Sqlite>,
+    r: &RejectInput<'_>,
+    outcome: TerminalOutcome,
+    code: &str,
+) -> Result<SetCurrentReceipt> {
+    let stored = StoredReceipt {
+        op_id: r.op_id.to_owned(),
+        command: crate::set_current::device_op_command(r.op).to_owned(),
+        skill_id: r.skill.as_str().to_owned(),
+        commit: Some(r.commit),
+        bundle_digest: Some(r.bundle_digest),
+        expected: r.expected,
+        outcome,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: r.created_at.to_owned(),
+        details: Some(serde_json::json!({ "code": code })),
+    };
+    insert_receipt(tx, r.ws, r.device_key_id, &stored).await?;
+    Ok(stored.into_receipt())
+}
+
+async fn reject_denied(
+    tx: &mut Transaction<'_, Sqlite>,
+    r: &RejectInput<'_>,
+    msg: &str,
+) -> Result<SetCurrentReceipt> {
+    let stored = StoredReceipt {
+        op_id: r.op_id.to_owned(),
+        command: crate::set_current::device_op_command(r.op).to_owned(),
+        skill_id: r.skill.as_str().to_owned(),
+        commit: Some(r.commit),
+        bundle_digest: Some(r.bundle_digest),
+        expected: r.expected,
+        outcome: TerminalOutcome::Denied,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: r.created_at.to_owned(),
+        details: detail(msg),
+    };
+    insert_receipt(tx, r.ws, r.device_key_id, &stored).await?;
     Ok(stored.into_receipt())
 }
 
@@ -606,8 +960,12 @@ async fn write_terminal(
     // Release the candidate's promotion lease: a terminal non-OK abandons this candidate, and its lease was
     // made non-expiring by a successful migrate, so without this its objects would be GC-rooted forever. The
     // delete is idempotent (a no-op if the lease is absent or only expiring). A retry of the SAME op_id
-    // replays this receipt before reaching here; a rebase is a new op_id with its own fresh lease.
-    delete_lease(tx, input.ws, input.op_id).await?;
+    // replays this receipt before reaching here; a rebase is a new op_id with its own fresh lease. A
+    // `review --approve` leased NOTHING (its candidate was migrated at propose), so it has no lease to release
+    // — skip the delete for it (it would be a harmless no-op, but staying op-aware keeps the contract clear).
+    if !matches!(input.op, DeviceOp::ReviewApprove) {
+        delete_lease(tx, input.ws, input.op_id).await?;
+    }
     Ok(stored.into_receipt())
 }
 
@@ -1141,3 +1499,11 @@ struct GenerationOutOfRange;
 #[derive(Debug, thiserror::Error)]
 #[error("a stored receipt outcome is not a known terminal code")]
 struct BadOutcome;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a propose reached the open step with no recorded base parent")]
+struct ProposeWithoutBase;
+
+#[derive(Debug, thiserror::Error)]
+#[error("review --reject must not be promoted through the pointer-move transaction")]
+struct RejectNotPromotable;

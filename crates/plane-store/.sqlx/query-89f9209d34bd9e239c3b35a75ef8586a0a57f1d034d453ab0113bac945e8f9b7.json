@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", proposer AS \"proposer!\" FROM proposals\n           WHERE workspace_id = ?1 AND skill_id = ?2 AND commit_id = ?3\n             AND base_epoch = ?4 AND base_seq = ?5 AND status = 'open'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "proposer!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "89f9209d34bd9e239c3b35a75ef8586a0a57f1d034d453ab0113bac945e8f9b7"
+}

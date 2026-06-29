@@ -10,7 +10,7 @@ use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 use crate::sqlite::Db;
-use crate::upload::{CandidateUpload, UploadReceipt};
+use crate::upload::CandidateUpload;
 
 /// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
 /// packs/dedups small text-shaped blobs well but degrades on large binaries; below this they stay in git.
@@ -22,8 +22,10 @@ pub(crate) const DEFAULT_LARGE_REJECT_CAP: u64 = 100 << 20;
 
 /// The plane's per-workspace storage authority — the **only** public type in this crate.
 ///
-/// Every raw SQL statement and raw git-object read is private; the only operations are authorized:
-/// [`read_object`](Self::read_object), [`upload_candidate`](Self::upload_candidate), and
+/// Every raw SQL statement and raw git-object read is private; the only operations are authorized: the
+/// skill-scoped [`read_object`](Self::read_object); the pointer-move writes
+/// [`publish`](Self::publish) / [`revert`](Self::revert); the contribute writes [`propose`](Self::propose) /
+/// [`review_approve`](Self::review_approve) / [`review_reject`](Self::review_reject); and the read-only
 /// [`check_lineage`](Self::check_lineage). It owns one SQLite database (the per-workspace provenance,
 /// reachability, roster, and pointer rows, every one bound on `workspace_id`) and a confined root under
 /// which each workspace gets its own git object store. Cross-workspace isolation is that database
@@ -125,30 +127,8 @@ impl Authority {
         crate::read::read_object(self, principal, ws, skill, object_id).await
     }
 
-    /// Upload a full candidate bundle: every file's bytes are re-hashed server-side (no client id is
-    /// trusted, and there is no reference-by-id), the canonical rules are applied to the uploaded
-    /// bytes, the objects are written to the per-workspace store, and — only after the authoritative
-    /// roster check, in one transaction — the commit's provenance and reachability are recorded. This
-    /// moves no pointer. The receipt is a pure function of the uploaded tree, identical whether the
-    /// bytes were new or already present (dedup is invisible).
-    ///
-    /// # Errors
-    /// [`AuthorityError::Denied`] if the principal is not rostered for the skill, or the candidate
-    /// would adopt a commit owned by another skill; [`AuthorityError::RejectedUpload`] if the bytes
-    /// violate the canonical rules or name a parent the workspace does not hold;
-    /// [`AuthorityError::Internal`] on a store or database fault.
-    pub async fn upload_candidate(
-        &self,
-        principal: &Principal,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        candidate: CandidateUpload,
-    ) -> Result<UploadReceipt> {
-        crate::upload::upload_candidate(self, principal, ws, skill, candidate).await
-    }
-
-    /// Evaluate the cross-skill lineage predicate over a candidate set (read-only this increment; the
-    /// pointer-move write enforces it transactionally later).
+    /// Evaluate the cross-skill lineage predicate over a candidate set (a read-only gather + the pure
+    /// decision; the pointer-move write enforces the same rule transactionally at promote/propose time).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
@@ -235,6 +215,131 @@ impl Authority {
             self, ws, skill, good, &device, author, message, op_id, created_at, now,
         )
         .await
+    }
+
+    /// Open a **proposal** — upload a candidate version for review WITHOUT moving `current` (the contribute
+    /// motion's first half). The full flow: ingest + migrate (the crash-safe quarantine → lease → install →
+    /// record, exactly as `publish`), then the one pure-DB transaction opens a `proposals` row and roots the
+    /// candidate's bytes through `proposal_object` (gated on `open ∧ non-stale` for both retention and read).
+    /// Returns `NEEDS_REVIEW`; `current` is byte-for-byte unchanged and nothing is signed. A later
+    /// [`review_approve`](Self::review_approve) promotes it. Genesis cannot be proposed (publish the first
+    /// version directly); a `--propose` against a skill with no `current` is a typed failure that uploads nothing.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
+    /// configured ([`with_plane_key`](Self::with_plane_key)).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn propose(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        op_id: &OpId,
+        candidate: CandidateUpload,
+        device: DeviceSignedOp,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        // A proposal must be signed as exactly `PublishPropose`. Forwarding another device op could reach the
+        // promote path (which moves `current`) — a gate bypass — so reject anything else BEFORE ingesting (a
+        // misuse uploads/migrates/opens nothing).
+        if !matches!(device.op, topos_core::sign::DeviceOp::PublishPropose) {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "a proposal must be signed as PublishPropose",
+            )
+            .await;
+        }
+        // Genesis cannot be proposed (a proposal needs an existing base). A cheap pre-ingest check; the
+        // in-transaction None branch is the authoritative backstop.
+        if self.db().read_current_commit(ws, skill).await?.is_none() {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "cannot propose against a skill with no current version; publish the genesis version directly",
+            )
+            .await;
+        }
+        let staged = crate::lifecycle::ingest(self, ws, op_id, candidate, now).await?;
+        crate::lifecycle::migrate(self, ws, &staged, now).await?;
+        crate::set_current::propose(self, ws, skill, &staged, &device, created_at, now).await
+    }
+
+    /// **Approve** an open proposal — promote it to `current` (the sideways move; the contribute motion's
+    /// second half). Uploads/leases/migrates nothing (the candidate is already in the main store, rooted by
+    /// its proposal); runs only the one pointer-move transaction, which compare-and-sets on the proposal's
+    /// base, performs the `proposal_object → commit_object` handoff, signs the advanced pointer, and flips the
+    /// proposal to `accepted`. A stale base ⇒ `CONFLICT` (rebase + re-propose); approving an already-resolved
+    /// proposal ⇒ a typed `CONFLICT`/`DENIED`, never a second promote. Under `review_required`, an approve
+    /// whose principal is the proposer's is rejected (four-eyes).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish); plus a genuine integrity fault if a non-stale proposal's bytes are lost.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn review_approve(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+        device: DeviceSignedOp,
+        op_id: &OpId,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        if !matches!(device.op, topos_core::sign::DeviceOp::ReviewApprove) {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "a review approval must be signed as ReviewApprove",
+            )
+            .await;
+        }
+        crate::set_current::review_approve(self, ws, skill, commit, &device, op_id, created_at, now)
+            .await
+    }
+
+    /// **Reject** (or proposer-**withdraw**) an open proposal — flip it to `rejected`, moving no pointer and
+    /// signing nothing, after which the gated root stops matching and ordinary GC reclaims its unique bytes.
+    /// One path serves reviewer-reject and proposer-withdraw (`resolved_by` records who); rejecting an
+    /// already-rejected proposal is an idempotent no-op, an accepted one a typed failure.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a store fault.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn review_reject(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+        device: DeviceSignedOp,
+        op_id: &OpId,
+        created_at: &str,
+    ) -> Result<SetCurrentReceipt> {
+        if !matches!(device.op, topos_core::sign::DeviceOp::ReviewReject) {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "a review rejection must be signed as ReviewReject",
+            )
+            .await;
+        }
+        crate::set_current::review_reject(self, ws, skill, commit, &device, op_id, created_at).await
     }
 
     /// The plane's raw 32-byte Ed25519 **public** key — for a follower to pin the trust root out-of-band.

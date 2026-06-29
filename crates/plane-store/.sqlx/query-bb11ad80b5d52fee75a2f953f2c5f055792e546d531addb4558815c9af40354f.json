@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT base_commit_id AS \"base_commit_id!: Vec<u8>\" FROM proposals\n               WHERE workspace_id = ?1 AND skill_id = ?2 AND commit_id = ?3\n                 AND base_epoch = ?4 AND base_seq = ?5\n               ORDER BY (status = 'open') DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "base_commit_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bb11ad80b5d52fee75a2f953f2c5f055792e546d531addb4558815c9af40354f"
+}

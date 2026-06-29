@@ -256,9 +256,16 @@ impl Db {
 
     /// The GC claim step: `present → deleting`, **guarded by the exact read-authorization surface** so a
     /// readable object is never reclaimed. One immediate-write transaction re-verifies AT DELETE TIME that
-    /// the object is referenced by NO commit (the `commit_object` table is what `read_object` authorizes
-    /// over) and named by NO live lease — closing the snapshot-then-delete race (a lease or a commit edge
-    /// added after the candidate scan but before this claim is seen here and the object is spared).
+    /// the object is kept by NONE of the three roots — closing the snapshot-then-delete race (a root added
+    /// after the candidate scan but before this claim is seen here and the object is spared):
+    /// - **no `commit_object` edge** (the accepted trunk — what `read_object`'s trunk arm authorizes over),
+    /// - **no live `promotion_lease`** (an in-flight migrate's pre-rooted set), and
+    /// - **no OPEN, NON-STALE proposal** rooting it via `proposal_object` (the pending-review surface). This
+    ///   last `NOT EXISTS` shares its `open ∧ base == current` predicate **verbatim** with the read arm
+    ///   ([`super::Db::authorize_object_read`]) and the recovery claim
+    ///   ([`Self::claim_stale_for_recovery`]), so the instant a publish advances `current` (staling the
+    ///   proposal) the object drops out of retention AND read in the same step — no reaper, no edge deletion,
+    ///   no window (the equivalence test pins the copies together).
     pub(crate) async fn claim_for_delete(
         &self,
         ws: &WorkspaceId,
@@ -280,6 +287,12 @@ impl Db {
                     ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
                   WHERE plo.workspace_id = ?1 AND plo.object_id = ?2
                     AND (pl.expires_at IS NULL OR pl.expires_at > ?3))
+              AND NOT EXISTS (
+                  SELECT 1 FROM proposal_object po
+                  JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
+                  JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                  WHERE po.workspace_id = ?1 AND po.object_id = ?2
+                    AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
             RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!"
             "#,
             ws_s,
@@ -444,7 +457,8 @@ impl Db {
     /// `deleting` row) — the caller must NOT unlink. Keeping the row `deleting` across the unlink preserves
     /// the unlink-before-`absent` ordering, so a concurrent migrate cannot reinstall the bytes mid-recovery.
     ///
-    /// Re-verifies the **read-authorization surface AT DELETE TIME** — the `commit_object` edge — exactly as
+    /// Re-verifies the **read-authorization surface AT DELETE TIME** — the `commit_object` trunk edge AND the
+    /// open-non-stale `proposal_object` root (the same two read arms, verbatim) — exactly as
     /// [`Self::claim_for_delete`] does, so a stale `deleting` row that became read-authorized after the
     /// crashed claim is spared rather than unlinked. A crashed GC's stale row is NOT guaranteed unrooted: the
     /// legacy `upload_candidate` path records a `commit_object` edge over identical content without consulting
@@ -475,6 +489,12 @@ impl Db {
                WHERE workspace_id = ?1 AND object_id = ?2 AND status = 'deleting' AND status_updated_at < ?3
                  AND NOT EXISTS (
                      SELECT 1 FROM commit_object WHERE workspace_id = ?1 AND object_id = ?2)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM proposal_object po
+                     JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
+                     JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                     WHERE po.workspace_id = ?1 AND po.object_id = ?2
+                       AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
                RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!""#,
             ws_s,
             oid,

@@ -86,10 +86,26 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > mid-materialize re-renders the recorded result, never re-merging on-disk markers; a clean re-run always
 > converges — proven by a fault-injection sweep). The disclosed **escape** (`pull <skill> --onto-current`)
 > commits the author's bytes on `current` with a drop-diff (always available — no deadlock); unrelated
-> histories fall back to a **2-way** manual choice, never a silent merge. Still to come: the large-object
+> histories fall back to a **2-way** manual choice, never a silent merge. The **contribute authority**
+> (`publish --propose` · `review --approve | --reject`) — the *contribute* motion's server half — is now built
+> on that same shared write: `propose` ingests + migrates a candidate like publish, then opens a `proposals`
+> row and roots its bytes through a **gated `proposal_object`** root (NOT `commit_object`) **without moving
+> `current` or signing** (`NEEDS_REVIEW`); a proposal's bytes are retained AND readable only while `open ∧
+> base == current`, **one derived predicate shared verbatim by the read-authorization join and both GC-claim
+> queries** — so keep-set == read surface holds across the eventless "stale" transition (no commit-parent
+> table, no backfill, no reaper), with a read-time re-authorize guard so a reclaimed object reads **404, never
+> `Integrity`**. `review --approve` uploads/leases nothing, runs the shared `(epoch,seq)` CAS (a stale base ⇒
+> CONFLICT), enforces **four-eyes under `review_required`**, then reuses the SAME promote — whose edge-write
+> is the **`proposal_object → commit_object` handoff** to the permanent trunk root — and flips the proposal
+> `accepted` (sideways, signed); `review --reject`/withdraw is a standalone status-flip (nothing signed),
+> after which GC reclaims the now-unrooted unique bytes. The legacy standalone `upload_candidate` path was
+> **retired** — every write now goes through the shared ingest, so a `commit_object` edge means
+> accepted-trunk by construction. Exercised **in-process** by the stale-approve + ABA interleavings — no HTTP,
+> no client. Still to come: the large-object
 > store's **S3-compatible remote
-> backend + online backfill** (additive, client-invisible); the **propose → review-approve promotion** (the
-> immediate follow-on; the typed gate is the only review surface so far); the HTTP plane (the transport
+> backend + online backfill** (additive, client-invisible); the **client contribute loop** (the
+> `publish --propose` / `review` / `diff` CLI verbs, the plane-sourced diff, rebase orchestration — the server
+> authority is built, the client UX + multi-reviewer governance are not); the HTTP plane (the transport
 > that feeds the now-built client pull engine real responses); at-rest key encryption;
 > `follow`/enrollment + identity/roster + device issuance;
 > the OpenClaw/Hermes adapters; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the

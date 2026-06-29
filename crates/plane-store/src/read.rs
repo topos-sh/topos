@@ -38,10 +38,10 @@ pub(crate) async fn read_object(
     };
 
     // Step two: fetch + verify the bytes from the store the database records, dispatching on `location`. The
-    // witness already proved reachability, so there is no benign miss left: ANY post-authz failure in EITHER
-    // store is a provenance/store divergence (corruption) → an Integrity fault, kept distinct from the
-    // not-found path (so the indistinguishable 404 holds across the large-object surface), never by bare hash.
-    match authority.db().object_dispatch(ws, object_id).await? {
+    // witness already proved reachability, so a clean run has no benign miss: a post-authz failure is a
+    // provenance/store divergence (corruption) → an Integrity fault, kept distinct from the not-found path
+    // (so the indistinguishable 404 holds across the large-object surface), never by bare hash.
+    let fetched = match authority.db().object_dispatch(ws, object_id).await? {
         // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
         Some((Location::LargeLocal, _)) => authority
             .large_store(ws)
@@ -52,24 +52,45 @@ pub(crate) async fn read_object(
         // bundle before reaching the requested blob.
         Some((Location::Git, git_oid)) => {
             let store = authority.open_store(ws)?;
-            let (bytes, content_sha256) = store
+            store
                 .read_git_blob_verified(git_oid)
-                .map_err(AuthorityError::integrity)?;
-            if content_sha256 == object_id.0 {
-                Ok(bytes)
-            } else {
-                Err(AuthorityError::integrity(GitLocatorMismatch))
-            }
+                .map_err(AuthorityError::integrity)
+                .and_then(|(bytes, content_sha256)| {
+                    if content_sha256 == object_id.0 {
+                        Ok(bytes)
+                    } else {
+                        Err(AuthorityError::integrity(GitLocatorMismatch))
+                    }
+                })
         }
         // No live presence row: a legacy straight-to-git object — its version is all-git, so the tree walk is
-        // safe — read by content id from the witness version.
+        // safe — read by content id from the witness version. (A reclaimed object also lands here, because
+        // `object_dispatch` filters `status = 'present'`; the re-authorize guard below catches that case.)
         None => {
             let store = authority.open_store(ws)?;
             store
                 .read_object_in_version(witness.0, object_id.0)
                 .map_err(AuthorityError::integrity)
         }
+    };
+
+    // Re-authorize-on-miss (the read-time TOCTOU guard). The authorization above and this fetch are two
+    // steps; between them a proposal can go stale (an eventless derived transition — a concurrent publish
+    // advances `current`) or be rejected, and a GC can then reclaim the proposal's now-unrooted unique bytes.
+    // Any of the fetch arms would then fault Integrity over bytes that are gone BY DESIGN, not corrupt. So on
+    // a post-authz failure, re-run the authorization: if the object is no longer authorized, it was legitimately
+    // reclaimed → the indistinguishable `NotFound` (404), preserving "reclaimed ⇒ 404, never Integrity" across
+    // the window. A still-authorized object that fails to load IS genuine corruption → the Integrity fault stands.
+    if let Err(AuthorityError::Integrity(_)) = &fetched
+        && authority
+            .db()
+            .authorize_object_read(ws, skill, principal, object_id)
+            .await?
+            .is_none()
+    {
+        return Err(AuthorityError::NotFound);
     }
+    fetched
 }
 
 #[derive(Debug, thiserror::Error)]

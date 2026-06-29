@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposals SET status = ?3, resolved_by = ?4 WHERE workspace_id = ?1 AND id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "69c9380ebf3ec31c5e368175998c2208ff4dacb088ff6d91307c8fcb1a231735"
+}

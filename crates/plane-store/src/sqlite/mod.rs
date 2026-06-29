@@ -21,18 +21,6 @@ use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 /// before failing, rather than erroring immediately under contention.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The outcome of recording a candidate commit's provenance under the authoritative roster check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordOutcome {
-    /// Provenance + reachability recorded (or already present for this same skill — idempotent).
-    Recorded,
-    /// The uploading principal is not rostered for the skill (the in-transaction authoritative check).
-    NotRostered,
-    /// The commit id is already owned by a different skill — a cross-skill adoption attempt, blocked
-    /// structurally by the `skill_commit` primary key.
-    OwnedByOtherSkill,
-}
-
 /// The SQLite-backed authority database: one pool configured for the transaction discipline the
 /// authority requires (WAL, `BEGIN IMMEDIATE`, a busy timeout, foreign keys on).
 #[derive(Debug)]
@@ -90,10 +78,24 @@ impl Db {
     }
 
     /// The read-authorization join: return the **witness** commit id iff the principal is rostered for
-    /// the skill AND some commit of that skill reaches `object_id` — i.e.
-    /// `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)`. An empty result is the single
-    /// not-entitled/not-found signal (not-rostered, skill-doesn't-reach, and object-nonexistent are
-    /// indistinguishable). Every table is bound on `workspace_id`, so no fact can cross a tenant.
+    /// the skill AND that skill makes the object readable — through EITHER the accepted trunk OR a pending
+    /// proposal. An empty result is the single not-entitled/not-found signal (not-rostered, skill-doesn't-
+    /// reach, and object-nonexistent are indistinguishable). Every table is bound on `workspace_id`, so no
+    /// fact can cross a tenant.
+    ///
+    /// Two disjoint arms over the SAME `(rostered, workspace-bound, skill-scoped)` envelope:
+    /// - **trunk** (unchanged): `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)` — any accepted
+    ///   version of the skill reaches the object.
+    /// - **proposal**: `∃ p: proposal_object(w,p,object_id) ∧ p.skill=s ∧ p.status='open' ∧ p.base ==
+    ///   current(w,s)` — an OPEN, NON-STALE proposal of the skill roots the object. This arm shares its
+    ///   `open ∧ non-stale` predicate **verbatim** with the two GC keep-checks
+    ///   ([`claim_for_delete`](Self::claim_for_delete) / [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)),
+    ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
+    ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
+    ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
+    ///   and the bind-parameter numbering differs per call site); a dedicated equivalence test pins the three
+    ///   copies together against drift. A reclaimed object that briefly outlives this check on a concurrent
+    ///   read is handled by [`crate::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
     pub(crate) async fn authorize_object_read(
         &self,
         ws: &WorkspaceId,
@@ -107,11 +109,21 @@ impl Db {
         let object = object_id.0.as_slice();
         let row = sqlx::query!(
             r#"
-            SELECT sc.commit_id AS "commit_id!: Vec<u8>"
-            FROM roster r
-            JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id
-            JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
-            WHERE r.workspace_id = ?1 AND r.skill_id = ?2 AND r.principal = ?3 AND co.object_id = ?4
+            SELECT w.commit_id AS "commit_id!: Vec<u8>" FROM (
+                SELECT sc.commit_id AS commit_id
+                FROM roster r
+                JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id
+                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
+                WHERE r.workspace_id = ?1 AND r.skill_id = ?2 AND r.principal = ?3 AND co.object_id = ?4
+              UNION ALL
+                SELECT p.commit_id AS commit_id
+                FROM proposal_object po
+                JOIN proposals p  ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
+                JOIN current    c  ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                JOIN roster     r2 ON r2.workspace_id = p.workspace_id AND r2.skill_id = p.skill_id AND r2.principal = ?3
+                WHERE po.workspace_id = ?1 AND po.object_id = ?4 AND p.skill_id = ?2
+                  AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+            ) w
             LIMIT 1
             "#,
             ws,
@@ -123,103 +135,6 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         row.map(|r| commit_id_from_row(&r.commit_id)).transpose()
-    }
-
-    /// Whether the principal currently has a roster row for the skill (the cheap pre-read before an
-    /// upload's git write — a non-authoritative fail-fast; the authoritative check is inside the
-    /// transaction below).
-    pub(crate) async fn is_rostered(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-    ) -> Result<bool> {
-        roster_exists(&self.pool, ws, skill, principal).await
-    }
-
-    /// Record a candidate commit's provenance + reachability **under the authoritative roster check**,
-    /// all in one immediate-write transaction (authorization before provenance: the read join trusts
-    /// `skill_commit` directly, so nothing readable may be recorded for an un-rostered caller).
-    ///
-    /// Order: (1) the authoritative roster check; (2) an owner-guarded `skill_commit` insert — the
-    /// primary key makes a content-derived commit id belong to exactly one skill, so a cross-skill
-    /// re-upload (same id) is refused; (3) the `commit_object` reachability edges (idempotent). A deny
-    /// rolls the transaction back, recording nothing.
-    pub(crate) async fn record_authorized_commit(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        commit: CommitId,
-        objects: &[ObjectId],
-        bundle_digest: [u8; 32],
-    ) -> Result<RecordOutcome> {
-        let ws_s = ws.as_str();
-        let skill_s = skill.as_str();
-        let cid = commit.0.as_slice();
-        let digest = bundle_digest.as_slice();
-
-        let mut tx = self.begin_immediate().await?;
-
-        // (1) Authoritative authorization — serialized in the write transaction, so a roster change
-        // racing the upload cannot let an un-rostered candidate through.
-        if !roster_exists(&mut *tx, ws, skill, principal).await? {
-            tx.rollback().await.map_err(AuthorityError::internal)?;
-            return Ok(RecordOutcome::NotRostered);
-        }
-
-        // (2) Provenance, owner-guarded by the primary key. Insert-if-absent, then read the owner: if a
-        // different skill already owns this commit id, deny without naming the other skill.
-        sqlx::query!(
-            "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT (workspace_id, commit_id) DO NOTHING",
-            ws_s,
-            cid,
-            skill_s,
-            digest,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-        let owner = sqlx::query!(
-            r#"SELECT skill_id AS "skill_id!" FROM skill_commit WHERE workspace_id = ?1 AND commit_id = ?2"#,
-            ws_s,
-            cid,
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-        match owner {
-            Some(row) if row.skill_id == skill_s => {}
-            Some(_) => {
-                tx.rollback().await.map_err(AuthorityError::internal)?;
-                return Ok(RecordOutcome::OwnedByOtherSkill);
-            }
-            // The row was inserted-or-present above, so it must exist; a missing row is a store fault.
-            None => {
-                tx.rollback().await.map_err(AuthorityError::internal)?;
-                return Err(AuthorityError::integrity(MissingProvenanceRow));
-            }
-        }
-
-        // (3) Reachability edges (the FK to skill_commit is now satisfied). Idempotent: a re-upload of
-        // already-present edges is a no-op with no observable difference (dedup is invisible).
-        for obj in objects {
-            let object = obj.0.as_slice();
-            sqlx::query!(
-                "INSERT INTO commit_object (workspace_id, commit_id, object_id) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT (workspace_id, commit_id, object_id) DO NOTHING",
-                ws_s,
-                cid,
-                object,
-            )
-            .execute(&mut *tx)
-            .await
-            .map_err(AuthorityError::internal)?;
-        }
-
-        tx.commit().await.map_err(AuthorityError::internal)?;
-        Ok(RecordOutcome::Recorded)
     }
 
     /// Gather the owning skill of each given commit id that has provenance in this workspace (absent
@@ -296,11 +211,6 @@ fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
 #[error("stored content id is not 32 bytes")]
 struct BadBlobWidth;
 
-/// The owner row for a just-inserted commit was unexpectedly absent.
-#[derive(Debug, thiserror::Error)]
-#[error("provenance row absent immediately after insert")]
-struct MissingProvenanceRow;
-
 // The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). Driven
 // by the not-yet-wired orchestration + the tests; unreferenced in a non-test production build.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -310,6 +220,9 @@ pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus}
 
 // The pointer-move transaction (the `set-current` write) + its receipt/policy/device-registry helpers.
 mod set_current;
+
+// The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
+mod proposals;
 
 #[cfg(test)]
 mod seed;

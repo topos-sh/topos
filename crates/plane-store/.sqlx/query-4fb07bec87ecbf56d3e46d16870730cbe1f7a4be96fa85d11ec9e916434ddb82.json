@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO approvals (workspace_id, commit_id, base_epoch, base_seq, reviewer, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (workspace_id, commit_id, base_epoch, base_seq, reviewer) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "4fb07bec87ecbf56d3e46d16870730cbe1f7a4be96fa85d11ec9e916434ddb82"
+}

@@ -303,6 +303,285 @@ pub(crate) async fn revert(
     .await
 }
 
+/// The server-trusted inputs to the reject transaction (built here, consumed in [`crate::sqlite`]). The
+/// identity fields are the device-signed values the plane reconstructs (the proposal's commit + its recorded
+/// digest + the request scope), never a client claim.
+pub(crate) struct RejectInput<'a> {
+    pub ws: &'a WorkspaceId,
+    pub skill: &'a SkillId,
+    pub commit: CommitId,
+    pub bundle_digest: [u8; 32],
+    pub device_key_id: &'a str,
+    pub op: DeviceOp,
+    pub op_id: &'a str,
+    pub op_id_bytes: [u8; 16],
+    pub signature: &'a [u8; 64],
+    pub expected: Generation,
+    pub created_at: &'a str,
+}
+
+/// Drive a `publish --propose` for an already-staged-and-migrated candidate: open a proposal WITHOUT moving
+/// `current`. Same shape as [`publish`] (re-verify renderability before the transaction, then run the one
+/// write), but the device op is `PublishPropose`, so the shared `run`'s propose arm fires — recording the
+/// proposal + its gated object roots and returning NEEDS_REVIEW. `current` is untouched; nothing is signed.
+pub(crate) async fn propose(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    staged: &StagedCandidate,
+    device: &DeviceSignedOp,
+    created_at: &str,
+    now: i64,
+) -> Result<SetCurrentReceipt> {
+    debug_assert!(
+        matches!(device.op, DeviceOp::PublishPropose),
+        "set_current::propose requires a PublishPropose device op"
+    );
+    let object_ids = lifecycle::distinct_object_ids(&staged.entries);
+    drive(
+        authority,
+        Candidate {
+            ws,
+            skill,
+            op_id: &staged.op_id,
+            commit: staged.version_id,
+            bundle_digest: staged.bundle_digest,
+            parents: &staged.parents,
+            object_ids: &object_ids,
+        },
+        device,
+        created_at,
+        now,
+    )
+    .await
+}
+
+/// Drive a `review --approve`: promote an existing OPEN proposal to `current` (the sideways move). Nothing is
+/// uploaded, leased, or migrated — the candidate is already in the main store, rooted by its proposal. This
+/// resolves the proposal's server-trusted promote inputs (its recorded digest, base commit, and rooted object
+/// set), re-verifies the candidate is renderable BEFORE the transaction (a stale-or-reclaimed proposal is
+/// classified as a clean CONFLICT, never a corruption alarm), then runs the one write through `run`'s approve
+/// arm. `expected` (the device's `expected_es`) is the proposal's base generation.
+///
+/// # Errors
+/// Propagates a genuine store/integrity fault on a definitively non-stale proposal whose bytes are lost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn review_approve(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    commit: CommitId,
+    device: &DeviceSignedOp,
+    op_id: &OpId,
+    created_at: &str,
+    now: i64,
+) -> Result<SetCurrentReceipt> {
+    let base = device.expected;
+    let command = device_op_command(device.op);
+
+    // The proposal commit's recorded digest (server-trusted, written at propose) — needed to verify the
+    // device-op signature, bound the receipt, and render. Absent ⇒ this skill has no such commit ⇒ a typed
+    // permanent failure (there is nothing to approve).
+    let Some(digest) = authority
+        .db()
+        .skill_commit_bundle_digest(ws, skill, commit)
+        .await?
+    else {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(commit),
+                None,
+                base,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("no such proposal commit for this skill"),
+                created_at,
+            ))
+            .await;
+    };
+
+    // The proposal's IMMUTABLE promote inputs (its base commit + the rooted object set). Absent ⇒ no proposal
+    // of this candidate+base ever existed ⇒ a typed permanent failure.
+    let Some(inputs) = authority
+        .db()
+        .proposal_approve_inputs(ws, skill, commit, base)
+        .await?
+    else {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(commit),
+                Some(digest),
+                base,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("no proposal for this candidate and base"),
+                created_at,
+            ))
+            .await;
+    };
+
+    let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(commit),
+                Some(digest),
+                base,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("op_id is not a canonical UUID"),
+                created_at,
+            ))
+            .await;
+    };
+
+    // Re-verify the proposal's bytes are renderable BEFORE the transaction — availability (Step E) is DB-only
+    // (`status = 'present'`), so a crash that lost a present row's bytes would otherwise promote a missing
+    // version. On a fault, classify by staleness: if the proposal is DEFINITIVELY non-stale (`current.es`
+    // still == base), the bytes are genuinely lost/corrupt ⇒ propagate (Integrity/Internal). If `current` has
+    // moved (or is gone), the proposal is stale and the transaction's compare-and-set returns a clean CONFLICT
+    // — fall through to it rather than surfacing a misleading corruption alarm for a normal stale proposal.
+    if let Err(e) = crate::read::render_version(authority, ws, commit.0, digest).await
+        && authority.db().read_current_generation(ws, skill).await? == Some(base)
+    {
+        return Err(e);
+    }
+
+    let signer = authority.plane_signer()?;
+    let input = PromoteInput {
+        ws,
+        skill,
+        op_id: op_id.as_str(),
+        op_id_bytes,
+        device_key_id: &device.device_key_id,
+        op: device.op,
+        signature: &device.signature,
+        expected: base,
+        candidate_commit: commit,
+        candidate_bundle_digest: digest,
+        parents: std::slice::from_ref(&inputs.base_commit),
+        object_ids: &inputs.object_ids,
+        created_at,
+        now,
+    };
+    authority.db().set_current_txn(input, signer).await
+}
+
+/// Drive a `review --reject` / proposer-withdraw: flip an open proposal to `rejected` — signing nothing,
+/// moving no pointer. Resolves the proposal commit's recorded digest (for the device-op signature + the bound
+/// receipt identity), then runs the standalone reject transaction.
+pub(crate) async fn review_reject(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    commit: CommitId,
+    device: &DeviceSignedOp,
+    op_id: &OpId,
+    created_at: &str,
+) -> Result<SetCurrentReceipt> {
+    let command = device_op_command(device.op);
+    let Some(digest) = authority
+        .db()
+        .skill_commit_bundle_digest(ws, skill, commit)
+        .await?
+    else {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(commit),
+                None,
+                device.expected,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("no such proposal commit for this skill"),
+                created_at,
+            ))
+            .await;
+    };
+    let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(commit),
+                Some(digest),
+                device.expected,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("op_id is not a canonical UUID"),
+                created_at,
+            ))
+            .await;
+    };
+    authority
+        .db()
+        .review_reject_txn(RejectInput {
+            ws,
+            skill,
+            commit,
+            bundle_digest: digest,
+            device_key_id: &device.device_key_id,
+            op: device.op,
+            op_id: op_id.as_str(),
+            op_id_bytes,
+            signature: &device.signature,
+            expected: device.expected,
+            created_at,
+        })
+        .await
+}
+
+/// Reject an op routed to the wrong entry point (e.g. a `propose` whose device op is not `PublishPropose`) — a
+/// permanent, receipted failure that uploaded / migrated / opened NOTHING (a guard before any state change),
+/// closing the same review-gate-bypass class [`reject_non_publish_op`] closes for direct publish.
+pub(crate) async fn reject_op_mismatch(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id: &OpId,
+    device: &DeviceSignedOp,
+    created_at: &str,
+    msg: &str,
+) -> Result<SetCurrentReceipt> {
+    authority
+        .db()
+        .record_pretxn(pretxn(
+            ws,
+            &device.device_key_id,
+            op_id.as_str(),
+            device_op_command(device.op),
+            skill,
+            None,
+            None,
+            device.expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg(msg),
+            created_at,
+        ))
+        .await
+}
+
 /// The resolved candidate a pointer-move promotes — the server-trusted identity + object set, whether it
 /// came from a publish upload or a server-constructed revert.
 struct Candidate<'a> {

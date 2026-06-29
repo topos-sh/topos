@@ -18,23 +18,32 @@ same-process code.) The error type holds this line too: internal faults carry a 
   confined root, plus a SQLite database whose every row carries `workspace_id` and whose every query
   binds it. `WorkspaceId` is a validated, path-safe id, so the per-workspace store directory can never
   escape the root. Isolation is the database binding, never the directory.
-- **The schema** (`migrations/0001_init.sql`, SQLite STRICT / WITHOUT ROWID; content ids as 32-byte
-  BLOBs): `skill_commit` (provenance — **PK `(workspace_id, commit_id)`** makes a content-derived commit
-  belong to exactly one skill), `commit_object` (reachability, with the inverse access-join index),
-  `roster` (membership = a row exists), `current` (the pointer — created + seedable, **never moved**).
-- **`Authority::read_object`** — the skill-scoped read. One join authorizes on rostered ∧ reachable and
-  yields a witness commit; the bytes are then read + re-verified from the store. Every
-  not-entitled/not-found case returns one indistinguishable `NotFound`; a store failure on an
-  already-authorized object is a separate `Integrity` fault (corruption), never a not-found. **No object
-  is served by bare hash.**
-- **`Authority::upload_candidate`** — full-tree upload + server rehash. The server recomputes every id
-  from the uploaded bytes (no client id trusted; no reference-by-id), applies the canonical rules, writes
-  the objects, then records provenance + reachability **only after** an authoritative roster check, in one
-  `BEGIN IMMEDIATE` transaction. The reachability edges are derived internally from the recomputed bytes.
-  Dedup is invisible (the receipt charges **logical** uploaded bytes and is identical on a hit). No
-  pointer is moved.
+- **The schema** (`migrations/0001`–`0004`, SQLite STRICT / WITHOUT ROWID; content ids as 32-byte BLOBs):
+  `skill_commit` (provenance — **PK `(workspace_id, commit_id)`** makes a content-derived commit belong to
+  exactly one skill), `commit_object` (accepted-trunk reachability + access, with the inverse index), `roster`
+  (membership = a row exists), `current` (the one movable pointer); the object-lifecycle + pointer-move tables
+  (`0002`/`0003`); and the **contribute tables** (`0004`): `proposals` (`status ∈ {open,accepted,rejected}`;
+  PK `(workspace_id, id)` where `id` IS the opening op_id; a **partial-unique** "one open per
+  (skill,commit,base)"; `base_commit_id` = the approve's authoritative first parent), `proposal_object` (the
+  **gated** retention/read root for a pending proposal), and `approvals` (the audit log).
+- **`Authority::read_object`** — the skill-scoped read. One join authorizes on rostered ∧ reachable —
+  reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
+  (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
+  uses, so **keep-set == read surface** — and yields a witness commit; the bytes are then read + re-verified.
+  Every not-entitled/not-found case returns one indistinguishable `NotFound`; a store failure on an
+  already-authorized object is a separate `Integrity` fault (corruption), never a not-found. A post-authz
+  fetch miss **re-authorizes** (the read-time TOCTOU guard): a proposal that staled — and whose unique bytes
+  a GC reclaimed — between the authorize and the fetch reads **404, never Integrity**. **No object is served
+  by bare hash.**
+- **Candidate ingest (server rehash — the confused-deputy guard).** Every write that introduces bytes
+  (`publish`/`propose`/`revert`) ingests the full candidate tree and **recomputes every id from the bytes**
+  (no client id trusted; no reference-by-id), applies the canonical rules, and migrates the
+  not-already-present objects (server-side dedup, invisible). The standalone `upload_candidate` op was
+  **retired** — its rehash/canonical/dedup machinery IS this shared ingest path, and `commit_object` is now
+  written ONLY by the accepted-trunk path (so "a `commit_object` edge" means "accepted-trunk-reachable", by
+  construction).
 - **`Authority::check_lineage`** — the cross-skill lineage predicate (a tiny database gather + a pure
-  decision function), built **read-only** here; the pointer-move write enforces it transactionally later.
+  decision function), read-only; the pointer-move/contribute writes enforce the same rule transactionally.
 - **Transaction discipline.** WAL + `synchronous = NORMAL` + a busy timeout + foreign keys on, set on the
   connect options; one private `begin_with("BEGIN IMMEDIATE")` entrypoint (a plain `begin()` or a bare
   `execute("BEGIN IMMEDIATE")` on the pool are unreachable). Compile-time-checked `query!` against the
@@ -49,15 +58,16 @@ same-process code.) The error type holds this line too: internal faults carry a 
   cannot fire on it); the orchestration (`lifecycle.rs`/`gc.rs`) builds **ingest** (quarantine + rehash +
   denylist), **migrate** (lease the full object set *before* migrating, server-side dedup, durable install,
   then record a real version + make the lease non-expiring on success), the **three-step mark-then-claim GC**
-  (claim → unlink-outside-any-transaction → finalize; the keep-set is **exactly the read-authorization surface**
-  — any `commit_object` edge ∪ a live lease — so a readable object is never reclaimed), a **recovery sweep** (which
-  re-verifies the `commit_object` edge on its re-claim — so a crashed-GC `deleting` row a legacy edge re-rooted is
-  spared, not reclaimed — but NOT the lease, since a lease over a `deleting` object is a waiting migrate it must
-  unblock), and a **quarantine janitor** (claim-before-rm, so a re-ingest that reuses an op id is never swept). GC acts only on objects with an `object_presence` row, so the legacy straight-to-git
-  upload path stays readable. It moves no pointer and the fence is wired to no public verb yet — the in-crate
-  tests drive it (deterministic interleavings for the dedup race, the snapshot-then-delete race, cross-workspace
-  isolation, and crash recovery). `topos-gitstore` gained the dumb byte primitives it needs (quarantine
-  staging, durable per-object install, loose-object delete).
+  (claim → unlink-outside-any-transaction → finalize; the keep-set is **exactly the read-authorization
+  surface** — any `commit_object` edge ∪ a live lease ∪ an **open-non-stale `proposal_object` root** — so a
+  readable object is never reclaimed and a reclaimed one reads 404), a **recovery sweep** (which re-verifies
+  BOTH the `commit_object` edge AND the proposal arm on its re-claim — so a `deleting` row re-rooted after a
+  crashed claim is spared — but NOT the lease, since a lease over a `deleting` object is a waiting migrate it
+  must unblock), and a **quarantine janitor** (claim-before-rm, so a re-ingest that reuses an op id is never
+  swept). The in-crate tests drive it (deterministic interleavings for the dedup race, the
+  snapshot-then-delete race, cross-workspace isolation, crash recovery, and — pinned by an equivalence test —
+  that the read arm and the two GC-claim arms evaluate the proposal predicate identically). `topos-gitstore`
+  supplies the dumb byte primitives (quarantine staging, durable per-object install, loose-object delete).
 - **The size-routed large-object store (offload).** At migrate (`install_one`, Step D) a file blob is routed
   by **size**: ≥ a configurable ~1 MiB threshold → the per-workspace **`LocalLargeStore`** (`location =
   large-local`), smaller → git (`location = git`); commits + trees always stay in git. A per-blob ~100 MiB
@@ -71,9 +81,9 @@ same-process code.) The error type holds this line too: internal faults carry a 
   its content id, the recomputed digest matched to the pin). GC's unlink step **dispatches on `location`**
   (a git loose-object delete, or a `LargeObjectStore::delete` keyed on the object id); the lease, the CAS, the
   `deleting` fence, and recovery are unchanged. Dedup-reuse honors the object's **recorded** location (never
-  re-routes by a new candidate's size). Per-workspace large-object roots ⇒ **no cross-workspace dedup**. The
-  legacy `upload_candidate` path stays all-git/unrouted (superseded when the pointer-move lands). Backend is
-  the **local FS only** — the S3-compatible remote backend + the online backfill are the named next steps.
+  re-routes by a new candidate's size). Per-workspace large-object roots ⇒ **no cross-workspace dedup**. Every
+  write routes through this migrate (the standalone all-git upload path was retired). Backend is the **local FS
+  only** — the S3-compatible remote backend + the online backfill are the named next steps.
 - **The pointer-move write (`set-current`) — publish · genesis · revert.** The `current` row this layer only
   created now **moves**, **signed**, in **one `BEGIN IMMEDIATE` pure-DB transaction** (no filesystem op
   inside it): receipt-replay → in-transaction authoritative authz (a device-op signature verified against the
@@ -97,6 +107,25 @@ same-process code.) The error type holds this line too: internal faults carry a 
   by the interleaving tests (concurrent-publish → one OK + one stable CONFLICT; the ABA traps; lost-ack
   replay; revoke-blocks-promotion; post-promote GC-reachability; genesis; first-parent) — **no HTTP, no
   client**.
+- **The contribute authority (`publish --propose` · `review --approve | --reject`).** The *contribute* motion,
+  on the SAME shared write core (no second trust path). **`propose`** ingests + migrates a candidate like
+  publish, then — in `run`'s propose arm, AFTER the shared CAS/availability/lineage/first-parent body — opens
+  a `proposals` row + roots the bytes through `proposal_object` and releases the migrate lease, **without
+  moving `current` or signing anything** (`NEEDS_REVIEW`; born non-stale). A proposal's bytes are retained +
+  readable ONLY while `open ∧ base == current`, **one derived predicate shared verbatim by the read arm and
+  both GC-claim arms** — so keep == read across the eventless stale transition (no `commit_parent`, no
+  backfill, no reaper), and the instant a publish stales it the unique objects drop out of both. **`approve`**
+  uploads/leases nothing; it runs the shared body (a stale base ⇒ `CONFLICT` *before* availability), then
+  locks the open proposal, enforces **four-eyes under `review_required`** (the proposer may not self-approve),
+  records an `approvals` row, and reuses the SAME promote — whose `commit_object` write is the
+  **`proposal_object → commit_object` handoff** to the permanent trunk root — then flips the status to
+  `accepted` (sideways `seq += 1`, signed). **`reject`/withdraw** is a small standalone status-flip txn (no
+  pointer move, nothing signed); the gate then stops matching and ordinary GC reclaims the unique bytes. All
+  outcomes are op_id'd + receipted (lost-ack replay is byte-identical); a reclaimed object reads **404, never
+  Integrity** (the read-time re-authorize guard). Driven in-process by the **stale-approve** interleaving
+  (approve@stale ⇒ CONFLICT → rebase + re-propose → approve@new ⇒ OK) and the **ABA** interleaving (a `revert`
+  makes `current.tree == the proposal's base tree`, yet the whole-`(epoch,seq)` CAS still ⇒ CONFLICT) —
+  **no HTTP, no client**.
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 
@@ -111,11 +140,11 @@ domain-typed boundary with no change to callers.
 
 The large-object store's **S3-compatible remote backend** (a second `LargeObjectStore` impl + a
 `large-remote` `location` arm — a no-op extraction) and its **idempotent online backfill** (copy → verify →
-flip `location` → `git repack`), both additive + client-invisible; the **propose → review-approve promotion**
-(the `publish --propose` path, the `review --approve` promotion, the `proposals`/`approvals` tables — the
-immediate follow-on; the `set_current` core is already factored to share its compare-and-set/sign/receipt
-transaction, and the typed-fail `APPROVAL_REQUIRED` gate is the only review surface built so far); the client
-**pull engine** that materializes a signed pointer; the **HTTP plane** (`set-current` is exercised in-process
+flip `location` → `git repack`), both additive + client-invisible; the **client contribute loop** (the
+`publish --propose` / `review` / `diff <skill> current..<hash>` CLI verbs, the plane-sourced diff, client
+rebase orchestration, the displayed proposal-status strings — the server authority is built, the client UX is
+not); **multi-reviewer governance** (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff
+UI — single-approver only today, no role column); the **HTTP plane** (every write is exercised in-process
 only); **at-rest key encryption / KMS** (the plane key is a plaintext `0600` seed for now); the `purge` verb +
 force-unlink (the tombstones table + denylist check already exist); Postgres (SQLite-first — the interleaving
 tests assert on outcome/invariant, never an error code, so the Postgres arm is a pure later extension);

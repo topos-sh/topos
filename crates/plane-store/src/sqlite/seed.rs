@@ -98,6 +98,81 @@ impl Db {
         Ok(())
     }
 
+    /// Stage a proposal row directly (test-only), inserting the candidate's `skill_commit` provenance (the
+    /// foreign-key target) if absent. Drives the GC-retention + read-authorization proposal-arm tests without
+    /// the (separately exercised) propose write path. `base_commit`/`base_(epoch,seq)` set the proposal's
+    /// base; pair with a `current` row at that generation to make it non-stale, or a later one to stale it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn seed_proposal(
+        &self,
+        ws: &WorkspaceId,
+        id: &str,
+        skill: &SkillId,
+        commit: CommitId,
+        base_commit: CommitId,
+        base_epoch: i64,
+        base_seq: i64,
+        status: &str,
+        proposer: &Principal,
+    ) -> Result<()> {
+        let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
+        let cid = commit.0.as_slice();
+        let base_cid = base_commit.0.as_slice();
+        let proposer_s = proposer.as_str();
+        let mut tx = self.begin_immediate().await?;
+        sqlx::query!(
+            "INSERT INTO skill_commit (workspace_id, commit_id, skill_id) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (workspace_id, commit_id) DO NOTHING",
+            ws_s,
+            cid,
+            skill_s,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        sqlx::query!(
+            "INSERT INTO proposals \
+               (workspace_id, id, skill_id, commit_id, base_commit_id, base_epoch, base_seq, status, proposer, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'seed')",
+            ws_s,
+            id,
+            skill_s,
+            cid,
+            base_cid,
+            base_epoch,
+            base_seq,
+            status,
+            proposer_s,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        tx.commit().await.map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Stage a proposal's object root directly (the gated retention/read root for a pending proposal).
+    pub(crate) async fn seed_proposal_object(
+        &self,
+        ws: &WorkspaceId,
+        proposal_id: &str,
+        object_id: ObjectId,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let oid = object_id.0.as_slice();
+        sqlx::query!(
+            "INSERT INTO proposal_object (workspace_id, proposal_id, object_id) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (workspace_id, proposal_id, object_id) DO NOTHING",
+            ws_s,
+            proposal_id,
+            oid,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
     /// Remove a roster membership — the revocation mechanism (membership = a row exists, so revocation
     /// is row deletion). Test-only here; enrollment owns issuance + revocation later.
     pub(crate) async fn delete_roster(

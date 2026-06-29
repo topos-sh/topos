@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest;
 
-use crate::sqlite::{ClaimOutcome, InstallOutcome, Location, ObjectStatus, RecordOutcome};
+use crate::sqlite::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 use crate::{
     Authority, AuthorityError, CandidateUpload, CommitId, FileMode, ObjectId, OpId, Principal,
     SkillId, UploadedFile, WorkspaceId, gc, lifecycle,
@@ -101,34 +101,50 @@ fn genesis(files: Vec<UploadedFile>) -> CandidateUpload {
     }
 }
 
-// ── the access rule: a rostered reader gets the bytes (even of an unpromoted version) ──────────────
+/// Stage a committed (accepted-trunk) version with its bytes durably installed + readable — for the
+/// read-access tests. Migrates a genesis bundle (the objects become `present`), releases the migrate lease,
+/// and records the commit's provenance + reachability (`skill_commit` + `commit_object`) — exactly the
+/// readable, GC-rooted state a promoted version has, without driving a full pointer-move. Returns the
+/// recomputed commit id.
+async fn stage_committed(
+    a: &Authority,
+    w: &WorkspaceId,
+    s: &SkillId,
+    op_id: &str,
+    files: Vec<UploadedFile>,
+) -> CommitId {
+    let staged = ingest_migrate(a, w, op_id, files, 100).await;
+    a.db().release_lease(w, &op(op_id)).await.unwrap();
+    let objects = lifecycle::distinct_object_ids(&staged.entries);
+    a.db()
+        .seed_commit(w, s, staged.version_id, &objects)
+        .await
+        .unwrap();
+    staged.version_id
+}
+
+// ── the access rule: a rostered reader gets the bytes of a version ─────────────────────────────────
 
 #[tokio::test]
-async fn rostered_member_reads_bytes_of_an_unpromoted_version() {
+async fn a_rostered_member_reads_the_bytes_of_a_version() {
     let fx = Fixture::new("read-ok").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let uploader = prin("dev_up");
     let reader = prin("dev_read");
-
-    // Two distinct readers/uploaders are rostered for the skill.
-    a.db().seed_roster(&w, &s, &uploader).await.unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
 
     let body = b"# PR describe\nrun the thing\n";
     let script = b"#!/bin/sh\necho hi\n";
-    let receipt = a
-        .upload_candidate(
-            &uploader,
-            &w,
-            &s,
-            genesis(vec![file("SKILL.md", body), file("run.sh", script)]),
-        )
-        .await
-        .expect("upload");
+    stage_committed(
+        a,
+        &w,
+        &s,
+        "read-ok",
+        vec![file("SKILL.md", body), file("run.sh", script)],
+    )
+    .await;
 
-    // `current` was never moved, yet a rostered member reads the candidate's bytes (the read path does
-    // not consult the pointer).
+    // A rostered member reads each of the version's objects (the read path resolves via the access join).
     assert_eq!(
         a.read_object(&reader, &w, &s, object_id(body))
             .await
@@ -141,8 +157,6 @@ async fn rostered_member_reads_bytes_of_an_unpromoted_version() {
             .unwrap(),
         script
     );
-    // The receipt's recomputed version id is exactly the kernel commit id over the uploaded bytes.
-    assert_eq!(receipt.logical_bytes, (body.len() + script.len()) as u64);
 }
 
 #[tokio::test]
@@ -153,9 +167,7 @@ async fn unrostered_reader_gets_notfound_for_a_real_object() {
     let uploader = prin("dev_up");
     a.db().seed_roster(&w, &s, &uploader).await.unwrap();
     let body = b"secret bytes";
-    a.upload_candidate(&uploader, &w, &s, genesis(vec![file("SKILL.md", body)]))
-        .await
-        .unwrap();
+    stage_committed(a, &w, &s, "unrostered", vec![file("SKILL.md", body)]).await;
 
     // A principal with no roster row gets the uniform not-found (never the bytes, never a 403).
     let outsider = prin("dev_outsider");
@@ -173,9 +185,7 @@ async fn revocation_by_roster_deletion_stops_reads() {
     let p = prin("dev_x");
     a.db().seed_roster(&w, &s, &p).await.unwrap();
     let body = b"body";
-    a.upload_candidate(&p, &w, &s, genesis(vec![file("SKILL.md", body)]))
-        .await
-        .unwrap();
+    stage_committed(a, &w, &s, "revoke", vec![file("SKILL.md", body)]).await;
     assert_eq!(
         a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
         body
@@ -198,12 +208,10 @@ async fn cross_workspace_object_is_unreadable_under_another_scope() {
     let (wa, wb, s) = (ws("w_a"), ws("w_b"), skill("s_pr"));
     let p = prin("dev_p");
 
-    // Upload a real object into workspace B.
+    // Stage a real object into workspace B.
     a.db().seed_roster(&wb, &s, &p).await.unwrap();
     let secret = b"workspace B private bytes";
-    a.upload_candidate(&p, &wb, &s, genesis(vec![file("SKILL.md", secret)]))
-        .await
-        .unwrap();
+    stage_committed(a, &wb, &s, "xws", vec![file("SKILL.md", secret)]).await;
 
     // The same principal, rostered for the same skill id in workspace A, cannot read B's object by
     // supplying B's object id under A's scope — the workspace_id binding makes it a uniform not-found.
@@ -225,9 +233,7 @@ async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent() {
     // An object reachable only via skill Y, in the shared per-workspace store.
     a.db().seed_roster(&w, &y, &p).await.unwrap();
     let y_bytes = b"skill Y only";
-    a.upload_candidate(&p, &w, &y, genesis(vec![file("SKILL.md", y_bytes)]))
-        .await
-        .unwrap();
+    stage_committed(a, &w, &y, "xskill", vec![file("SKILL.md", y_bytes)]).await;
 
     // A reader rostered for X (not Y) gets not-found for Y's object — byte-for-byte identical to asking
     // for an object that exists in no skill at all.
@@ -311,133 +317,32 @@ async fn check_lineage_uses_seeded_provenance() {
     );
 }
 
-// ── upload + server rehash (the confused-deputy guard) ────────────────────────────────────────────
+// ── ingest guards: the no-empty-bundle policy + the canonical rules (the rehash/dedup/cross-skill +
+// roster paths are now exercised through publish/propose, below) ────────────────────────────────────
 
 #[tokio::test]
-async fn server_recomputes_the_version_id_so_a_one_byte_change_changes_it() {
-    let fx = Fixture::new("rehash").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-
-    let r1 = a
-        .upload_candidate(&p, &w, &s, genesis(vec![file("SKILL.md", b"alpha")]))
-        .await
-        .unwrap();
-    let r2 = a
-        .upload_candidate(&p, &w, &s, genesis(vec![file("SKILL.md", b"alphb")]))
-        .await
-        .unwrap();
-    assert_ne!(
-        r1.version_id, r2.version_id,
-        "a 1-byte change must change the version id"
-    );
-    assert_ne!(r1.bundle_digest, r2.bundle_digest);
-}
-
-#[tokio::test]
-async fn upload_rejects_a_forbidden_path_and_records_nothing() {
-    let fx = Fixture::new("reject-path").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-
-    let bad = a
-        .upload_candidate(&p, &w, &s, genesis(vec![file("/abs/forbidden", b"x")]))
-        .await;
-    assert!(matches!(bad, Err(AuthorityError::RejectedUpload(_))));
-    // Nothing was recorded: a read of the object's id is not-found.
-    assert!(matches!(
-        a.read_object(&p, &w, &s, object_id(b"x")).await,
-        Err(AuthorityError::NotFound)
-    ));
-}
-
-#[tokio::test]
-async fn empty_upload_is_rejected() {
-    let fx = Fixture::new("empty-upload").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-    // The git store would happily snapshot a zero-entry tree; the authority must reject an empty bundle
-    // itself (it cannot trust the client scanner to have done so).
-    let res = a.upload_candidate(&p, &w, &s, genesis(vec![])).await;
-    assert!(matches!(res, Err(AuthorityError::RejectedUpload(_))));
-}
-
-#[tokio::test]
-async fn unrostered_upload_is_denied_and_records_nothing_readable() {
-    let fx = Fixture::new("upload-denied").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let stranger = prin("dev_stranger");
-
-    let body = b"injected";
-    let res = a
-        .upload_candidate(&stranger, &w, &s, genesis(vec![file("SKILL.md", body)]))
-        .await;
-    assert!(matches!(res, Err(AuthorityError::Denied)));
-
-    // Even a (later) rostered reader cannot read it — no provenance was recorded, so the access join
-    // finds nothing (the orphan git object is unreachable through the only public surface).
-    a.db()
-        .seed_roster(&w, &s, &prin("dev_reader"))
-        .await
-        .unwrap();
-    assert!(matches!(
-        a.read_object(&prin("dev_reader"), &w, &s, object_id(body))
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
-}
-
-#[tokio::test]
-async fn dedup_hit_returns_an_identical_receipt() {
-    let fx = Fixture::new("dedup").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-
-    let files = || {
-        vec![
-            file("SKILL.md", b"same bytes"),
-            file("run.sh", b"#!/bin/sh\n"),
-        ]
-    };
-    let first = a
-        .upload_candidate(&p, &w, &s, genesis(files()))
-        .await
-        .unwrap();
-    let second = a
-        .upload_candidate(&p, &w, &s, genesis(files()))
-        .await
-        .unwrap();
-    // A re-upload of identical bytes yields a byte-identical receipt — no "already present" signal.
-    assert_eq!(first, second);
-}
-
-#[tokio::test]
-async fn exact_cross_skill_re_upload_is_denied() {
-    let fx = Fixture::new("xskill-adopt").await;
+async fn ingest_rejects_an_empty_or_malformed_bundle() {
+    let fx = Fixture::new("ingest-reject").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (x, y) = (skill("s_x"), skill("s_y"));
-    let p = prin("dev_p"); // rostered for both skills, but still can't move a commit across them.
-    a.db().seed_roster(&w, &x, &p).await.unwrap();
-    a.db().seed_roster(&w, &y, &p).await.unwrap();
-
-    let cand = || genesis(vec![file("SKILL.md", b"shared content")]);
-    a.upload_candidate(&p, &w, &x, cand())
-        .await
-        .expect("first upload to X");
-    // The identical bundle yields the identical commit id; recording it under Y is refused (the
-    // skill_commit primary key makes a commit belong to exactly one skill).
-    let adopt = a.upload_candidate(&p, &w, &y, cand()).await;
-    assert!(matches!(adopt, Err(AuthorityError::Denied)));
+    // Empty: the authority rejects a zero-file bundle itself (the git store would happily snapshot a
+    // zero-entry tree; the client scanner cannot be trusted to have enforced this).
+    assert!(matches!(
+        lifecycle::ingest(a, &w, &op("empty"), genesis(vec![]), 100).await,
+        Err(AuthorityError::RejectedUpload(_))
+    ));
+    // A forbidden path: the canonical reject rules fire ONCE, inside the kernel during staging.
+    assert!(matches!(
+        lifecycle::ingest(
+            a,
+            &w,
+            &op("badpath"),
+            genesis(vec![file("/abs/forbidden", b"x")]),
+            100,
+        )
+        .await,
+        Err(AuthorityError::RejectedUpload(_))
+    ));
 }
 
 // ── transaction discipline ────────────────────────────────────────────────────────────────────────
@@ -457,30 +362,6 @@ async fn foreign_key_is_enforced_a_dangling_pointer_insert_is_rejected() {
         res.is_err(),
         "a dangling current insert must be rejected by the FK"
     );
-}
-
-#[tokio::test]
-async fn two_writers_serialize_without_a_busy_error() {
-    let fx = Fixture::new("concurrent").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-
-    // Two immediate-write transactions for different commits, driven concurrently. The IMMEDIATE write
-    // lock + busy timeout serialize them; both must succeed (no SQLITE_BUSY).
-    let c1 = CommitId([0xA1; 32]);
-    let c2 = CommitId([0xB2; 32]);
-    let os1 = [ObjectId([0x01; 32])];
-    let os2 = [ObjectId([0x02; 32])];
-    let (r1, r2) = tokio::join!(
-        a.db()
-            .record_authorized_commit(&w, &s, &p, c1, &os1, [0xC1; 32]),
-        a.db()
-            .record_authorized_commit(&w, &s, &p, c2, &os2, [0xC2; 32]),
-    );
-    assert_eq!(r1.unwrap(), RecordOutcome::Recorded);
-    assert_eq!(r2.unwrap(), RecordOutcome::Recorded);
 }
 
 // ── object_presence fenced transitions (the CAS state machine, in isolation) ───────────────────────
@@ -1033,61 +914,6 @@ async fn two_concurrent_migrations_of_one_object_do_not_corrupt() {
 }
 
 #[tokio::test]
-async fn gc_acts_only_on_fenced_objects_legacy_upload_stays_readable() {
-    let fx = Fixture::new("e-legacy").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-    // The pre-existing straight-to-git upload path: writes a blob with NO object_presence row.
-    let body = b"legacy bytes";
-    a.upload_candidate(&p, &w, &s, genesis(vec![file("L.md", body)]))
-        .await
-        .unwrap();
-    assert_eq!(
-        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
-        body
-    );
-    // A full GC pass must not touch it (no presence row → invisible to GC).
-    gc::run_gc(a, &w, 200).await.unwrap();
-    assert_eq!(
-        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
-        body,
-        "a legacy blob with no presence row stays readable after GC"
-    );
-}
-
-#[tokio::test]
-async fn gc_spares_an_object_a_legacy_commit_still_references_even_if_fenced() {
-    // The keep-set regression: read_object authorizes via ANY commit_object, so the fence must spare a
-    // commit-referenced object even when it also carries a (now-abandoned) presence row.
-    let fx = Fixture::new("e-overlap").await;
-    let a = &fx.authority;
-    let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_p");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-    let body = b"shared between legacy and fenced";
-    // Legacy upload records commit_object + writes the blob (readable, no presence row).
-    a.upload_candidate(&p, &w, &s, genesis(vec![file("B.md", body)]))
-        .await
-        .unwrap();
-    // A later fenced migrate of the SAME bytes adds a presence row; then it is abandoned.
-    ingest_migrate(a, &w, "op", vec![file("B.md", body)], 100).await;
-    a.db().release_lease(&w, &op("op")).await.unwrap();
-
-    // GC must SPARE it (a commit_object edge = readable); the read keeps working.
-    gc::run_gc(a, &w, 200).await.unwrap();
-    assert_eq!(
-        a.db().object_status(&w, object_id(body)).await.unwrap(),
-        ObjectStatus::Present
-    );
-    assert_eq!(
-        a.read_object(&p, &w, &s, object_id(body)).await.unwrap(),
-        body
-    );
-}
-
-#[tokio::test]
 async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired_one() {
     let fx = Fixture::new("e-quarantine").await;
     let a = &fx.authority;
@@ -1243,14 +1069,12 @@ async fn quarantines_are_per_workspace_and_the_janitor_is_scoped() {
 // ── review hardening: recovery keep-set re-check · deleting-wait · janitor reuse-guard ───────────────
 
 #[tokio::test]
-async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge() {
-    // The recovery byte-loss guard (the companion to
-    // `gc_spares_an_object_a_legacy_commit_still_references_even_if_fenced`, but for the RECOVERY path, where
-    // the edge arrives AFTER the claim). A crashed GC leaves a stale `deleting` row; before recovery runs, a
-    // legacy `upload_candidate` of identical bytes records a `commit_object` edge with no `object_presence`
-    // consult, so the object becomes read-authorized. recovery_sweep must re-verify the keep-set at delete
-    // time and SPARE it, never unlink a now-readable, committed object's bytes. Fails (Integrity on the final
-    // read) if `claim_stale_for_recovery` drops its keep-set guard.
+async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge() {
+    // The recovery byte-loss guard for the RECOVERY path, where the keep-set root arrives AFTER the claim. A
+    // crashed GC leaves a stale `deleting` row; before recovery runs, a `commit_object` edge over the same
+    // object appears (making it read-authorized). recovery_sweep must re-verify the keep-set at delete time
+    // and SPARE it, never unlink a now-readable, committed object's bytes. Fails (Integrity on the final read)
+    // if `claim_stale_for_recovery` drops its `commit_object` re-check.
     let fx = Fixture::new("e-recover-reroot").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
@@ -1258,8 +1082,9 @@ async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge() {
     a.db().seed_roster(&w, &s, &p).await.unwrap();
     let body = b"shared content the recovery must not reclaim";
 
-    // (1) Fenced migrate of `body`, then abandon -> present, unrooted (a normal GC candidate).
-    ingest_migrate(a, &w, "op", vec![file("B.md", body)], 100).await;
+    // (1) Fenced migrate of `body`, then abandon -> present, unrooted (a normal GC candidate). The migrated
+    // version's git commit + blob exist on disk.
+    let staged = ingest_migrate(a, &w, "op", vec![file("B.md", body)], 100).await;
     a.db().release_lease(&w, &op("op")).await.unwrap();
     let oid = object_id(body);
 
@@ -1270,9 +1095,10 @@ async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge() {
         ClaimOutcome::Claimed { .. }
     ));
 
-    // (3) A legacy upload of the SAME bytes records a `commit_object` edge — the object is now readable even
+    // (3) A `commit_object` edge over the migrated commit now roots the object — it is read-authorized even
     // though its row is `deleting`.
-    a.upload_candidate(&p, &w, &s, genesis(vec![file("B.md", body)]))
+    a.db()
+        .seed_commit(&w, &s, staged.version_id, &[oid])
         .await
         .unwrap();
     assert_eq!(a.read_object(&p, &w, &s, oid).await.unwrap(), body);
@@ -1859,21 +1685,17 @@ async fn a_live_lease_spares_an_offloaded_object_from_gc() {
 }
 
 #[tokio::test]
-async fn a_legacy_git_reupload_after_a_large_gc_reads_from_git_not_a_stale_location() {
-    // Regression: a reclaimed large-local object leaves an `absent` row that STILL records
-    // `location = large-local`. If the same bytes are then re-uploaded via the legacy straight-to-git path
-    // (a `commit_object` edge, no presence row), an authorized read must dispatch to GIT — `object_location`
-    // honors only a `present` row, so the stale location can never mis-route a valid read to the deleted
-    // side-store object (which would spuriously fault Integrity).
+async fn a_reclaimed_large_local_object_reports_no_live_location() {
+    // A reclaimed large-local object leaves an `absent` row that STILL records `location = large-local`, but
+    // `object_location` honors only a `present` row — so a stale location can never mis-route a later read to
+    // the deleted side-store object (it reports None; reads dispatch on the live presence row, never a stale one).
     let fx = Fixture::with_large_limits("stale-loc", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let s = skill("s_pr");
-    let p = prin("dev_read");
     let body = blob(2048, 0x7E);
     let obj = object_id(&body);
 
-    // 1. Offload it, then abandon + GC it → the row goes `absent` but keeps `location = large-local`.
+    // Offload it, then abandon + GC it → the row goes `absent` but keeps `location = large-local`.
     ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
     a.db().release_lease(&w, &op("op1")).await.unwrap();
     assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1);
@@ -1881,17 +1703,8 @@ async fn a_legacy_git_reupload_after_a_large_gc_reads_from_git_not_a_stale_locat
         a.db().object_status(&w, obj).await.unwrap(),
         ObjectStatus::Absent
     );
-    // The stale `absent` row records `large-local`, but `object_location` must report no LIVE location.
+    // The stale `absent` row records `large-local`, but `object_location` reports no LIVE location.
     assert_eq!(a.db().object_location(&w, obj).await.unwrap(), None);
-
-    // 2. Re-upload the SAME bytes via the legacy git path (writes a git blob + commit_object, no presence row).
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
-    a.upload_candidate(&p, &w, &s, genesis(vec![file("model.bin", &body)]))
-        .await
-        .expect("legacy re-upload");
-
-    // 3. The authorized read returns the git bytes — never mis-routed to the deleted large object.
-    assert_eq!(a.read_object(&p, &w, &s, obj).await.unwrap(), body);
 }
 
 #[tokio::test]
@@ -2194,6 +2007,243 @@ async fn gc_reclaims_large_objects_when_no_git_repo_exists() {
         ObjectStatus::Absent
     );
     assert!(!a.large_store(&w).exists(obj.0).unwrap());
+}
+
+// ── the contribute authority's gated proposal root (the GC + read proposal arm) ──────────────────────
+//
+// `publish --propose` roots a candidate's bytes through `proposal_object`, gated — for BOTH retention and
+// read — on ONE derived predicate `open ∧ base == current`. These tests pin that the read arm and the two
+// GC-claim arms evaluate it IDENTICALLY (the anti-drift guard), and that keep-set == read-authorization holds
+// across the eventless stale transition: a reclaimed object reads 404, never an Integrity alarm. The
+// propose/approve/reject write paths that PRODUCE these rows are exercised end-to-end further below; here the
+// rows are seeded, so the gate itself is tested in isolation.
+
+/// Migrate one object's bytes into the main store, then release its lease — so the ONLY thing that can root
+/// it is a (seeded) proposal, isolating the proposal arm. Returns the migrated version's commit id.
+async fn migrate_unrooted(
+    a: &Authority,
+    w: &WorkspaceId,
+    op_id: &str,
+    path: &str,
+    bytes: &[u8],
+) -> CommitId {
+    let staged = ingest_migrate(a, w, op_id, vec![file(path, bytes)], 100).await;
+    a.db().release_lease(w, &op(op_id)).await.unwrap();
+    staged.version_id
+}
+
+const PROP_OP_1: &str = "a1111111-1111-4111-8111-111111111111";
+
+#[tokio::test]
+async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_and_404s() {
+    // The keep-set == read-surface crux: an open, non-stale proposal's unique object is kept + readable; the
+    // instant a publish stales the proposal the SAME object drops out of read AND retention together (no
+    // event, no reaper), and
+    // a read of the reclaimed object is 404 — never an Integrity corruption alarm.
+    let fx = Fixture::new("prop-crux").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+
+    // `current` points at a base commit Cb at (1,1) — the proposal's base.
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+
+    // The proposal's unique object X: migrated (present + readable), rooted by nothing but the proposal.
+    let xbytes = b"proposed unique bytes";
+    let cp = migrate_unrooted(a, &w, PROP_OP_1, "NEW.md", xbytes).await;
+    let x = object_id(xbytes);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+    a.db().seed_proposal_object(&w, "prop1", x).await.unwrap();
+
+    // OPEN + NON-STALE: read authorizes via the proposal arm (returns the real bytes); GC spares X.
+    assert_eq!(a.read_object(&reader, &w, &s, x).await.unwrap(), xbytes);
+    assert_eq!(
+        gc::run_gc(a, &w, 200).await.unwrap(),
+        0,
+        "an open, non-stale proposal roots its object"
+    );
+    assert_eq!(
+        a.db().object_status(&w, x).await.unwrap(),
+        ObjectStatus::Present
+    );
+
+    // STALE it: a publish advances `current` past the base — the eventless derived transition.
+    a.db().force_current_generation(&w, &s, 1, 2).await.unwrap();
+
+    // The read drops in the SAME step — 404 immediately, BEFORE any GC runs (a gate, not a reaper).
+    assert!(matches!(
+        a.read_object(&reader, &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+    // GC now reclaims X (no trunk edge, no live lease, and the proposal is stale).
+    assert_eq!(gc::run_gc(a, &w, 300).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, x).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    // A read of the reclaimed object is 404 — NEVER an Integrity alarm (keep-set == read surface).
+    assert!(matches!(
+        a.read_object(&reader, &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn recovery_claim_spares_an_open_proposals_object_and_reclaims_a_staled_one() {
+    // The third copy of the predicate: `claim_stale_for_recovery` must spare a stale `deleting` row an open,
+    // non-stale proposal roots, then reclaim it once the proposal goes stale — tracking the read gate exactly.
+    let fx = Fixture::new("prop-recovery").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+    let cp = CommitId([0xC0; 32]);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+    let x = object_id(b"recover-me");
+    a.db().seed_proposal_object(&w, "prop1", x).await.unwrap();
+    // A STALE `deleting` row (a crashed GC's leftover) over X: status_updated_at=0 < older_than below.
+    a.db()
+        .seed_deleting_object(&w, x, &goid(7), 0)
+        .await
+        .unwrap();
+
+    // OPEN + NON-STALE: recovery SPARES X (None) — the proposal arm holds it, exactly like the read gate.
+    assert_eq!(
+        a.db()
+            .claim_stale_for_recovery(&w, x, 1000, 1001)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // STALE it: recovery now RECLAIMS X (the gate dropped) — keep tracks read.
+    a.db().force_current_generation(&w, &s, 1, 2).await.unwrap();
+    assert!(
+        a.db()
+            .claim_stale_for_recovery(&w, x, 1000, 1002)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_proposals_unique_object_reclaims_and_reads_404() {
+    // A non-`open` proposal never roots or authorizes — even at a matching base — so its unique bytes reclaim.
+    let fx = Fixture::new("prop-reject").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+    let xbytes = b"rejected bytes";
+    let cp = migrate_unrooted(a, &w, PROP_OP_1, "R.md", xbytes).await;
+    let x = object_id(xbytes);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "rejected", &prin("p_author"))
+        .await
+        .unwrap();
+    a.db().seed_proposal_object(&w, "prop1", x).await.unwrap();
+
+    assert!(matches!(
+        a.read_object(&reader, &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+    assert_eq!(gc::run_gc(a, &w, 200).await.unwrap(), 1);
+    assert_eq!(
+        a.db().object_status(&w, x).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn a_trunk_shared_object_stays_kept_and_readable_after_its_proposal_stales() {
+    // An object reachable from BOTH the trunk (a `commit_object` edge) and a proposal stays kept + readable
+    // when the proposal stales — the trunk arm is untouched; only the proposal's UNIQUE objects reclaim.
+    let fx = Fixture::new("prop-shared").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    let ybytes = b"shared bytes";
+    let ccur = migrate_unrooted(a, &w, PROP_OP_1, "Y.md", ybytes).await;
+    let y = object_id(ybytes);
+    // Trunk: `current` at (1,1) points at Ccur, and Ccur edges Y.
+    a.db().seed_commit(&w, &s, ccur, &[y]).await.unwrap();
+    a.db().seed_current(&w, &s, ccur, 1, 1).await.unwrap();
+    // A proposal ALSO roots Y (reuses it), base (1,1), open.
+    let cp = CommitId([0xC0; 32]);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, ccur, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+    a.db().seed_proposal_object(&w, "prop1", y).await.unwrap();
+
+    // Stale the proposal; the TRUNK arm still keeps + reads Y.
+    a.db().force_current_generation(&w, &s, 1, 2).await.unwrap();
+    assert_eq!(a.read_object(&reader, &w, &s, y).await.unwrap(), ybytes);
+    assert_eq!(
+        gc::run_gc(a, &w, 300).await.unwrap(),
+        0,
+        "the trunk commit_object edge keeps the shared object"
+    );
+    assert_eq!(
+        a.db().object_status(&w, y).await.unwrap(),
+        ObjectStatus::Present
+    );
+}
+
+#[tokio::test]
+async fn genuine_corruption_under_an_open_proposal_is_integrity_not_masked_as_404() {
+    // The read-time TOCTOU guard re-authorizes on a fetch miss and downgrades to 404 ONLY when the object is
+    // no longer authorized (a legitimately reclaimed proposal object). An object STILL rooted by an open,
+    // non-stale proposal whose bytes are gone is genuine corruption — the guard's re-authorize returns Some,
+    // so the Integrity alarm must STAND, never be masked. (The guard's converse — the concurrent
+    // authorize→stale→reclaim→fetch race that downgrades to 404 — is a window the single-threaded harness
+    // cannot interleave; its outcome equals the reclaimed-object 404 the crux test asserts.)
+    let fx = Fixture::new("prop-corrupt").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+    let xbytes = b"present then corrupt";
+    let cp = migrate_unrooted(a, &w, PROP_OP_1, "X.md", xbytes).await;
+    let x = object_id(xbytes);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+    a.db().seed_proposal_object(&w, "prop1", x).await.unwrap();
+    assert_eq!(a.read_object(&reader, &w, &s, x).await.unwrap(), xbytes);
+
+    // Destroy the bytes underneath a still-open, non-stale proposal (the presence row stays `present`).
+    let (loc, goid_x) = a.db().object_dispatch(&w, x).await.unwrap().unwrap();
+    assert_eq!(loc, Location::Git);
+    a.open_store(&w)
+        .unwrap()
+        .delete_loose_object(goid_x)
+        .unwrap();
+
+    // Read authorizes (G true), the fetch faults, re-authorize is STILL Some ⇒ Integrity stands (not 404).
+    assert!(matches!(
+        a.read_object(&reader, &w, &s, x).await,
+        Err(AuthorityError::Integrity(_))
+    ));
 }
 
 // ── the pointer-move write (`set-current`): genesis · publish · revert · the gate · interleavings ──────
@@ -3482,4 +3532,1185 @@ async fn a_non_canonical_uuid_op_id_is_rejected() {
             .unwrap()
             .is_none()
     );
+}
+
+// ── the contribute authority end-to-end: publish --propose · review --approve|--reject (the write paths) ──
+//
+// These drive the REAL propose/approve/reject through `Authority` (and the shared `set_current::propose`)
+// against a live SQLite + git store — the write paths that PRODUCE the proposal/approval rows the gated GC +
+// read arms above consume. A test acts as the client device, signing each device-op over the SERVER-rehashed
+// candidate values exactly as the transaction reconstructs them.
+
+/// The commit `current` points at for a skill (the parent for the next candidate).
+async fn current_commit(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> CommitId {
+    fx.authority
+        .db()
+        .read_current_commit(w, s)
+        .await
+        .unwrap()
+        .expect("a current pointer")
+}
+
+/// Ingest + migrate + sign(PublishPropose) + open the proposal; returns (receipt, candidate commit, digest).
+#[allow(clippy::too_many_arguments)]
+async fn do_propose(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id_str: &str,
+    candidate: CandidateUpload,
+    expected: Generation,
+) -> (crate::SetCurrentReceipt, CommitId, [u8; 32]) {
+    let (staged, device) = prepare(
+        fx,
+        key,
+        dkid,
+        ws,
+        skill,
+        DeviceOp::PublishPropose,
+        op_id_str,
+        candidate,
+        expected,
+    )
+    .await;
+    let r =
+        crate::set_current::propose(&fx.authority, ws, skill, &staged, &device, CREATED_AT, NOW)
+            .await
+            .unwrap();
+    (r, staged.version_id, staged.bundle_digest)
+}
+
+/// Sign a `review --approve` over the proposal's (commit, digest, base) and run it through the public API.
+#[allow(clippy::too_many_arguments)]
+async fn do_approve(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id_str: &str,
+    commit: CommitId,
+    digest: [u8; 32],
+    base: Generation,
+) -> crate::SetCurrentReceipt {
+    let op_id = op(op_id_str);
+    let sig = sign_op(
+        key,
+        dkid,
+        ws,
+        skill,
+        DeviceOp::ReviewApprove,
+        &op_id,
+        base,
+        commit.0,
+        digest,
+    );
+    let device = DeviceSignedOp {
+        device_key_id: dkid.to_owned(),
+        op: DeviceOp::ReviewApprove,
+        signature: sig,
+        expected: base,
+    };
+    fx.authority
+        .review_approve(ws, skill, commit, device, &op_id, CREATED_AT, NOW)
+        .await
+        .unwrap()
+}
+
+/// Sign a `review --reject` over the proposal's (commit, digest, base) and run it through the public API.
+#[allow(clippy::too_many_arguments)]
+async fn do_reject(
+    fx: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    dkid: &str,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    op_id_str: &str,
+    commit: CommitId,
+    digest: [u8; 32],
+    base: Generation,
+) -> crate::SetCurrentReceipt {
+    let op_id = op(op_id_str);
+    let sig = sign_op(
+        key,
+        dkid,
+        ws,
+        skill,
+        DeviceOp::ReviewReject,
+        &op_id,
+        base,
+        commit.0,
+        digest,
+    );
+    let device = DeviceSignedOp {
+        device_key_id: dkid.to_owned(),
+        op: DeviceOp::ReviewReject,
+        signature: sig,
+        expected: base,
+    };
+    fx.authority
+        .review_reject(ws, skill, commit, device, &op_id, CREATED_AT)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn propose_opens_a_proposal_without_moving_current() {
+    let fx = Fixture::new("pr-open").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(20);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "20000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let before = fx.authority.read_signed_record(&w, &s).await.unwrap();
+
+    let unique = b"a brand new reference doc";
+    let (r, _cp, _d) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "20000000-0000-4000-8000-000000000002",
+        child(g, vec![file("SKILL.md", b"v0"), file("NEW.md", unique)]),
+        gn(1, 1),
+    )
+    .await;
+
+    // NEEDS_REVIEW, nothing signed, `current` byte-for-byte unchanged (same commit + same signed record).
+    assert_eq!(r.outcome, TerminalOutcome::NeedsReview);
+    assert!(r.signed_record.is_none());
+    assert!(r.current.is_none());
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+    assert_eq!(
+        fx.authority.read_signed_record(&w, &s).await.unwrap(),
+        before
+    );
+
+    // The proposal's UNIQUE object is readable (the proposal read arm) and GC keeps it while open + non-stale.
+    let x = object_id(unique);
+    assert_eq!(
+        fx.authority
+            .read_object(&prin("p_author"), &w, &s, x)
+            .await
+            .unwrap(),
+        unique
+    );
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing() {
+    let fx = Fixture::new("pr-genesis").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(20);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    // No genesis publish: `current` is absent. A `--propose` must fail typed (a proposal needs a base) and
+    // upload nothing — the first version is a direct genesis publish.
+    let device = DeviceSignedOp {
+        device_key_id: "dk".to_owned(),
+        op: DeviceOp::PublishPropose,
+        signature: [0u8; 64],
+        expected: gn(0, 0),
+    };
+    let r = fx
+        .authority
+        .propose(
+            &w,
+            &s,
+            &op("20000000-0000-4000-8000-000000000099"),
+            genesis(vec![file("SKILL.md", b"v0")]),
+            device,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    assert!(
+        fx.authority
+            .read_signed_record(&w, &s)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_proposal_staled_by_a_publish_then_gc_reclaims_its_unique_object_and_reads_404() {
+    // The keep-set == read-surface crux through the REAL write paths: propose roots a unique object (kept +
+    // readable); a direct publish stales the proposal; GC reclaims the unique object; a read is 404, never Integrity.
+    let fx = Fixture::new("pr-stale-gc").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(21);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "21000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let unique = b"proposed-only bytes";
+    do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "21000000-0000-4000-8000-000000000002",
+        child(g, vec![file("SKILL.md", b"v0"), file("NEW.md", unique)]),
+        gn(1, 1),
+    )
+    .await;
+    let x = object_id(unique);
+    // Kept + readable while open.
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 0);
+    assert!(
+        fx.authority
+            .read_object(&prin("p_author"), &w, &s, x)
+            .await
+            .is_ok()
+    );
+
+    // A direct publish advances `current` → the proposal is now stale.
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "21000000-0000-4000-8000-000000000003",
+        child(g, vec![file("SKILL.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    // The read drops immediately; GC reclaims the now-unrooted unique object; the read stays 404 (not Integrity).
+    assert!(matches!(
+        fx.authority.read_object(&prin("p_author"), &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 1);
+    assert_eq!(
+        fx.authority.db().object_status(&w, x).await.unwrap(),
+        ObjectStatus::Absent
+    );
+    assert!(matches!(
+        fx.authority.read_object(&prin("p_author"), &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn propose_then_approve_promotes_sideways_and_replays_idempotently() {
+    let fx = Fixture::new("pr-approve").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(22);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "22000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let unique = b"approved reference";
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "22000000-0000-4000-8000-000000000002",
+        child(g, vec![file("SKILL.md", b"v0"), file("NEW.md", unique)]),
+        gn(1, 1),
+    )
+    .await;
+
+    // Approve promotes sideways: current advances (1,1)->(1,2), signed; the candidate becomes `current`.
+    let r = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "22000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(r.is_ok());
+    assert_eq!(r.current, Some(gn(1, 2)));
+    assert!(r.signed_record.is_some());
+    assert_eq!(current_commit(&fx, &w, &s).await, cp);
+
+    // The handoff: the once-proposal-only object is now TRUNK-rooted (commit_object) — survives GC, stays read.
+    let x = object_id(unique);
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 0);
+    assert!(
+        fx.authority
+            .read_object(&prin("p_author"), &w, &s, x)
+            .await
+            .is_ok()
+    );
+
+    // A same-op_id replay returns the byte-identical receipt (no second promote).
+    let replay = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "22000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(replay, r);
+    assert_eq!(current_commit(&fx, &w, &s).await, cp);
+}
+
+#[tokio::test]
+async fn interleaving_b_a_stale_approve_conflicts_then_rebase_and_approve_succeeds() {
+    let fx = Fixture::new("pr-interleave-b").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(23);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let c0 = current_commit(&fx, &w, &s).await;
+    // Propose p1 on base (1,1).
+    let (_, p1, d1) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000002",
+        child(c0, vec![file("a.md", b"p1")]),
+        gn(1, 1),
+    )
+    .await;
+    // A direct publish advances `current` to (1,2): p1 is now STALE.
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000003",
+        child(c0, vec![file("a.md", b"maya")]),
+        gn(1, 1),
+    )
+    .await;
+    let c1 = current_commit(&fx, &w, &s).await;
+    // Approve p1 at its stale base (1,1) ⇒ CONFLICT carrying the live generation — NOT a DENIED, NOT a promote.
+    let conflict = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000004",
+        p1,
+        d1,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(conflict.outcome, TerminalOutcome::Conflict);
+    assert_eq!(conflict.current, Some(gn(1, 2)));
+    assert_eq!(current_commit(&fx, &w, &s).await, c1);
+
+    // Rebase: propose p2 on the NEW tip (base (1,2)); approve p2 ⇒ OK (current -> (1,3)).
+    let (_, p2, d2) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000005",
+        child(c1, vec![file("a.md", b"p1-rebased")]),
+        gn(1, 2),
+    )
+    .await;
+    let ok = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "23000000-0000-4000-8000-000000000006",
+        p2,
+        d2,
+        gn(1, 2),
+    )
+    .await;
+    assert!(ok.is_ok());
+    assert_eq!(ok.current, Some(gn(1, 3)));
+    assert_eq!(current_commit(&fx, &w, &s).await, p2);
+}
+
+#[tokio::test]
+async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_matches_the_base() {
+    // …X(beta)->Y(gamma); revert --to X makes current.tree == X.tree == the proposal's base tree, yet the
+    // generation advanced. A late approve at the stale base must CONFLICT — a digest-only CAS would wrongly
+    // accept (current.tree == base.tree); the whole-(epoch,seq) CAS catches it.
+    let fx = Fixture::new("pr-interleave-c").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(24);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    // X (beta) at (1,1).
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "24000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"beta")]),
+        gn(0, 0),
+    )
+    .await;
+    let x = current_commit(&fx, &w, &s).await;
+    // Propose Q on base X (1,1).
+    let (_, q, dq) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "24000000-0000-4000-8000-000000000002",
+        child(x, vec![file("a.md", b"q-change")]),
+        gn(1, 1),
+    )
+    .await;
+    // Publish Y (gamma) -> (1,2).
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "24000000-0000-4000-8000-000000000003",
+        child(x, vec![file("a.md", b"gamma")]),
+        gn(1, 1),
+    )
+    .await;
+    // Revert --to X -> R(tree=beta, parents=[Y]) -> (1,3). Now current.tree == beta == Q's base tree.
+    let rop = op("24000000-0000-4000-8000-000000000004");
+    let rsig = sign_revert(&fx, &key, "dk", &w, &s, x, &rop, gn(1, 2)).await;
+    let rdev = DeviceSignedOp {
+        device_key_id: "dk".to_owned(),
+        op: DeviceOp::Revert,
+        signature: rsig,
+        expected: gn(1, 2),
+    };
+    let rev = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            x,
+            rdev,
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rev.current, Some(gn(1, 3)));
+
+    // Approve Q at its stale base (1,1) ⇒ CONFLICT (live (1,3)), even though the live tree now matches beta.
+    let conflict = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "24000000-0000-4000-8000-000000000005",
+        q,
+        dq,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(conflict.outcome, TerminalOutcome::Conflict);
+    assert_eq!(conflict.current, Some(gn(1, 3)));
+}
+
+#[tokio::test]
+async fn approving_an_already_accepted_proposal_conflicts_and_never_promotes_twice() {
+    let fx = Fixture::new("pr-double-approve").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(25);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "25000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "25000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    let ok = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "25000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(ok.is_ok());
+    // A DIFFERENT op_id approving the already-accepted (Cp, base) ⇒ typed CONFLICT (current moved), no 2nd promote.
+    let again = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "25000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(again.outcome, TerminalOutcome::Conflict);
+    assert_eq!(current_commit(&fx, &w, &s).await, cp);
+}
+
+#[tokio::test]
+async fn four_eyes_blocks_self_approve_only_under_review_required() {
+    let fx = Fixture::new("pr-4eyes-on").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let author = dev_key(26);
+    let reviewer = dev_key(27);
+    register(&fx, &w, &s, "dk_author", &author, "p_author").await;
+    register(&fx, &w, &s, "dk_reviewer", &reviewer, "p_reviewer").await;
+    fx.authority
+        .db()
+        .set_review_required(&w, true)
+        .await
+        .unwrap();
+    // Genesis (a genesis publish bypasses the gate — someone must create the first version).
+    publish(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "26000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "26000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    // The proposer self-approving under review_required ⇒ DENIED (four-eyes); `current` unmoved.
+    let denied = do_approve(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "26000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(denied.outcome, TerminalOutcome::Denied);
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+    // A SECOND actor approves ⇒ OK.
+    let ok = do_approve(
+        &fx,
+        &reviewer,
+        "dk_reviewer",
+        &w,
+        &s,
+        "26000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(ok.is_ok());
+}
+
+#[tokio::test]
+async fn a_solo_author_may_self_approve_when_review_required_is_off() {
+    let fx = Fixture::new("pr-4eyes-off").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let author = dev_key(28);
+    register(&fx, &w, &s, "dk", &author, "p_author").await;
+    // review_required is OFF (the default) — a deferred self-publish is allowed.
+    publish(
+        &fx,
+        &author,
+        "dk",
+        &w,
+        &s,
+        "28000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &author,
+        "dk",
+        &w,
+        &s,
+        "28000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    let ok = do_approve(
+        &fx,
+        &author,
+        "dk",
+        &w,
+        &s,
+        "28000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "self-approve is allowed with review_required off"
+    );
+    assert_eq!(current_commit(&fx, &w, &s).await, cp);
+}
+
+#[tokio::test]
+async fn a_staled_then_gc_reclaimed_proposal_approve_conflicts_not_integrity() {
+    // After a proposal stales AND GC reclaims its unique bytes, a late approve must be a clean CONFLICT — the
+    // pre-transaction render fault is classified as stale (current moved), never surfaced as a corruption alarm.
+    let fx = Fixture::new("pr-stale-approve").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(29);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "29000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "29000000-0000-4000-8000-000000000002",
+        child(
+            g,
+            vec![file("a.md", b"v0"), file("NEW.md", b"unique-proposed")],
+        ),
+        gn(1, 1),
+    )
+    .await;
+    // Stale it, then GC reclaims its unique object.
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "29000000-0000-4000-8000-000000000003",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 1);
+    // The approve at the stale base ⇒ CONFLICT (Ok value), NOT an Integrity error.
+    let conflict = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "29000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(conflict.outcome, TerminalOutcome::Conflict);
+}
+
+#[tokio::test]
+async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims() {
+    let fx = Fixture::new("pr-reject").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(40);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "40000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let unique = b"rejected-only bytes";
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "40000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v0"), file("NEW.md", unique)]),
+        gn(1, 1),
+    )
+    .await;
+    let x = object_id(unique);
+    assert!(
+        fx.authority
+            .read_object(&prin("p_author"), &w, &s, x)
+            .await
+            .is_ok()
+    );
+
+    // Reject ⇒ OK (a reject success carries no pointer data); `current` untouched, nothing signed.
+    let r = do_reject(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "40000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(r.outcome, TerminalOutcome::Ok);
+    assert!(r.signed_record.is_none());
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+
+    // The rejected proposal's unique object is no longer readable and GC reclaims it.
+    assert!(matches!(
+        fx.authority.read_object(&prin("p_author"), &w, &s, x).await,
+        Err(AuthorityError::NotFound)
+    ));
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 1);
+    assert_eq!(
+        fx.authority.db().object_status(&w, x).await.unwrap(),
+        ObjectStatus::Absent
+    );
+}
+
+#[tokio::test]
+async fn rejecting_an_already_rejected_proposal_is_idempotent_and_approve_after_reject_is_typed() {
+    let fx = Fixture::new("pr-reject-idem").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(41);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    do_reject(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    // A reject under a NEW op_id of the already-rejected proposal ⇒ idempotent OK.
+    let again = do_reject(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(again.outcome, TerminalOutcome::Ok);
+    // And an approve after a reject ⇒ typed DENIED (no open proposal, base still fresh), never a promote.
+    let approve = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000005",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(approve.outcome, TerminalOutcome::Denied);
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+}
+
+#[tokio::test]
+async fn an_unrostered_principal_cannot_reject() {
+    let fx = Fixture::new("pr-reject-authz").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let author = dev_key(42);
+    let stranger = dev_key(43);
+    register(&fx, &w, &s, "dk_author", &author, "p_author").await;
+    // The stranger's device is registered but NOT rostered for the skill.
+    fx.authority
+        .db()
+        .seed_device(
+            &w,
+            "dk_stranger",
+            &stranger.verifying_key().to_bytes(),
+            &prin("p_stranger"),
+            false,
+        )
+        .await
+        .unwrap();
+    publish(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "42000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "42000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    // The unrostered stranger's reject ⇒ DENIED; the proposal stays open (its object still readable).
+    let denied = do_reject(
+        &fx,
+        &stranger,
+        "dk_stranger",
+        &w,
+        &s,
+        "42000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(denied.outcome, TerminalOutcome::Denied);
+    // The author (rostered) can still approve it (it was never rejected).
+    let ok = do_approve(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "42000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(ok.is_ok());
+}
+
+#[tokio::test]
+async fn the_review_required_loop_direct_is_approval_required_propose_needs_review_approve_ok() {
+    // Under review_required a DIRECT publish is APPROVAL_REQUIRED (the dead-end), an explicit --propose is
+    // NEEDS_REVIEW (the remedy), and a second-actor approve promotes — never confusing the two outcomes.
+    let fx = Fixture::new("pr-rr-loop").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let author = dev_key(44);
+    let reviewer = dev_key(45);
+    register(&fx, &w, &s, "dk_author", &author, "p_author").await;
+    register(&fx, &w, &s, "dk_reviewer", &reviewer, "p_reviewer").await;
+    fx.authority
+        .db()
+        .set_review_required(&w, true)
+        .await
+        .unwrap();
+    // Genesis bypasses the gate.
+    publish(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "44000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    // A non-genesis DIRECT publish ⇒ APPROVAL_REQUIRED (the gate; uploads nothing readable, current unmoved).
+    let (staged, device) = prepare(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "44000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"direct")]),
+        gn(1, 1),
+    )
+    .await;
+    let direct =
+        crate::set_current::publish(&fx.authority, &w, &s, &staged, &device, CREATED_AT, NOW)
+            .await
+            .unwrap();
+    assert_eq!(direct.outcome, TerminalOutcome::ApprovalRequired);
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+    // The remedy: an explicit --propose ⇒ NEEDS_REVIEW.
+    let (p, cp, digest) = do_propose(
+        &fx,
+        &author,
+        "dk_author",
+        &w,
+        &s,
+        "44000000-0000-4000-8000-000000000003",
+        child(g, vec![file("a.md", b"proposed")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(p.outcome, TerminalOutcome::NeedsReview);
+    // A second actor approves ⇒ OK.
+    let ok = do_approve(
+        &fx,
+        &reviewer,
+        "dk_reviewer",
+        &w,
+        &s,
+        "44000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(ok.is_ok());
+    assert_eq!(ok.current, Some(gn(1, 2)));
+}
+
+#[tokio::test]
+async fn the_proposals_table_rejects_out_of_range_generations() {
+    // SF-4: the safe-integer CHECK pins every stored (epoch, seq) to the JCS ceiling a follower could verify.
+    let fx = Fixture::new("pr-safeint").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let over = fx
+        .authority
+        .db()
+        .seed_proposal(
+            &w,
+            "p-overflow",
+            &s,
+            CommitId([0xC0; 32]),
+            CommitId([0xB0; 32]),
+            i64::MAX,
+            1,
+            "open",
+            &prin("p_author"),
+        )
+        .await;
+    assert!(
+        over.is_err(),
+        "an out-of-range base_epoch must violate the CHECK"
+    );
+}
+
+#[tokio::test]
+async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable() {
+    // The pointer-move's in-transaction authorization (the roster check) replaces the retired upload's
+    // roster gate: a registered-but-unrostered device migrates its candidate but cannot promote it, and
+    // records no commit_object — so the object is unreadable.
+    let fx = Fixture::new("authz-unrostered").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(50);
+    fx.authority
+        .db()
+        .seed_device(
+            &w,
+            "dk",
+            &key.verifying_key().to_bytes(),
+            &prin("p_stranger"),
+            false,
+        )
+        .await
+        .unwrap();
+    let body = b"injected";
+    let (staged, device) = prepare(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "50000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", body)]),
+        gn(0, 0),
+    )
+    .await;
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &staged, &device, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    fx.authority
+        .db()
+        .seed_roster(&w, &s, &prin("p_reader"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        fx.authority
+            .read_object(&prin("p_reader"), &w, &s, object_id(body))
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn a_publish_cannot_adopt_another_skills_commit() {
+    // The cross-skill adoption guard, in the SHARED write body (so it covers publish / propose / approve
+    // alike): a content-addressed commit belongs to exactly one skill, so re-creating its identical bytes
+    // under another skill is refused — even by a principal rostered for both.
+    let fx = Fixture::new("authz-xskill").await;
+    let (w, x, y) = (ws("w_acme"), skill("s_x"), skill("s_y"));
+    let key = dev_key(51);
+    register(&fx, &w, &x, "dk", &key, "p_dev").await;
+    register(&fx, &w, &y, "dk", &key, "p_dev").await;
+    // X creates genesis commit C (owned by X).
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &x,
+        "51000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"shared")]),
+        gn(0, 0),
+    )
+    .await;
+    // Y migrates the IDENTICAL bytes → the same commit C; promoting it under Y is denied (it is X's commit).
+    let (staged, device) = prepare(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &y,
+        DeviceOp::PublishDirect,
+        "51000000-0000-4000-8000-000000000002",
+        genesis(vec![file("a.md", b"shared")]),
+        gn(0, 0),
+    )
+    .await;
+    let r = crate::set_current::publish(&fx.authority, &w, &y, &staged, &device, CREATED_AT, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
 }

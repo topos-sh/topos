@@ -19,11 +19,17 @@
 //!   the object — and yields a witness commit; the bytes are then read + re-verified from the store.
 //!   Every not-entitled/not-found case returns one indistinguishable not-found; objects are never
 //!   served by bare hash.
-//! - **Full-tree upload + server rehash** ([`Authority::upload_candidate`]). The server recomputes
-//!   every id from the uploaded bytes (no client id is trusted; no reference-by-id), applies the
-//!   canonical rules, writes the objects, and records provenance + reachability only after an
-//!   authoritative roster check — in one transaction. Dedup is invisible. No pointer is moved.
-//! - **The cross-skill lineage predicate** ([`Authority::check_lineage`]) — built read-only here.
+//! - **The pointer-move writes** ([`Authority::publish`] / [`Authority::revert`]) and the **contribute
+//!   writes** ([`Authority::propose`] / [`Authority::review_approve`] / [`Authority::review_reject`]). A
+//!   candidate is always ingested + migrated (full-tree upload, server rehash — no client id is trusted, no
+//!   reference-by-id — the canonical rules, a GC-excluded quarantine, lease-before-migrate, server-side
+//!   dedup, durable install), then one `BEGIN IMMEDIATE` pure-DB transaction advances `current` under a
+//!   whole-`(epoch, seq)` compare-and-set (publish/revert/approve) or opens a gated proposal (propose),
+//!   signs the new pointer, and writes a durable all-outcome receipt. `commit_object` is written ONLY by the
+//!   accepted-trunk path (publish/revert/approve); a proposal roots its bytes through `proposal_object`,
+//!   gated for both retention and read on `open ∧ non-stale`.
+//! - **The cross-skill lineage predicate** ([`Authority::check_lineage`]) — a read-only gather + the pure
+//!   decision; the pointer-move enforces the same rule transactionally.
 //! - **The DB-authoritative object-lifecycle / garbage-collection fence.** A GC-excluded upload
 //!   quarantine; the fenced `object_presence` compare-and-swap state machine
 //!   (`present`/`deleting`/`absent`/`unavailable`, a `deleting` object non-resurrectable); promotion leases
@@ -42,9 +48,8 @@
 //! ## Deliberately not here yet
 //!
 //! The large-object store's S3-compatible remote backend + online backfill (additive, client-invisible), the
-//! pointer-move write (compare-and-set, the in-process signer, durable receipts), the HTTP surface,
-//! identity/roster issuance, and Postgres are later work. The `current` pointer table is created and seedable
-//! but never moved; nothing is signed.
+//! HTTP surface (these writes are exercised in-process only), real identity/roster/device issuance (the
+//! registry is fixture-seeded), at-rest key encryption, the `purge` verb, and Postgres are later work.
 
 mod authority;
 mod error;
@@ -56,10 +61,10 @@ mod signer;
 mod sqlite;
 mod upload;
 
-// The object-lifecycle fence (quarantine ingest, lease-before-migrate, the 3-phase GC, recovery + janitor)
-// is built behind the privacy boundary and exercised by the in-crate tests, but it is wired to NO public
-// verb this increment — the pointer-move write that drives it lands later. So in a non-test build its
-// `pub(crate)` ops are legitimately unreferenced; the lint stays active under `test`, where they are used.
+// The object-lifecycle fence: `ingest`/`migrate` now drive the publish/propose writes, but the GC pass,
+// recovery sweep, and quarantine janitor are scheduler-driven (the composing server owns scheduling — this
+// library holds none), so they are legitimately unreferenced in a non-test production build; the lint stays
+// active under `test`, where the in-crate tests exercise every path. (Same for the decomposed migrate steps.)
 #[cfg_attr(not(test), allow(dead_code))]
 mod gc;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -73,7 +78,7 @@ pub use error::{AuthorityError, Result};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
-pub use upload::{CandidateUpload, UploadReceipt, UploadedFile};
+pub use upload::{CandidateUpload, UploadedFile};
 
 /// Re-exported for constructing [`UploadedFile`]s — the two regular-file modes the kernel allows.
 pub use topos_core::digest::FileMode;
