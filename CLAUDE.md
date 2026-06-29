@@ -24,8 +24,22 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > over `gix`, with verify-on-read), the crash-safe document protocol, the bundle scanner, and the local verbs
 > (`add`/`list`/`diff`/`log`/`pull`/`uninstall`). The **Claude Code harness adapter** is built too: discovery,
 > adopt-in-place (track a skill where it sits, writing nothing into it), the idempotent content-blind
-> session-start currency hook in `settings.json`, and a clean (skill-byte-preserving) uninstall — `pull` is a
-> no-op skeleton the hook runs until the sync engine lands. The **plane's storage + read authority**
+> session-start currency hook in `settings.json`, and a clean (skill-byte-preserving) uninstall. The
+> **client pull/apply sync engine** is now built too: the `checkForUpdates → plan → apply` machine over the
+> pure four-state currency transition (in `topos-core`), reading a signed `current` pointer through a
+> source seam, authenticating its signature + workspace/skill scope, holding the **anti-rollback floor**
+> (`observed` rises only on a verified strictly-higher record; a record at or below the floor is never
+> auto-applied, and one naming a different commit than recorded raises a loud ALARM), snapshotting a local
+> draft before any decision (never clobbered — a divergence is detected + surfaced, not merged), fetching +
+> re-verifying the bytes (digest == tree == `commit_id`) and recording them durably (backfilling missing
+> ancestors) before a **crash-safe, namespace-atomic byte-writing materialization** (a sibling staging dir
+> → fsync → atomic directory swap → fsync parent → `map → lock → sync` commit, so a fault at any boundary
+> leaves the placement holding old-or-new complete bytes and `applied` advances only after the swap; a
+> crash-after-swap heals forward rather than showing a false divergence). `pull <skill>` accepts a pending
+> update and `pull <skill>@<hash>` goes back to a version locally (a `held` pin that never lowers the
+> floor). Consent stays the kernel's one `decide()` policy. The plane response + follow-state are
+> **fixture-fed** in-process this increment (no HTTP, no `plane-store` edge — `check-arch` holds the line;
+> production follows nothing, so the bare `pull` is an honest no-op). The **plane's storage + read authority**
 > (`plane-store`) is now built behind its privacy boundary: per-workspace SQLite + git-object storage; the
 > skill-scoped object-read access rule (rostered ∧ reachable, one indistinguishable not-found, never served by
 > bare hash); full-tree upload with server rehash that records provenance + reachability only after an
@@ -61,11 +75,12 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > direct publish closed (`APPROVAL_REQUIRED`, ingesting nothing). It is exercised **in-process** (no HTTP, no
 > client) by deterministic interleaving tests. Still to come: the large-object store's **S3-compatible remote
 > backend + online backfill** (additive, client-invisible); the **propose → review-approve promotion** (the
-> immediate follow-on; the typed gate is the only review surface so far); the HTTP plane; at-rest key
-> encryption; the four-state sync machine + the `pull` engine; the byte-writing materialization (the atomic
-> dir-swap that an *update* uses to overwrite a harness dir); the OpenClaw/Hermes adapters; identity/roster +
-> device issuance; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the client build —
-> `check-arch` forbids that edge); `axum` stays declared but unreferenced until the HTTP plane lands.
+> immediate follow-on; the typed gate is the only review surface so far); the HTTP plane (the transport
+> that feeds the now-built client pull engine real responses); at-rest key encryption; the **diff3 3-way
+> merge** that resolves a detected DIVERGED draft; `follow`/enrollment + identity/roster + device issuance;
+> the OpenClaw/Hermes adapters; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the
+> client build — `check-arch` forbids that edge); `axum` stays declared but unreferenced until the HTTP
+> plane lands.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
