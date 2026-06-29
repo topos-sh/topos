@@ -957,7 +957,7 @@ async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end() {
     // Abandon the migrate so the object is genuinely unrooted — only such an object can be GC-claimed, so
     // this is the realistic precondition for a crashed GC (the recovery claim now re-verifies the keep-set,
     // so a still-rooted `deleting` row is spared, not finalized — see
-    // `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge`).
+    // `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge`).
     a.db().release_lease(&w, &op("op")).await.unwrap();
     // Simulate a GC that claimed the object (present → deleting) long ago, then crashed before finalizing.
     a.db()
@@ -1126,7 +1126,7 @@ async fn recovery_finalizes_a_leased_deleting_row_to_unblock_a_waiting_migrate()
     // A migrate that hits a crashed-GC's stale `deleting` row leases its full object set (including this
     // object) BEFORE `install_one` waits for `absent`. Recovery MUST still finalize the stale row to unblock
     // that waiter — a lease over a `deleting` object means "waiting to re-install", not "readable" (only a
-    // `commit_object` edge spares; see `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_legacy_edge`).
+    // `commit_object` edge spares; see `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge`).
     // Regression: a recovery guard that also checked the lease would strand the migrate until the lease TTL
     // lapsed.
     let fx = Fixture::new("e-recover-leased").await;
@@ -4713,4 +4713,140 @@ async fn a_publish_cannot_adopt_another_skills_commit() {
         .await
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
+}
+
+#[tokio::test]
+async fn approve_after_reject_then_gc_is_denied_not_integrity() {
+    // After a proposal is rejected AND a GC reclaims its now-unrooted unique bytes — while `current` is still
+    // at the base (reject moves no pointer) — an approve's pre-transaction render faults over the missing
+    // bytes. It must NOT surface as Integrity (a 500 / no receipt): the proposal is no longer open, so the
+    // bytes were LEGITIMATELY reclaimed, and the transaction must produce a typed, receipted DENIED.
+    let fx = Fixture::new("pr-reject-gc-approve").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(46);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "46000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let unique = b"reject-then-gc bytes";
+    let (_, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "46000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"v0"), file("NEW.md", unique)]),
+        gn(1, 1),
+    )
+    .await;
+    do_reject(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "46000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    // The rejected proposal's unique object is now unrooted — GC reclaims it (current still at the base).
+    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 1);
+    // The approve renders a now-missing object, but the proposal is no longer open ⇒ a typed DENIED, not Integrity.
+    let r = do_approve(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "46000000-0000-4000-8000-000000000004",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+}
+
+#[tokio::test]
+async fn revert_to_a_proposal_commit_is_refused_so_it_cannot_bypass_review() {
+    // A proposal commit carries a `skill_commit` provenance row (so its digest resolves) but NO `commit_object`
+    // root — it is not an accepted version. Reverting to it would forward-promote its un-reviewed tree past the
+    // review gate + four-eyes (revert bypasses both). The accepted-trunk gate must refuse it, leaving `current`
+    // unmoved and never serving the proposal's bytes.
+    let fx = Fixture::new("pr-revert-proposal").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(52);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    fx.authority
+        .db()
+        .set_review_required(&w, true)
+        .await
+        .unwrap();
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "52000000-0000-4000-8000-000000000001",
+        genesis(vec![file("a.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    // Propose un-reviewed bytes (never accepted).
+    let (_, cp, _digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "52000000-0000-4000-8000-000000000002",
+        child(g, vec![file("a.md", b"un-reviewed")]),
+        gn(1, 1),
+    )
+    .await;
+    // revert --to <the proposal commit> ⇒ PERMANENT_FAILURE; `current` must NOT advance to the proposal's tree.
+    let rop = op("52000000-0000-4000-8000-000000000003");
+    let rsig = sign_revert(&fx, &key, "dk", &w, &s, cp, &rop, gn(1, 1)).await;
+    let rdev = DeviceSignedOp {
+        device_key_id: "dk".to_owned(),
+        op: DeviceOp::Revert,
+        signature: rsig,
+        expected: gn(1, 1),
+    };
+    let r = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            cp,
+            rdev,
+            "d_test",
+            "topos revert",
+            &rop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    assert_eq!(
+        current_commit(&fx, &w, &s).await,
+        g,
+        "current must stay at genesis, never the un-reviewed proposal tree"
+    );
 }

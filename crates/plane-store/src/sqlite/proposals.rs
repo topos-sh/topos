@@ -113,6 +113,39 @@ impl Db {
             object_ids,
         }))
     }
+
+    /// Whether an OPEN proposal exists for `(ws, skill, commit, base)` (a pool read). The approve path uses it
+    /// to classify a pre-transaction render fault: a fault while a still-open, non-stale proposal is the
+    /// target is genuine corruption (a crash lost the bytes the gate was protecting); a fault while the
+    /// proposal is no longer open (rejected/accepted) — and its unique bytes were therefore legitimately GC-
+    /// reclaimed — is NOT corruption, so the transaction is left to produce the typed `DENIED`/`CONFLICT`.
+    pub(crate) async fn open_proposal_exists(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+        base: Generation,
+    ) -> Result<bool> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        let cid = commit.0.as_slice();
+        let base_epoch = u64_to_i64(base.epoch)?;
+        let base_seq = u64_to_i64(base.seq)?;
+        let row = sqlx::query!(
+            r#"SELECT 1 AS "one!: i64" FROM proposals
+               WHERE workspace_id = ?1 AND skill_id = ?2 AND commit_id = ?3
+                 AND base_epoch = ?4 AND base_seq = ?5 AND status = 'open'"#,
+            ws_s,
+            skill_s,
+            cid,
+            base_epoch,
+            base_seq,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.is_some())
+    }
 }
 
 /// Insert a fresh `open` proposal (provenance — `skill_commit` — must already be written: the foreign key).
@@ -177,6 +210,29 @@ pub(super) async fn insert_proposal_object(
     .await
     .map_err(AuthorityError::internal)?;
     Ok(())
+}
+
+/// Whether a proposal row already exists under this op_id (the `proposals` PK is `(workspace_id, id=op_id)`).
+/// `propose` checks this under the write lock before inserting: a SAME-device op_id retry replays at the
+/// receipt layer before reaching here, so a hit means a DIFFERENT device minted the same op_id (a ~122-bit
+/// UUIDv4 collision) — preempted as a typed, receipted terminal rather than a non-receipted PK-violation
+/// `Internal`. (Widening the PK to include `device_key_id` would ripple into the FK + the triply-duplicated
+/// retention predicate, so the workspace-unique op_id is relied on instead, with this guard as the backstop.)
+pub(super) async fn proposal_id_exists(
+    tx: &mut Transaction<'_, Sqlite>,
+    ws: &WorkspaceId,
+    id: &str,
+) -> Result<bool> {
+    let ws_s = ws.as_str();
+    let row = sqlx::query!(
+        r#"SELECT 1 AS "one!: i64" FROM proposals WHERE workspace_id = ?1 AND id = ?2"#,
+        ws_s,
+        id,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(row.is_some())
 }
 
 /// Read the OPEN proposal for `(ws, skill, commit, base)` while holding the write lock (the in-transaction

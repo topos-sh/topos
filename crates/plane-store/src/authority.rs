@@ -211,6 +211,21 @@ impl Authority {
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        // A revert must be signed as exactly `Revert` (mirroring the publish/propose/review guards): a
+        // mismatched op would otherwise mis-route into the promote arms. Reject it before constructing the
+        // forward commit, recording nothing.
+        if !matches!(device.op, topos_core::sign::DeviceOp::Revert) {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "a revert must be signed as Revert",
+            )
+            .await;
+        }
         crate::set_current::revert(
             self, ws, skill, good, &device, author, message, op_id, created_at, now,
         )

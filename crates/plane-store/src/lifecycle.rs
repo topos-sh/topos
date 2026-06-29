@@ -1,8 +1,7 @@
 //! The object-lifecycle orchestration — quarantine ingest + lease-before-migrate-into-git, built over the
-//! DB transitions (`mod sqlite`) and the dumb git fence primitives (`topos-gitstore`). These are the
-//! directly-testable `pub(crate)` ops the fence is exercised through; the legacy `upload_candidate` write
-//! path is left untouched (so GC, which acts only on objects with an `object_presence` row, never reclaims
-//! a legacy straight-to-git blob).
+//! DB transitions (`mod sqlite`) and the dumb git fence primitives (`topos-gitstore`). `ingest` + `migrate`
+//! are the entry the publish/propose/revert writes share; every object that reaches the main store does so
+//! through this path, so it carries an `object_presence` row (the sole presence authority GC acts over).
 //!
 //! Steps map to the crash-safe publication protocol: **A/B (ingest)** open a GC-excluded quarantine and
 //! stage + rehash + denylist-check the candidate; **D (migrate)** lease the commit's FULL object set, then

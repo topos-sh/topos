@@ -178,6 +178,10 @@ pub(crate) async fn revert(
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
+    debug_assert!(
+        matches!(device.op, DeviceOp::Revert),
+        "set_current::revert requires a Revert device op"
+    );
     let command = device_op_command(device.op);
 
     // good's tree digest (recorded on its provenance row; render needs a KNOWN digest, so it cannot
@@ -248,6 +252,33 @@ pub(crate) async fn revert(
     // good's object set (from its reachability edges — no git_oid reverse-map) + its tree structure
     // (path, mode, git_oid) for the durable commit. Both come from already-recorded, present state.
     let object_ids = authority.db().commit_object_ids(ws, good).await?;
+
+    // A revert may target ONLY an ACCEPTED version — one rooted on `commit_object`. `propose` records a
+    // `skill_commit` provenance row (+ digest) for its candidate but roots its bytes via `proposal_object`,
+    // NEVER `commit_object` — so an empty trunk object set means `good` is a proposal (or otherwise
+    // un-accepted) commit. Forward-promoting its tree would smuggle un-reviewed bytes past the review gate +
+    // four-eyes (revert bypasses both) and strand `current` over immediately-GC-reclaimable bytes (the forward
+    // commit roots nothing). Refuse it before constructing anything. (Every real bundle carries >= 1 file —
+    // the no-empty-bundle policy — so an empty `commit_object` set is an exact "not accepted" test.)
+    if object_ids.is_empty() {
+        return authority
+            .db()
+            .record_pretxn(pretxn(
+                ws,
+                &device.device_key_id,
+                op_id.as_str(),
+                command,
+                skill,
+                Some(good),
+                Some(good_digest),
+                device.expected,
+                TerminalOutcome::PermanentFailure,
+                detail_msg("revert target is not an accepted version"),
+                created_at,
+            ))
+            .await;
+    }
+
     let store = authority.store_for_write(ws)?;
     let leaves = store
         .read_tree_structure(good.0)
@@ -451,14 +482,21 @@ pub(crate) async fn review_approve(
 
     // Re-verify the proposal's bytes are renderable BEFORE the transaction — availability (Step E) is DB-only
     // (`status = 'present'`), so a crash that lost a present row's bytes would otherwise promote a missing
-    // version. On a fault, classify by staleness: if the proposal is DEFINITIVELY non-stale (`current.es`
-    // still == base), the bytes are genuinely lost/corrupt ⇒ propagate (Integrity/Internal). If `current` has
-    // moved (or is gone), the proposal is stale and the transaction's compare-and-set returns a clean CONFLICT
-    // — fall through to it rather than surfacing a misleading corruption alarm for a normal stale proposal.
-    if let Err(e) = crate::read::render_version(authority, ws, commit.0, digest).await
-        && authority.db().read_current_generation(ws, skill).await? == Some(base)
-    {
-        return Err(e);
+    // version. On a fault, propagate it as genuine corruption ONLY if the proposal is still LIVE + APPROVABLE
+    // — `open` AND `current.es` still == base — because only then did the gate guarantee its bytes present, so
+    // their loss is a real fault. Otherwise the proposal is stale (current moved ⇒ the transaction's CAS
+    // returns CONFLICT) OR no longer open (rejected/accepted ⇒ its unique bytes were LEGITIMATELY GC-reclaimed,
+    // and the transaction returns DENIED/CONFLICT): fall through and let the transaction produce that typed,
+    // receipted outcome, never a misleading Integrity 500 for a normal approve-after-reject or stale approve.
+    if let Err(e) = crate::read::render_version(authority, ws, commit.0, digest).await {
+        let live = authority.db().read_current_generation(ws, skill).await? == Some(base);
+        let open = authority
+            .db()
+            .open_proposal_exists(ws, skill, commit, base)
+            .await?;
+        if live && open {
+            return Err(e);
+        }
     }
 
     let signer = authority.plane_signer()?;

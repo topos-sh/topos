@@ -10,12 +10,13 @@
 //! a recovery sweep that takes over a frozen pass can never also unlink/finalize the same row (exactly one
 //! actor removes the bytes). Each step is its own short transaction (or none, for the unlink), so the single
 //! SQLite writer is never held across the filesystem op and a concurrent migrate's lease-insert is never
-//! starved. GC acts ONLY on objects with an `object_presence` row — the legacy straight-to-git upload path
-//! (no presence row) is invisible to it.
+//! starved. GC acts ONLY on objects with an `object_presence` row — every migrated object has one, and an
+//! object with no presence row is invisible to it.
 //!
 //! **Recovery sweep:** finalizes a STALE `deleting` (one a crashed GC left behind), each via a one-winner
-//! re-claim that re-verifies the **read-authorization surface at delete time** (no `commit_object` edge), so
-//! a crashed claim's row that the legacy upload path re-rooted before recovery runs is spared, not reclaimed.
+//! re-claim that re-verifies the **read-authorization surface at delete time** (no `commit_object` trunk edge
+//! AND no open-non-stale `proposal_object` root), so a crashed claim's row a commit edge or a pending proposal
+//! re-rooted before recovery runs is spared, not reclaimed.
 //! It deliberately does NOT re-check the lease: a lease over a *`deleting`* object is a migrate WAITING for
 //! recovery to clear it (its `install_one` re-copies once the row reaches `absent`), so sparing it would
 //! strand that waiter — and a lease alone is never readable, so finalizing it loses no readable bytes. Two
@@ -29,14 +30,13 @@
 //!
 //! **The keep-set re-check is at claim time, not the physical unlink.** Both the live claim and the recovery
 //! re-claim re-verify the keep-set inside their transaction, then release the single-writer lock before the
-//! out-of-transaction unlink. A `commit_object` edge committed by the *legacy* `upload_candidate` path
-//! strictly inside that (claim, unlink] window is therefore not re-seen. The live GC closes this by
-//! construction (no `.await`/yield between the claim and the synchronous unlink, so on a single writer
-//! nothing interleaves there); the residual is only a multi-threaded legacy-upload-vs-GC race on identical
-//! content, and it is fail-safe (verify-on-read never serves wrong bytes; any later upload of that
-//! content-addressed blob restores it). The durable closure is the **lease→edge handoff** the go-forward
-//! fenced publish performs (a migrated version's only edge-writer holds its lease across the edge write, and
-//! `claim_for_delete` spares any live-leased object), which supersedes the raw legacy edge-add.
+//! out-of-transaction unlink. The ONLY writer of a `commit_object` edge is the promote/handoff path
+//! (publish/revert/approve), which holds the candidate's lease across the edge write — and `claim_for_delete`
+//! spares any live-leased object — so an edge can never appear in the (claim, unlink] window for an object the
+//! claim just took: the **lease→edge handoff** closes it by construction. A pending proposal's
+//! `proposal_object` root is likewise gated on the live `current` and re-checked at claim time. (The live GC
+//! also has no `.await`/yield between the claim and the synchronous unlink, so on a single writer nothing
+//! interleaves there.)
 //!
 //! **Power-loss note (self-healing):** under WAL + `synchronous = NORMAL` a fsync'd unlink can briefly get
 //! ahead of the not-yet-checkpointed claim/finalize commits, so a crash can leave a `present` row over
@@ -136,10 +136,11 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
         // The stale list is advisory; the per-object claim is the one-winner guard (mirroring run_gc's
         // claim) — it keeps the row `deleting` across the unlink and hands the git locator to exactly one
         // sweeper, so two concurrent recoveries can't both unlink and a migrate can't reinstall mid-sweep.
-        // It ALSO re-verifies the read-authorization surface at delete time (the `commit_object` edge), so a
-        // stale `deleting` row that a legacy `upload_candidate` re-rooted after the crashed claim is spared
-        // rather than unlinked — closing the recovery byte-loss path. (It does NOT re-check the lease: a lease
-        // over a `deleting` object is a waiting migrate recovery must unblock, not a reason to spare.)
+        // It ALSO re-verifies the read-authorization surface at delete time (a `commit_object` trunk edge OR
+        // an open-non-stale `proposal_object` root), so a stale `deleting` row that a promote or a pending
+        // proposal re-rooted after the crashed claim is spared rather than unlinked — closing the recovery
+        // byte-loss path. (It does NOT re-check the lease: a lease over a `deleting` object is a waiting
+        // migrate recovery must unblock, not a reason to spare.)
         for object_id in authority.db().stale_deleting(&ws, older_than).await? {
             // `claim_stale_for_recovery` stamps `status_updated_at = now`, so `now` is THIS sweeper's claim
             // token (the value its finalize/owner-check gate on).

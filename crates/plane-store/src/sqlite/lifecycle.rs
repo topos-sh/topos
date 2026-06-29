@@ -102,15 +102,12 @@ impl Db {
     }
 
     /// The recorded physical [`Location`] of a **`present`** object (a pool read; no transaction). `None`
-    /// means there is no *live* location — no row at all (a legacy straight-to-git object, whose pre-fence
-    /// `upload_candidate` path records no presence row), one never installed, OR a non-`present` row (a
+    /// means there is no *live* location — no row at all, one never installed, OR a non-`present` row (a
     /// reclaimed `absent`/`deleting`/`unavailable` one). The caller treats `None` as `git`. **The
     /// `status = 'present'` filter is load-bearing for reads:** after a large-local object is GC'd its row
-    /// lingers as `absent` with `location = 'large-local'`; if the same bytes are then re-uploaded via the
-    /// legacy git path (which adds a `commit_object` edge but no presence row), an authorized read must NOT
-    /// be routed to the deleted side-store object — `None` here sends it to the git witness instead. Drives
-    /// the migrate dedup-reuse belt (always called on a `present` row, so the filter is transparent there)
-    /// and the single-object read dispatch.
+    /// lingers as `absent` with `location = 'large-local'`; the filter makes this report no live location for
+    /// it, so a read can never be routed to the deleted side-store object. Drives the migrate dedup-reuse belt
+    /// (always called on a `present` row, so the filter is transparent there) and the single-object read dispatch.
     pub(crate) async fn object_location(
         &self,
         ws: &WorkspaceId,
@@ -460,13 +457,13 @@ impl Db {
     /// Re-verifies the **read-authorization surface AT DELETE TIME** — the `commit_object` trunk edge AND the
     /// open-non-stale `proposal_object` root (the same two read arms, verbatim) — exactly as
     /// [`Self::claim_for_delete`] does, so a stale `deleting` row that became read-authorized after the
-    /// crashed claim is spared rather than unlinked. A crashed GC's stale row is NOT guaranteed unrooted: the
-    /// legacy `upload_candidate` path records a `commit_object` edge over identical content without consulting
-    /// `object_presence`, so the row can become readable later; without this guard the recovery unlink would
-    /// reclaim a now-readable, committed object's bytes (byte loss). A re-rooted row is SPARED (left
-    /// `deleting`, its `status_updated_at` un-bumped); since `deleting` is non-resurrectable the bytes stay on
-    /// disk and readable, while a re-migrate of that exact content is the only blocked op (a rare, no-data-loss
-    /// residual the later pointer-move's lease→edge handoff removes).
+    /// crashed claim is spared rather than unlinked. This re-check is DEFENSIVE: the promote/handoff (the only
+    /// `commit_object` writer) holds the candidate's lease across the edge write, so a normally-migrated edge
+    /// never lands on a `deleting` object — but re-verifying at delete time keeps the recovery sweep's keep-set
+    /// == the read surface unconditionally, so a recovery unlink can never reclaim a now-readable object's
+    /// bytes (byte loss). A spared row is left `deleting` (its `status_updated_at` un-bumped); since `deleting`
+    /// is non-resurrectable the bytes stay on disk + readable, while a re-migrate of that exact content is the
+    /// only blocked op (a rare, no-data-loss residual the lease→edge handoff removes).
     ///
     /// Unlike `claim_for_delete`, this deliberately does **NOT** check the promotion lease. A live lease over
     /// a `present` object means "in use, do not reclaim"; but over a *`deleting`* object it means a migrate's

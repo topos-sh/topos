@@ -16,8 +16,8 @@ use topos_types::{
 
 use super::Db;
 use super::proposals::{
-    ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, read_open_proposal,
-    resolve_proposal, set_proposal_status,
+    ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
+    read_open_proposal, resolve_proposal, set_proposal_status,
 };
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
@@ -579,6 +579,12 @@ async fn propose_arm(
     proposer: &Principal,
 ) -> Result<SetCurrentReceipt> {
     let base = input.expected;
+    // A DIFFERENT device minting this op_id (a ~122-bit UUID collision; a same-device retry already replayed
+    // at step 1, before `run` reached here) would PK-collide on the `proposals` row and fault a non-receipted
+    // `Internal`. Preempt it with a typed, receipted permanent failure (which also releases the staged lease).
+    if proposal_id_exists(tx, input.ws, input.op_id).await? {
+        return permanent(tx, input, bound, "op id already names a proposal").await;
+    }
     // Provenance first (the `proposals.commit_id` foreign key targets `skill_commit`).
     insert_skill_commit(
         tx,
