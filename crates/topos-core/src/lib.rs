@@ -15,9 +15,12 @@
 //! - [`sign`]    — the frozen signing/commit byte encodings: `commit_id`, the device-op signature
 //!   frame + verify, and the JCS `current`-pointer preimage + verify. Construction + verify live
 //!   here (the one shared encoder); the concrete `sign` is the caller's, over the same crate.
+//! - [`sync`]    — the pure client sync transition: the four currency states, the anti-rollback floor
+//!   plus the reused-tuple ALARM evaluation, and the post-fetch heal. Pure over explicit values,
+//!   behind a truth-table test.
 //!
-//! Still to land (each behind its golden vector): the `(epoch,seq)` CAS decision, the four-state
-//! sync transition, diff3, and the first-parent / same-skill lineage asserts.
+//! Still to land (each behind its golden vector): the `(epoch,seq)` CAS decision, diff3, and the
+//! first-parent / same-skill lineage asserts.
 #![cfg_attr(not(test), no_std)]
 // Purity AND panic-freedom are enforced by the compiler in production builds: the kernel may not
 // reach `std`, nor `unwrap`/`expect`/`panic!`. Tests keep them (assertions, fixture construction).
@@ -31,3 +34,4 @@ extern crate alloc;
 pub mod consent;
 pub mod digest;
 pub mod sign;
+pub mod sync;

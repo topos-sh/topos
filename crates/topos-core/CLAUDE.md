@@ -13,10 +13,14 @@ Implemented (each behind a known-answer / truth-table test):
 - ✅ the frozen **signing/commit byte-encodings** (`sign`) — the canonical `commit_id` construction, the
   **Ed25519** device-op signature frame + verify, and the JCS `current`-pointer preimage + verify (the
   concrete `sign` lives in the caller, over the same dalek crate).
+- ✅ the **client sync transition** (`sync`) — the four currency states from `work==base?`×`applied==observed?`,
+  the anti-rollback floor + reused-tuple-ALARM evaluation (epoch-dominant generation order), and the
+  post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind a
+  truth-table/matrix test.
 
 Planned (land behind a golden vector as their wire encoding / mechanics freeze):
-- the `(epoch, seq)` compare-and-set *decision*; the four-state sync *transition* fn; diff3 hunk planning;
-  first-parent + same-skill lineage assertions.
+- the `(epoch, seq)` compare-and-set *decision*; diff3 hunk planning; first-parent + same-skill lineage
+  assertions.
 
 ## Hard constraints
 
