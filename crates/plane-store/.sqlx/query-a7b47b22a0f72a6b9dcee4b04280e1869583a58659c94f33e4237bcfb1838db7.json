@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM roster WHERE workspace_id = ?1 AND principal = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a7b47b22a0f72a6b9dcee4b04280e1869583a58659c94f33e4237bcfb1838db7"
+}

@@ -1263,8 +1263,28 @@ async fn governance_mutation_run(
                 GovernanceOutcome::Denied("would remove the last owner")
             } else {
                 let tgt = target.as_str();
+                // Remove the workspace membership AND, in the same transaction, revoke the principal's read
+                // access instantly: drop every per-skill roster grant + read token they hold in this workspace
+                // (the same instant-revoke discipline the device-revoke arm uses). Otherwise a removed member
+                // would keep reading the workspace's skills through their surviving roster rows.
                 sqlx::query!(
                     "DELETE FROM workspace_member WHERE workspace_id = ?1 AND principal = ?2",
+                    ws_s,
+                    tgt,
+                )
+                .execute(&mut **tx)
+                .await
+                .map_err(AuthorityError::internal)?;
+                sqlx::query!(
+                    "DELETE FROM roster WHERE workspace_id = ?1 AND principal = ?2",
+                    ws_s,
+                    tgt,
+                )
+                .execute(&mut **tx)
+                .await
+                .map_err(AuthorityError::internal)?;
+                sqlx::query!(
+                    "DELETE FROM read_token WHERE workspace_id = ?1 AND principal = ?2",
                     ws_s,
                     tgt,
                 )

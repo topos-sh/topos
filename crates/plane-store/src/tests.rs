@@ -5717,6 +5717,59 @@ mod enrollment_and_governance {
     }
 
     #[tokio::test]
+    async fn roster_remove_revokes_the_members_reads() {
+        let fx = Fixture::new("enr-rosterremove").await;
+        let a = &fx.authority;
+        let w = ws("w_acme");
+        let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+        let invite = make_invite(
+            a,
+            &w,
+            &owner_seed,
+            &owner_dk,
+            &op_id(1),
+            "alice@acme.com",
+            "s_deploy",
+        )
+        .await;
+        let device_seed = [13u8; 32];
+        let dpub = device_pub(&device_seed);
+        let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+        let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+            panic!("redeem");
+        };
+        let alice_token = r.read_tokens[0].token.clone();
+        assert!(
+            a.resolve_read_token(&alice_token, NOW).await.is_ok(),
+            "alice can read before she is removed"
+        );
+
+        // The owner removes alice from the workspace roster (DELETE /v1/workspaces/{ws}/roster/{email}).
+        let remove = sign_governance(
+            &owner_seed,
+            w.as_str(),
+            &op_id(2),
+            &owner_dk,
+            GovernanceOp::RosterRemove {
+                target: prin("alice@acme.com"),
+            },
+        );
+        assert_eq!(
+            a.roster_remove(&w, &op_id(2), remove, "t0").await.unwrap(),
+            GovernanceOutcome::Ok
+        );
+
+        // Her read access is instantly revoked: the read token 404s (I-404), not a 403.
+        assert!(
+            matches!(
+                a.resolve_read_token(&alice_token, NOW).await,
+                Err(AuthorityError::NotFound)
+            ),
+            "a removed member's reads must 404"
+        );
+    }
+
+    #[tokio::test]
     async fn a_members_governance_op_is_denied() {
         let fx = Fixture::new("enr-rolematrix").await;
         let a = &fx.authority;

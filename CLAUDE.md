@@ -117,23 +117,53 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > `contracts/openapi/` (drift-gated). The **client's real transport** is wired too: a blocking `ureq`
 > `PlaneSource` conditional-GETs the signed pointer and reassembles a version (metadata + per-blob
 > content-addressed GETs, **re-verifying each sha256**) to feed the **existing** pull engine — the read
-> credential + the pinned plane key come from on-disk `instance.json`/`follows.json` (**fixture-seeded**; the
-> enrollment that mints them lands later, so production still follows nothing and the bare `pull` stays an
-> honest no-op). The whole distribute loop is proven **end-to-end over loopback HTTP** (a first pull
-> fast-forwards byte-exact incl. the exec bit, a second is a 304 no-op, a tampered signature is refused with
-> last-known-good retained). The client gains **no `plane-store`/`sqlx`/`tokio` edge** (`check-arch` holds the
-> line), and the test-only seeding shims are feature-gated out of the production build (a check-arch guard
-> proves it).
+> credential + the pinned plane key come from on-disk `instance.json`/`follows.json` (in that increment
+> **fixture-seeded** — the **enrollment** layer described next now mints + writes them for real). The whole
+> distribute loop is proven **end-to-end over loopback HTTP** (a first pull fast-forwards byte-exact incl. the
+> exec bit, a second is a 304 no-op, a tampered signature is refused with last-known-good retained). The client
+> gains **no `plane-store`/`sqlx`/`tokio` edge** (`check-arch` holds the line), and the test-only seeding shims
+> are feature-gated out of the production build (a check-arch guard proves it).
+>
+> **Enrollment turns the fixtures into a real follow.** Identity issuance is now built end to end, so a real
+> `topos follow <link>` enrolls, mints credentials, registers a device, pins the plane key, and lands the first
+> skill. The **kernel** gained two domain-separated verify-only frames (the device-enrollment possession proof +
+> the governance-op signature). The **plane** (`plane-store` + `topos-plane`) mints the opaque credential family
+> — one `/i/` invite, the RFC-8628 device-flow grant, per-(device,skill) read tokens — **deterministically
+> HMAC-derived over a `0600` enrollment secret and stored only as its sha256** (so a lost-ack retry re-derives
+> the identical credential, and a consumed grant re-derives the same read tokens — naturally idempotent redeem,
+> instant revoke). The central **`redeem_enrollment`** runs ONE `BEGIN IMMEDIATE` txn (a possession proof via the
+> kernel's `verify_enroll` against the grant's bound device key → the deployment-mode roster gate [cloud requires
+> a confirmed, already-rostered identity; self-host grants membership from the bearer] → device register with
+> anti-squat → per-skill read scope + minted read tokens — **never a user token**). The device key id is
+> **server-derived** from the public key. The **device-flow / emailed-passcode floor / self-host invite-chain**
+> are concrete `topos-plane` modules behind thin routes (`GET /i/{token}` + the device/passcode/redeem +
+> governance invite/roster/device-revoke routes; **OpenAPI drift-gated**); a single generic **OIDC connector**
+> is compiled behind a default-off cargo feature (the id token is consumed server-side, never returned to the
+> agent). **Governance** mutations (invite / roster set+remove / device-revoke) are device-signed against the
+> kernel governance frame, role-gated (owner/reviewer/member), op_id-idempotent, and instant (a removed member's
+> reads — and a revoked device's read tokens — drop in the same txn). The **client** mints an Ed25519 device key
+> (a separate `0600` seed file, never in JSON — mirroring the plane's signer), and the **`follow`** verb is a
+> two-call agent-driven flow (TOFU-pin the plane key over the unauthenticated `/i/` channel; a `0600`
+> write-ahead-log; the first version always an offer behind one `--approve`, never auto-landed) that writes the
+> real sidecar docs, so `load_enrollment` lights up; **`invite`** mints an `/i/` link by signing the governance
+> op. The whole loop is proven **end-to-end over loopback HTTP** (a real `follow` enrolls + redeems + lands the
+> first skill byte-exact; a leaked invite is inert to an off-roster identity). The client still carries **no
+> `plane-store`/`sqlx`/`tokio`/`reqwest`/`hyper` edge** (only `ed25519-dalek`/`getrandom`/`zeroize`).
 >
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
-> client-invisible); the **client contribute loop** (the `publish --propose` / `review` / `diff` CLI verbs +
-> the device-key signer, the plane-sourced diff, rebase orchestration — the server authority + its HTTP routes
-> are built, the client UX + multi-reviewer governance are not); **enrollment** (device-flow / passcode /
-> magic-link / OIDC, invite + read-credential minting) and `follow`/identity/roster/device issuance; the
-> **governance mutation routes** (roster / policy); **TLS termination** at the plane (loopback HTTP today —
-> terminate at a reverse proxy); the **audit outbox**; at-rest key encryption; the OpenClaw/Hermes adapters;
-> and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids
-> that edge); `axum` now powers the OSS plane's HTTP server and `ureq` the client transport.
+> client-invisible); the **client contribute loop** (the `publish --propose` / `review` / `revert` / `diff` CLI
+> verbs that wire the now-built device-key signer + session-poll currency — the server authority + its HTTP
+> routes are built, the client UX + multi-reviewer governance are not); the **hosted verification-page HTML +
+> cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
+> multi-IdP / HRD / SAML / SCIM — one generic OIDC connector ships feature-gated); **magic-link** as a primary
+> rung; **active read-token rotation** (per-device revoke + expiry are built; rotation in the `current` path is
+> deferred — v0 mints long-lived device-bound tokens); the **`PUT /policy`** mutation + **`unfollow`** + the
+> client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
+> workspace standup** (`admin-claim` stands up self-host today); **TLS termination** at the plane (loopback HTTP
+> today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
+> the enrollment secret are plaintext `0600` seeds for now); the OpenClaw/Hermes adapters; and Postgres. `sqlx`
+> is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
+> powers the OSS plane's HTTP server, `ureq` the client transport, and `lettre` the passcode mailer.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
