@@ -93,6 +93,16 @@ impl Layout {
     pub(crate) fn host_path(&self) -> PathBuf {
         self.identity_dir().join("host.json")
     }
+
+    /// `instance.json` — the enrolled plane + the pinned plane public key (a home-level enrollment doc).
+    pub(crate) fn instance_path(&self) -> PathBuf {
+        self.home.join("instance.json")
+    }
+
+    /// `follows.json` — the durable follow-state (a home-level enrollment doc; carries a `0600` secret).
+    pub(crate) fn follows_path(&self) -> PathBuf {
+        self.home.join("follows.json")
+    }
 }
 
 /// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file

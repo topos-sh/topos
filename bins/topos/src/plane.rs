@@ -33,7 +33,7 @@ pub(crate) enum PointerFetch {
 /// A version's bytes + the commit metadata needed to **re-derive its `version_id`** locally (the
 /// integrity gate recomputes `commit_id(parents, tree, author, message)` and the bundle digest, so the
 /// source is never trusted on its word). Carries the full commit frame, not just files.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct FetchedVersion {
     /// The parent `version_id`s (the commit frame's `parents`; `parents[0]` is the trunk parent).
     pub parents: Vec<[u8; 32]>,
@@ -46,7 +46,7 @@ pub(crate) struct FetchedVersion {
 }
 
 /// One fetched file. `mode` is part of the consent-bound digest, so it is carried, not inferred.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct FetchedFile {
     pub path: String,
     pub mode: FileMode,

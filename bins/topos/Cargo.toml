@@ -22,6 +22,9 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 rustix.workspace = true
+# The plane transport: ureq 3, blocking, rustls+ring (the workspace pin, default features). Self-contained
+# (its own TLS stack); it carries NO plane-store/sqlx/libsqlite3-sys/tokio edge — check-arch holds the line.
+ureq.workspace = true
 hex.workspace = true
 # DECODE-ONLY: the signed `current` pointer's base64url-unpadded Signature.value (86 chars), verified
 # against the pinned plane key. This is the public verify-side codec, NOT the private-key signing edge
