@@ -7,7 +7,7 @@
 //! preimage builders, the two halves of every signature agree on the bytes by construction (the
 //! classic two-halves-of-a-signature footgun is closed by one shared encoder).
 //!
-//! Three frozen, domain-separated encodings:
+//! Five frozen, domain-separated encodings:
 //!
 //! - the **commit** identity (a content hash, not a signature): `commit_id = sha256(frame)` — the
 //!   user-facing `version_id`. A length-prefixed binary frame. ([`commit_id`])
@@ -15,11 +15,15 @@
 //!   device signs; verified by both the plane and other clients. ([`verify_device_op`])
 //! - the signed **current pointer** (what a follower re-verifies on *every* pull — the trust root):
 //!   RFC 8785 (JCS) canonical JSON, binding `alg` to foreclose algorithm-confusion. ([`verify_pointer`])
+//! - the **device-enrollment possession proof** (verify-only): a length-prefixed binary frame an
+//!   enrolling device signs to prove it controls the very key it registers. ([`verify_enroll`])
+//! - the **governance-op** signature (verify-only): a length-prefixed binary frame an owner's
+//!   registered device signs for an invite / roster mutation / device revoke. ([`verify_governance_op`])
 //!
-//! Domain separation: the two binary frames carry distinct ASCII context tags (a publish signature
-//! can never verify as a revert, nor either as the pointer); the pointer is a JSON object — a
-//! different leading byte (`{`) entirely — and binds its algorithm. No signature under one preimage
-//! can verify under another.
+//! Domain separation: the four binary frames carry distinct ASCII context tags (no one frame's
+//! signature can verify as another — a publish never as a revert, an enrollment never as a governance
+//! op, neither as a commit); the pointer is a JSON object — a different leading byte (`{`) entirely —
+//! and binds its algorithm. No signature under one preimage can verify under another.
 //!
 //! ## Why a hand-specified binary frame, not a serialization crate
 //!
@@ -41,6 +45,10 @@ use ed25519_dalek::{Signature, VerifyingKey};
 const COMMIT_TAG: &[u8] = b"TOPOS_COMMIT_V1\0";
 /// The ASCII context tag for the device-op signature frame (22 chars + NUL = 23 bytes).
 const DEVICE_OP_TAG: &[u8] = b"TOPOS_DEVICE_OP_SIG_V1\0";
+/// The ASCII context tag for the device-enrollment possession-proof frame (22 chars + NUL = 23 bytes).
+const DEVICE_ENROLL_TAG: &[u8] = b"TOPOS_DEVICE_ENROLL_V1\0";
+/// The ASCII context tag for the governance-op signature frame (26 chars + NUL = 27 bytes).
+const GOVERNANCE_OP_TAG: &[u8] = b"TOPOS_GOVERNANCE_OP_SIG_V1\0";
 
 /// Why a preimage could not be built. Every case is unreachable for well-formed inputs (a commit has
 /// ≤ 2 parents; ids/messages are far under 4 GiB; generations are small counters) — they exist so the
@@ -240,6 +248,210 @@ pub fn verify_device_op(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Device-enrollment possession proof — the enrolling client signs this binary frame to prove it
+// controls the very key it registers. The frame binds the registered public key itself, so the
+// signature is a proof-of-possession: it can only verify under that one key, never another.
+// ---------------------------------------------------------------------------------------------
+
+/// The fields an enrolling device signs to prove possession of the key it registers. The signed value
+/// binds the consumed single-use grant, the device-auth session, the key id + the **raw key being
+/// registered**, and the offered skill set — so the proof is non-transferable to a different key and
+/// scoped to one workspace / grant / session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnrollFields<'a> {
+    /// Scopes the enrollment to one workspace.
+    pub workspace_id: &'a str,
+    /// `sha256` of the opaque single-use enrollment grant being consumed (binds this one grant).
+    pub grant_hash: [u8; 32],
+    /// The non-secret device-auth session handle (the RFC 8628 device-authorization id).
+    pub device_auth_id: &'a str,
+    /// The id the registered device key will be known by.
+    pub device_key_id: &'a str,
+    /// The raw Ed25519 key being registered — **also** the key this signature verifies under, which is
+    /// what makes the frame a proof-of-possession (a signature under any other key cannot match it).
+    pub device_public_key: [u8; 32],
+    /// The skills the device offers to follow, bound as a **set** (order + duplicates canonicalized away).
+    pub offered_skill_ids: &'a [&'a str],
+}
+
+/// Build the canonical device-enrollment signing frame.
+///
+/// Layout: `TOPOS_DEVICE_ENROLL_V1\0` ‖ `u32be`(ws len) ‖ workspace_id ‖ grant_hash (32 B) ‖
+/// `u32be`(auth len) ‖ device_auth_id ‖ `u32be`(key-id len) ‖ device_key_id ‖ device_public_key (32 B)
+/// ‖ `u32be`(skill count) ‖ each (`u32be`(skill len) ‖ skill_id). The `offered_skill_ids` are bound as
+/// a **set** — the kernel sorts them byte-lexicographically and dedups them — so a client and the plane
+/// can never disagree on order or duplicates; the count is the deduped count. An empty set is valid
+/// (count 0). Every multi-byte integer is big-endian; every string length prefix is `u32be`.
+///
+/// # Errors
+/// [`PreimageError::FieldTooLong`] if a string field — or the deduped skill count — exceeds `u32::MAX`.
+pub fn enroll_preimage(fields: &EnrollFields) -> Result<Vec<u8>, PreimageError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(DEVICE_ENROLL_TAG);
+    put_lp_str(&mut out, fields.workspace_id)?;
+    out.extend_from_slice(&fields.grant_hash);
+    put_lp_str(&mut out, fields.device_auth_id)?;
+    put_lp_str(&mut out, fields.device_key_id)?;
+    out.extend_from_slice(&fields.device_public_key);
+    put_lp_str_set(&mut out, fields.offered_skill_ids)?;
+    Ok(out)
+}
+
+/// Verify a device-enrollment possession proof.
+///
+/// The verify key is the caller's authoritative key (the one actually being registered), passed
+/// separately from `fields.device_public_key`: if that **field** is tampered to some other value the
+/// frame bytes change and verification fails — a key-substitution is caught. Returns `false` — never
+/// panics — on any malformed input or verification failure. Mirrors [`verify_device_op`].
+#[must_use]
+pub fn verify_enroll(
+    fields: &EnrollFields,
+    signature: &[u8; 64],
+    device_public_key: &[u8; 32],
+) -> bool {
+    match enroll_preimage(fields) {
+        Ok(message) => verify_ed25519(&message, signature, device_public_key),
+        Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Governance-op signature — an owner's registered device key signs an invite / roster mutation /
+// device revoke. The frame binds `op_type` plus the op's full parameter set, so an invite signature
+// can never replay as a revoke, and the plane can use `sha256(preimage)` as a request-replay identity.
+// ---------------------------------------------------------------------------------------------
+
+/// The closed set of governance operations an owner signs. Each variant carries its full parameter
+/// set, which the frame binds — so a signature for one operation can never be replayed as another (the
+/// `op_type` byte + the per-variant tail are both part of the signed bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernanceOpKind<'a> {
+    /// Invite principals at `role`, expiring at `expires_at`, optionally pre-offering `skills`.
+    /// `emails` and `skills` are each bound as a **set** (sorted byte-lexicographically + deduped).
+    Invite {
+        /// The role the invitees are granted.
+        role: u8,
+        /// The invite's expiry deadline (an opaque integer bound into the frame).
+        expires_at: u64,
+        /// The invited email addresses, bound as a set.
+        emails: &'a [&'a str],
+        /// The skills pre-offered to the invitees, bound as a set.
+        skills: &'a [&'a str],
+    },
+    /// Set `target`'s role (add or change a roster entry).
+    RosterSet {
+        /// The role to set.
+        role: u8,
+        /// The principal whose role is set.
+        target: &'a str,
+    },
+    /// Remove `target` from the roster.
+    RosterRemove {
+        /// The principal removed.
+        target: &'a str,
+    },
+    /// Revoke a registered device key.
+    DeviceRevoke {
+        /// The id of the device key being revoked.
+        target_device_key_id: &'a str,
+    },
+}
+
+impl GovernanceOpKind<'_> {
+    /// The operation-type byte bound into the frame: `Invite` = 1, `RosterSet` = 2, `RosterRemove` = 3,
+    /// `DeviceRevoke` = 4. Binding it is a real integrity property — a signed invite must never be
+    /// replayable as a revoke (mirrors the device-op subtype binding).
+    #[must_use]
+    pub fn op_type(&self) -> u8 {
+        match self {
+            GovernanceOpKind::Invite { .. } => 1,
+            GovernanceOpKind::RosterSet { .. } => 2,
+            GovernanceOpKind::RosterRemove { .. } => 3,
+            GovernanceOpKind::DeviceRevoke { .. } => 4,
+        }
+    }
+}
+
+/// The fields an owner's device signs for a governance operation. The signed value is the full
+/// canonical parameter set, so the plane can use `sha256(preimage)` as a request-replay identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GovernanceOpFields<'a> {
+    /// Scopes the operation to one workspace (no cross-workspace replay).
+    pub workspace_id: &'a str,
+    /// The client-minted op id (a UUIDv4's raw 16 bytes), the idempotency key.
+    pub op_id: [u8; 16],
+    /// The id of the **signing** owner's device key (the verifier selects the public key by this).
+    pub device_key_id: &'a str,
+    /// The operation (its `op_type` + its parameter tail are bound into the frame).
+    pub op: GovernanceOpKind<'a>,
+}
+
+/// Build the canonical governance-op signing frame.
+///
+/// Layout: `TOPOS_GOVERNANCE_OP_SIG_V1\0` ‖ `u32be`(ws len) ‖ workspace_id ‖ `u8` op_type ‖ op_id
+/// (16 B) ‖ `u32be`(key len) ‖ device_key_id ‖ the op-specific tail:
+/// - `Invite`: `u8` role ‖ `u64be` expires_at ‖ `u32be`(email count) ‖ each email ‖ `u32be`(skill
+///   count) ‖ each skill — emails and skills are each a sorted + deduped **set**;
+/// - `RosterSet`: `u8` role ‖ `u32be`(target len) ‖ target;
+/// - `RosterRemove`: `u32be`(target len) ‖ target;
+/// - `DeviceRevoke`: `u32be`(key len) ‖ target_device_key_id.
+///
+/// Every multi-byte integer is big-endian; every string length prefix is `u32be`.
+///
+/// # Errors
+/// [`PreimageError::FieldTooLong`] if a string field — or a deduped set count — exceeds `u32::MAX`.
+pub fn governance_op_preimage(fields: &GovernanceOpFields) -> Result<Vec<u8>, PreimageError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(GOVERNANCE_OP_TAG);
+    put_lp_str(&mut out, fields.workspace_id)?;
+    out.push(fields.op.op_type());
+    out.extend_from_slice(&fields.op_id);
+    put_lp_str(&mut out, fields.device_key_id)?;
+    match &fields.op {
+        GovernanceOpKind::Invite {
+            role,
+            expires_at,
+            emails,
+            skills,
+        } => {
+            out.push(*role);
+            out.extend_from_slice(&expires_at.to_be_bytes());
+            put_lp_str_set(&mut out, emails)?;
+            put_lp_str_set(&mut out, skills)?;
+        }
+        GovernanceOpKind::RosterSet { role, target } => {
+            out.push(*role);
+            put_lp_str(&mut out, target)?;
+        }
+        GovernanceOpKind::RosterRemove { target } => {
+            put_lp_str(&mut out, target)?;
+        }
+        GovernanceOpKind::DeviceRevoke {
+            target_device_key_id,
+        } => {
+            put_lp_str(&mut out, target_device_key_id)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Verify a governance-op signature with the signing owner's registered raw 32-byte public key.
+///
+/// Returns `false` — never panics — on any malformed input or verification failure. Mirrors
+/// [`verify_device_op`].
+#[must_use]
+pub fn verify_governance_op(
+    fields: &GovernanceOpFields,
+    signature: &[u8; 64],
+    signer_public_key: &[u8; 32],
+) -> bool {
+    match governance_op_preimage(fields) {
+        Ok(message) => verify_ed25519(&message, signature, signer_public_key),
+        Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Signed current pointer — RFC 8785 (JCS). The trust root every follower re-verifies on each pull.
 // ---------------------------------------------------------------------------------------------
 
@@ -322,6 +534,26 @@ fn put_lp_str(out: &mut Vec<u8>, s: &str) -> Result<(), PreimageError> {
     Ok(())
 }
 
+/// Append a length-prefixed **set** of strings: sort byte-lexicographically + dedup, then emit
+/// `u32be`(count) followed by each [`put_lp_str`]. Canonicalizing the set inside the kernel means a
+/// client and the plane can never disagree on order or duplicates for a set-valued field. (`str`'s
+/// `Ord` compares raw bytes, so the sort IS byte-lexicographic.) The count is the **deduped** length;
+/// an empty set is valid (count 0).
+///
+/// # Errors
+/// [`PreimageError::FieldTooLong`] if the deduped count, or any item, exceeds `u32::MAX` bytes.
+fn put_lp_str_set(out: &mut Vec<u8>, items: &[&str]) -> Result<(), PreimageError> {
+    let mut sorted = items.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let count = u32::try_from(sorted.len()).map_err(|_| PreimageError::FieldTooLong)?;
+    out.extend_from_slice(&count.to_be_bytes());
+    for &item in &sorted {
+        put_lp_str(out, item)?;
+    }
+    Ok(())
+}
+
 /// A JSON value in a flat canonical object: a string or an unsigned integer (the only kinds the
 /// pointer preimage needs). Floats are deliberately absent — JCS number canonicalization for them is
 /// the hard part we never touch.
@@ -401,6 +633,14 @@ mod tests {
     const DEVICEOP_SIG: &str = "ea4685bbd5f65186f1f307067151ac97016dfc6e618d8b6f73b9d04a89823bc050554c2291b4ee64a22fdeab05671140f949ac95cb3f07f129dd82658d14ea0b";
     const POINTER_PREIMAGE: &str = r#"{"alg":"Ed25519","epoch":1,"seq":42,"skill_id":"s_prdescribe","version_id":"a10ee836cc1b8290caa8f55ce70c7ff2a281922adf9a94315cbf6c07edfa9225","workspace_id":"w_acme"}"#;
     const POINTER_SIG: &str = "e05a3a08c5107ccc30b2e741aaecc75dce6d822f88874f0d63c3b5d95549d1b57399c3860baca7a560e03bfdc89225dd338fc4f059df5d91c509f30187595f06";
+    // The device-enrollment possession proof: the registered key (DEVICE_PK) signs the frame. The
+    // unsorted offered_skill_ids ["s_prdescribe","s_deploy"] canonicalize to ["s_deploy","s_prdescribe"].
+    const ENROLL_PREIMAGE: &str = "544f504f535f4445564943455f454e524f4c4c5f56310000000006775f61636d6533333333333333333333333333333333333333333333333333333333333333330000000b64615f61636d655f3030310000000f706b5f616c6963655f6c6170746f7003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b80000000200000008735f6465706c6f790000000c735f70726465736372696265";
+    const ENROLL_SIG: &str = "df1ff32e9d33dd520241aa141c57c7c5ebeb4a9f0a4dc493c50b3289ea4e0f893c2605390e884cbc9d30b32f4db9358b8c27c0b6f5edde7db8e763414012f80a";
+    // The governance-op (an Invite): the owner's device key (DEVICE_PK) signs. Emits a 27-byte tag; the
+    // unsorted emails ["bob@…","alice@…"] canonicalize to ["alice@…","bob@…"].
+    const GOVERNANCE_PREIMAGE: &str = "544f504f535f474f5645524e414e43455f4f505f5349475f56310000000006775f61636d6501f47ac10b58cc4372a5670e02b2c3d4790000000f706b5f616c6963655f6c6170746f70010000000067748580000000020000000f616c6963654061636d652e746573740000000d626f624061636d652e746573740000000100000008735f6465706c6f79";
+    const GOVERNANCE_SIG: &str = "577886a1b76c3673461a2af8b9f71e9dc8854e4c57e69c6a8529fa9fc94009bce0c689bfadd860a25eec57704bb05a2b58410df39b2eb5bbaea05c07c5428008";
 
     const FIX_PARENTS: [[u8; 32]; 1] = [[0x11u8; 32]];
     const FIX_TREE: [u8; 32] = [0x22u8; 32];
@@ -449,6 +689,33 @@ mod tests {
             version_id: arr32(COMMIT_ID),
             epoch: 1,
             seq: 42,
+        }
+    }
+
+    fn fixture_enroll() -> EnrollFields<'static> {
+        EnrollFields {
+            workspace_id: "w_acme",
+            grant_hash: [0x33; 32],
+            device_auth_id: "da_acme_001",
+            device_key_id: "pk_alice_laptop",
+            device_public_key: arr32(DEVICE_PK),
+            // DELIBERATELY unsorted — the kernel sorts to ["s_deploy", "s_prdescribe"].
+            offered_skill_ids: &["s_prdescribe", "s_deploy"],
+        }
+    }
+
+    fn fixture_governance() -> GovernanceOpFields<'static> {
+        GovernanceOpFields {
+            workspace_id: "w_acme",
+            op_id: FIX_OP_ID,
+            device_key_id: "pk_alice_laptop",
+            op: GovernanceOpKind::Invite {
+                role: 1,
+                expires_at: 1_735_689_600,
+                // DELIBERATELY unsorted — the kernel sorts to ["alice@acme.test", "bob@acme.test"].
+                emails: &["bob@acme.test", "alice@acme.test"],
+                skills: &["s_deploy"],
+            },
         }
     }
 
@@ -690,6 +957,428 @@ mod tests {
             &other_op_id,
             &arr64(DEVICEOP_SIG),
             &arr32(DEVICE_PK)
+        ));
+    }
+
+    // ---- Device-enrollment possession proof ----
+
+    #[test]
+    fn enroll_known_answer_positive() {
+        let fields = fixture_enroll();
+        assert_eq!(
+            crate::digest::to_hex(&enroll_preimage(&fields).unwrap()),
+            ENROLL_PREIMAGE,
+            "enroll frame changed — update only if the encoding INTENTIONALLY changed",
+        );
+        assert!(
+            verify_enroll(&fields, &arr64(ENROLL_SIG), &arr32(DEVICE_PK)),
+            "the golden enrollment possession proof must verify",
+        );
+    }
+
+    #[test]
+    fn enroll_negative_1_wrong_tag() {
+        // Flip a byte inside the domain tag: a different context can never verify the same signature.
+        let mut bytes = unhex(ENROLL_PREIMAGE);
+        bytes[0] ^= 0xff;
+        assert!(!verify_ed25519(
+            &bytes,
+            &arr64(ENROLL_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn enroll_negative_2_binds_every_scalar_field() {
+        // Each non-key field is part of the signed frame; tampering any one breaks the golden signature
+        // — verified with the ORIGINAL device key, so this is distinct from the wrong-key case below.
+        let sig = arr64(ENROLL_SIG);
+        let pk = arr32(DEVICE_PK);
+        assert!(!verify_enroll(
+            &EnrollFields {
+                workspace_id: "w_other",
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+        assert!(!verify_enroll(
+            &EnrollFields {
+                grant_hash: [0x44; 32],
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+        assert!(!verify_enroll(
+            &EnrollFields {
+                device_auth_id: "da_evil",
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+        assert!(!verify_enroll(
+            &EnrollFields {
+                device_key_id: "pk_evil",
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+    }
+
+    #[test]
+    fn enroll_negative_3_key_substitution() {
+        // The registered key is bound INTO the frame. Tamper the device_public_key FIELD but verify
+        // against the original key arg: the frame bytes change, so the proof fails — an attacker cannot
+        // swap their own key into a victim's signed enrollment.
+        let substituted = EnrollFields {
+            device_public_key: [0x77; 32],
+            ..fixture_enroll()
+        };
+        assert!(!verify_enroll(
+            &substituted,
+            &arr64(ENROLL_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn enroll_negative_4_wrong_verify_key() {
+        // Untampered fields, but verified against a different (the plane's) public key.
+        assert!(!verify_enroll(
+            &fixture_enroll(),
+            &arr64(ENROLL_SIG),
+            &arr32(PLANE_PK)
+        ));
+    }
+
+    #[test]
+    fn enroll_negative_5_offered_skill_set_add_and_remove() {
+        let sig = arr64(ENROLL_SIG);
+        let pk = arr32(DEVICE_PK);
+        // Adding a skill to the set changes the frame.
+        assert!(!verify_enroll(
+            &EnrollFields {
+                offered_skill_ids: &["s_prdescribe", "s_deploy", "s_extra"],
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+        // Removing one likewise.
+        assert!(!verify_enroll(
+            &EnrollFields {
+                offered_skill_ids: &["s_deploy"],
+                ..fixture_enroll()
+            },
+            &sig,
+            &pk
+        ));
+    }
+
+    #[test]
+    fn enroll_offered_skills_are_a_canonical_set() {
+        // POSITIVE: a reordered AND duplicated input canonicalizes to the SAME bytes as the fixture
+        // (itself unsorted), so the SAME golden signature verifies — the in-kernel sort+dedup makes the
+        // offered skills an order-/duplicate-independent set.
+        let canonical = enroll_preimage(&fixture_enroll()).unwrap();
+        let reordered = EnrollFields {
+            offered_skill_ids: &["s_deploy", "s_prdescribe", "s_deploy"],
+            ..fixture_enroll()
+        };
+        assert_eq!(
+            enroll_preimage(&reordered).unwrap(),
+            canonical,
+            "reorder + dup must yield a byte-identical frame",
+        );
+        assert!(verify_enroll(
+            &reordered,
+            &arr64(ENROLL_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn enroll_empty_offered_skill_set_is_valid() {
+        // An empty set is valid (count 0), not an error — the tail is just the four zero count bytes.
+        let empty = EnrollFields {
+            offered_skill_ids: &[],
+            ..fixture_enroll()
+        };
+        assert!(enroll_preimage(&empty).unwrap().ends_with(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn enroll_domain_separation() {
+        // The enroll frame carries its own tag, and its signature does not cross into the device-op
+        // frame (nor a device-op signature into enroll).
+        assert!(
+            enroll_preimage(&fixture_enroll())
+                .unwrap()
+                .starts_with(DEVICE_ENROLL_TAG)
+        );
+        // The golden enrollment proof must NOT verify as a device-op...
+        assert!(!verify_device_op(
+            &fixture_device_op(),
+            &arr64(ENROLL_SIG),
+            &arr32(DEVICE_PK)
+        ));
+        // ...and the golden device-op signature must NOT verify as an enrollment.
+        assert!(!verify_enroll(
+            &fixture_enroll(),
+            &arr64(DEVICEOP_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    // ---- Governance-op signature ----
+
+    #[test]
+    fn governance_known_answer_positive() {
+        let fields = fixture_governance();
+        assert_eq!(
+            crate::digest::to_hex(&governance_op_preimage(&fields).unwrap()),
+            GOVERNANCE_PREIMAGE,
+            "governance frame changed — update only if the encoding INTENTIONALLY changed",
+        );
+        assert!(
+            verify_governance_op(&fields, &arr64(GOVERNANCE_SIG), &arr32(DEVICE_PK)),
+            "the golden governance-op signature must verify",
+        );
+    }
+
+    #[test]
+    fn governance_op_type_byte_mapping() {
+        // The frozen op_type byte for every governance operation.
+        assert_eq!(
+            GovernanceOpKind::Invite {
+                role: 0,
+                expires_at: 0,
+                emails: &[],
+                skills: &[],
+            }
+            .op_type(),
+            1
+        );
+        assert_eq!(
+            GovernanceOpKind::RosterSet {
+                role: 0,
+                target: "x",
+            }
+            .op_type(),
+            2
+        );
+        assert_eq!(GovernanceOpKind::RosterRemove { target: "x" }.op_type(), 3);
+        assert_eq!(
+            GovernanceOpKind::DeviceRevoke {
+                target_device_key_id: "x",
+            }
+            .op_type(),
+            4
+        );
+    }
+
+    #[test]
+    fn governance_negative_1_wrong_tag() {
+        let mut bytes = unhex(GOVERNANCE_PREIMAGE);
+        bytes[0] ^= 0xff;
+        assert!(!verify_ed25519(
+            &bytes,
+            &arr64(GOVERNANCE_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn governance_negative_2_wrong_op_type() {
+        // Re-typing the op (Invite -> DeviceRevoke) flips the op_type byte (and the tail) — the golden
+        // invite signature can never verify as a revoke. This is the replay-across-ops guard.
+        let revoke = GovernanceOpFields {
+            op: GovernanceOpKind::DeviceRevoke {
+                target_device_key_id: "pk_alice_laptop",
+            },
+            ..fixture_governance()
+        };
+        assert!(!verify_governance_op(
+            &revoke,
+            &arr64(GOVERNANCE_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn governance_negative_3_wrong_device_key_id() {
+        let other = GovernanceOpFields {
+            device_key_id: "pk_evil",
+            ..fixture_governance()
+        };
+        assert!(!verify_governance_op(
+            &other,
+            &arr64(GOVERNANCE_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn governance_negative_4_binds_the_invite_params() {
+        // The full canonical Invite param set is bound: role, expiry, op_id, and the email set each
+        // break the golden signature when tampered (each verified with the correct key).
+        fn invite(
+            role: u8,
+            expires_at: u64,
+            emails: &'static [&'static str],
+        ) -> GovernanceOpFields<'static> {
+            GovernanceOpFields {
+                op: GovernanceOpKind::Invite {
+                    role,
+                    expires_at,
+                    emails,
+                    skills: &["s_deploy"],
+                },
+                ..fixture_governance()
+            }
+        }
+        let sig = arr64(GOVERNANCE_SIG);
+        let pk = arr32(DEVICE_PK);
+        let base_emails: &'static [&'static str] = &["bob@acme.test", "alice@acme.test"];
+        assert!(!verify_governance_op(
+            &invite(2, 1_735_689_600, base_emails),
+            &sig,
+            &pk
+        ));
+        assert!(!verify_governance_op(
+            &invite(1, 1_735_689_601, base_emails),
+            &sig,
+            &pk
+        ));
+        assert!(!verify_governance_op(
+            &invite(1, 1_735_689_600, &["carol@acme.test", "alice@acme.test"]),
+            &sig,
+            &pk
+        ));
+        assert!(!verify_governance_op(
+            &GovernanceOpFields {
+                op_id: [0xAB; 16],
+                ..fixture_governance()
+            },
+            &sig,
+            &pk
+        ));
+    }
+
+    #[test]
+    fn governance_each_kind_binds_its_target() {
+        // For the non-Invite kinds (which the golden does not cover), prove the per-kind tail params are
+        // bound by showing the FRAME bytes change when a target/role changes — a structural check that
+        // needs no separate signature. The differing op_type byte also separates two same-tail kinds.
+        fn frame(op: GovernanceOpKind<'static>) -> Vec<u8> {
+            governance_op_preimage(&GovernanceOpFields {
+                op,
+                ..fixture_governance()
+            })
+            .unwrap()
+        }
+        assert_ne!(
+            frame(GovernanceOpKind::RosterSet {
+                role: 1,
+                target: "u_bob"
+            }),
+            frame(GovernanceOpKind::RosterSet {
+                role: 1,
+                target: "u_carol"
+            }),
+        );
+        assert_ne!(
+            frame(GovernanceOpKind::RosterSet {
+                role: 1,
+                target: "u_bob"
+            }),
+            frame(GovernanceOpKind::RosterSet {
+                role: 2,
+                target: "u_bob"
+            }),
+        );
+        assert_ne!(
+            frame(GovernanceOpKind::RosterRemove { target: "u_bob" }),
+            frame(GovernanceOpKind::RosterRemove { target: "u_carol" }),
+        );
+        assert_ne!(
+            frame(GovernanceOpKind::DeviceRevoke {
+                target_device_key_id: "pk_a"
+            }),
+            frame(GovernanceOpKind::DeviceRevoke {
+                target_device_key_id: "pk_b"
+            }),
+        );
+        // Same tail string, different kind ⇒ different op_type byte ⇒ different frame.
+        assert_ne!(
+            frame(GovernanceOpKind::RosterRemove { target: "u_x" }),
+            frame(GovernanceOpKind::DeviceRevoke {
+                target_device_key_id: "u_x"
+            }),
+        );
+    }
+
+    #[test]
+    fn governance_negative_5_wrong_key() {
+        assert!(!verify_governance_op(
+            &fixture_governance(),
+            &arr64(GOVERNANCE_SIG),
+            &arr32(PLANE_PK)
+        ));
+    }
+
+    #[test]
+    fn governance_invite_sets_are_canonical() {
+        // POSITIVE: reordered + duplicated emails (and skills) canonicalize to the SAME bytes, so the
+        // SAME golden signature verifies — the Invite's emails/skills are order-/dup-independent sets.
+        let canonical = governance_op_preimage(&fixture_governance()).unwrap();
+        let reordered = GovernanceOpFields {
+            op: GovernanceOpKind::Invite {
+                role: 1,
+                expires_at: 1_735_689_600,
+                emails: &["alice@acme.test", "bob@acme.test", "bob@acme.test"],
+                skills: &["s_deploy", "s_deploy"],
+            },
+            ..fixture_governance()
+        };
+        assert_eq!(
+            governance_op_preimage(&reordered).unwrap(),
+            canonical,
+            "reorder + dup of the invite sets must yield a byte-identical frame",
+        );
+        assert!(verify_governance_op(
+            &reordered,
+            &arr64(GOVERNANCE_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn governance_domain_separation() {
+        // The governance frame carries its own tag, and its signature does not cross into the enroll or
+        // device-op frames — nor either of theirs into governance.
+        assert!(
+            governance_op_preimage(&fixture_governance())
+                .unwrap()
+                .starts_with(GOVERNANCE_OP_TAG)
+        );
+        let gov_sig = arr64(GOVERNANCE_SIG);
+        let pk = arr32(DEVICE_PK);
+        assert!(!verify_enroll(&fixture_enroll(), &gov_sig, &pk));
+        assert!(!verify_device_op(&fixture_device_op(), &gov_sig, &pk));
+        // ...and neither the enroll nor the device-op golden verifies as a governance op.
+        assert!(!verify_governance_op(
+            &fixture_governance(),
+            &arr64(ENROLL_SIG),
+            &pk
+        ));
+        assert!(!verify_governance_op(
+            &fixture_governance(),
+            &arr64(DEVICEOP_SIG),
+            &pk
         ));
     }
 

@@ -12,9 +12,11 @@
 //! Modules:
 //! - [`digest`]  — canonical bundle manifest + the byte-exact sha256 digest + path reject rules.
 //! - [`consent`] — the consent-satisfier truth-table as a pure decision function.
-//! - [`sign`]    — the frozen signing/commit byte encodings: `commit_id`, the device-op signature
-//!   frame + verify, and the JCS `current`-pointer preimage + verify. Construction + verify live
-//!   here (the one shared encoder); the concrete `sign` is the caller's, over the same crate.
+//! - [`sign`]    — the five frozen signing/commit byte encodings: `commit_id`, the device-op
+//!   signature frame + verify, the JCS `current`-pointer preimage + verify, the device-enrollment
+//!   possession proof + verify, and the governance-op signature frame + verify (the last two
+//!   verify-only). Construction + verify live here (the one shared encoder); the concrete `sign` is
+//!   the caller's, over the same crate.
 //! - [`sync`]    — the pure client sync transition: the four currency states, the anti-rollback floor
 //!   plus the reused-tuple ALARM evaluation, and the post-fetch heal. Pure over explicit values,
 //!   behind a truth-table test.
