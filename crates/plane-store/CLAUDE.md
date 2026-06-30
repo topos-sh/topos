@@ -201,10 +201,11 @@ flip `location` → `git repack`), both additive + client-invisible; the **clien
 `publish --propose` / `review` / `diff <skill> current..<hash>` CLI verbs, the plane-sourced diff, client
 rebase orchestration, the displayed proposal-status strings — the server authority is built, the client UX is
 not); **multi-reviewer governance** (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff
-UI — single-approver only today, no role column); the **HTTP plane's still-to-come routes** that wrap the
-issuance core (the enrollment + governance request/response DTOs, the verification-page HTML, the mailer, one
-generic OSS OIDC connector, the workspace-policy mutation, the audit outbox — the *authority ops* now mint
-real credentials, but the network surface over them is not wired here); **active read-token rotation** (redeem
+UI — single-approver only today, no role column); the **HTTP plane's still-to-come surfaces** over the issuance
+core (the verification-page HTML, the workspace-policy mutation route, the audit outbox — the enrollment +
+governance request/response DTOs, the mailer, and one generic OSS OIDC connector all landed in `topos-plane`
+this increment, so the network surface itself is wired; these three remain unbuilt); **active read-token
+rotation** (redeem
 mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
 revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest key encryption / KMS** (the plane signing key + the enrollment secret are plaintext `0600` seeds for

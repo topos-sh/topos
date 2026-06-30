@@ -89,6 +89,10 @@ pub(crate) enum EnrollError {
     /// The id_token carried no email claim.
     #[error("oidc id token carries no email")]
     NoEmail,
+    /// The id_token's email claim is present but NOT verified (`email_verified` != true) — per OpenID Connect
+    /// it is therefore not proof of control, so it cannot confirm a session identity.
+    #[error("oidc id token email is unverified")]
+    EmailUnverified,
     /// Confirming the session identity in the authority failed.
     #[error("confirming the session identity failed")]
     Confirm(#[from] plane_store::AuthorityError),
@@ -185,6 +189,13 @@ pub(crate) async fn callback(
     let claims = id_token
         .claims(&verifier, &nonce)
         .map_err(|_| EnrollError::IdToken)?;
+    // Per OpenID Connect, an `email` claim is NOT proof of control unless `email_verified` is true. The cloud
+    // roster gate keys on this confirmed email, so against an IdP that issues tokens carrying a user-asserted,
+    // unverified email an attacker could set their profile email to a rostered victim's and confirm the session
+    // as that victim — defeating the gate. Require a verified email before it can confirm an identity.
+    if claims.email_verified() != Some(true) {
+        return Err(EnrollError::EmailUnverified);
+    }
     let email = claims
         .email()
         .map(|email| email.as_str().to_owned())

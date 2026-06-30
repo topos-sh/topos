@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key AS \"public_key!: Vec<u8>\", principal AS \"principal!\", revoked AS \"revoked!\"\n           FROM device_registry WHERE workspace_id = ?1 AND device_key_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "principal!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "001ab06f22e7237f74a021d363403fa2c9804fbaad3add402f33c566e2952421"
+}

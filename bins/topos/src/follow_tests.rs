@@ -997,6 +997,20 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         "nothing placed by the offer"
     );
 
+    // A SECOND bare sweep (the I-TOFU regression guard): the first sweep raised the floor + recorded the
+    // tuple, but the still-unapproved first-receive baseline is STILL offered, NEVER auto-landed — even for
+    // the default Auto follower.
+    let swept2 = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        swept2.skills[0].action,
+        PullAction::Offered,
+        "a SECOND auto sweep still offers — the first version is never auto-landed"
+    );
+    assert!(
+        !rig.placement("s_deploy").exists(),
+        "still nothing placed after two consecutive auto sweeps"
+    );
+
     // An EXPLICIT accept places the first bytes.
     let accepted = ops::pull(
         &ctx,

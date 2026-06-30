@@ -920,12 +920,24 @@ fn is_zero_gen(g: Generation) -> bool {
     g.epoch == 0 && g.seq == 0
 }
 
-/// Whether this followed skill has NEVER received bytes — the first-receive baseline `follow` lays:
-/// nothing authenticated (empty `recorded`) at the genesis floor `(0,0)`, nothing applied. An `add`-ed
-/// skill always carries a genesis recorded tuple, and a received skill has a recorded history, so neither
-/// is ever mistaken for first-receive.
+/// Whether this followed skill has NEVER received bytes — the first-receive baseline `follow` lays: nothing
+/// applied, on the all-zero base. An `add`-ed skill carries a real local genesis (a non-zero `base_commit`),
+/// and a received skill has applied a version (`applied` > `(0,0)`), so neither is ever mistaken for it.
+///
+/// DURABLE across sweeps: keyed on `applied` + the zero base, NOT `recorded`/`observed`. A bare sweep that
+/// only OFFERS a first-receive baseline still raises the floor + records the tuple (so the conditional GET and
+/// the anti-rollback floor keep working) — which would make `recorded`/`observed` non-empty after sweep 1, so
+/// keying on those would let a SECOND auto sweep mistake the still-unapproved baseline for a normal followed
+/// skill and AUTO-LAND it (breaking I-TOFU). `applied` stays `(0,0)` and `base_commit` stays all-zero until the
+/// first explicit accept actually MATERIALIZES bytes, so they remain a true "never placed" signal every sweep.
 fn is_never_received(sync: &SyncState) -> bool {
-    sync.recorded.is_empty() && is_zero_gen(sync.observed) && is_zero_gen(sync.applied)
+    is_zero_gen(sync.applied) && is_zero_commit(&sync.base_commit)
+}
+
+/// Whether a commit-id hex is the all-zero sentinel the first-receive baseline lays for `base_commit` (no
+/// local bytes yet) — a real content-addressed commit id is never all-zero.
+fn is_zero_commit(commit_hex: &str) -> bool {
+    commit_hex.len() == 64 && commit_hex.bytes().all(|b| b == b'0')
 }
 
 /// What the client holds for the conditional GET: the floor generation + the commit recorded there, or

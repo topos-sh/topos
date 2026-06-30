@@ -595,11 +595,14 @@ async fn complete_passcode_run(
     code: &str,
     now: i64,
 ) -> Result<PasscodeComplete> {
-    // The live session this user code names (pending/confirmed). Absent ⇒ the uniform miss.
+    // The live, NON-EXPIRED session this user code names (pending/confirmed). Absent/expired ⇒ the uniform
+    // miss — an expired session is the indistinguishable NotFound at every confirm entry point (matching the
+    // poll + read_verification_session), not only at poll time.
     let row = sqlx::query!(
         r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
-           WHERE user_code = ?1 AND status IN ('pending', 'confirmed') LIMIT 1"#,
+           WHERE user_code = ?1 AND status IN ('pending', 'confirmed') AND expires_at >= ?2 LIMIT 1"#,
         user_code,
+        now,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -757,14 +760,21 @@ async fn redeem_run(
         _ => false,
     };
 
-    // (6) Anti-squat: a pre-existing device row must match (key, principal) exactly.
-    if let Some((existing_pk, existing_principal)) =
+    // (6) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
+    // AND must NOT be revoked. Without the revoked check, a revoked device could re-redeem its still-live
+    // grant (a ~12-min TTL) and the deterministic mint loop below would RE-CREATE the read tokens the revoke
+    // just deleted — undoing the kill switch within the grant window. A revoked device cannot re-enroll.
+    if let Some((existing_pk, existing_principal, revoked)) =
         read_device(tx, &grant.workspace_id, input.server_device_key_id).await?
-        && (existing_pk != input.device_public_key || existing_principal != grant.principal)
     {
-        return Ok(RedeemOutcome::Denied(
-            "device key id already bound to a different key/principal",
-        ));
+        if existing_pk != input.device_public_key || existing_principal != grant.principal {
+            return Ok(RedeemOutcome::Denied(
+                "device key id already bound to a different key/principal",
+            ));
+        }
+        if revoked {
+            return Ok(RedeemOutcome::Denied("device is revoked"));
+        }
     }
 
     // ── all checks passed — WRITES only from here (so a DENIED above had no side effect) ──
@@ -955,10 +965,10 @@ async fn read_device(
     tx: &mut Transaction<'_, Sqlite>,
     ws: &WorkspaceId,
     device_key_id: &str,
-) -> Result<Option<([u8; 32], String)>> {
+) -> Result<Option<([u8; 32], String, bool)>> {
     let ws_s = ws.as_str();
     let row = sqlx::query!(
-        r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!"
+        r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!", revoked AS "revoked!"
            FROM device_registry WHERE workspace_id = ?1 AND device_key_id = ?2"#,
         ws_s,
         device_key_id,
@@ -968,7 +978,7 @@ async fn read_device(
     .map_err(AuthorityError::internal)?;
     match row {
         None => Ok(None),
-        Some(r) => Ok(Some((blob32(&r.public_key)?, r.principal))),
+        Some(r) => Ok(Some((blob32(&r.public_key)?, r.principal, r.revoked != 0))),
     }
 }
 
@@ -1153,10 +1163,12 @@ async fn create_invite_run(
     };
     let signer = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
-        Preamble::Fail(reason, req) => {
-            record_event(tx, input, &req, "DENIED", None).await?;
-            return Ok(GovernanceOutcome::Denied(reason));
-        }
+        // A PRE-AUTHENTICATION failure (an unknown/revoked signing device or an invalid signature) is NOT
+        // attributable to any verified actor, so it must NOT write a durable workspace_events row: recording it
+        // would let an UNAUTHENTICATED network client forge audit entries (attacker-chosen actor/target for an
+        // arbitrary workspace) and grow storage without bound. The authenticated-but-unauthorized denials below
+        // (the role / last-owner guards, reached via Proceed) ARE recorded — they name a verified device.
+        Preamble::Fail(reason, _req) => return Ok(GovernanceOutcome::Denied(reason)),
         Preamble::Proceed(s) => s,
     };
     // Owner-only.
@@ -1196,12 +1208,17 @@ async fn create_invite_run(
     let role_s = role.as_str();
     for email in emails {
         let em = email.as_str();
-        // UPSERT the invited member, but NEVER downgrade an already-confirmed one back to invited.
+        // UPSERT the invited member, but NEVER downgrade an already-CONFIRMED one: keep both their status AND
+        // their role. An invite is an ADD; re-inviting a member who already joined must not re-role them — and
+        // in particular must not silently demote the last owner to a member (which would orphan the workspace,
+        // the exact case roster_set guards with would_orphan_owner). Only a NEW/still-invited row takes the
+        // invite's role.
         sqlx::query!(
             "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
              VALUES (?1, ?2, ?3, 'invited', ?4, ?5) \
              ON CONFLICT (workspace_id, principal) DO UPDATE SET \
-               role = excluded.role, invited_by = excluded.invited_by, \
+               role = CASE WHEN workspace_member.status = 'confirmed' THEN workspace_member.role ELSE excluded.role END, \
+               invited_by = excluded.invited_by, \
                status = CASE WHEN workspace_member.status = 'confirmed' THEN 'confirmed' ELSE 'invited' END",
             ws_s,
             em,
@@ -1224,10 +1241,10 @@ async fn governance_mutation_run(
 ) -> Result<GovernanceOutcome> {
     let signer = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
-        Preamble::Fail(reason, req) => {
-            record_event(tx, input, &req, "DENIED", None).await?;
-            return Ok(GovernanceOutcome::Denied(reason));
-        }
+        // Pre-authentication failure (unknown/revoked device or invalid signature): NOT attributable to a
+        // verified actor, so record NOTHING (see create_invite_run) — an unauthenticated request can't forge
+        // an audit row. Post-auth denials below (role / last-owner) are recorded against the verified device.
+        Preamble::Fail(reason, _req) => return Ok(GovernanceOutcome::Denied(reason)),
         Preamble::Proceed(s) => s,
     };
     let ws_s = input.ws.as_str();
@@ -1300,7 +1317,7 @@ async fn governance_mutation_run(
             // Owner OR the device's own principal may revoke it.
             let target_principal = read_device(tx, input.ws, target_device_key_id)
                 .await?
-                .map(|(_, p)| p);
+                .map(|(_, p, _)| p);
             let is_self = target_principal.as_deref() == Some(signer.principal.as_str());
             if signer.role != Role::Owner && !is_self {
                 GovernanceOutcome::Denied(
@@ -1459,12 +1476,16 @@ async fn admin_claim_run(
     .await
     .map_err(AuthorityError::internal)?;
 
-    // Register the device (anti-squat as in redeem).
-    if let Some((existing_pk, existing_principal)) =
+    // Register the device (anti-squat + revocation as in redeem).
+    if let Some((existing_pk, existing_principal, revoked)) =
         read_device(tx, &ws, server_device_key_id).await?
-        && (&existing_pk != device_public_key || existing_principal != principal.as_str())
     {
-        return Ok(RedeemOutcome::Denied("device key id already bound"));
+        if &existing_pk != device_public_key || existing_principal != principal.as_str() {
+            return Ok(RedeemOutcome::Denied("device key id already bound"));
+        }
+        if revoked {
+            return Ok(RedeemOutcome::Denied("device is revoked"));
+        }
     }
     let pk = device_public_key.as_slice();
     sqlx::query!(

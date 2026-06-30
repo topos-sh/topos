@@ -5681,6 +5681,23 @@ mod enrollment_and_governance {
             Err(AuthorityError::NotFound)
         ));
 
+        // The revoked device cannot RE-REDEEM its still-live grant to re-mint the dropped token (the kill
+        // switch is durable, not undone within the grant TTL).
+        assert!(
+            matches!(
+                redeem(a, &grant, &device_seed, dpub).await,
+                RedeemOutcome::Denied(_)
+            ),
+            "a revoked device's re-redeem must be denied"
+        );
+        assert!(
+            matches!(
+                a.resolve_read_token(&alice_token, NOW).await,
+                Err(AuthorityError::NotFound)
+            ),
+            "the read token stays 404 — the denied re-redeem re-minted nothing"
+        );
+
         // The owner self-revokes its OWN device → a subsequent device-signed governance op is refused.
         let self_revoke = sign_governance(
             &owner_seed,
@@ -5805,6 +5822,58 @@ mod enrollment_and_governance {
         assert!(
             matches!(out, CreateInviteOutcome::Denied(_)),
             "member denied: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_the_op_id() {
+        let fx = Fixture::new("enr-noforge").await;
+        let a = &fx.authority;
+        let w = ws("w_acme");
+        let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+
+        // An attacker with NO registered device signs a governance op with a well-formed op_id.
+        let attacker_seed = [99u8; 32];
+        let forged = sign_governance(
+            &attacker_seed,
+            w.as_str(),
+            &op_id(7),
+            "dk_attacker_unregistered",
+            GovernanceOp::Invite {
+                role: Role::Member,
+                expires_at: None,
+                emails: vec![prin("x@acme.com")],
+                skills: vec![],
+            },
+        );
+        assert!(
+            matches!(
+                a.create_invite(&w, &op_id(7), forged, "t0").await.unwrap(),
+                CreateInviteOutcome::Denied(_)
+            ),
+            "an unknown signing device is denied (pre-authentication)"
+        );
+
+        // The SAME op_id, now from the LEGIT owner, SUCCEEDS — the pre-authentication failure wrote no durable
+        // workspace_events row, so it neither forged an audit entry nor squatted the op_id as an idempotency block.
+        let legit = sign_governance(
+            &owner_seed,
+            w.as_str(),
+            &op_id(7),
+            &owner_dk,
+            GovernanceOp::Invite {
+                role: Role::Member,
+                expires_at: None,
+                emails: vec![prin("y@acme.com")],
+                skills: vec![],
+            },
+        );
+        assert!(
+            matches!(
+                a.create_invite(&w, &op_id(7), legit, "t0").await.unwrap(),
+                CreateInviteOutcome::Created(_)
+            ),
+            "the legit owner's op with the same op_id is not blocked by a forged pre-auth row"
         );
     }
 
