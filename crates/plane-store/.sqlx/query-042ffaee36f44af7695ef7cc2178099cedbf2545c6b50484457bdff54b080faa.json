@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT display_name AS \"display_name!\", verified_domain AS \"verified_domain?\",\n                      verified_domain_status AS \"verified_domain_status!\", deployment_mode AS \"deployment_mode!\"\n               FROM workspace WHERE workspace_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "verified_domain?",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "verified_domain_status!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "deployment_mode!",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "042ffaee36f44af7695ef7cc2178099cedbf2545c6b50484457bdff54b080faa"
+}

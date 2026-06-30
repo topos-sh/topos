@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE passcodes SET attempts = ?3 WHERE device_code_sha256 = ?1 AND principal = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a8d4455a2c7cec3dedb079d6814335a9c6f0b69832a4e57cbcec4e19c38a8257"
+}

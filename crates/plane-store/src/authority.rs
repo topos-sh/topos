@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 
 use topos_gitstore::{LocalLargeStore, Store};
 
+use crate::enroll::{
+    CreateInviteOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentState,
+    GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteBootstrap, NoEnrollmentConfig,
+    PasscodeComplete, PasscodeStart, RedeemOutcome,
+};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
@@ -48,6 +53,10 @@ pub struct Authority {
     /// [`with_plane_key`](Self::with_plane_key). Absent until configured: the pointer-move requires it (a
     /// typed precondition), while every other operation (read/upload/lineage/lifecycle) never signs.
     signer: Option<PlaneSigner>,
+    /// The enrollment + governance issuance state — the `0600` HMAC secret + the static config, loaded by
+    /// [`with_enrollment_config`](Self::with_enrollment_config). Absent until configured: every
+    /// enrollment/governance op requires it (a typed precondition); every other op never touches it.
+    enrollment: Option<EnrollmentState>,
 }
 
 impl Authority {
@@ -70,7 +79,21 @@ impl Authority {
             large_threshold: DEFAULT_LARGE_THRESHOLD,
             large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
             signer: None,
+            enrollment: None,
         })
+    }
+
+    /// Load (or first-run generate + persist `0600`) the enrollment HMAC secret from the config's
+    /// `secret_path`, enabling the enrollment + governance ops. Mirrors [`with_plane_key`](Self::with_plane_key)
+    /// (the secret's custody is the plane key's exact custody — re-validated owner-only, atomically published)
+    /// and holds the static config the bootstrap reads. The secret is read once here — never per-op, never
+    /// inside a transaction.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if the secret file cannot be read/created/validated.
+    pub fn with_enrollment_config(mut self, config: EnrollmentConfig) -> Result<Self> {
+        self.enrollment = Some(EnrollmentState::load(config)?);
+        Ok(self)
     }
 
     /// Load (or, on first run, generate + persist `0600`) the plane signing key from `path`, enabling the
@@ -138,8 +161,8 @@ impl Authority {
     /// # Errors
     /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
     /// [`AuthorityError::Integrity`] if a stored token row is corrupt.
-    pub async fn resolve_read_token(&self, token: &str) -> Result<ReadScope> {
-        crate::read::resolve_read_token(self, token).await
+    pub async fn resolve_read_token(&self, token: &str, now: i64) -> Result<ReadScope> {
+        crate::read::resolve_read_token(self, token, now).await
     }
 
     /// Read a skill's signed `current` pointer for an authenticated [`ReadScope`] — the public authenticated
@@ -421,6 +444,215 @@ impl Authority {
         crate::set_current::review_reject(self, ws, skill, commit, &device, op_id, created_at).await
     }
 
+    // ── enrollment + governance issuance (every op decided in-Authority; requires with_enrollment_config) ──
+
+    /// Create an owner-signed **invite** — mint the opaque `/i/<token>` link, store it (hash-only), seed the
+    /// invited members at `role` (`status = 'invited'`), and record the governance receipt. GOVERNANCE-signed
+    /// (the signing owner's device-op signature is verified in-transaction). `op_id`-idempotent: a retry with
+    /// the matching bound identity re-derives the IDENTICAL link and replays the receipt; a different request
+    /// under the same op id is a denied key-reuse. The role + skills come from `signed.op` (a `GovernanceOp::Invite`).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config / plane key is set; a database fault.
+    pub async fn create_invite(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &str,
+        signed: GovernanceSignedOp,
+        created_at: &str,
+    ) -> Result<CreateInviteOutcome> {
+        crate::enroll::create_invite(self, ws, op_id, &signed, created_at).await
+    }
+
+    /// Resolve an invite link to its **bootstrap payload** — the workspace identity, the offered skills, and
+    /// the plane signing root to TOFU-pin (no bytes, no role). A revoked/expired/absent invite is the single
+    /// indistinguishable [`AuthorityError::NotFound`].
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
+    pub async fn read_invite_bootstrap(&self, token: &str, now: i64) -> Result<InviteBootstrap> {
+        crate::enroll::read_invite_bootstrap(self, token, now).await
+    }
+
+    /// Start a **device-authorization** flow against an invite (RFC-8628-shaped). The device key id is
+    /// SERVER-derived from `device_public_key` (a client-asserted id is ignored). Returns the secret device
+    /// code, the user code, and the verification URI. Cloud sessions await a human identity step; self-host
+    /// sessions are born confirmed (a device-rooted principal), so the first poll yields a grant.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
+    pub async fn start_device_auth(
+        &self,
+        invite_token: &str,
+        device_public_key: &[u8; 32],
+        machine_name: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<DeviceAuthStart> {
+        crate::enroll::start_device_auth(
+            self,
+            invite_token,
+            device_public_key,
+            machine_name,
+            now,
+            created_at,
+        )
+        .await
+    }
+
+    /// Poll a device-authorization session — `Pending`/`SlowDown`/`Denied`/`Expired`, or `Granted` with the
+    /// single-use enrollment grant (a re-poll re-derives the SAME grant). An unknown device code is the
+    /// indistinguishable [`AuthorityError::NotFound`].
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on an unknown device code; [`AuthorityError::Internal`] on a fault.
+    pub async fn poll_device_auth(
+        &self,
+        device_code: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<DeviceAuthPoll> {
+        crate::enroll::poll_device_auth(self, device_code, now, created_at).await
+    }
+
+    /// Start a **passcode** challenge for an email on a live session — store the 6-digit code (hash-only) and
+    /// return the plaintext ONCE (for the mailer; never logged). A constant-shaped ack (no roster-enumeration
+    /// oracle — the cloud gate is enforced at redeem). The email is parsed INSIDE the op.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on no live session (or a malformed email); [`AuthorityError::Internal`] on a fault.
+    pub async fn start_passcode(
+        &self,
+        user_code: &str,
+        email: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<PasscodeStart> {
+        crate::enroll::start_passcode(self, user_code, email, now, created_at).await
+    }
+
+    /// Complete a passcode challenge — verify the code under the TTL + attempt cap, confirming the session's
+    /// identity on success. The email is parsed INSIDE the op.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on no live session (or a malformed email); [`AuthorityError::Internal`] on a fault.
+    pub async fn complete_passcode(
+        &self,
+        user_code: &str,
+        email: &str,
+        code: &str,
+        now: i64,
+    ) -> Result<PasscodeComplete> {
+        crate::enroll::complete_passcode(self, user_code, email, code, now).await
+    }
+
+    /// **Redeem** an enrollment grant — THE central op. In one transaction: re-derive the device key id, check
+    /// the grant binds this device, verify the enrollment possession proof against the grant's bound key
+    /// ([`topos_core::sign::verify_enroll`]), apply the roster gate (cloud requires a confirmed identity;
+    /// self-host grants membership), register the device, and mint per-skill read tokens. **Returns no user
+    /// token, ever.** Naturally idempotent — a replay re-derives identical read tokens.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn redeem_enrollment(
+        &self,
+        grant_token: &str,
+        enroll_sig: &[u8; 64],
+        device_public_key: [u8; 32],
+        now: i64,
+        created_at: &str,
+    ) -> Result<RedeemOutcome> {
+        crate::enroll::redeem_enrollment(
+            self,
+            grant_token,
+            enroll_sig,
+            device_public_key,
+            now,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Admin claim** (self-host first-boot standup) — consume the one-time claim token, create the
+    /// (self-host) workspace, seat its first owner (a server-derived device-rooted principal), and register
+    /// the claiming device. Returns an [`EnrollmentRedeemed`](crate::EnrollmentRedeemed)-shaped result.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn admin_claim(
+        &self,
+        claim_token: &str,
+        device_public_key: [u8; 32],
+        display_name: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<RedeemOutcome> {
+        crate::enroll::admin_claim(
+            self,
+            claim_token,
+            device_public_key,
+            display_name,
+            now,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Set** a principal's workspace role (owner-only governance op, with the last-owner-lockout guard).
+    /// GOVERNANCE-signed + `op_id`-idempotent. The role + target come from `signed.op` (a `GovernanceOp::RosterSet`).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn roster_set(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &str,
+        signed: GovernanceSignedOp,
+        created_at: &str,
+    ) -> Result<GovernanceOutcome> {
+        if !matches!(signed.op, GovernanceOp::RosterSet { .. }) {
+            return Ok(GovernanceOutcome::Denied("op is not a roster_set"));
+        }
+        crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
+    }
+
+    /// **Remove** a principal from the workspace roster (owner-only, with the last-owner-lockout guard).
+    /// GOVERNANCE-signed + `op_id`-idempotent. The target comes from `signed.op` (a `GovernanceOp::RosterRemove`).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn roster_remove(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &str,
+        signed: GovernanceSignedOp,
+        created_at: &str,
+    ) -> Result<GovernanceOutcome> {
+        if !matches!(signed.op, GovernanceOp::RosterRemove { .. }) {
+            return Ok(GovernanceOutcome::Denied("op is not a roster_remove"));
+        }
+        crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
+    }
+
+    /// **Revoke** a registered device — flip `revoked` AND drop its read tokens in one transaction (instant
+    /// per-device revoke). Owner OR the device's own principal may sign. GOVERNANCE-signed + `op_id`-idempotent.
+    /// The target device key id comes from `signed.op` (a `GovernanceOp::DeviceRevoke`).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn revoke_device(
+        &self,
+        ws: &WorkspaceId,
+        op_id: &str,
+        signed: GovernanceSignedOp,
+        created_at: &str,
+    ) -> Result<GovernanceOutcome> {
+        if !matches!(signed.op, GovernanceOp::DeviceRevoke { .. }) {
+            return Ok(GovernanceOutcome::Denied("op is not a device_revoke"));
+        }
+        crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
+    }
+
     /// The plane's raw 32-byte Ed25519 **public** key — for a follower to pin the trust root out-of-band.
     ///
     /// # Errors
@@ -464,6 +696,24 @@ impl Authority {
         self.signer
             .as_ref()
             .ok_or_else(|| AuthorityError::internal(NoPlaneKey))
+    }
+
+    /// The configured enrollment state (secret + config), or a typed precondition fault — every
+    /// enrollment/governance op requires it.
+    pub(crate) fn enrollment(&self) -> Result<&EnrollmentState> {
+        self.enrollment
+            .as_ref()
+            .ok_or_else(|| AuthorityError::internal(NoEnrollmentConfig))
+    }
+
+    /// Derive a deterministic opaque credential under the enrollment secret (the one credential mint). A
+    /// thin wrapper over [`crate::enroll::derive_token`] that supplies the configured secret.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set.
+    pub(crate) fn derive_token(&self, domain: &[u8], parts: &[&[u8]]) -> Result<String> {
+        let secret = self.enrollment()?.secret.as_bytes();
+        Ok(crate::enroll::derive_token(secret, domain, parts))
     }
 
     /// The per-workspace git-store directory — one component under the confined root. `WorkspaceId` is
@@ -578,6 +828,42 @@ impl Authority {
         token: &str,
     ) -> Result<()> {
         self.db.seed_read_token(ws, skill, principal, token).await
+    }
+
+    /// Stage a `workspace` row (the enrollment/governance billable object) so a downstream cloud-enrollment
+    /// or governance test can stand up a workspace without the cloud product's provisioning. Test-only.
+    /// `verified_domain_status` ∈ {`unverified`,`pending`,`verified`}; `deployment_mode` ∈ {`cloud`,`self_host`}.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_workspace(
+        &self,
+        ws: &WorkspaceId,
+        display_name: &str,
+        verified_domain_status: &str,
+        deployment_mode: &str,
+    ) -> Result<()> {
+        self.db
+            .seed_workspace(ws, display_name, verified_domain_status, deployment_mode)
+            .await
+    }
+
+    /// Stage a `workspace_member` row (the workspace RBAC roster) so a downstream test can seat an owner
+    /// without the enrollment path. Test-only. `role` ∈ {`owner`,`reviewer`,`member`}; `status` ∈
+    /// {`invited`,`confirmed`}.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_workspace_member(
+        &self,
+        ws: &WorkspaceId,
+        principal: &Principal,
+        role: &str,
+        status: &str,
+    ) -> Result<()> {
+        self.db
+            .seed_workspace_member(ws, principal, role, status)
+            .await
     }
 
     /// Drive a REAL genesis [`publish`](Self::publish): recompute the server-trusted ids the publish's ingest

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE device_auth_sessions SET last_polled_at = ?2 WHERE device_code_sha256 = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5be74b7513efb293738fd9431f75b8925ded6347536a4c99ebb7a11f47142a3b"
+}

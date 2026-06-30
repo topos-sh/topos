@@ -39,7 +39,9 @@ pub(crate) async fn get_current(
     Path(read_token): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
-    let scope = state.authority().resolve_read_token(&read_token).await?;
+    // The server clock (epoch-ms) enforces the read token's expiry inside the authority.
+    let now = crate::wire::now_utc().1;
+    let scope = state.authority().resolve_read_token(&read_token, now).await?;
     let pointer = state
         .authority()
         .read_current(&scope)

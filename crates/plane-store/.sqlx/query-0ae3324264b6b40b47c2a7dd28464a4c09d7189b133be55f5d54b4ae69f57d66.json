@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT role AS \"role!\", status AS \"status!\" FROM workspace_member\n           WHERE workspace_id = ?1 AND principal = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "role!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0ae3324264b6b40b47c2a7dd28464a4c09d7189b133be55f5d54b4ae69f57d66"
+}

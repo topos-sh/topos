@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_code AS \"user_code!\", workspace_id AS \"workspace_id!\",\n                  invite_sha256 AS \"invite_sha256?: Vec<u8>\", device_pubkey AS \"device_pubkey!: Vec<u8>\",\n                  device_key_id AS \"device_key_id!\", status AS \"status!\",\n                  confirmed_principal AS \"confirmed_principal?\", expires_at AS \"expires_at!: i64\",\n                  interval_secs AS \"interval_secs!: i64\", last_polled_at AS \"last_polled_at?: i64\"\n           FROM device_auth_sessions WHERE device_code_sha256 = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_code!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "workspace_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "invite_sha256?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "device_pubkey!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "device_key_id!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "confirmed_principal?",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at!: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "interval_secs!: i64",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_polled_at?: i64",
+        "ordinal": 9,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c3698af7a342f8d39d4a395a195da4f0aab075c1ee8b896eaac3c9e9b476acbf"
+}

@@ -43,6 +43,12 @@ getrandom.workspace = true
 uuid = { workspace = true }
 # Serialize the signed `current` record (a topos-types DTO) into the stored BLOB + the open receipt `details`.
 serde_json.workspace = true
+# The deterministic opaque-credential derivation: HMAC-SHA256 over the 0600 enrollment secret mints every
+# invite / grant / read-token plaintext, so a lost-ack retry re-derives the IDENTICAL credential (and only its
+# sha256 is ever stored). `sha2` is the HMAC hash backend (the same 0.10 pin topos-core uses, default-features
+# off — Sha256 needs no std). Plane-store-only: the secret never reaches the client (no topos -> plane-store edge).
+hmac.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # Drives `#[tokio::test]` — `rt` + `macros` for the runtime + attribute. (`time` comes from the normal dep.)

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT device_code_sha256 AS \"device_code_sha256!: Vec<u8>\" FROM device_auth_sessions\n               WHERE user_code = ?1 AND status IN ('pending', 'confirmed') LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "device_code_sha256!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4555ef21c2372970a7122df9708142aa606568693ea2cfbef7653c6dc81d77ba"
+}

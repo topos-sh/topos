@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT workspace_id AS \"workspace_id!\", expires_at AS \"expires_at?: i64\",\n                      revoked AS \"revoked!: i64\"\n               FROM invites WHERE token_sha256 = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "workspace_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "461d3ca3c7d3a172952e8388893f161e8154af1ab31bd986dcff7e692c003d19"
+}

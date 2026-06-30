@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO read_token (workspace_id, skill_id, principal, token_sha256, device_key_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT (token_sha256) DO UPDATE SET workspace_id = excluded.workspace_id, skill_id = excluded.skill_id, principal = excluded.principal, device_key_id = excluded.device_key_id, expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c3c156c4aacece9cca88b74bc4bdc444690dfb8158668d0b12230e7c39e366d0"
+}

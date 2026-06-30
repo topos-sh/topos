@@ -341,6 +341,76 @@ impl Db {
         Ok(())
     }
 
+    /// Stage a `workspace` row (the enrollment/governance billable object) — so cloud enrollment + governance
+    /// tests can stand up a workspace without the (deferred) admin-claim/provisioning path. Test-only; real
+    /// workspace creation is the cloud product's / `admin_claim`'s job. `created_at` is a fixed `'seed'`.
+    pub(crate) async fn seed_workspace(
+        &self,
+        ws: &WorkspaceId,
+        display_name: &str,
+        verified_domain_status: &str,
+        deployment_mode: &str,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        sqlx::query!(
+            "INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) \
+             VALUES (?1, ?2, NULL, ?3, ?4, 'seed') \
+             ON CONFLICT (workspace_id) DO UPDATE SET \
+               display_name = excluded.display_name, verified_domain_status = excluded.verified_domain_status, \
+               deployment_mode = excluded.deployment_mode",
+            ws_s,
+            display_name,
+            verified_domain_status,
+            deployment_mode,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Stage a `workspace_member` row (the workspace RBAC roster) — so governance tests can seat an owner
+    /// without the enrollment path. Test-only. `added_at` is a fixed `'seed'`.
+    pub(crate) async fn seed_workspace_member(
+        &self,
+        ws: &WorkspaceId,
+        principal: &Principal,
+        role: &str,
+        status: &str,
+    ) -> Result<()> {
+        let (ws_s, prin) = (ws.as_str(), principal.as_str());
+        sqlx::query!(
+            "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
+             VALUES (?1, ?2, ?3, ?4, NULL, 'seed') \
+             ON CONFLICT (workspace_id, principal) DO UPDATE SET role = excluded.role, status = excluded.status",
+            ws_s,
+            prin,
+            role,
+            status,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Stage a one-time `admin_claim` token (storing only its sha256) — so the self-host first-boot
+    /// `admin_claim` op can be driven in a test. Test-only; the real provisioner mints + logs the plaintext.
+    pub(crate) async fn seed_admin_claim(&self, ws: &WorkspaceId, token: &str) -> Result<()> {
+        let token_sha256 = digest::sha256(token.as_bytes());
+        let (ws_s, key) = (ws.as_str(), token_sha256.as_slice());
+        sqlx::query!(
+            "INSERT INTO admin_claim (token_sha256, workspace_id, consumed_at, created_at) \
+             VALUES (?1, ?2, NULL, 'seed') ON CONFLICT (token_sha256) DO NOTHING",
+            key,
+            ws_s,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
     /// Stage the per-skill `current` pointer (created, never moved this increment; the signed record
     /// stays absent). Requires the commit's provenance to exist first (the foreign key).
     pub(crate) async fn seed_current(

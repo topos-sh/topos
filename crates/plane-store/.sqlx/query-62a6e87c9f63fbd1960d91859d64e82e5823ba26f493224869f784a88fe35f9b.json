@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT request_sha256 AS \"request_sha256!: Vec<u8>\", outcome AS \"outcome!\"\n           FROM workspace_events WHERE workspace_id = ?1 AND op_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "request_sha256!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "outcome!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "62a6e87c9f63fbd1960d91859d64e82e5823ba26f493224869f784a88fe35f9b"
+}

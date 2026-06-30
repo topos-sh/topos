@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE device_auth_sessions SET status = 'issued' WHERE device_code_sha256 = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "32b5c6e9a1ebac3635b128482bbfb5accfd7ee0f10c16139f4ab1617b74145b9"
+}

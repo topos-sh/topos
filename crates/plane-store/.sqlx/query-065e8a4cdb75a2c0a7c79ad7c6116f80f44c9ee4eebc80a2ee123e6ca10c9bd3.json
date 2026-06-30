@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT workspace_id AS \"workspace_id!\", principal AS \"principal!\",\n                  device_pubkey AS \"device_pubkey!: Vec<u8>\", device_key_id AS \"device_key_id!\",\n                  device_auth_id AS \"device_auth_id!\", expires_at AS \"expires_at!: i64\"\n           FROM enrollment_grants WHERE grant_sha256 = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "workspace_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "principal!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_pubkey!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "device_key_id!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_auth_id!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "065e8a4cdb75a2c0a7c79ad7c6116f80f44c9ee4eebc80a2ee123e6ca10c9bd3"
+}

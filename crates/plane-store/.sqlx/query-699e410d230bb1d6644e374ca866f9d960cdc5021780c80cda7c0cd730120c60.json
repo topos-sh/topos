@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT skill_id AS \"skill_id!\", name AS \"name?\" FROM invite_skill WHERE token_sha256 = ?1\n               ORDER BY skill_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "skill_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name?",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "699e410d230bb1d6644e374ca866f9d960cdc5021780c80cda7c0cd730120c60"
+}

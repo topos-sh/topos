@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT skill_id AS \"skill_id!\" FROM enrollment_grant_skill WHERE grant_sha256 = ?1 ORDER BY skill_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "skill_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ba601f572720a2e1003d7e0835f843754c4ee1cb1c1d221573c9a66619162e0"
+}

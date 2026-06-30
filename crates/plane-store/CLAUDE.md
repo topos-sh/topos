@@ -142,6 +142,40 @@ same-process code.) The error type holds this line too: internal faults carry a 
   (approve@stale ⇒ CONFLICT → rebase + re-propose → approve@new ⇒ OK) and the **ABA** interleaving (a `revert`
   makes `current.tree == the proposal's base tree`, yet the whole-`(epoch,seq)` CAS still ⇒ CONFLICT) —
   **no HTTP, no client**.
+- **The enrollment + governance issuance core (real, but basic).** The fixture-seeded device/roster/read-token
+  era is over: this layer now **mints real credentials**. Migration `0006` adds the standalone `workspace`
+  (deployment posture), the workspace-level RBAC `workspace_member` roster (DISTINCT from the per-skill
+  `roster`), the opaque `invites` (+ `invite_skill`), `enrollment_grants` (+ `enrollment_grant_skill`),
+  `device_auth_sessions`, `passcodes`, `admin_claim`, and the `workspace_events` governance audit + op_id
+  idempotency store — all STRICT + WITHOUT ROWID, ws-scoped, 32-byte BLOBs width-checked, with NO foreign key
+  onto the standalone `workspace` (so the existing publish/read tests, which seed no workspace, stay green);
+  it also adds nullable `device_key_id` + `expires_at` to `read_token`. **Every opaque credential is
+  deterministically HMAC-derived** (`hmac`/`sha2` over a `0600` enrollment secret loaded with the plane key's
+  exact custody) and **stored ONLY as its sha256** — so a lost-ack retry re-derives the IDENTICAL credential, a
+  consumed grant re-derives the SAME read tokens (naturally idempotent redeem), and a revoke is an instant row
+  flip; `device_code`/`user_code`/`passcode` are fresh `getrandom`. The ops, all decided IN-Authority against
+  server-trusted rows (never a client-asserted id): **`create_invite`** (owner-signed; mints the `/i/<token>`
+  link, seeds the invited members, op_id-idempotent), **`read_invite_bootstrap`** (the no-bytes, no-role
+  payload + the plane signing root), **`start_device_auth`** (RFC-8628-shaped; the device key id is
+  **server-derived** `dk_<…>` from the public key, never client-asserted; cloud sessions are `pending`,
+  self-host born `confirmed` device-rooted), **`poll_device_auth`** (pending/slow-down/denied/expired/granted;
+  the grant is deterministic so a re-poll re-issues the SAME one), **`start_passcode`**/**`complete_passcode`**
+  (the email parsed INSIDE the op, a constant-shaped ack, brute-force locked after a cap), the central
+  **`redeem_enrollment`** (ONE `BEGIN IMMEDIATE`: a possession proof via `topos_core::sign::verify_enroll`
+  against the GRANT's bound key → the deployment-mode roster gate [cloud requires a confirmed, already-rostered
+  identity; self-host grants membership from the bearer] → device registry register with anti-squat → per-skill
+  roster + **minted read tokens, NEVER a user token**), and **`admin_claim`** (self-host first-boot standup).
+  The **governance** mutations (`roster_set`/`roster_remove`/`revoke_device`) verify a
+  `topos_core::sign::verify_governance_op` signature in-transaction against the signer's non-revoked registered
+  device, enforce the role matrix (owner-only for invite/roster; owner-or-self for revoke) + a
+  last-owner-lockout guard, are op_id-idempotent via `workspace_events` (a same-op_id retry with a matching
+  `request_sha256` replays; a different one is a denied key-reuse), and revoke is **instant** (flip `revoked` +
+  drop the device's read tokens in one txn). `resolve_read_token` now takes `now` and enforces the token's
+  `expires_at`. Driven in-process by the device-flow→grant→redeem happy path, the possession-proof teeth (a
+  leaked grant on a different key ⇒ DENIED), deterministic redeem idempotency, the cloud roster gate, self-host
+  SMTP-free membership, instant revoke, the governance role matrix, and server-derived device ids —
+  **no HTTP** (the verification-page HTML, the OIDC/magic-link methods, the mailer, and active read-token
+  rotation land elsewhere). Test-fixture shims gain `seed_workspace` / `seed_workspace_member`.
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 
@@ -160,14 +194,16 @@ flip `location` → `git repack`), both additive + client-invisible; the **clien
 `publish --propose` / `review` / `diff <skill> current..<hash>` CLI verbs, the plane-sourced diff, client
 rebase orchestration, the displayed proposal-status strings — the server authority is built, the client UX is
 not); **multi-reviewer governance** (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff
-UI — single-approver only today, no role column); the **HTTP plane's still-to-come routes** (enrollment +
-read-credential minting, governance roster/policy mutation, the audit outbox — the read + write authority
-routes are now served, but nothing mints a real read token yet); **at-rest key encryption / KMS** (the plane
-key is a plaintext `0600` seed for now); the `purge` verb +
-force-unlink (the tombstones table + denylist check already exist); Postgres (SQLite-first — the interleaving
-tests assert on outcome/invariant, never an error code, so the Postgres arm is a pure later extension);
-two-parent author merges; real device/roster issuance + revocation routes (the registry is fixture-seeded);
-per-skill encryption-at-rest.
+UI — single-approver only today, no role column); the **HTTP plane's still-to-come routes** that wrap the
+issuance core (the enrollment + governance request/response DTOs, the verification-page HTML, the mailer, one
+generic OSS OIDC connector, the workspace-policy mutation, the audit outbox — the *authority ops* now mint
+real credentials, but the network surface over them is not wired here); **active read-token rotation** (redeem
+mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
+revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);
+**at-rest key encryption / KMS** (the plane signing key + the enrollment secret are plaintext `0600` seeds for
+now); the `purge` verb + force-unlink (the tombstones table + denylist check already exist); Postgres
+(SQLite-first — the interleaving tests assert on outcome/invariant, never an error code, so the Postgres arm
+is a pure later extension); two-parent author merges; per-skill encryption-at-rest.
 
 ## Build note
 
@@ -189,3 +225,10 @@ shared workspace pin stays `default-features = false` so `topos-core` keeps its 
 `base64` (base64url-unpadded for the signed pointer's signature value), `uuid` (parsing the canonical op id
 into the 16 bytes the device-op signature binds), and `serde_json` (serializing the signed-`current` record
 DTO into the stored BLOB). The plane private key lives **only** here; `topos-core` stays no-key verify-only.
+
+The **enrollment issuance core** adds, to **this crate only** (likewise client-unreachable): `hmac` + `sha2`
+(HMAC-SHA256 — the deterministic opaque-credential derivation over the `0600` enrollment secret, which reuses
+the plane key's exact load-or-generate custody; `sha2`'s `Sha256` is the HMAC backend, the same
+`default-features = false` 0.10 pin `topos-core` uses), reusing the already-present `getrandom` (fresh
+device-code / user-code / passcode), `base64` (the credential codec), and `uuid` (the governance op id). The
+enrollment secret never reaches the client.

@@ -175,9 +175,16 @@ pub struct VersionMeta {
 /// # Errors
 /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
 /// [`AuthorityError::Integrity`] if a stored row is corrupt.
-pub(crate) async fn resolve_read_token(authority: &Authority, token: &str) -> Result<ReadScope> {
+pub(crate) async fn resolve_read_token(
+    authority: &Authority,
+    token: &str,
+    now: i64,
+) -> Result<ReadScope> {
     let token_sha256 = digest::sha256(token.as_bytes());
-    match authority.db().lookup_read_token(&token_sha256).await? {
+    // `now` enforces the token's `expires_at` (a NULL expiry never expires — legacy + non-expiring rows): an
+    // expired token resolves to the same indistinguishable `NotFound` as an unknown one, so a per-device
+    // revoke (which also drops the row) and an expiry are both an instant 404, never an enumeration oracle.
+    match authority.db().lookup_read_token(&token_sha256, now).await? {
         Some((ws, skill, principal)) => Ok(ReadScope {
             ws,
             skill,

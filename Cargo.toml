@@ -49,7 +49,8 @@ anyhow = "1"
 # --- declared for later (NOT yet referenced by any member) ---
 # default-features = false keeps the kernel's sha2 no_std (the default `std` feature would otherwise
 # pull std into topos-core's tree); held at 0.10 to share one sha2 with ed25519-dalek.
-sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact digest + commit/device-op preimage
+sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact digest + commit/device-op preimage; plane-store: the HMAC-SHA256 backend
+hmac = "0.12"                 # signing edge (plane-store only): the deterministic opaque-credential derivation (HMAC-SHA256 over the 0600 enrollment secret) — never reaches the client
 unicode-normalization = { version = "0.1", default-features = false } # topos-core: NFC path-collision reject (no_std)
 # default-features = false keeps topos-core's verify path no_std (no RNG/std); the signing consumers
 # (plane-store / client) opt back into `std` + `zeroize` for the in-process / device signer.

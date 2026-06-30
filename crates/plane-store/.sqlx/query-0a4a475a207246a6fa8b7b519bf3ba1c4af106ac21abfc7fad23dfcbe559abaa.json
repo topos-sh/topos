@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) VALUES (?1, ?2, NULL, 'unverified', 'self_host', ?3) ON CONFLICT (workspace_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0a4a475a207246a6fa8b7b519bf3ba1c4af106ac21abfc7fad23dfcbe559abaa"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = ?2 WHERE device_code_sha256 = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "21a8c7ffea62bc3f713cb74464b1c1b4e6f99c9f0e4dda1e5de1d5009372b3eb"
+}

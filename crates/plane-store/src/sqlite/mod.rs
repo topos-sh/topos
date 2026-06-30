@@ -179,12 +179,14 @@ impl Db {
     pub(crate) async fn lookup_read_token(
         &self,
         token_sha256: &[u8; 32],
+        now: i64,
     ) -> Result<Option<(WorkspaceId, SkillId, Principal)>> {
         let key = token_sha256.as_slice();
         let row = sqlx::query!(
             r#"SELECT workspace_id AS "workspace_id!", skill_id AS "skill_id!", principal AS "principal!"
-               FROM read_token WHERE token_sha256 = ?1"#,
+               FROM read_token WHERE token_sha256 = ?1 AND (expires_at IS NULL OR expires_at > ?2)"#,
             key,
+            now,
         )
         .fetch_optional(&self.pool)
         .await
@@ -308,6 +310,9 @@ mod set_current;
 
 // The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
 mod proposals;
+
+// The enrollment + governance issuance SQL (invites / device-auth / passcodes / grants / redeem / governance).
+mod enroll;
 
 // Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
 // `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them

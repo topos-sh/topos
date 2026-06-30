@@ -39,7 +39,9 @@ pub(crate) async fn get_version(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
     let token = wire::bearer_token(&headers)?;
-    let scope = state.authority().resolve_read_token(&token).await?;
+    // The server clock (epoch-ms) enforces the read token's expiry inside the authority.
+    let now = wire::now_utc().1;
+    let scope = state.authority().resolve_read_token(&token, now).await?;
     let meta = state
         .authority()
         .read_version_metadata(&scope, &ws, &skill, &version_id)

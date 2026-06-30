@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_claim (token_sha256, workspace_id, consumed_at, created_at) VALUES (?1, ?2, NULL, 'seed') ON CONFLICT (token_sha256) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "21b0af724977b98ef9005601a82973c302b6a7c43b675a635e44cb50cecfd19a"
+}

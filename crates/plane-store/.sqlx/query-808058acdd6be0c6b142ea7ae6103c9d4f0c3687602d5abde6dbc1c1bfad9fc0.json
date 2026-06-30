@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO enrollment_grant_skill (grant_sha256, skill_id) VALUES (?1, ?2) ON CONFLICT (grant_sha256, skill_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "808058acdd6be0c6b142ea7ae6103c9d4f0c3687602d5abde6dbc1c1bfad9fc0"
+}

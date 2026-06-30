@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM read_token WHERE workspace_id = ?1 AND device_key_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2d45d8a32ab2ed5bac7efaf21a2d06d524a1bf1b2000c1817b02006503a13875"
+}

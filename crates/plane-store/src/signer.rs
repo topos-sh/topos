@@ -55,23 +55,8 @@ impl PlaneSigner {
     /// [`AuthorityError::Internal`] if the key file cannot be read/created/validated or OS entropy is
     /// unavailable on first generation.
     pub(crate) fn load_or_generate(path: &Path) -> Result<Self> {
-        if let Some(seed) = read_seed(path)? {
-            return Ok(Self::from_seed(&seed));
-        }
-        // Absent — generate and persist atomically (O_EXCL). A racing process may create it first.
-        let fresh = generate_seed()?;
-        match create_seed_file(path, &fresh) {
-            CreateOutcome::Created => Ok(Self::from_seed(&fresh)),
-            CreateOutcome::Raced => {
-                let seed = read_seed(path)?.ok_or_else(|| {
-                    AuthorityError::internal(SignerError::KeyFile("vanished after a create race"))
-                })?;
-                Ok(Self::from_seed(&seed))
-            }
-            CreateOutcome::Failed(reason) => {
-                Err(AuthorityError::internal(SignerError::KeyFile(reason)))
-            }
-        }
+        let seed = load_or_generate_seed(path)?;
+        Ok(Self::from_seed(&seed))
     }
 
     /// Construct from a raw seed (used by `load_or_generate` and the tests). The seed is consumed into the
@@ -127,6 +112,31 @@ impl std::fmt::Debug for PlaneSigner {
 fn derive_key_id(public_key: &[u8; 32]) -> String {
     let hex = topos_core::digest::to_hex(&topos_core::digest::sha256(public_key));
     format!("plane_{}", &hex[..16])
+}
+
+/// Load (or, on first run, generate + persist `0600`) a raw 32-byte secret seed from `path`, with the
+/// SAME custody the plane signing key uses: a present file is re-validated (exactly 32 bytes, owner-only)
+/// and a fresh one is published atomically (`O_EXCL` temp + hard-link), so two processes racing converge on
+/// one secret. Reused for both the plane signing key ([`PlaneSigner::load_or_generate`]) and the enrollment
+/// HMAC secret — one custody pattern, one `0600` posture. The seed is returned in a [`Zeroizing`] buffer.
+///
+/// # Errors
+/// [`AuthorityError::Internal`] if the file cannot be read/created/validated or OS entropy is unavailable.
+pub(crate) fn load_or_generate_seed(path: &Path) -> Result<Zeroizing<[u8; SEED_LEN]>> {
+    if let Some(seed) = read_seed(path)? {
+        return Ok(seed);
+    }
+    // Absent — generate and persist atomically (O_EXCL). A racing process may create it first.
+    let fresh = generate_seed()?;
+    match create_seed_file(path, &fresh) {
+        CreateOutcome::Created => Ok(fresh),
+        CreateOutcome::Raced => read_seed(path)?.ok_or_else(|| {
+            AuthorityError::internal(SignerError::KeyFile("vanished after a create race"))
+        }),
+        CreateOutcome::Failed(reason) => {
+            Err(AuthorityError::internal(SignerError::KeyFile(reason)))
+        }
+    }
 }
 
 /// Fill a 32-byte seed from the OS CSPRNG.

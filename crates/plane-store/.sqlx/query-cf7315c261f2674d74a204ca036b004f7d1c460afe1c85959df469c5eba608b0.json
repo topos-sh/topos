@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) VALUES (?1, ?2, ?3, 'invited', ?4, ?5) ON CONFLICT (workspace_id, principal) DO UPDATE SET role = excluded.role, invited_by = excluded.invited_by, status = CASE WHEN workspace_member.status = 'confirmed' THEN 'confirmed' ELSE 'invited' END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "cf7315c261f2674d74a204ca036b004f7d1c460afe1c85959df469c5eba608b0"
+}

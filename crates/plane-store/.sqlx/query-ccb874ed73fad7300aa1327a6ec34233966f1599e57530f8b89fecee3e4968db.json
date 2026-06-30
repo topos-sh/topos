@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE enrollment_grants SET consumed_at = ?2 WHERE grant_sha256 = ?1 AND consumed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ccb874ed73fad7300aa1327a6ec34233966f1599e57530f8b89fecee3e4968db"
+}

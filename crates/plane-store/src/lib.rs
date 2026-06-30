@@ -52,6 +52,7 @@
 //! registry is fixture-seeded), at-rest key encryption, the `purge` verb, and Postgres are later work.
 
 mod authority;
+mod enroll;
 mod error;
 mod id;
 mod lineage;
@@ -74,6 +75,12 @@ mod lifecycle;
 mod tests;
 
 pub use authority::Authority;
+pub use enroll::{
+    CreateInviteOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
+    EnrollmentRedeemed, GovernanceOp, GovernanceOutcome, GovernanceSignedOp, GrantIssued,
+    InviteBootstrap, InviteCreated, MintedReadToken, PasscodeComplete, PasscodeStart,
+    RedeemOutcome, Role,
+};
 pub use error::{AuthorityError, Result};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};

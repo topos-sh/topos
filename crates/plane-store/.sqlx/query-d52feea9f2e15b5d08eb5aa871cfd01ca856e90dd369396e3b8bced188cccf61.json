@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE device_auth_sessions SET status = 'expired' WHERE device_code_sha256 = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d52feea9f2e15b5d08eb5aa871cfd01ca856e90dd369396e3b8bced188cccf61"
+}

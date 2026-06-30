@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM workspace_member WHERE workspace_id = ?1 AND principal = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "716c3891f4136bd88cfa69ea5f40b11e8da70ec521d8c6edfb34b74ba0a5791e"
+}
