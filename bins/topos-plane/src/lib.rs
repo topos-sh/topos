@@ -19,6 +19,7 @@
 //! The `review-required` workspace policy + the enrollment connectors are the authority's / the enrollment
 //! port's, not this layer's; they land behind their own seams.
 
+mod enroll;
 mod rate_limit;
 mod router;
 mod routes;
@@ -31,10 +32,16 @@ pub mod openapi;
 #[cfg(test)]
 mod tests;
 
+pub use enroll::mailer::SmtpConfig;
 pub use openapi::openapi;
 pub use rate_limit::Limits;
 pub use router::router;
-pub use state::PlaneState;
+pub use state::{EnrollConfig, PlaneState};
+
+/// The OIDC enrollment connector's config (feature-gated — `enroll-oidc`, default-off). Re-exported so the
+/// bin can read it from the environment; the verification routes that drive the connector land next.
+#[cfg(feature = "enroll-oidc")]
+pub use enroll::oidc::OidcConfig;
 
 /// The plane's HTTP surface is built — `router(state)` composes it.
 pub const PLANE_READY: bool = true;

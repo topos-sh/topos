@@ -814,9 +814,11 @@ fn check_arch() -> Result<()> {
     )?;
     // The test-only `test-fixtures` feature must never be enabled in a production build: a downstream cloud
     // plane composes the PRODUCTION `topos-plane`, which must not carry `plane-store`'s seed/move/tamper
-    // shims; and the production client must not carry its own `test_support` facade. (The `tests/` member
-    // enables both, but it is excluded from the production artifact — `cargo build -p topos-plane`.)
+    // shims NOR its own mailer-injection shim; and the production client must not carry its own
+    // `test_support` facade. (The `tests/` member enables them, but it is excluded from the production
+    // artifact — `cargo build -p topos-plane`.)
     assert_test_fixtures_off("topos-plane", "plane-store")?;
+    assert_test_fixtures_off("topos-plane", "topos-plane")?;
     assert_test_fixtures_off("topos", "topos")?;
     // No member silently escapes the shared lint floor (incl. unsafe_code = forbid).
     check_member_lints()?;

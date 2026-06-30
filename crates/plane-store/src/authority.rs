@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use topos_gitstore::{LocalLargeStore, Store};
 
 use crate::enroll::{
-    CreateInviteOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentState,
-    GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteBootstrap, NoEnrollmentConfig,
-    PasscodeComplete, PasscodeStart, RedeemOutcome,
+    ConfirmOutcome, CreateInviteOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
+    EnrollmentState, GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteBootstrap,
+    NoEnrollmentConfig, PasscodeComplete, PasscodeStart, RedeemOutcome, VerificationContext,
 };
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
@@ -472,6 +472,38 @@ impl Authority {
     /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
     pub async fn read_invite_bootstrap(&self, token: &str, now: i64) -> Result<InviteBootstrap> {
         crate::enroll::read_invite_bootstrap(self, token, now).await
+    }
+
+    /// Resolve a device-auth `user_code` to its **verification-page disclosure** — the machine name + device
+    /// fingerprint, the workspace identity, and the offered skills a human reviews before confirming (the
+    /// RFC-8628 confused-deputy guard). Carries no secret. A miss / non-live / expired session — or an unknown
+    /// code — is the single indistinguishable [`AuthorityError::NotFound`].
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on no live session; [`AuthorityError::Internal`] on a database fault.
+    pub async fn read_verification_context(
+        &self,
+        user_code: &str,
+        now: i64,
+    ) -> Result<VerificationContext> {
+        crate::enroll::read_verification_context(self, user_code, now).await
+    }
+
+    /// Confirm a session's identity from an **externally-proven** email (the OIDC callback's in-Authority
+    /// half) — set the live session's `confirmed_principal` + status `confirmed`, so the device's next poll
+    /// yields a grant. The CALLER (the OIDC module) MUST have validated the id_token first; this op trusts the
+    /// passed `verified_email` and parses it INSIDE the op (never a handler `Principal::parse`). An unknown /
+    /// non-live session — or a malformed email — is the indistinguishable [`AuthorityError::NotFound`].
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on no live session / a malformed email; [`AuthorityError::Internal`] on a fault.
+    pub async fn confirm_external_identity(
+        &self,
+        user_code: &str,
+        verified_email: &str,
+        now: i64,
+    ) -> Result<ConfirmOutcome> {
+        crate::enroll::confirm_external_identity(self, user_code, verified_email, now).await
     }
 
     /// Start a **device-authorization** flow against an invite (RFC-8628-shaped). The device key id is

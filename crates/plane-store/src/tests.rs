@@ -5118,8 +5118,8 @@ mod enrollment_and_governance {
     use super::*;
     use crate::enroll::device_key_id_for;
     use crate::{
-        CreateInviteOutcome, DeviceAuthPoll, GovernanceOp, GovernanceOutcome, GovernanceSignedOp,
-        GrantIssued, PasscodeComplete, RedeemOutcome, Role,
+        ConfirmOutcome, CreateInviteOutcome, DeviceAuthPoll, GovernanceOp, GovernanceOutcome,
+        GovernanceSignedOp, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
     };
 
     const NOW: i64 = 1_000;
@@ -5338,6 +5338,114 @@ mod enrollment_and_governance {
         a.redeem_enrollment(&grant.grant_token, &sig, dpub, NOW, "t0")
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn verification_context_discloses_the_session_device_and_offered_skills() {
+        let fx = Fixture::new("enr-verify-ctx").await;
+        let a = &fx.authority;
+        let w = ws("w_acme");
+        let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+        let invite = make_invite(
+            a,
+            &w,
+            &owner_seed,
+            &owner_dk,
+            &op_id(1),
+            "alice@acme.com",
+            "s_deploy",
+        )
+        .await;
+
+        let device_seed = [11u8; 32];
+        let dpub = device_pub(&device_seed);
+        let start = a
+            .start_device_auth(&invite, &dpub, "alice-laptop", NOW, "t0")
+            .await
+            .unwrap();
+
+        // The verification page discloses the device + workspace + offered skills — no secret.
+        let ctx = a
+            .read_verification_context(&start.user_code, NOW)
+            .await
+            .unwrap();
+        assert_eq!(ctx.machine_name, "alice-laptop");
+        assert_eq!(ctx.workspace_display_name, "Acme");
+        assert_eq!(ctx.verified_domain_status, "verified");
+        assert_eq!(ctx.offered_skills.len(), 1);
+        assert_eq!(ctx.offered_skills[0].0.as_str(), "s_deploy");
+        assert_eq!(ctx.offered_skills[0].1.as_deref(), Some("Deploy"));
+        // The fingerprint is the leading 16 hex of sha256(device pubkey) — no secret, no `dk_` prefix.
+        let expected_fp = &digest::to_hex(&digest::sha256(&dpub))[..16];
+        assert_eq!(ctx.device_fingerprint, expected_fp);
+        assert!(!ctx.device_fingerprint.starts_with("dk_"));
+
+        // An unknown user code is the single indistinguishable NotFound.
+        assert!(matches!(
+            a.read_verification_context("ZZZZ-ZZZZ", NOW).await,
+            Err(AuthorityError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants() {
+        let fx = Fixture::new("enr-oidc-confirm").await;
+        let a = &fx.authority;
+        let w = ws("w_acme");
+        let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+        let invite = make_invite(
+            a,
+            &w,
+            &owner_seed,
+            &owner_dk,
+            &op_id(1),
+            "alice@acme.com",
+            "s_deploy",
+        )
+        .await;
+
+        let device_seed = [11u8; 32];
+        let dpub = device_pub(&device_seed);
+        let start = a
+            .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
+            .await
+            .unwrap();
+        // A cloud session starts pending → a poll is Pending until an identity is confirmed.
+        assert!(matches!(
+            a.poll_device_auth(&start.device_code, NOW, "t0")
+                .await
+                .unwrap(),
+            DeviceAuthPoll::Pending
+        ));
+
+        // The OIDC callback proved the email out-of-band; confirm it directly (no passcode, no code check).
+        assert_eq!(
+            a.confirm_external_identity(&start.user_code, "alice@acme.com", NOW)
+                .await
+                .unwrap(),
+            ConfirmOutcome::Confirmed
+        );
+
+        // The session is confirmed for alice → the next poll yields a grant bound to her, redeemable.
+        let grant = match a
+            .poll_device_auth(&start.device_code, NOW, "t0")
+            .await
+            .unwrap()
+        {
+            DeviceAuthPoll::Granted(g) => g,
+            other => panic!("expected Granted, got {other:?}"),
+        };
+        let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+            panic!("expected a redeem");
+        };
+        assert_eq!(r.principal.as_str(), "alice@acme.com");
+
+        // An unknown user code is the indistinguishable NotFound.
+        assert!(matches!(
+            a.confirm_external_identity("ZZZZ-ZZZZ", "alice@acme.com", NOW)
+                .await,
+            Err(AuthorityError::NotFound)
+        ));
     }
 
     #[tokio::test]

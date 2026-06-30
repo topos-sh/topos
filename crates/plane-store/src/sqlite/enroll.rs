@@ -15,8 +15,9 @@ use topos_core::sign::{
 
 use super::Db;
 use crate::enroll::{
-    self, DeviceAuthPoll, EnrollmentRedeemed, GovernanceInput, GovernanceOp, GovernanceOutcome,
-    GrantIssued, MintedReadToken, PasscodeComplete, RedeemInput, RedeemOutcome, Role,
+    self, ConfirmOutcome, DeviceAuthPoll, EnrollmentRedeemed, GovernanceInput, GovernanceOp,
+    GovernanceOutcome, GrantIssued, MintedReadToken, PasscodeComplete, RedeemInput, RedeemOutcome,
+    Role,
 };
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
@@ -401,6 +402,110 @@ async fn issue_grant(
         offered_skills: offered,
         expires_at,
     })
+}
+
+// ── verification page: the live-session disclosure + the external-identity confirm ─────────────────────
+
+/// A LIVE device-auth session resolved by `user_code` for the verification-page disclosure (no secret).
+pub(crate) struct VerificationSessionRow {
+    pub(crate) machine_name: String,
+    pub(crate) device_pubkey: [u8; 32],
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) invite_sha256: Option<[u8; 32]>,
+}
+
+impl Db {
+    /// Resolve the LIVE (pending/confirmed), NON-EXPIRED session a `user_code` names — for the verification
+    /// page. `None` ⇒ no such live session (an unknown code, a non-live/expired one — the uniform miss). A
+    /// pure pool read: no mutation, no secret (the device code's sha256 is never returned here).
+    pub(crate) async fn read_live_verification_session(
+        &self,
+        user_code: &str,
+        now: i64,
+    ) -> Result<Option<VerificationSessionRow>> {
+        let row = sqlx::query!(
+            r#"SELECT machine_name AS "machine_name!", device_pubkey AS "device_pubkey!: Vec<u8>",
+                      workspace_id AS "workspace_id!", invite_sha256 AS "invite_sha256?: Vec<u8>"
+               FROM device_auth_sessions
+               WHERE user_code = ?1 AND status IN ('pending', 'confirmed') AND expires_at >= ?2
+               LIMIT 1"#,
+            user_code,
+            now,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(VerificationSessionRow {
+                machine_name: r.machine_name,
+                device_pubkey: blob32(&r.device_pubkey)?,
+                workspace_id: WorkspaceId::parse(&r.workspace_id)
+                    .map_err(AuthorityError::integrity)?,
+                invite_sha256: r.invite_sha256.map(|b| blob32(&b)).transpose()?,
+            })),
+        }
+    }
+
+    /// Confirm a live session's identity from an externally-proven principal (the OIDC callback's write half).
+    /// One `BEGIN IMMEDIATE`. Mirrors [`complete_passcode_run`]'s success branch — set status `confirmed` +
+    /// `confirmed_principal` — minus the code check (the CALLER proved the email via a validated id_token). An
+    /// unknown / non-live / expired `user_code` is the uniform `NotFound`.
+    pub(crate) async fn confirm_external_identity_txn(
+        &self,
+        user_code: &str,
+        principal: &Principal,
+        now: i64,
+    ) -> Result<ConfirmOutcome> {
+        let mut tx = self.begin_immediate().await?;
+        let r = confirm_external_identity_run(&mut tx, user_code, principal, now).await;
+        match r {
+            Ok(out) => {
+                tx.commit().await.map_err(AuthorityError::internal)?;
+                Ok(out)
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(AuthorityError::internal)?;
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn confirm_external_identity_run(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_code: &str,
+    principal: &Principal,
+    now: i64,
+) -> Result<ConfirmOutcome> {
+    // The live session this user code names (pending/confirmed), non-expired. Absent ⇒ the uniform miss.
+    let row = sqlx::query!(
+        r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
+           WHERE user_code = ?1 AND status IN ('pending', 'confirmed') AND expires_at >= ?2 LIMIT 1"#,
+        user_code,
+        now,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    let Some(row) = row else {
+        return Err(AuthorityError::NotFound);
+    };
+    let device_code_sha256 = blob32(&row.device_code_sha256)?;
+    let dc = device_code_sha256.as_slice();
+    let prin = principal.as_str();
+    // Confirm the (externally-proven) principal — the device may now poll a grant. No code check: the OIDC
+    // module already validated the id_token, so this is `complete_passcode`'s confirm half, minus the verify.
+    sqlx::query!(
+        "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = ?2 \
+         WHERE device_code_sha256 = ?1",
+        dc,
+        prin,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(ConfirmOutcome::Confirmed)
 }
 
 // ── passcode: start (upsert) + complete (verify under cap), the verification-page second factor ────────

@@ -22,16 +22,39 @@
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 
-**Planned (lands later):** the **`review-required` workspace policy** mutation route + the **governance**
-mutation routes (roster / policy); the **enrollment** state machine (device-flow / passcode / magic-link /
-invite-chain / one generic OSS OIDC connector — concrete modules behind a cargo feature) + invite +
-read-credential **minting**; the **audit outbox** read via durable cursors; **TLS termination** (loopback
-HTTP today — terminate at a reverse proxy).
+**Implemented — the enrollment protocol GLUE the verification routes (landing next) drive** (`src/enroll/`).
+No durable state, no issuance decision (every credential/identity decision is `plane-store::Authority`'s):
+
+- **The passcode mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
+  no async-trait: the handler runs the blocking send on `spawn_blocking`, fire-and-forget so neither the body
+  nor its latency leaks whether an address was rostered), with `SmtpMailer` (lettre, blocking SMTP + rustls),
+  `NoopMailer` (the no-SMTP self-host default — silently drops, so the bootstrap won't advertise the passcode
+  method), and a recording `FakeMailer` (test-gated). **Redaction:** the code rides in a `Passcode`
+  whose hand-written `Debug` is `<redacted>`; `SmtpMailer` / `SmtpConfig` `Debug` omit the transport / creds.
+- **The OIDC connector** (`enroll/oidc.rs`, behind `enroll-oidc`, **DEFAULT-OFF** — a default build resolves
+  NO oauth2/openidconnect/reqwest). A minimal single-provider id-token flow: `start` builds the authorize
+  redirect (PKCE + CSRF state + nonce, the `user_code` bound into `state`); `callback` runs SERVER-SIDE
+  (validate state → exchange code → validate the id_token via JWKS/nonce → confirm the session). **The
+  id/access token is consumed here and dropped — it NEVER returns to the agent; only the
+  proven email crosses to `confirm_external_identity`.** A regression test pins the callback's Ok type to `()`.
+- **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>`; the public
+  `with_enroll_config` builds the mailer INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring
+  `with_rate_limit` + the internal Limiter. A test-gated `with_mailer` shim injects the FakeMailer (a
+  check-arch guard keeps the `test-fixtures` feature off in production).
+
+**Planned (lands next):** the **enrollment + governance HTTP routes** that wrap the now-built issuance core +
+this glue — the request/response DTOs, the verification-page HTML, the passcode-send + OIDC start/callback
+handlers, the workspace-policy mutation — so today it's the **passcode floor + OIDC behind a feature, no
+routes yet**; plus the **`review-required` workspace policy** + **governance** mutation routes (roster /
+policy); the **audit outbox** read via durable cursors; **TLS termination** (loopback HTTP today — terminate
+at a reverse proxy).
 
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / db / git-root /
-large-root / plane-key), opens the `Authority`, and serves `router(state)`.
+large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), opens the `Authority` (now wiring
+`with_enrollment_config` so it mints real credentials) + builds the `EnrollConfig` for `PlaneState`, and
+serves `router(state)`. Under `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` for the connector.
 
 ## The litmus for what belongs in this lib
 

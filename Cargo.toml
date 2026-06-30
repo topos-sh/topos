@@ -82,6 +82,13 @@ rustix = { version = "1", features = ["fs"] } # topos client: safe fsync / F_FUL
 hex = "0.4"                   # one shared hex codec for the std crates (the client decodes 64-char sidecar id fields); the no_std kernel keeps its own tiny impl
 tracing = "0.1"              # observability spine
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] } # topos-plane bin: JSON logs + RUST_LOG filter
+# Enrollment edge (topos-plane ONLY; the client takes no edge to it — check-arch forbids topos -> plane-store
+# and topos never depends on topos-plane). The passcode mailer is a normal dep (blocking SMTP, rustls — no
+# C/openssl); the OIDC connector is feature-gated DEFAULT-OFF, so a default build pulls in neither oauth2 nor
+# openidconnect (nor their reqwest/tokio stack). ≥0.11.22 for the advisory fix.
+lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] } # topos-plane: passcode mailer (blocking SMTP + rustls)
+oauth2 = "5"                  # topos-plane enrollment OIDC (feature-gated, default-off; reqwest + rustls by default)
+openidconnect = "4"           # topos-plane enrollment OIDC (feature-gated, default-off; wraps oauth2; reqwest + rustls)
 
 [workspace.lints.rust]
 unsafe_code = "forbid"        # no unsafe in our crates (deps may use it internally)

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT machine_name AS \"machine_name!\", device_pubkey AS \"device_pubkey!: Vec<u8>\",\n                      workspace_id AS \"workspace_id!\", invite_sha256 AS \"invite_sha256?: Vec<u8>\"\n               FROM device_auth_sessions\n               WHERE user_code = ?1 AND status IN ('pending', 'confirmed') AND expires_at >= ?2\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "machine_name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_pubkey!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "workspace_id!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "invite_sha256?: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9c8f1b84507443fd82acdc82c76193d327b917a1a60b612e40f76f5479698759"
+}

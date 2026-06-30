@@ -273,6 +273,53 @@ fn envelope(bytes: &[u8]) -> JsonEnvelope {
     serde_json::from_slice(bytes).expect("response body is a JsonEnvelope")
 }
 
+// ── enrollment wiring: with_enroll_config / with_mailer / the accessors ───────────────────────────────
+
+#[tokio::test]
+async fn enroll_config_and_injected_mailer_are_readable() {
+    use crate::enroll::mailer::{FakeMailer, MailContext, Passcode};
+
+    let ctx = setup("state-enroll").await;
+    let fake = Arc::new(FakeMailer::default());
+    // with_enroll_config sets the static config (no SMTP ⇒ a NoopMailer); with_mailer overrides it for the
+    // test so we can assert the handler sends through exactly the injected mailer.
+    let state = ctx
+        .state
+        .clone()
+        .with_enroll_config(crate::EnrollConfig {
+            base_url: "https://plane.test".to_owned(),
+            deployment_mode: plane_store::DeploymentMode::Cloud,
+            enrollment_method: "passcode".to_owned(),
+            smtp: None,
+        })
+        .with_mailer(fake.clone());
+
+    assert_eq!(state.enroll().base_url, "https://plane.test");
+    assert_eq!(state.enroll().enrollment_method, "passcode");
+    assert_eq!(
+        state.enroll().deployment_mode,
+        plane_store::DeploymentMode::Cloud
+    );
+
+    // The accessor returns exactly the injected mailer — a send lands in the FakeMailer's record.
+    let mail_ctx = MailContext {
+        workspace_display_name: "Acme".to_owned(),
+        base_url: "https://plane.test".to_owned(),
+    };
+    state
+        .mailer()
+        .send_passcode(
+            "alice@acme.com",
+            &Passcode::new("424242".to_owned()),
+            &mail_ctx,
+        )
+        .unwrap();
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "alice@acme.com");
+    assert_eq!(sent[0].code, "424242");
+}
+
 // ── publish ─────────────────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

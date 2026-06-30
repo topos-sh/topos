@@ -232,6 +232,36 @@ pub enum PasscodeComplete {
     TooManyAttempts,
 }
 
+/// The verification-page disclosure for a LIVE device-auth session — what a human sees BEFORE confirming an
+/// identity (the RFC-8628 confused-deputy guard: the page shows which device + workspace + skills are being
+/// authorized, so a human approves the session they actually started, not one an attacker raced in). Carries
+/// **no secret** — no device code, no grant, no token.
+#[derive(Debug, Clone)]
+pub struct VerificationContext {
+    /// The human-readable machine name the device offered at start.
+    pub machine_name: String,
+    /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. NOT
+    /// the `device_key_id` (no `dk_` prefix, shorter); a display aid only, never an authority input.
+    pub device_fingerprint: String,
+    /// The workspace display name the device would join.
+    pub workspace_display_name: String,
+    /// The org-domain claim (if any).
+    pub verified_domain: Option<String>,
+    /// The domain-verification state.
+    pub verified_domain_status: String,
+    /// The skills the invite pre-offers, each with an optional display name.
+    pub offered_skills: Vec<(SkillId, Option<String>)>,
+}
+
+/// The outcome of confirming a session's external identity (the OIDC callback's in-Authority half). A single
+/// success marker — the identity proof happened in the CALLER (the OIDC module validated the id_token); this
+/// op only records the proven principal onto the live session, exactly like [`PasscodeComplete::Confirmed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmOutcome {
+    /// The session's identity was confirmed (the device's next poll yields a grant).
+    Confirmed,
+}
+
 /// One minted read token (returned ONCE on redeem; only its sha256 is stored).
 #[derive(Debug, Clone)]
 pub struct MintedReadToken {
@@ -452,6 +482,19 @@ pub(crate) fn sha256_token(token: &str) -> [u8; 32] {
     topos_core::digest::sha256(token.as_bytes())
 }
 
+/// The length, in hex chars, of the human-comparable device fingerprint shown on the verification page.
+const DEVICE_FINGERPRINT_HEX_LEN: usize = 16;
+
+/// A short hex fingerprint of a device's public key — `sha256(pubkey)` truncated to
+/// [`DEVICE_FINGERPRINT_HEX_LEN`] hex chars — for the verification page, so a human can visually cross-check
+/// the device asking to enroll. NOT the `device_key_id` (no `dk_` prefix, shorter); a display aid only, never
+/// an authority input.
+#[must_use]
+pub(crate) fn device_fingerprint(device_public_key: &[u8; 32]) -> String {
+    let hex = topos_core::digest::to_hex(&topos_core::digest::sha256(device_public_key));
+    hex[..DEVICE_FINGERPRINT_HEX_LEN].to_owned()
+}
+
 /// The server-trusted inputs to the one redeem transaction (built in orchestration, consumed in
 /// [`crate::sqlite`]). Every identity field is the SERVER's value — the rehashed grant, the re-derived device
 /// key id — never a client claim.
@@ -651,6 +694,40 @@ pub(crate) async fn read_invite_bootstrap(
     })
 }
 
+/// Resolve a `user_code` to its verification-page disclosure (the orchestration half of
+/// [`Authority::read_verification_context`]). A miss — an unknown code, a non-live (issued/denied/expired)
+/// session, an expired one, or a missing workspace — is the single indistinguishable `NotFound`. A pure read
+/// (no mutation, no secret), mirroring [`read_invite_bootstrap`].
+pub(crate) async fn read_verification_context(
+    authority: &Authority,
+    user_code: &str,
+    now: i64,
+) -> Result<VerificationContext> {
+    let Some(session) = authority
+        .db()
+        .read_live_verification_session(user_code, now)
+        .await?
+    else {
+        return Err(AuthorityError::NotFound);
+    };
+    let Some(workspace) = authority.db().read_workspace(&session.workspace_id).await? else {
+        return Err(AuthorityError::NotFound);
+    };
+    // The offered skills are the session invite's (a self-host device-rooted session has no invite ⇒ none).
+    let offered_skills = match &session.invite_sha256 {
+        Some(invite_sha256) => authority.db().read_invite_skills(invite_sha256).await?,
+        None => Vec::new(),
+    };
+    Ok(VerificationContext {
+        machine_name: session.machine_name,
+        device_fingerprint: device_fingerprint(&session.device_pubkey),
+        workspace_display_name: workspace.display_name,
+        verified_domain: workspace.verified_domain,
+        verified_domain_status: workspace.verified_domain_status,
+        offered_skills,
+    })
+}
+
 /// Start a device-authorization flow (the orchestration half of [`Authority::start_device_auth`]). Resolves
 /// the invite, SERVER-derives the device key id (a client-asserted id is ignored), generates a fresh secret
 /// device code + a unique user code, and inserts the session (cloud `pending`; self-host `confirmed` with a
@@ -792,6 +869,24 @@ pub(crate) async fn complete_passcode(
     authority
         .db()
         .complete_passcode_txn(user_code, &principal, code, now)
+        .await
+}
+
+/// Confirm a session's EXTERNAL identity (the orchestration half of
+/// [`Authority::confirm_external_identity`]). The CALLER (the OIDC module) has already proven the email via a
+/// validated id_token; this op only records it onto the live session (status `confirmed` + the principal),
+/// exactly as [`complete_passcode`]'s success half does — minus the code check. The email is parsed INSIDE
+/// the op (never a handler-parsed principal); a malformed email is the indistinguishable `NotFound`.
+pub(crate) async fn confirm_external_identity(
+    authority: &Authority,
+    user_code: &str,
+    verified_email: &str,
+    now: i64,
+) -> Result<ConfirmOutcome> {
+    let principal = Principal::parse(verified_email).map_err(|_| AuthorityError::NotFound)?;
+    authority
+        .db()
+        .confirm_external_identity_txn(user_code, &principal, now)
         .await
 }
 

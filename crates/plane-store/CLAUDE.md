@@ -171,11 +171,18 @@ same-process code.) The error type holds this line too: internal faults carry a 
   last-owner-lockout guard, are op_id-idempotent via `workspace_events` (a same-op_id retry with a matching
   `request_sha256` replays; a different one is a denied key-reuse), and revoke is **instant** (flip `revoked` +
   drop the device's read tokens in one txn). `resolve_read_token` now takes `now` and enforces the token's
-  `expires_at`. Driven in-process by the device-flow→grant→redeem happy path, the possession-proof teeth (a
-  leaked grant on a different key ⇒ DENIED), deterministic redeem idempotency, the cloud roster gate, self-host
-  SMTP-free membership, instant revoke, the governance role matrix, and server-derived device ids —
-  **no HTTP** (the verification-page HTML, the OIDC/magic-link methods, the mailer, and active read-token
-  rotation land elsewhere). Test-fixture shims gain `seed_workspace` / `seed_workspace_member`.
+  `expires_at`. Two more read/confirm ops feed the verification surface: **`read_verification_context`** (the
+  RFC-8628 confused-deputy disclosure — resolve a LIVE, non-expired session by `user_code` and return the
+  machine name + device fingerprint, the workspace identity, and the offered skills; no secret; a miss/expiry
+  is the one indistinguishable `NotFound`) and **`confirm_external_identity`** (the OIDC callback's
+  in-Authority half — set a live session's `confirmed_principal` + status `confirmed` from an
+  already-proven email, the email parsed INSIDE the op; `complete_passcode`'s confirm minus the code check).
+  Driven in-process by the device-flow→grant→redeem happy path, the possession-proof teeth (a leaked grant on
+  a different key ⇒ DENIED), deterministic redeem idempotency, the cloud roster gate, self-host SMTP-free
+  membership, instant revoke, the governance role matrix, server-derived device ids, the verification-context
+  disclosure, and the external-identity confirm-then-grant — **no HTTP** (the verification-page HTML, the
+  OIDC/magic-link transport + the mailer, and active read-token rotation land in `topos-plane`). Test-fixture
+  shims gain `seed_workspace` / `seed_workspace_member`.
 
 ## Backend shape (concrete now; a second backend is a mechanical add)
 

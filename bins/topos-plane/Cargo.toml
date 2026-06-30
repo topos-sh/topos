@@ -8,11 +8,27 @@ repository.workspace = true
 publish = false
 description = "The OSS plane, library-first (lib + thin bin). The lib is the composable plane-core (the public authority API over plane-store, a router(state) builder, the review-required workspace policy, the enrollment state machine). The bin is a thin axum main. The private cloud plane IMPORTS this lib and COMPOSES it — no fork, no extension hook."
 
-# oauth2/openidconnect (feature-gated enrollment) + lettre land later.
+[features]
+# The enrollment OIDC connector (one generic single-provider id_token flow). DEFAULT-OFF: the default build
+# pulls in NEITHER oauth2 nor openidconnect (nor their reqwest/tokio/hyper stack) — `cargo build -p
+# topos-plane` resolves none of it; only `--features enroll-oidc` does.
+enroll-oidc = ["dep:oauth2", "dep:openidconnect"]
+# The test-only mailer-injection shim (`PlaneState::with_mailer` + the in-crate `FakeMailer`). Mirrors
+# `plane-store/test-fixtures`: gated OUT of the production build (a check-arch guard asserts it stays off).
+test-fixtures = []
+
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
 plane-store.workspace = true
+# The passcode mailer: blocking SMTP over rustls (no C/openssl). The send is fire-and-forget on
+# `spawn_blocking` from the handler, so the sync `SmtpTransport` never blocks the async runtime.
+lettre.workspace = true
+# The enrollment OIDC connector — feature-gated (`enroll-oidc`), so a default build never resolves them. The
+# id/access token is consumed SERVER-SIDE and never returned to the agent.
+oauth2 = { workspace = true, optional = true }
+openidconnect = { workspace = true, optional = true }
+thiserror.workspace = true # the mailer / OIDC typed error (creds never reach its Debug/Display)
 # The HTTP surface: axum (default features cover json/http1/tokio/query; matchit is built-in), the OpenAPI
 # generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.
 axum.workspace = true
