@@ -12,6 +12,10 @@ description = "The wire DTOs only — the --json envelope, terminal-outcome/acti
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
+# This leaf carries BOTH schema derives: `schemars` (the committed JSON-Schema contract) AND `utoipa`
+# (the plane's OpenAPI document, assembled where the routes live). `ToSchema` is an independent derive
+# alongside `JsonSchema` — it never changes serde behavior or the schemars output.
+utoipa.workspace = true
 # NB: op_id is a wire String here (format: uuid in the schema); the uuid CRATE is a client dep
 # (it mints the v4), not a wire-DTO dep — so it is deliberately absent from this leaf.
 

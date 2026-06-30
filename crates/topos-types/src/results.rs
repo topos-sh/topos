@@ -261,7 +261,7 @@ pub struct LogData {
 /// `publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is
 /// returned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the
 /// `publish --propose` next-action) and carries no `data`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct PublishData {
     pub skill_id: String,
     /// The new commit.
@@ -278,7 +278,7 @@ pub struct PublishData {
 
 /// `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns
 /// `NEEDS_REVIEW`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct ProposeData {
     /// `<skill>@<version_id>` of the candidate.
     pub proposal: String,
@@ -291,7 +291,7 @@ pub struct ProposeData {
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a
 /// pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct RevertData {
     pub skill_id: String,
     /// The good version named by `--to` (the bytes being restored).
@@ -305,7 +305,7 @@ pub struct RevertData {
 
 /// `review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale
 /// base returns `CONFLICT`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct ReviewData {
     /// `<skill>@<version_id>` of the reviewed proposal.
     pub proposal: String,
@@ -316,7 +316,17 @@ pub struct ReviewData {
 }
 
 /// A review verdict. **INFERRED.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     Approve,

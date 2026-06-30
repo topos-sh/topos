@@ -19,6 +19,9 @@ pub mod results;
 /// On-disk persisted client documents under `~/.topos/` (sync / lock / map / op records).
 pub mod persisted;
 
+/// Wire request/response DTOs for the plane's HTTP write + version-metadata routes (the OpenAPI bodies).
+pub mod requests;
+
 /// Bumped on any breaking change to a persisted/wire shape; every document carries it.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -35,7 +38,7 @@ fn empty_object() -> serde_json::Value {
 
 /// The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the
 /// SAME typed value where practical.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct JsonEnvelope {
     /// Always `1` for this contract version (the schema pins it `const`).
     #[schemars(extend("const" = 1))]
@@ -64,7 +67,17 @@ pub struct JsonEnvelope {
 // ---------------------------------------------------------------------------------------------
 
 /// The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TerminalOutcome {
     Ok,
@@ -90,7 +103,9 @@ pub enum TerminalOutcome {
 
 /// A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
 /// branch on the known set and still pass through unknowns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema,
+)]
 pub struct NextAction {
     pub code: ActionCode,
     /// A complete argv array — execute as-is (no TTY parsing).
@@ -218,20 +233,65 @@ impl schemars::JsonSchema for ActionCode {
     }
 }
 
+// utoipa's `ToSchema` (split into `PartialSchema` + `ToSchema` in utoipa 5) is hand-written here to
+// MIRROR the OPEN-string schemars schema above: `ActionCode` is an open string — any value validates,
+// the known vocabulary rides in `examples`, and an unrecognized future code passes through (executed via
+// the action's `argv`, never rejected). The derive can't express "open enum", so both halves are manual.
+impl utoipa::PartialSchema for ActionCode {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .title(Some("ActionCode"))
+            .description(Some(
+                "A machine-actionable next-action code. The values in `examples` are the known set; an \
+                 unrecognized future code is still valid and MUST be executed via the action's `argv` \
+                 (never rejected).",
+            ))
+            .examples(KNOWN_ACTION_CODES)
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for ActionCode {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ActionCode")
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Generation, Affected, Receipt, WireError (one canonical receipt + flat error).
 // ---------------------------------------------------------------------------------------------
 
 /// The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the
 /// agent consumes `expected`/`current` on a CONFLICT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
 pub struct Generation {
     pub epoch: u64,
     pub seq: u64,
 }
 
 /// What an outcome refers to (every field optional — a policy flip has no skill/version).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
 pub struct Affected {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
@@ -247,7 +307,7 @@ pub struct Affected {
 
 /// The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even
 /// on failures): one stable receipt per op, identical on retry.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct Receipt {
     /// Always `1` for this contract version (the schema pins it `const`).
     #[schemars(extend("const" = 1))]
@@ -285,7 +345,7 @@ pub struct Receipt {
 
 /// The flat wire error (rich `thiserror` enums stay internal). Carries a
 /// stable code + retryability + the safe next actions; never raw SQL/git strings.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct WireError {
     /// A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an
     /// **open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are
@@ -311,13 +371,13 @@ pub struct WireError {
 // the signed preimage also binds workspace_id + skill_id (no cross-scope replay).
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct PointerScope {
     pub workspace_id: String,
     pub skill_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct CurrentRecord {
     /// The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the
     /// pointer names the version, and the commit transitively pins the bytes.
@@ -330,12 +390,22 @@ pub struct CurrentRecord {
 /// fail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root
 /// pointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the
 /// exact opposite of a next-action code and must never silently pass through.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
 pub enum SignatureAlg {
     Ed25519,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct Signature {
     pub alg: SignatureAlg,
     pub key_id: String,
@@ -345,7 +415,7 @@ pub struct Signature {
 }
 
 /// The signed `current` pointer — a versioned envelope; `ETag = "<epoch>.<seq>"`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct SignedCurrentRecord {
     /// Always `1` for this contract version (the schema pins it `const`).
     #[schemars(extend("const" = 1))]
