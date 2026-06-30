@@ -72,6 +72,25 @@ renderer over the SAME typed outcomes (one value, two presentations).
   from `Debug`, never in an error message or URL). `app.rs` selects the real transport + pinned key only when
   enrolled AND following ≥1 skill, else stays inert. The end-to-end pull-over-loopback-HTTP proof lives in the
   `tests/` member; adding `ureq` keeps the client arch-clean (no `plane-store`/`sqlx`/`tokio` edge).
+- **The device keypair + signer** (`device_signer`, `identity`) — the client's **only** private-key edge,
+  mirroring the plane's in-process signer. An Ed25519 signing key is **load-or-generated** from a `0600`
+  `identity/device.key` seed (refuse-on-permissive, exactly-32-bytes, a `Zeroizing` seed held only
+  transiently, serialized under the identity lock; the `SigningKey` self-zeroizes on drop and a hand-written
+  `Debug` redacts the key material). The **`device_key_id`** is derived byte-for-byte the way the plane
+  derives it (`dk_` + the first 32 hex of `sha256(pubkey)`) — so the frames the client signs bind the SAME id
+  the plane re-derives and verifies. Three concrete signers over `topos-core`'s frozen preimages —
+  `sign_enroll` / `sign_governance` / `sign_device_op` (the last built now for the contribute verbs that land
+  next) — each unit-proven to round-trip through the kernel's `verify_*` (one shared preimage, so signer +
+  verifier agree by construction). `host.json` now carries a secret-free **`DeviceKeyRef`** (the PUBLIC key +
+  a pointer to the sibling `0600` seed, NEVER the seed) via `set_device_key`. The signer is **built +
+  unit-tested, wired by the follow / contribute flow next** (no verb drives it yet).
+- **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
+  `write_private` (mode 0600 **from creation** — no world-readable window, no chmod-after-write race) +
+  `private_perms_ok` (the refuse-on-permissive read gate), both threaded through the `FaultFs` crash gate;
+  `atomic_write_private` is the crash-safe secret write (its temp is 0600 from creation, so a fault never
+  leaves a world-readable partial), and `write_doc_private` / `read_doc_private` the typed secret-doc pair
+  (`read_doc_private` fails closed on a group/other-accessible secret BEFORE parsing). The device seed uses
+  `write_private` today; `follows.json` / the WAL point at these next.
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
 message, so injectable id/time sources make `add` deterministic. Golden `--json` fixtures (add/list/diff/log)
@@ -80,11 +99,12 @@ are asserted byte-equal in tests.
 ## Planned (lands later)
 
 Enrollment (invite redemption + read-credential minting — the transport reads `instance.json`/`follows.json`,
-nothing writes them yet) + signing-at-rest; `follow`/`unfollow`; the client `publish`/`review`/`revert` verbs +
-the device-key signer (the **publish guard** over `conflict.json` is built + unit-tested now, wired then);
-the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters (Claude Code
-is the reference — only it guarantees the swap completes before skills resolve; the others leave a named,
-bounded multi-file-read residual).
+and the device keypair + signer + the `0600` primitives are now built, but nothing yet WRITES those follow
+docs or records the device key in `host.json`) + signing-at-rest; `follow`/`unfollow`; the client
+`publish`/`review`/`revert` verbs that WIRE the now-built device-key signer (the **publish guard** over
+`conflict.json` is built + unit-tested now, wired then); the `diff current..<hash>` + `log --team` plane
+halves; the OpenClaw/Hermes harness adapters (Claude Code is the reference — only it guarantees the swap
+completes before skills resolve; the others leave a named, bounded multi-file-read residual).
 
 ## Architectural layering (enforced at the dependency graph)
 
@@ -98,5 +118,7 @@ Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `c
 `uuid`, `rustix` (safe fsync/flock + the atomic dir-swap), `hex` (decode sidecar id fields), `base64`
 (**decode-only**: the signed pointer's base64url `Signature.value`, verify-side — not the private-key
 signing edge `check-arch` forbids), `ureq` (the blocking rustls+ring plane transport — self-contained, so no
-`tokio`/`plane-store`/`sqlx` edge), `anyhow`, `thiserror`; a test-only `ed25519-dalek` dev-dependency signs
-fixture pointers. (The client device-key signer for the contribute verbs lands later.)
+`tokio`/`plane-store`/`sqlx` edge), `ed25519-dalek` (`std` + `zeroize` — the device-key SIGNER, the client's
+only private-key edge), `getrandom` (first-run seed entropy) + `zeroize` (wipe the transient seed buffer),
+`anyhow`, `thiserror`. None of the crypto crates cross `check-arch`'s line (it bans only
+`plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` stays verify-only `no_std`.

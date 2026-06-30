@@ -69,6 +69,15 @@ pub(crate) trait FsOps {
     /// mode is part of the consent-bound digest, so the materialized bit must match the approved bytes.
     /// Creates/truncates and forces the mode (defeating `umask`); **no fsync** (the caller fsyncs).
     fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()>;
+    /// Create/truncate `path` and write `bytes` with mode **0600 from creation** — a SECRET (the device
+    /// seed; later `follows.json` / a WAL). Unlike [`FsOps::write_staged`] (0644/0755) there is **no**
+    /// world-readable window: the file is private from the open, then a defensive `set_permissions(0o600)`
+    /// defeats a pre-existing looser mode / `umask`. **No fsync** (the caller fsyncs — see
+    /// `crate::atomic::atomic_write_private`).
+    fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// Whether `path` is owner-only (`mode & 0o077 == 0`) — the refuse-on-permissive gate a secret read
+    /// uses to fail closed before trusting bytes a wider audience could have written. A pure read.
+    fn private_perms_ok(&self, path: &Path) -> io::Result<bool>;
     /// Atomically exchange two EXISTING directories in one namespace operation (`RENAME_EXCHANGE` on
     /// Linux / `RENAME_SWAP` via `renameatx_np` on macOS — safe `rustix`, no `unsafe`). After it, each
     /// path names what the other held. The single primitive that lets an *update* land new bytes onto a
@@ -238,6 +247,29 @@ impl FsOps for RealFs {
         Ok(())
     }
 
+    fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)?;
+        // `mode(0o600)` is masked by `umask` and ignored if the file already existed, so force 0600 — a
+        // secret must never have a group/other-accessible window. This only tightens a pre-existing looser
+        // file; a fresh file is already private from creation, so there is no chmod-after-write race.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        Ok(mode & 0o077 == 0)
+    }
+
     fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
         #[cfg(any(
             target_os = "linux",
@@ -367,6 +399,10 @@ mod fault {
             self.tick()?;
             self.inner.write_staged(path, bytes, executable)
         }
+        fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.tick()?;
+            self.inner.write_private(path, bytes)
+        }
         fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
             self.tick()?;
             self.inner.exchange_dir(a, b)
@@ -383,6 +419,9 @@ mod fault {
         }
         fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
             self.inner.path_kind(path)
+        }
+        fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
+            self.inner.private_perms_ok(path)
         }
         fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
             self.inner.lock_exclusive(path)

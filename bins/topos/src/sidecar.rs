@@ -94,6 +94,14 @@ impl Layout {
         self.identity_dir().join("host.json")
     }
 
+    /// `identity/device.key` — the raw 32-byte Ed25519 seed (the device signing key), a `0600` secret.
+    /// NEVER in JSON; `host.json` carries only the PUBLIC key + a [`crate::identity::DeviceKeyRef`] that
+    /// points here.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn device_key_path(&self) -> PathBuf {
+        self.identity_dir().join("device.key")
+    }
+
     /// `instance.json` — the enrolled plane + the pinned plane public key (a home-level enrollment doc).
     pub(crate) fn instance_path(&self) -> PathBuf {
         self.home.join("instance.json")

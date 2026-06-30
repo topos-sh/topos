@@ -19,7 +19,8 @@ test-fixtures = []
 # The architectural-layering rule: this binary's graph
 # carries NO plane-store, NO sqlx, NO libsqlite3-sys. Enforced by a `cargo tree -p topos` CI check
 # (see xtask), NOT a global cargo-deny ban (those crates live elsewhere in the workspace).
-# The plane transport (ureq) + device-key signer (ed25519-dalek) + harness adapters land later.
+# The plane transport (ureq) is wired below; the device-key SIGNER (ed25519-dalek, the client's only
+# private-key edge) is now a normal dependency too; the OpenClaw/Hermes harness adapters land later.
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
@@ -40,13 +41,16 @@ hex.workspace = true
 base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-# TEST-ONLY: sign fixture `current` pointers with a throwaway plane key so the verify path is exercised
-# end-to-end. A dev-dependency never enters the production graph, so it does not cross check-arch's line
-# (the client production build stays verify-only via topos-core). Pinned through the workspace set,
-# adding only `std` for signing (no key-gen / zeroize needed here).
-ed25519-dalek = { workspace = true, features = ["std"] }
+# The device-key SIGNER — the client's ONLY private-key edge: the local device identity signs enroll /
+# governance / device-op frames over topos-core's frozen preimages. Ed25519 over the workspace pin, opting
+# into `std` + `zeroize` (zeroize restores SigningKey's zero-on-drop that the no_std default would strip).
+# `getrandom` is the OS CSPRNG for first-run seed generation; `zeroize` wipes the transient raw seed buffer.
+# NONE of these cross check-arch's line (it bans only plane-store/sqlx/libsqlite3-sys/tokio/reqwest/hyper) —
+# topos-core stays verify-only no_std, and the signing edge is the CLIENT's own, never plane-store's. (These
+# also serve the test that signs a fixture `current` pointer — a normal dep is available to tests too.)
+ed25519-dalek = { workspace = true, features = ["std", "zeroize"] }
+getrandom.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

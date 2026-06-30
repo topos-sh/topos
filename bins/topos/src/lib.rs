@@ -18,6 +18,7 @@ pub(crate) mod atomic;
 pub(crate) mod cli;
 pub(crate) mod config_io;
 pub(crate) mod ctx;
+pub(crate) mod device_signer;
 pub(crate) mod doc;
 pub(crate) mod enroll;
 pub(crate) mod error;
