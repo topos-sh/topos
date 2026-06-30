@@ -181,6 +181,77 @@ impl Db {
         }))
     }
 
+    /// Fast-path replay of a prior **gated** (`APPROVAL_REQUIRED`) direct-publish outcome, keyed on the
+    /// STABLE (command, skill, expected) — so a retry of a gated op stays sticky across a `review_required`
+    /// flip without re-gating (which would mismatch a `commit = None` gate receipt and burn `OP_ID_REUSED`)
+    /// or re-ingesting (a gated op's lease is released, so a re-ingest hits `LeaseNotLive`). Only the gated
+    /// outcome is fast-pathed; any other returns `None`, and the preflight skip-gates a stored **OK** (whose
+    /// completed lease makes a re-ingest safe) via [`published_ok_exists`](Self::published_ok_exists), leaving
+    /// the commit comparison to the in-txn replay. Mirrors [`replay_revert`](Self::replay_revert).
+    pub(crate) async fn replay_gated_publish(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        op_id: &str,
+        skill: &SkillId,
+        expected: Generation,
+    ) -> Result<Option<SetCurrentReceipt>> {
+        let Some(stored) = get_receipt(self.pool(), ws, device_key_id, op_id).await? else {
+            return Ok(None);
+        };
+        // A gated outcome MUST be replayed on this pre-ingest fast path rather than left to the promote: every
+        // non-OK outcome RELEASES its migrate lease, so re-ingesting a gated op would hit `LeaseNotLive`. Both
+        // gate paths can produce it — the PREFLIGHT (pre-ingest, `commit = None`) and the rare IN-TXN gate
+        // (post-ingest, `commit = Some`, when `review_required` flips on mid-publish). The unbound one NEEDS
+        // this fast path (the promote's commit-comparison replay can't match a `None` commit). The bound one
+        // is replayed here too, deliberately: a gated op published NO bytes, so replaying `APPROVAL_REQUIRED`
+        // for a same-op_id retry of different bytes — instead of `OP_ID_REUSED` — denies the publish either
+        // way (the client re-runs as a proposal) and avoids re-migrating its released lease. Any OTHER stored
+        // outcome returns `None`; the preflight then skip-gates a stored OK (whose COMPLETED lease makes a
+        // re-ingest safe) via `published_ok_exists`.
+        if stored.outcome != TerminalOutcome::ApprovalRequired {
+            return Ok(None);
+        }
+        let stable_match = stored.command == "publish-direct"
+            && stored.skill_id == skill.as_str()
+            && stored.expected == expected;
+        Ok(Some(if stable_match {
+            stored.into_receipt()
+        } else {
+            // The op id was reused for a DIFFERENT direct publish (skill/expected differ): the byte-stable
+            // reuse receipt, bound on the gated request's stable key (no commit/digest — nothing ingested).
+            let bound = BoundIdentity {
+                command: "publish-direct",
+                skill_id: skill.as_str(),
+                commit: None,
+                bundle_digest: None,
+                expected,
+            };
+            permanent_key_reuse(op_id, &bound, &stored.created_at)
+        }))
+    }
+
+    /// Whether a prior **OK** pointer-move receipt exists for this `(workspace, device, op id)`. The publish
+    /// preflight consults it to avoid RE-GATING a publish that already SUCCEEDED: re-gating would bind a fresh
+    /// `commit = None` receipt and mismatch the stored OK (burning the op as `OP_ID_REUSED` once
+    /// `review_required` flips ON between attempts). A stored OK instead skips the gate so the promote path's
+    /// in-txn replay (which runs BEFORE the in-txn gate) returns the original OK — safe because an OK leaves a
+    /// **completed** (non-expiring) lease, so the re-ingest succeeds. (Non-OK outcomes release their lease, so
+    /// they are NOT skip-gated; a gated one is replayed by [`replay_gated_publish`](Self::replay_gated_publish),
+    /// and a CONFLICT/DENIED retry keeps its prior behaviour — re-gated to `OP_ID_REUSED` under review-on, or
+    /// the unchanged review-off flow.)
+    pub(crate) async fn published_ok_exists(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        op_id: &str,
+    ) -> Result<bool> {
+        Ok(matches!(
+            get_receipt(self.pool(), ws, device_key_id, op_id).await?,
+            Some(stored) if stored.outcome == TerminalOutcome::Ok
+        ))
+    }
+
     /// The `(epoch, seq)` generation `current` points at for a skill, if a pointer exists (a pool read). The
     /// approve path uses it to classify a pre-transaction render fault: a fault on a proposal whose base still
     /// equals this is genuine corruption; a fault on one whose base no longer matches is a stale proposal the
@@ -286,6 +357,29 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         Ok(row.is_some_and(|r| r.review_required != 0))
+    }
+
+    /// Upsert the workspace's `review_required` policy (the write the read above consults). The single home
+    /// for the policy row; `Authority::set_review_required` is the public op, and the test-fixtures
+    /// `seed_review_required` shim delegates to it. The upsert has no foreign key onto the standalone
+    /// `workspace` row (so the publish/read tests that seed no workspace stay green).
+    pub(crate) async fn set_review_required(
+        &self,
+        ws: &WorkspaceId,
+        review_required: bool,
+    ) -> Result<()> {
+        let ws_s = ws.as_str();
+        let rr = i64::from(review_required);
+        sqlx::query!(
+            "INSERT INTO workspace_policy (workspace_id, review_required) VALUES (?1, ?2) \
+             ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
+            ws_s,
+            rr,
+        )
+        .execute(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
     }
 }
 

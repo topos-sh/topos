@@ -706,6 +706,19 @@ impl Authority {
         crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
     }
 
+    /// Set the workspace's `review_required` policy — the off-by-default anti-poisoning gate. With it on, a
+    /// direct publish short-circuits to `APPROVAL_REQUIRED` (ingesting nothing) and an approval requires a
+    /// second, distinct reviewer (four-eyes); genesis + revert bypass it. This is the authorized public op a
+    /// downstream plane (or its admin console) toggles; the test-only `seed_review_required` shim delegates
+    /// to it. A trusted caller (the toggle is not itself device-op-signed — the device-signed governance
+    /// route over this policy is later work); authorization to call it is the composing plane's concern.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn set_review_required(&self, ws: &WorkspaceId, review_required: bool) -> Result<()> {
+        self.db.set_review_required(ws, review_required).await
+    }
+
     /// The plane's raw 32-byte Ed25519 **public** key — for a follower to pin the trust root out-of-band.
     ///
     /// # Errors
@@ -868,9 +881,9 @@ impl Authority {
             .await
     }
 
-    /// Set the workspace's `review_required` policy (the anti-poisoning gate). Test-only — the real toggle
-    /// is a plane/console setting; the client only enforces the typed-fail / four-eyes / delegated-consent
-    /// outcomes.
+    /// Set the workspace's `review_required` policy (the anti-poisoning gate). Test-only convenience that
+    /// **delegates** to the public [`set_review_required`](Self::set_review_required) (one impl, no drift) —
+    /// kept so the existing fixtures read the same way; a downstream plane uses the public op.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
@@ -879,7 +892,7 @@ impl Authority {
         ws: &WorkspaceId,
         review_required: bool,
     ) -> Result<()> {
-        self.db.set_review_required(ws, review_required).await
+        self.set_review_required(ws, review_required).await
     }
 
     /// Mint a read token (store only its sha256, exactly as [`resolve_read_token`](Self::resolve_read_token)

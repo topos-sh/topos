@@ -307,7 +307,7 @@ async fn enroll_config_and_injected_mailer_are_readable() {
     let state = ctx
         .state
         .clone()
-        .with_enroll_config(crate::EnrollConfig {
+        .with_enroll_config(crate::state::EnrollConfig {
             base_url: "https://plane.test".to_owned(),
             deployment_mode: plane_store::DeploymentMode::Cloud,
             enrollment_method: "passcode".to_owned(),
@@ -339,6 +339,43 @@ async fn enroll_config_and_injected_mailer_are_readable() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to, "alice@acme.com");
     assert_eq!(sent[0].code, "424242");
+}
+
+/// The runtime parity guard for the **single construction path**: `PlaneState::open_sqlite` (the leak-free
+/// constructor the bin + a downstream plane use) runs against a real tempdir and yields a SERVING state. It
+/// is the only test that EXECUTES the constructor (the bin isn't run in CI; the `open_sqlite` doc-test is
+/// `no_run`), so it pins that the internal resolution matches the bin's (mode `"cloud"` ⇒ `Cloud`; no SMTP ⇒
+/// `device_code`) and that the composed `router(state)` answers — an unknown read token is the
+/// indistinguishable 404, never a panic/500.
+#[tokio::test]
+async fn open_sqlite_builds_a_serving_state() {
+    let dir = unique_dir("open-sqlite");
+    let state = PlaneState::open_sqlite(crate::PlaneConfig {
+        db_path: dir.join("db"),
+        git_root: dir.join("git"),
+        large_root: dir.join("large"),
+        plane_key_path: dir.join("plane.key"),
+        enroll_secret_path: dir.join("enroll.key"),
+        base_url: "https://plane.test".to_owned(),
+        mode: "cloud".to_owned(),
+        enrollment_method: None,
+        smtp: None,
+    })
+    .await
+    .expect("open_sqlite builds a serving state");
+
+    // The constructor's internal resolution matches the bin's: the mode `String` parsed to `Cloud`, and the
+    // enrollment method defaulted to `device_code` (no SMTP relay).
+    assert_eq!(state.enroll().base_url, "https://plane.test");
+    assert_eq!(state.enroll().deployment_mode, DeploymentMode::Cloud);
+    assert_eq!(state.enroll().enrollment_method, "device_code");
+
+    // The composed router serves: an unknown token is the indistinguishable 404, proving the authority +
+    // routes are wired by the constructor.
+    let (status, _h, _b) = send(router(state), get("/v1/current/rt_unknown_token", &[])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── publish ─────────────────────────────────────────────────────────────────────────────────────────
@@ -995,7 +1032,7 @@ async fn enroll_setup(tag: &str) -> EnrollCtx {
             refill_per_sec: 1.0,
             enabled: false,
         })
-        .with_enroll_config(crate::EnrollConfig {
+        .with_enroll_config(crate::state::EnrollConfig {
             base_url: ENROLL_BASE_URL.to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "passcode".to_owned(),

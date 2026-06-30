@@ -734,6 +734,28 @@ pub(crate) async fn publish_preflight(
     if !matches!(op, DeviceOp::PublishDirect) {
         return Ok(None);
     }
+    // A same-op-id retry must not be RE-GATED across a `review_required` flip: the gate binds `commit = None`,
+    // so re-gating an op that already terminated would mismatch its stored receipt and burn OP_ID_REUSED.
+    // (1) Replay a stored GATED outcome directly (it must not be re-ingested — a gated op's lease is released,
+    // so a re-ingest would hit LeaseNotLive; this also keeps it sticky if the policy flipped OFF). (2) Skip
+    // the gate for a stored OK so the promote path's in-txn replay (which runs BEFORE the in-txn gate) returns
+    // the original OK — safe because an OK leaves a completed (non-expiring) lease, so the re-ingest succeeds.
+    // Any other stored outcome (CONFLICT/DENIED) keeps its prior behaviour. Only a FRESH op id reaches the
+    // policy gate below. Mirrors the revert path's pre-txn replay.
+    if let Some(replayed) = authority
+        .db()
+        .replay_gated_publish(ws, device_key_id, op_id.as_str(), skill, expected)
+        .await?
+    {
+        return Ok(Some(replayed));
+    }
+    if authority
+        .db()
+        .published_ok_exists(ws, device_key_id, op_id.as_str())
+        .await?
+    {
+        return Ok(None);
+    }
     if !authority.db().workspace_review_required(ws).await? {
         return Ok(None);
     }
@@ -748,13 +770,12 @@ pub(crate) async fn publish_preflight(
     {
         return Ok(None);
     }
-    // NOTE (safe only while policy is immutable): this gated receipt binds `commit/digest = None` (nothing
-    // is ingested yet), whereas the in-txn promote path binds `commit = Some(candidate)`. A single op id
-    // that took the in-txn path on one attempt and this preflight on another would see those bound
-    // identities disagree and burn as OP_ID_REUSED. That split requires `review_required` to FLIP between
-    // attempts — impossible in v0, where the policy is fixture-seeded with no mutation surface. Unifying the
-    // bound (the client's claimed commit/digest, or keying the gate on stable fields) lands with the
-    // set-policy verb + the propose path, which ship together.
+    // This gated receipt binds `commit/digest = None` (nothing is ingested yet), whereas the promote path
+    // binds `commit = Some(candidate)`. A single op id that took the promote on one attempt and this preflight
+    // on another would see those bound identities disagree and burn as OP_ID_REUSED. That split requires
+    // `review_required` to FLIP between attempts — now possible (the set-policy surface exists), so the retry
+    // guards above keep it consistent: a stored gated receipt is replayed before the policy is re-read, and a
+    // stored OK skips this gate (its in-txn replay returns it). Only a fresh op id ever reaches this line.
     let receipt = authority
         .db()
         .record_pretxn(pretxn(

@@ -173,12 +173,24 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > prompt; `revert` → follower rolls forward; the plane `diff` renders a proposal). The client stays
 > edge-clean.
 >
+> **The plane is now composable leak-free — the seam a downstream plane builds on.** The OSS `topos-plane`
+> lib gained a **leak-free construction surface**: a plain/owned `PlaneConfig` + `PlaneState::open_sqlite(cfg)`
+> that builds the `Authority` + enrollment config **internally** (so a composer never names a `plane_store`
+> type), the **bin dogfoods it** (one construction path, no drift), and a public **`PlaneState::set_review_required(ws:
+> &str, bool)`** sets the `review_required` policy through the public API (a leak-free wrapper over a new
+> ungated `Authority::set_review_required`; the test-only seed delegates to it). A `no_run` doc-test + a
+> runtime parity test pin the surface; `PlaneState::new(Arc<Authority>)` stays the explicit test/advanced path.
+> This is what a separate, private downstream plane *composes* (imports + `.merge`s `router(state)`, gates in
+> front, sets policy via the API) — never forks, never the authority.
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
 > client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
 > multi-IdP / HRD / SAML / SCIM — one generic OIDC connector ships feature-gated); **magic-link** as a primary
 > rung; **active read-token rotation** (per-device revoke + expiry are built; rotation in the `current` path is
-> deferred — v0 mints long-lived device-bound tokens); the **`PUT /policy`** mutation + **`unfollow`** + the
+> deferred — v0 mints long-lived device-bound tokens); the **device-signed `PUT /policy` governance route**
+> (the `review-required` toggle is a public library method now — a composing admin route calls it; a
+> device-op-signed route over it needs a new kernel frame) + **`unfollow`** + the
 > client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
 > workspace standup** (`admin-claim` stands up self-host today); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +

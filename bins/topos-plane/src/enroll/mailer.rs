@@ -75,7 +75,8 @@ pub(crate) enum MailError {
 }
 
 /// The SMTP relay configuration (host, port, credentials, from-address). `pub` because it is a field of the
-/// public [`EnrollConfig`](crate::EnrollConfig); its `Debug` REDACTS the user + password.
+/// public [`PlaneConfig`](crate::PlaneConfig) (and the crate-private `EnrollConfig`); its `Debug` REDACTS the
+/// user + password.
 #[derive(Clone)]
 pub struct SmtpConfig {
     /// The SMTP relay hostname.

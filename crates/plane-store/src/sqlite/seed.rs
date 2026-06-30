@@ -271,26 +271,6 @@ impl Db {
         Ok(())
     }
 
-    /// Set a workspace's review-required policy (fixture-seeded; there is no public set-policy verb yet).
-    pub(crate) async fn set_review_required(
-        &self,
-        ws: &WorkspaceId,
-        review_required: bool,
-    ) -> Result<()> {
-        let ws_s = ws.as_str();
-        let rr = i64::from(review_required);
-        sqlx::query!(
-            "INSERT INTO workspace_policy (workspace_id, review_required) VALUES (?1, ?2) \
-             ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
-            ws_s,
-            rr,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(())
-    }
-
     /// Stage a read token (the per-follower, per-skill read credential) — storing only its sha256, never the
     /// plaintext, exactly as the resolver looks it up. Real minting (and the 0600 at-rest token file) lands
     /// later behind the enrollment port.

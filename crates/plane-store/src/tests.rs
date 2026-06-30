@@ -3159,6 +3159,225 @@ async fn review_required_gates_a_direct_publish() {
     );
 }
 
+/// Once `review_required` is MUTABLE (the public set-policy op exists), a gated direct publish must REPLAY
+/// its original `APPROVAL_REQUIRED` even when the policy is turned OFF between a lost-ack and a same-`op_id`
+/// retry. The preflight gate binds `commit = None`, so without the pre-txn replay the retry would fall
+/// through to the promote path, whose commit-comparison replay would burn it as `OP_ID_REUSED`. The pointer
+/// never moves, and a FRESH op under the now-off policy is NOT gated (the replay is op-scoped).
+#[tokio::test]
+async fn a_gated_publish_replays_approval_required_across_a_policy_flip() {
+    let fx = Fixture::new("sc-gate-flip").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(23);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // Genesis (bypasses the gate) so a child publish has a base.
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "41000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert!(g.is_ok());
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Review ON (via the new PUBLIC op): the preflight gates op_id X → APPROVAL_REQUIRED (commit/digest None).
+    let op_id = op("41000000-0000-4000-8000-000000000001");
+    fx.authority.set_review_required(&w, true).await.unwrap();
+    let pre1 = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &op_id,
+        None,
+        None,
+        gn(1, 1),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pre1.unwrap().outcome, TerminalOutcome::ApprovalRequired);
+
+    // Flip the policy OFF, then RETRY the SAME op_id: the gated outcome is REPLAYED (without the fix this
+    // returns `None`, the promote runs, and the bound-identity mismatch burns it as OP_ID_REUSED).
+    fx.authority.set_review_required(&w, false).await.unwrap();
+    let pre2 = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &op_id,
+        None,
+        None,
+        gn(1, 1),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pre2.expect("the gated outcome replays across the policy flip")
+            .outcome,
+        TerminalOutcome::ApprovalRequired,
+    );
+
+    // A DIFFERENT op id under the now-off policy is NOT gated — the replay is op-scoped, not a sticky gate.
+    let fresh = op("41000000-0000-4000-8000-000000000002");
+    let pre3 = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &fresh,
+        None,
+        None,
+        gn(1, 1),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert!(pre3.is_none(), "a fresh op under review-off is not gated");
+
+    // The pointer never moved across the whole flip.
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c0)
+    );
+}
+
+/// The MIRROR direction: a SUCCESSFUL direct publish (review OFF), then the policy flips ON, then a
+/// same-`op_id` retry. The stored OK receipt binds `commit = Some`; the preflight must NOT re-gate it — it
+/// skips the gate so the promote path's in-txn replay (which runs BEFORE the in-txn gate) returns the
+/// original OK, rather than recording a `commit = None` gate receipt that mismatches the stored one and burns
+/// the op as `OP_ID_REUSED`. A FRESH op is still gated under the now-on policy.
+#[tokio::test]
+async fn a_successful_publish_replays_ok_even_after_review_required_flips_on() {
+    let fx = Fixture::new("sc-ok-flip-on").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(24);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // Genesis, then a successful CHILD publish under review-OFF (records an OK receipt for op_id Y).
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "42000000-0000-4000-8000-000000000000",
+        genesis(vec![file("f", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert!(g.is_ok());
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    let op_y = "42000000-0000-4000-8000-000000000001";
+    let ok = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        op_y,
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(ok.outcome, TerminalOutcome::Ok);
+    let c1 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Flip review ON. The preflight for the SAME op id must NOT re-gate the stored OK (skip the gate ⇒ None).
+    fx.authority.set_review_required(&w, true).await.unwrap();
+    let pre = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &op(op_y),
+        None,
+        None,
+        gn(1, 1),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert!(
+        pre.is_none(),
+        "a stored OK op is not re-gated when review flips on (the gate is skipped)"
+    );
+
+    // A FRESH op IS gated under the now-on policy (the gate still fires for new ops).
+    let fresh = op("42000000-0000-4000-8000-000000000002");
+    let pre_fresh = crate::set_current::publish_preflight(
+        &fx.authority,
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "dk_a",
+        &fresh,
+        None,
+        None,
+        gn(1, 2),
+        CREATED_AT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pre_fresh.unwrap().outcome,
+        TerminalOutcome::ApprovalRequired
+    );
+
+    // The full promote retry of op Y replays the original OK (the in-txn replay precedes the in-txn gate),
+    // not OP_ID_REUSED — and the pointer does not double-advance.
+    let retry = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        op_y,
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(
+        retry.outcome,
+        TerminalOutcome::Ok,
+        "the retry replays the original OK"
+    );
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c1)
+    );
+}
+
 /// Sign a revert device-op: the server constructs the forward commit, so the test signs over the SAME values
 /// the txn will (good's digest determines the forward version_id).
 #[allow(clippy::too_many_arguments)]

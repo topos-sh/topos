@@ -121,9 +121,11 @@ same-process code.) The error type holds this line too: internal faults carry a 
   **`revert --to <good>`** is a **forward** commit `{tree: good.tree, parents: [current]}` (`seq` advances,
   the pointer never moves backward); good's tree digest is read from its provenance row (migration `0003`
   added a `bundle_digest` column — the git commit does not persist it). The **review-required typed-fail
-  gate** is built (a direct publish under the fixture-seeded policy short-circuits to `APPROVAL_REQUIRED`
-  having ingested nothing; genesis + revert bypass it). The cross-skill lineage predicate is now **enforced
-  transactionally** here. Migration `0003` adds `op_receipts` + `workspace_policy` + a fixture-seeded
+  gate** is built (a direct publish under the policy short-circuits to `APPROVAL_REQUIRED` having ingested
+  nothing; genesis + revert bypass it); the policy is set by the public **`Authority::set_review_required(ws,
+  bool)`** (a `workspace_policy` upsert — the test-only `seed_review_required` now delegates to it; the
+  device-signed `PUT /policy` governance route over it is later work). The cross-skill lineage predicate is now
+  **enforced transactionally** here. Migration `0003` adds `op_receipts` + `workspace_policy` + a fixture-seeded
   `device_registry`. Two-parent author merges are rejected wholesale (a later increment). Driven in-process
   by the interleaving tests (concurrent-publish → one OK + one stable CONFLICT; the ABA traps; lost-ack
   replay; revoke-blocks-promotion; post-promote GC-reachability; genesis; first-parent) — **no HTTP, no

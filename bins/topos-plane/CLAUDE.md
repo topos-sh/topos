@@ -4,6 +4,17 @@
 
 **Implemented** — the HTTP surface over the built `plane-store::Authority`:
 
+- **The leak-free construction surface (what a downstream plane composes without naming `plane-store`):**
+  `pub struct PlaneConfig` (plain/owned fields only — `mode: String`, paths, `Option<SmtpConfig>`) +
+  `pub async fn PlaneState::open_sqlite(cfg: PlaneConfig) -> anyhow::Result<PlaneState>`, which builds the
+  `Authority` + the (now crate-private) enrollment config **internally**. The **bin dogfoods it** (one
+  construction path — `main.rs` names no `plane_store` type). A `no_run` doc-test + a runtime parity test pin
+  it. `PlaneState::new(Arc<Authority>)` stays the explicit test/advanced path that does name `Authority`.
+- `pub async fn PlaneState::set_review_required(&self, workspace_id: &str, review_required: bool) ->
+  anyhow::Result<()>` — the `review_required` workspace-policy toggle, **set via the public API** (a leak-free
+  wrapper over `Authority::set_review_required`: the id is parsed + both errors stringified internally). A
+  composing admin route calls it; it is **not** itself device-op-signed (the device-signed `PUT /policy`
+  governance route is later work).
 - `pub fn router(state: PlaneState) -> axum::Router` — the **single** composed surface a downstream plane
   imports verbatim (the limiter lives inside `PlaneState`). There is **no** `PlaneExtension`/callback/fork
   hook (a check-arch guard also proves the production build never enables the test-only seeding feature).
@@ -59,23 +70,30 @@ issuance decision (every credential/identity decision is `plane-store::Authority
   id/access token is consumed here and dropped — it NEVER returns to the agent; only the
   proven email crosses to `confirm_external_identity`.** A regression test pins the callback's Ok type to `()`.
 - **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>` (+ a feature-gated
-  `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the public `with_enroll_config` builds the mailer
-  INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring `with_rate_limit` + the internal
-  Limiter, and the feature-gated `with_oidc_config` loads the connector. A test-gated `with_mailer` shim
-  injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in production).
+  `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the **crate-private** `with_enroll_config` builds the
+  mailer INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring `with_rate_limit` + the internal
+  Limiter — `PlaneState::open_sqlite` calls it from a leak-free `PlaneConfig` (`EnrollConfig` is now `pub(crate)`,
+  so it never crosses the public API). The feature-gated `with_oidc_config` loads the connector. A test-gated
+  `with_mailer` shim injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in
+  production).
 
 **Planned (lands later):** the **verification-page HTML** (the routes above are the JSON surface a composing
-web layer renders; the page itself is a separate surface); the **workspace-policy mutation** (the
-`review-required` toggle is config today, not yet a route); the **audit outbox** read via durable cursors;
-**TLS termination** (loopback HTTP today — terminate at a reverse proxy).
+web layer renders; the page itself is a separate surface); the **device-signed `PUT /policy` route** (the
+`review-required` toggle is now a public library method — `PlaneState::set_review_required` — that a composing
+admin route calls; a device-op-signed governance route over it needs a new kernel frame, still later work);
+the **audit outbox** read via durable cursors; **TLS termination** (loopback HTTP today — terminate at a
+reverse proxy).
 
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / db / git-root /
-large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), opens the `Authority` (now wiring
-`with_enrollment_config` so it mints real credentials) + builds the `EnrollConfig` for `PlaneState`, and
-serves `router(state)`. Under `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto
-`PlaneState` (`with_oidc_config`) so the `/v1/enroll/oidc/*` routes can drive it.
+large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), resolves its two bin-local
+marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
+**single leak-free constructor** `PlaneState::open_sqlite(PlaneConfig { .. })` — which opens the `Authority`,
+loads the plane key + enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
+`plane-store` type, dogfooding the same path a downstream plane uses) — and serves `router(state)`. Under
+`enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto `PlaneState` (`with_oidc_config`) so
+the `/v1/enroll/oidc/*` routes can drive it.
 
 ## The litmus for what belongs in this lib
 

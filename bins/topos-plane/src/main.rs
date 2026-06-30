@@ -5,12 +5,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use plane_store::{Authority, DeploymentMode, EnrollmentConfig};
-use topos_plane::{EnrollConfig, PlaneState, SmtpConfig, router};
+use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router};
 
 /// The self-hostable plane's runtime configuration (flags or env).
 #[derive(Debug, Parser)]
@@ -76,18 +74,14 @@ async fn main() -> Result<()> {
 
     let cfg = Config::parse();
 
-    // Resolve the shared enrollment values (posture, base URL, advertised method) once — both the authority's
-    // `EnrollmentConfig` (it builds the bootstrap payloads) and the plane's `EnrollConfig` (the routes + the
-    // mailer) read them.
-    let deployment_mode = DeploymentMode::parse(&cfg.mode).unwrap_or_else(|| {
-        tracing::warn!(mode = %cfg.mode, "unknown TOPOS_PLANE_MODE; defaulting to self_host");
-        DeploymentMode::SelfHost
-    });
+    // The two bin-local marshals `open_sqlite` does NOT do: default the public base URL to the bind address,
+    // and assemble the SMTP relay from the five all-or-nothing fields (any missing ⇒ no passcode email, the
+    // no-op mailer). Everything else — parsing the mode, defaulting the enrollment method, opening the
+    // authority + enrollment config — is the constructor's, so there is one construction home and no drift.
     let base_url = cfg
         .base_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", cfg.bind));
-    // All five SMTP fields together enable the relay; any missing ⇒ no passcode email (the no-op mailer).
     let smtp = match (
         cfg.smtp_host.clone(),
         cfg.smtp_port,
@@ -104,37 +98,22 @@ async fn main() -> Result<()> {
         }),
         _ => None,
     };
-    let enrollment_method = cfg.enrollment_method.clone().unwrap_or_else(|| {
-        if smtp.is_some() {
-            "passcode"
-        } else {
-            "device_code"
-        }
-        .to_owned()
-    });
 
-    // Open the storage authority (the only trust surface) + load/generate the plane signing key AND the
-    // enrollment HMAC secret (both `0600`, generated on first run). The enrollment config is what mints real
-    // credentials — wiring it here is what turns enrollment on for this bin.
-    let authority = Authority::open_sqlite(&cfg.db, &cfg.git_root, &cfg.large_root)
-        .await
-        .context("opening the storage authority")?
-        .with_plane_key(&cfg.plane_key)
-        .context("loading the plane signing key")?
-        .with_enrollment_config(EnrollmentConfig {
-            secret_path: cfg.enroll_secret.clone(),
-            base_url: base_url.clone(),
-            deployment_mode,
-            enrollment_method: enrollment_method.clone(),
-        })
-        .context("loading the enrollment secret")?;
-
-    let state = PlaneState::new(Arc::new(authority)).with_enroll_config(EnrollConfig {
+    // The single construction path (dogfooding the library's leak-free constructor — the same one a downstream
+    // plane uses): build the serving state from a `PlaneConfig`. It opens the authority, loads/generates the
+    // `0600` plane key + enrollment secret, and builds the enrollment config internally.
+    let state = PlaneState::open_sqlite(PlaneConfig {
+        db_path: cfg.db,
+        git_root: cfg.git_root,
+        large_root: cfg.large_root,
+        plane_key_path: cfg.plane_key,
+        enroll_secret_path: cfg.enroll_secret,
         base_url,
-        deployment_mode,
-        enrollment_method,
+        mode: cfg.mode,
+        enrollment_method: cfg.enrollment_method,
         smtp,
-    });
+    })
+    .await?;
 
     // The OIDC connector is feature-gated + default-off; when built in, read its config from the environment
     // and load it onto the state so the `/v1/enroll/oidc/*` routes can drive it.
