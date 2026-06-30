@@ -22,6 +22,10 @@ pub struct PlaneState {
     limiter: Limiter,
     mailer: Arc<dyn Mailer>,
     enroll: Arc<EnrollConfig>,
+    /// The OIDC connector config — only present under `enroll-oidc` (default-off), set by the bin from the
+    /// environment via [`with_oidc_config`](Self::with_oidc_config); `None` until configured.
+    #[cfg(feature = "enroll-oidc")]
+    oidc: Option<Arc<crate::enroll::oidc::OidcConfig>>,
 }
 
 /// The static enrollment configuration the verification routes (landing next) read: the public base URL, the
@@ -63,6 +67,8 @@ impl PlaneState {
             limiter: Limiter::new(Limits::from_env()),
             mailer: Arc::new(NoopMailer),
             enroll: Arc::new(EnrollConfig::default()),
+            #[cfg(feature = "enroll-oidc")]
+            oidc: None,
         }
     }
 
@@ -94,6 +100,22 @@ impl PlaneState {
         };
         self.enroll = Arc::new(config);
         self
+    }
+
+    /// Set the OIDC connector config (the bin reads `TOPOS_PLANE_OIDC_*` and calls this). Feature-gated —
+    /// `enroll-oidc` is default-off, so a default build never resolves the connector. Mirrors
+    /// [`with_enroll_config`](Self::with_enroll_config): a builder that the composition root calls once.
+    #[cfg(feature = "enroll-oidc")]
+    #[must_use]
+    pub fn with_oidc_config(mut self, config: crate::enroll::oidc::OidcConfig) -> Self {
+        self.oidc = Some(Arc::new(config));
+        self
+    }
+
+    /// The configured OIDC connector, if any (the OIDC routes read it; `None` ⇒ the routes 404).
+    #[cfg(feature = "enroll-oidc")]
+    pub(crate) fn oidc(&self) -> Option<&crate::enroll::oidc::OidcConfig> {
+        self.oidc.as_deref()
     }
 
     /// Inject a mailer directly — the route tests pass a `FakeMailer` to read the passcode without SMTP.

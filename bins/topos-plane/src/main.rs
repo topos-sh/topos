@@ -136,9 +136,13 @@ async fn main() -> Result<()> {
         smtp,
     });
 
-    // The OIDC connector is feature-gated + default-off; when built in, read its config from the environment.
+    // The OIDC connector is feature-gated + default-off; when built in, read its config from the environment
+    // and load it onto the state so the `/v1/enroll/oidc/*` routes can drive it.
     #[cfg(feature = "enroll-oidc")]
-    configure_oidc();
+    let state = match configure_oidc() {
+        Some(oidc) => state.with_oidc_config(oidc),
+        None => state,
+    };
 
     let listener = tokio::net::TcpListener::bind(cfg.bind)
         .await
@@ -155,10 +159,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Read the OIDC connector config from `TOPOS_PLANE_OIDC_*` (a full set enables it) and log that it is wired.
-/// The verification routes that DRIVE the connector land next; this only validates + surfaces the config.
+/// Read the OIDC connector config from `TOPOS_PLANE_OIDC_*` (a full set enables it). Returns the config to
+/// load onto [`PlaneState`] (the `/v1/enroll/oidc/*` routes drive it); `None` when the env set is incomplete.
 #[cfg(feature = "enroll-oidc")]
-fn configure_oidc() {
+fn configure_oidc() -> Option<topos_plane::OidcConfig> {
     let vars = (
         std::env::var("TOPOS_PLANE_OIDC_ISSUER").ok(),
         std::env::var("TOPOS_PLANE_OIDC_CLIENT_ID").ok(),
@@ -172,6 +176,9 @@ fn configure_oidc() {
             client_secret,
             redirect_uri,
         };
-        tracing::info!(issuer = %oidc.issuer, "OIDC enrollment connector configured (routes land next)");
+        tracing::info!(issuer = %oidc.issuer, "OIDC enrollment connector configured");
+        Some(oidc)
+    } else {
+        None
     }
 }

@@ -18,6 +18,7 @@
 //! constraint used across [`crate`].
 
 use crate::Generation;
+use crate::bootstrap::{BootstrapSkill, VerifiedDomainStatus};
 use crate::results::ReviewDecision;
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +210,341 @@ pub struct WireVersionMeta {
     pub files: Vec<WireVersionFile>,
 }
 
+// =================================================================================================
+// Enrollment request/response DTOs — the device-flow / passcode / redeem / admin-claim wire bodies.
+//
+// The enrollment credentials (device code, grant, read token, device public key) are OPAQUE strings,
+// never trusted as ids: the server re-derives every id from the bytes (the device key id from the public
+// key, the grant by its sha256). The enroll-frame possession signature rides the `Topos-Device-Signature`
+// header on redeem, NOT the body. Field names are snake_case as written.
+// =================================================================================================
+
+/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow against an invite. The
+/// server SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct DeviceAuthorizeRequest {
+    /// The opaque `/i/<token>` invite token the device enrolls against.
+    pub invite_token: String,
+    /// The device's raw 32-byte Ed25519 public key, base64url-unpadded. The server derives the device key id
+    /// from it (never a client-asserted id) and binds it into the enrollment possession frame.
+    pub device_public_key: String,
+    /// A human-readable machine name shown on the verification page (a confused-deputy guard, not authority).
+    pub machine_name: String,
+}
+
+/// `POST /v1/device/authorize` response — the RFC-8628 device-authorization grant (the names mirror the RFC).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct DeviceAuthorizeResponse {
+    /// The SECRET device code the client polls `device/token` with.
+    pub device_code: String,
+    /// The short code a human types on the verification page.
+    pub user_code: String,
+    /// The verification URL a human visits to approve the session.
+    pub verification_uri: String,
+    /// The session lifetime, in seconds (RFC-8628 `expires_in`).
+    pub expires_in: u64,
+    /// The minimum poll interval, in seconds (RFC-8628 `interval`).
+    pub interval: u64,
+}
+
+/// `POST /v1/device/token` body — poll a device-authorization session for its grant.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct DeviceTokenRequest {
+    /// The SECRET device code from `device/authorize`.
+    pub device_code: String,
+}
+
+/// A device-authorization poll status — the RFC-8628 outcomes (snake_case). `granted` carries the opaque
+/// grant; every other status carries only itself (no grant).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTokenStatus {
+    /// Not yet confirmed — keep polling at the interval.
+    Pending,
+    /// Polled too fast — back off.
+    SlowDown,
+    /// The session was denied at the verification page.
+    Denied,
+    /// The session expired before confirmation.
+    Expired,
+    /// Confirmed — the `grant` is present.
+    Granted,
+}
+
+/// `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
+/// when `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct DeviceTokenResponse {
+    /// The poll status.
+    pub status: DeviceTokenStatus,
+    /// The opaque single-use enrollment grant — present ONLY when `status` is `granted` (the redeem credential).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+}
+
+/// `GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before
+/// confirming an identity (the RFC-8628 confused-deputy guard). Carries no secret.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct VerificationContextResponse {
+    /// The human-readable machine name the device offered at start.
+    pub machine_name: String,
+    /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. A
+    /// display aid only, never an authority input.
+    pub device_fingerprint: String,
+    /// The workspace display name the device would join.
+    pub workspace_display_name: String,
+    /// The org-domain claim, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_domain: Option<String>,
+    /// The domain-verification state.
+    pub verified_domain_status: VerifiedDomainStatus,
+    /// The skills the invite pre-offers (each with an optional display name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offered_skills: Vec<BootstrapSkill>,
+}
+
+/// `POST /v1/enroll/passcode` body — start a passcode challenge for an email on a live device-auth session.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct PasscodeRequest {
+    /// The user code naming the live device-auth session.
+    pub user_code: String,
+    /// The email the passcode proves control of.
+    pub email: String,
+}
+
+/// The constant-shaped status of a started passcode challenge — always `sent`, so a non-rostered address is
+/// no enumeration oracle (the cloud roster gate is enforced at redeem, never here).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PasscodeAckStatus {
+    /// The challenge was accepted (and, for a valid address, mailed). The ONLY possible status.
+    Sent,
+}
+
+/// `POST /v1/enroll/passcode` response — a CONSTANT-shaped ack (always `sent`); the send is fire-and-forget,
+/// so neither the body nor its latency reveals whether the address was rostered.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct PasscodeAck {
+    /// Always `sent`.
+    pub status: PasscodeAckStatus,
+}
+
+/// `POST /v1/enroll/passcode/confirm` body — submit a passcode to confirm the session's identity.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct PasscodeConfirmRequest {
+    /// The user code naming the live device-auth session.
+    pub user_code: String,
+    /// The email the passcode was sent to.
+    pub email: String,
+    /// The 6-digit passcode the human entered.
+    pub code: String,
+}
+
+/// The outcome of a passcode confirmation (snake_case). A wrong code carries only the status — never the
+/// attempts remaining (no brute-force timing/count oracle on the wire).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PasscodeConfirmStatus {
+    /// The code matched — the session's identity is confirmed (the device's next poll yields a grant).
+    Confirmed,
+    /// The code was wrong.
+    WrongCode,
+    /// The passcode expired.
+    Expired,
+    /// The attempt cap was hit — the passcode is locked.
+    TooManyAttempts,
+}
+
+/// `POST /v1/enroll/passcode/confirm` response — the confirmation status.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct PasscodeConfirmResponse {
+    /// The confirmation status.
+    pub status: PasscodeConfirmStatus,
+}
+
+/// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted
+/// per-skill read tokens. The enrollment possession signature rides the `Topos-Device-Signature` header
+/// (NOT a body field); the server re-derives the device key id from `device_public_key`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct RedeemRequest {
+    /// The workspace the device enrolls into (authoritatively the grant's; echoed for the client's clarity).
+    pub workspace_id: String,
+    /// The opaque single-use enrollment grant (from a `granted` device-token poll).
+    pub grant: String,
+    /// The device's raw 32-byte Ed25519 public key, base64url-unpadded (must equal the grant's bound key).
+    pub device_public_key: String,
+}
+
+/// `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device and
+/// the minted per-skill read tokens. **NO user token, ever.** Rides in the all-outcome envelope's `data`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct RedeemResponse {
+    /// The workspace the device enrolled into.
+    pub workspace_id: String,
+    /// The server-derived device key id now registered.
+    pub device_key_id: String,
+    /// The minted per-skill read credentials (returned ONCE; only their sha256 is stored server-side).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_creds: Vec<RedeemedSkillCred>,
+}
+
+/// One minted per-skill read credential — the `0600` at-rest secret a follower stores to pull a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct RedeemedSkillCred {
+    /// The skill the token reads.
+    pub skill_id: String,
+    /// The plaintext read token (returned ONCE; only its sha256 is stored server-side).
+    pub read_token: String,
+    /// The token expiry in epoch-ms (`None` = non-expiring — per-device revoke is the kill switch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+/// `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
+/// first owner. The server re-derives the device key id from `device_public_key`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct AdminClaimRequest {
+    /// The one-time admin-claim token.
+    pub claim_token: String,
+    /// The claiming device's raw 32-byte Ed25519 public key, base64url-unpadded.
+    pub device_public_key: String,
+    /// The display name for the standing-up workspace.
+    pub display_name: String,
+}
+
+// =================================================================================================
+// Governance request bodies — owner/admin device-op-signed mutations. The governance-frame signature rides
+// the `Topos-Device-Signature` header; the op is derived from the route + body. `op_id` is a UUIDv4.
+// =================================================================================================
+
+/// A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRole {
+    /// Full governance authority (invite, roster, revoke).
+    Owner,
+    /// A reviewer (review-gate authority; no governance authority in v0).
+    Reviewer,
+    /// An ordinary member (no governance authority).
+    Member,
+}
+
+/// One skill an invite pre-offers, with an optional display name (the name is NOT bound into the invite
+/// signing frame — only the skill id is — so a rename never forks the deterministic invite link).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct InviteSkill {
+    /// The offered skill id.
+    pub skill_id: String,
+    /// An optional display name to carry on the invite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster
+/// (omitted `role` defaults to `member`; the client must sign the same role byte). Returns
+/// [`InviteData`](crate::results::InviteData) on success.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct InviteRequest {
+    /// The target workspace id (bound into the governance signing frame).
+    pub workspace_id: String,
+    /// The client-minted UUIDv4 idempotency key (a retry replays the deterministic link + receipt).
+    #[schemars(extend("format" = "uuid"))]
+    pub op_id: String,
+    /// The id of the signing OWNER's device key (the registry selects the verifying key by this).
+    pub device_key_id: String,
+    /// The emails to invite (seeded onto the roster as `invited`), bound as a set in the signing frame.
+    pub emails: Vec<String>,
+    /// The role the invitees are granted — omitted defaults to `member` (the client signs the same byte).
+    #[serde(default)]
+    pub role: Option<WorkspaceRole>,
+    /// The skills the invite pre-offers (each with an optional display name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<InviteSkill>,
+}
+
+/// `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
+/// principal is the `{email}` path segment; the role rides the body (bound into the signing frame).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct RosterSetRequest {
+    /// The target workspace id (bound into the governance signing frame).
+    pub workspace_id: String,
+    /// The client-minted UUIDv4 idempotency key.
+    #[schemars(extend("format" = "uuid"))]
+    pub op_id: String,
+    /// The id of the signing owner's device key.
+    pub device_key_id: String,
+    /// The role to set on the `{email}` target.
+    pub role: WorkspaceRole,
+}
+
+/// `DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster
+/// (owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct RosterRemoveRequest {
+    /// The target workspace id (bound into the governance signing frame).
+    pub workspace_id: String,
+    /// The client-minted UUIDv4 idempotency key.
+    #[schemars(extend("format" = "uuid"))]
+    pub op_id: String,
+    /// The id of the signing owner's device key.
+    pub device_key_id: String,
+}
+
+/// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
+/// principal). The revoke is INSTANT (flip `revoked` + drop the device's read tokens in one transaction).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct DeviceRevokeRequest {
+    /// The target workspace id (bound into the governance signing frame).
+    pub workspace_id: String,
+    /// The client-minted UUIDv4 idempotency key.
+    #[schemars(extend("format" = "uuid"))]
+    pub op_id: String,
+    /// The id of the SIGNING device key (the actor; not the target).
+    pub device_key_id: String,
+    /// The id of the device key to revoke.
+    pub target_device_key_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +613,102 @@ mod tests {
         let back: WireVersionMeta = serde_json::from_value(v).unwrap();
         assert_eq!(back.version_id, "a".repeat(64));
         assert_eq!(back.files[0].object_id, "d".repeat(64));
+    }
+
+    #[test]
+    fn device_token_status_is_snake_case_and_granted_carries_a_grant() {
+        assert_eq!(
+            serde_json::to_string(&DeviceTokenStatus::SlowDown).unwrap(),
+            "\"slow_down\""
+        );
+        // A pending poll carries only the status (no grant).
+        let pending = DeviceTokenResponse {
+            status: DeviceTokenStatus::Pending,
+            grant: None,
+        };
+        let v = serde_json::to_value(&pending).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert!(v.get("grant").is_none(), "no grant unless granted");
+        // A granted poll carries the opaque grant.
+        let granted = DeviceTokenResponse {
+            status: DeviceTokenStatus::Granted,
+            grant: Some("g_opaque".to_owned()),
+        };
+        let v = serde_json::to_value(&granted).unwrap();
+        assert_eq!(v["status"], "granted");
+        assert_eq!(v["grant"], "g_opaque");
+    }
+
+    #[test]
+    fn passcode_ack_is_constant_shaped() {
+        let ack = PasscodeAck {
+            status: PasscodeAckStatus::Sent,
+        };
+        assert_eq!(serde_json::to_value(&ack).unwrap()["status"], "sent");
+    }
+
+    #[test]
+    fn passcode_confirm_status_is_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PasscodeConfirmStatus::TooManyAttempts).unwrap(),
+            "\"too_many_attempts\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PasscodeConfirmStatus::WrongCode).unwrap(),
+            "\"wrong_code\""
+        );
+    }
+
+    #[test]
+    fn redeem_response_carries_read_creds_and_no_user_token() {
+        let resp = RedeemResponse {
+            workspace_id: "w_acme".to_owned(),
+            device_key_id: "dk_abc".to_owned(),
+            read_creds: vec![RedeemedSkillCred {
+                skill_id: "s_deploy".to_owned(),
+                read_token: "rt_secret".to_owned(),
+                expires_at: None,
+            }],
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["read_creds"][0]["skill_id"], "s_deploy");
+        // NO user token field, ever.
+        assert!(v.get("user_token").is_none());
+        assert!(v.get("token").is_none());
+        let back: RedeemResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back.read_creds.len(), 1);
+    }
+
+    #[test]
+    fn workspace_role_is_snake_case_and_invite_request_round_trips() {
+        assert_eq!(
+            serde_json::to_string(&WorkspaceRole::Reviewer).unwrap(),
+            "\"reviewer\""
+        );
+        let req = InviteRequest {
+            workspace_id: "w_acme".to_owned(),
+            op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
+            device_key_id: "dk_owner".to_owned(),
+            emails: vec!["alice@acme.com".to_owned()],
+            role: Some(WorkspaceRole::Member),
+            skills: vec![InviteSkill {
+                skill_id: "s_deploy".to_owned(),
+                name: Some("Deploy".to_owned()),
+            }],
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["role"], "member");
+        assert_eq!(v["emails"][0], "alice@acme.com");
+        let back: InviteRequest = serde_json::from_value(v).unwrap();
+        assert_eq!(back.skills[0].skill_id, "s_deploy");
+        // An omitted role deserializes to None (the handler defaults it to member).
+        let no_role: InviteRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "w_acme",
+            "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "device_key_id": "dk_owner",
+            "emails": ["bob@acme.com"],
+        }))
+        .unwrap();
+        assert!(no_role.role.is_none());
     }
 }

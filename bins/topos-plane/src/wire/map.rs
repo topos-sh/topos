@@ -3,11 +3,24 @@
 //! handler NEVER builds these by hand (no string-format drift, one home for the outcome→action policy).
 
 use base64::Engine as _;
-use plane_store::{CandidateUpload, CommitId, SetCurrentReceipt, UploadedFile, VersionMeta};
-use topos_types::requests::{WireCandidate, WireVersionFile, WireVersionMeta};
+use plane_store::{
+    CandidateUpload, CommitId, CreateInviteOutcome, DeploymentMode as StoreDeploymentMode,
+    DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, PasscodeComplete,
+    RedeemOutcome, SetCurrentReceipt, UploadedFile, VerificationContext, VersionMeta,
+};
+use topos_types::bootstrap::{
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
+    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+};
+use topos_types::requests::{
+    DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, PasscodeConfirmResponse,
+    PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred, VerificationContextResponse,
+    WireCandidate, WireVersionFile, WireVersionMeta,
+};
+use topos_types::results::InviteData;
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, Receipt, SCHEMA_VERSION, SignedCurrentRecord,
-    TerminalOutcome, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, Receipt, SCHEMA_VERSION, SignatureAlg,
+    SignedCurrentRecord, TerminalOutcome, WireError,
 };
 
 use super::error::PlaneHttpError;
@@ -204,4 +217,232 @@ fn default_code(outcome: TerminalOutcome) -> &'static str {
         TerminalOutcome::RetryableFailure => "RETRYABLE_FAILURE",
         TerminalOutcome::PermanentFailure => "PERMANENT_FAILURE",
     }
+}
+
+// =================================================================================================
+// Enrollment / governance mappers — the domain ⇄ wire edge for the issuance routes. The unauthenticated
+// reads (bootstrap, device-auth, verification, passcode) map to a plain typed DTO (a miss is the route's
+// 404); the op_id-carrying WRITES (redeem, admin-claim, invite, roster, revoke) map every protocol outcome
+// to a 200 all-outcome envelope (a DENIED is a 200 + the flat error, never a 403 — I-404 is only for
+// skill-scoped object reads).
+// =================================================================================================
+
+/// Map an [`InviteBootstrap`] to the wire [`BootstrapData`] — the pre-enrollment TOFU payload. `token` is the
+/// invite link token the client used (echoed as the non-secret `token_id`); the plane key is pinned here.
+pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapData {
+    BootstrapData {
+        schema_version: SCHEMA_VERSION,
+        invite: BootstrapInvite {
+            token_id: token.to_owned(),
+            // The domain `InviteBootstrap` does not carry the invite's own expiry; the bootstrap omits it
+            // (enrollment fails closed if the invite has expired, so the field is advisory only).
+            expires_at: None,
+            consent: ConsentMode::DirectHumanFirstReceive,
+            // ALWAYS false — a first-received skill is offered, never silently landed.
+            first_receive_auto_land: false,
+        },
+        plane: BootstrapPlane {
+            base_url: b.base_url,
+            deployment_mode: deployment_mode_to_wire(b.deployment_mode),
+            enrollment_method: b.enrollment_method,
+            signing_key: BootstrapSigningKey {
+                alg: SignatureAlg::Ed25519,
+                key_id: b.plane_key_id,
+                value: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b.plane_public_key),
+            },
+        },
+        workspace: BootstrapWorkspace {
+            workspace_id: b.workspace_id.as_str().to_owned(),
+            display_name: b.display_name,
+            verified_domain: b.verified_domain,
+            verified_domain_status: verified_domain_status_to_wire(&b.verified_domain_status),
+        },
+        offered_skills: skills_to_wire(b.skills),
+    }
+}
+
+/// Map a [`DeviceAuthStart`] to the wire [`DeviceAuthorizeResponse`]. `now` (the server clock the start was
+/// stamped with) converts the absolute `expires_at` (epoch-ms) into the RFC-8628 relative `expires_in` (s).
+pub(crate) fn device_auth_to_wire(s: DeviceAuthStart, now: i64) -> DeviceAuthorizeResponse {
+    DeviceAuthorizeResponse {
+        device_code: s.device_code,
+        user_code: s.user_code,
+        verification_uri: s.verification_uri,
+        expires_in: u64::try_from((s.expires_at - now) / 1000).unwrap_or(0),
+        interval: u64::try_from(s.interval_secs).unwrap_or(0),
+    }
+}
+
+/// Map a [`DeviceAuthPoll`] to the wire [`DeviceTokenResponse`]. Only `Granted` carries the opaque grant.
+pub(crate) fn device_poll_to_wire(poll: DeviceAuthPoll) -> DeviceTokenResponse {
+    let (status, grant) = match poll {
+        DeviceAuthPoll::Pending => (DeviceTokenStatus::Pending, None),
+        DeviceAuthPoll::SlowDown => (DeviceTokenStatus::SlowDown, None),
+        DeviceAuthPoll::Denied => (DeviceTokenStatus::Denied, None),
+        DeviceAuthPoll::Expired => (DeviceTokenStatus::Expired, None),
+        DeviceAuthPoll::Granted(g) => (DeviceTokenStatus::Granted, Some(g.grant_token)),
+    };
+    DeviceTokenResponse { status, grant }
+}
+
+/// Map a [`VerificationContext`] to the wire [`VerificationContextResponse`] (the verification-page disclosure).
+pub(crate) fn verification_to_wire(v: VerificationContext) -> VerificationContextResponse {
+    VerificationContextResponse {
+        machine_name: v.machine_name,
+        device_fingerprint: v.device_fingerprint,
+        workspace_display_name: v.workspace_display_name,
+        verified_domain: v.verified_domain,
+        verified_domain_status: verified_domain_status_to_wire(&v.verified_domain_status),
+        offered_skills: skills_to_wire(v.offered_skills),
+    }
+}
+
+/// Map a [`PasscodeComplete`] to the wire [`PasscodeConfirmResponse`] — only the status crosses (a wrong-code
+/// attempt count never reaches the wire).
+pub(crate) fn passcode_complete_to_wire(c: PasscodeComplete) -> PasscodeConfirmResponse {
+    let status = match c {
+        PasscodeComplete::Confirmed => PasscodeConfirmStatus::Confirmed,
+        PasscodeComplete::WrongCode { .. } => PasscodeConfirmStatus::WrongCode,
+        PasscodeComplete::Expired => PasscodeConfirmStatus::Expired,
+        PasscodeComplete::TooManyAttempts => PasscodeConfirmStatus::TooManyAttempts,
+    };
+    PasscodeConfirmResponse { status }
+}
+
+/// The all-outcome envelope for a redeem / admin-claim ([`RedeemOutcome`]): `Redeemed` → a 200 carrying the
+/// [`RedeemResponse`] (the registered device + the minted read creds, NEVER a user token); `Denied` → a 200
+/// carrying the uniform flat DENIED error (no static reason — never an oracle).
+pub(crate) fn redeem_envelope(command: &str, outcome: RedeemOutcome) -> JsonEnvelope {
+    match outcome {
+        RedeemOutcome::Redeemed(r) => {
+            let resp = RedeemResponse {
+                workspace_id: r.workspace_id.as_str().to_owned(),
+                device_key_id: r.device_key_id,
+                read_creds: r
+                    .read_tokens
+                    .into_iter()
+                    .map(|t| RedeemedSkillCred {
+                        skill_id: t.skill_id.as_str().to_owned(),
+                        read_token: t.token,
+                        expires_at: t.expires_at,
+                    })
+                    .collect(),
+            };
+            ok_envelope(command, to_data(&resp))
+        }
+        RedeemOutcome::Denied(_) => denied_envelope(command),
+    }
+}
+
+/// The all-outcome envelope for a create-invite ([`CreateInviteOutcome`]): `Created` → a 200 carrying the
+/// [`InviteData`] (the shareable link + the seeded roster/skills); `Denied` → the uniform flat DENIED error.
+pub(crate) fn invite_envelope(outcome: CreateInviteOutcome) -> JsonEnvelope {
+    match outcome {
+        CreateInviteOutcome::Created(inv) => {
+            let data = InviteData {
+                invite_link: inv.link,
+                roster_added: inv
+                    .roster_added
+                    .iter()
+                    .map(|p| p.as_str().to_owned())
+                    .collect(),
+                skills: inv
+                    .skills
+                    .iter()
+                    .map(|(id, _)| id.as_str().to_owned())
+                    .collect(),
+            };
+            ok_envelope("invite", to_data(&data))
+        }
+        CreateInviteOutcome::Denied(_) => denied_envelope("invite"),
+    }
+}
+
+/// The all-outcome envelope for a roster/revoke [`GovernanceOutcome`]: `Ok` → a 200 carrying `data` (`{}` for
+/// these data-less mutations); `Denied` → the uniform flat DENIED error. A role-denial is a 200+DENIED (the
+/// actor is an authenticated member — nothing to hide), NOT a 403.
+pub(crate) fn governance_envelope(
+    command: &str,
+    outcome: &GovernanceOutcome,
+    data: serde_json::Value,
+) -> JsonEnvelope {
+    match outcome {
+        GovernanceOutcome::Ok => ok_envelope(command, data),
+        GovernanceOutcome::Denied(_) => denied_envelope(command),
+    }
+}
+
+/// A success envelope (`ok = true`) carrying `data`, no error, no receipt (enrollment/governance ops have no
+/// `SetCurrentReceipt`; their idempotency record is the authority's `workspace_events`/deterministic credential).
+fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelope {
+    JsonEnvelope {
+        schema_version: SCHEMA_VERSION,
+        command: command.to_owned(),
+        ok: true,
+        data,
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    }
+}
+
+/// The uniform DENIED envelope — a flat [`WireError`] with the `DENIED` code + the access-recovery next
+/// actions, carrying NO static reason (the per-op reason is for server logs, never an enumeration oracle).
+fn denied_envelope(command: &str) -> JsonEnvelope {
+    let outcome = TerminalOutcome::Denied;
+    let actions = next_actions_for(outcome);
+    let error = WireError {
+        code: "DENIED".to_owned(),
+        outcome,
+        retryable: retryable(outcome),
+        affected: Affected::default(),
+        expected_generation: None,
+        current_generation: None,
+        context: serde_json::json!({}),
+        next_actions: actions.clone(),
+    };
+    JsonEnvelope {
+        schema_version: SCHEMA_VERSION,
+        command: command.to_owned(),
+        ok: false,
+        data: serde_json::json!({}),
+        warnings: vec![],
+        next_actions: actions,
+        receipt: None,
+        error: Some(error),
+    }
+}
+
+/// Serialize a typed payload into the envelope's `data` slot (an unrepresentable value degrades to `{}`).
+fn to_data<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// The plane-store deployment posture → its wire mirror.
+fn deployment_mode_to_wire(mode: StoreDeploymentMode) -> DeploymentMode {
+    match mode {
+        StoreDeploymentMode::Cloud => DeploymentMode::Cloud,
+        StoreDeploymentMode::SelfHost => DeploymentMode::SelfHost,
+    }
+}
+
+/// A stored domain-verification discriminant → the wire enum (an unknown value degrades to `unverified`).
+fn verified_domain_status_to_wire(status: &str) -> VerifiedDomainStatus {
+    match status {
+        "pending" => VerifiedDomainStatus::Pending,
+        "verified" => VerifiedDomainStatus::Verified,
+        _ => VerifiedDomainStatus::Unverified,
+    }
+}
+
+/// The offered `(SkillId, Option<name>)` pairs → the wire [`BootstrapSkill`] list.
+fn skills_to_wire(skills: Vec<(plane_store::SkillId, Option<String>)>) -> Vec<BootstrapSkill> {
+    skills
+        .into_iter()
+        .map(|(id, name)| BootstrapSkill {
+            skill_id: id.as_str().to_owned(),
+            name,
+        })
+        .collect()
 }

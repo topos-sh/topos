@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "InviteData",
-  "description": "`invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never\nenrolls on its own. **INFERRED.**",
+  "description": "`invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never\nenrolls on its own. **INFERRED.** Also the `POST /v1/invites` success `data` shape (the OpenAPI body),\nhence the `utoipa::ToSchema` derive alongside `schemars`.",
   "type": "object",
   "properties": {
     "invite_link": {

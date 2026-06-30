@@ -16,11 +16,23 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use tower::ServiceExt as _;
 
-use plane_store::{Authority, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId};
+use plane_store::{
+    Authority, DeploymentMode, EnrollmentConfig, FileMode, OpId, Principal, Role, SkillId,
+    UploadedFile, WorkspaceId,
+};
 use topos_core::digest::{self, ManifestEntry};
-use topos_core::sign::{self, Commit, DeviceOp, DeviceOpFields, device_op_preimage};
-use topos_types::{Generation, JsonEnvelope, SignedCurrentRecord, TerminalOutcome};
+use topos_core::sign::{
+    self, Commit, DeviceOp, DeviceOpFields, EnrollFields, GovernanceOpFields, GovernanceOpKind,
+    device_op_preimage, enroll_preimage, governance_op_preimage,
+};
+use topos_types::bootstrap::{BootstrapData, ConsentMode};
+use topos_types::requests::{
+    DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, PasscodeConfirmResponse,
+    PasscodeConfirmStatus, RedeemResponse,
+};
+use topos_types::{Generation, JsonEnvelope, SignatureAlg, SignedCurrentRecord, TerminalOutcome};
 
+use crate::enroll::mailer::FakeMailer;
 use crate::{PlaneState, router};
 
 // ── constants ──────────────────────────────────────────────────────────────────────────────────────
@@ -259,7 +271,16 @@ fn get(uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
 
 /// Run a request against a fresh router; return (status, response headers clone, body bytes).
 async fn run(ctx: &Ctx, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-    let resp = ctx.app().oneshot(req).await.unwrap();
+    send(ctx.app(), req).await
+}
+
+/// Drive any router via `oneshot`; return (status, response headers clone, body bytes). Shared by the
+/// write/read tests (over [`Ctx`]) and the enrollment/governance tests (over [`EnrollCtx`]).
+async fn send(
+    app: axum::Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -803,4 +824,585 @@ async fn a_missing_device_signature_header_is_a_400() {
         .unwrap();
     let (status, _, _) = run(&ctx, req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ══ enrollment + governance ═══════════════════════════════════════════════════════════════════════════
+//
+// Per-route wiring proofs over `router(state)`: the unauthenticated bootstrap, the full device-auth → passcode
+// → redeem chain (signing the enroll possession frame with a test key), and the governance invite/revoke
+// authority (owner-OK, member-DENIED). The comprehensive acceptance suite + the cross-component `follow` e2e
+// land in the final test step.
+
+const OWNER_DK: &str = "dk_owner";
+const OWNER_PRINCIPAL: &str = "owner@acme.com";
+const OWNER_SEED: u8 = 11;
+const MEMBER_DK: &str = "dk_member";
+const MEMBER_PRINCIPAL: &str = "member@acme.com";
+const MEMBER_SEED: u8 = 12;
+const TARGET_DK: &str = "dk_target";
+const TARGET_PRINCIPAL: &str = "target@acme.com";
+const TARGET_SEED: u8 = 13;
+const ALICE_EMAIL: &str = "alice@acme.com";
+const ALICE_SEED: u8 = 14;
+const ENROLL_BASE_URL: &str = "https://plane.test";
+
+/// A seeded enrollment plane: a cloud `workspace`, a confirmed owner + its registered device, the enrollment
+/// secret loaded, and a `FakeMailer` injected so the passcode is readable without SMTP.
+struct EnrollCtx {
+    dir: PathBuf,
+    state: PlaneState,
+    owner_key: SigningKey,
+    fake: Arc<FakeMailer>,
+}
+
+impl Drop for EnrollCtx {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl EnrollCtx {
+    fn app(&self) -> axum::Router {
+        router(self.state.clone())
+    }
+
+    fn authority(&self) -> &Authority {
+        self.state.authority()
+    }
+}
+
+async fn enroll_setup(tag: &str) -> EnrollCtx {
+    let dir = unique_dir(tag);
+    let authority = Authority::open_sqlite(&dir.join("db"), &dir.join("git"), &dir.join("large"))
+        .await
+        .expect("open authority")
+        .with_plane_key(&dir.join("plane.key"))
+        .expect("plane key")
+        .with_enrollment_config(EnrollmentConfig {
+            secret_path: dir.join("enroll.secret"),
+            base_url: ENROLL_BASE_URL.to_owned(),
+            deployment_mode: DeploymentMode::Cloud,
+            enrollment_method: "passcode".to_owned(),
+        })
+        .expect("enrollment config");
+    let ws = WorkspaceId::parse(WS).unwrap();
+    authority
+        .seed_workspace(&ws, "Acme", "unverified", "cloud")
+        .await
+        .unwrap();
+    let owner = Principal::parse(OWNER_PRINCIPAL).unwrap();
+    authority
+        .seed_workspace_member(&ws, &owner, "owner", "confirmed")
+        .await
+        .unwrap();
+    let owner_key = dev_key(OWNER_SEED);
+    authority
+        .seed_device(
+            &ws,
+            OWNER_DK,
+            &owner_key.verifying_key().to_bytes(),
+            &owner,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let fake = Arc::new(FakeMailer::default());
+    // with_enroll_config first (it builds a NoopMailer from the no-SMTP config), then with_mailer overrides it
+    // with the FakeMailer so the passcode handler's send is readable.
+    let state = PlaneState::new(Arc::new(authority))
+        .with_rate_limit(crate::Limits {
+            burst: 1.0,
+            refill_per_sec: 1.0,
+            enabled: false,
+        })
+        .with_enroll_config(crate::EnrollConfig {
+            base_url: ENROLL_BASE_URL.to_owned(),
+            deployment_mode: DeploymentMode::Cloud,
+            enrollment_method: "passcode".to_owned(),
+            smtp: None,
+        })
+        .with_mailer(fake.clone());
+    EnrollCtx {
+        dir,
+        state,
+        owner_key,
+        fake,
+    }
+}
+
+/// The server-derived device key id from a raw public key — `dk_<first 32 hex of sha256(pubkey)>` (the same
+/// derivation the authority uses on redeem). The enroll frame binds it; a client never asserts it.
+fn device_key_id_for(pubkey: &[u8; 32]) -> String {
+    let hex = digest::to_hex(&digest::sha256(pubkey));
+    format!("dk_{}", &hex[..32])
+}
+
+/// base64url-unpadded a raw 32-byte key (the device public key on the wire).
+fn b64key(pubkey: &[u8; 32]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey)
+}
+
+/// Sign a governance op over the canonical frame → base64url (the `Topos-Device-Signature` header value).
+fn sign_governance(
+    signer: &SigningKey,
+    signer_dk: &str,
+    op_id: &str,
+    op: GovernanceOpKind,
+) -> String {
+    let fields = GovernanceOpFields {
+        workspace_id: WS,
+        op_id: op_id_bytes(op_id),
+        device_key_id: signer_dk,
+        op,
+    };
+    let sig = signer
+        .sign(&governance_op_preimage(&fields).unwrap())
+        .to_bytes();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig)
+}
+
+/// Sign an enrollment possession frame over the SERVER-trusted values → base64url. `device_auth_id` is the
+/// session's `user_code` (what the authority binds), `offered` the invite's offered skill ids.
+fn sign_enroll(
+    signer: &SigningKey,
+    grant_hash: [u8; 32],
+    device_auth_id: &str,
+    device_key_id: &str,
+    pubkey: [u8; 32],
+    offered: &[&str],
+) -> String {
+    let fields = EnrollFields {
+        workspace_id: WS,
+        grant_hash,
+        device_auth_id,
+        device_key_id,
+        device_public_key: pubkey,
+        offered_skill_ids: offered,
+    };
+    let sig = signer.sign(&enroll_preimage(&fields).unwrap()).to_bytes();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig)
+}
+
+/// A POST with a JSON body and NO device-signature header (the enrollment reads/steps that are not signed).
+fn post_nosig(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// A request with a JSON body + a device-signature header, for any method (POST/PUT/DELETE governance/redeem).
+fn signed_req(method: &str, uri: &str, sig: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("topos-device-signature", sig)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// The `<token>` of an `<base_url>/i/<token>` invite link.
+fn token_from_link(link: &str) -> String {
+    link.rsplit_once("/i/")
+        .expect("an invite link carries /i/")
+        .1
+        .to_owned()
+}
+
+/// Block (briefly) until the fire-and-forget passcode send lands in the `FakeMailer`, returning the code.
+fn wait_for_passcode(fake: &FakeMailer) -> String {
+    for _ in 0..200 {
+        if let Some(m) = fake.sent().into_iter().next() {
+            return m.code;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("no passcode mailed within the timeout");
+}
+
+/// Drive `POST /v1/invites` as the owner; return the success envelope (asserts a 200).
+async fn create_invite(ctx: &EnrollCtx, op_id: &str, emails: &[&str], skill: &str) -> JsonEnvelope {
+    let skills = [skill];
+    let sig = sign_governance(
+        &ctx.owner_key,
+        OWNER_DK,
+        op_id,
+        GovernanceOpKind::Invite {
+            role: Role::Member.signing_byte(),
+            expires_at: 0,
+            emails,
+            skills: &skills,
+        },
+    );
+    let body = serde_json::json!({
+        "workspace_id": WS,
+        "op_id": op_id,
+        "device_key_id": OWNER_DK,
+        "emails": emails,
+        "role": "member",
+        "skills": [{ "skill_id": skill, "name": "Deploy" }],
+    });
+    let (status, _, bytes) = send(ctx.app(), signed_req("POST", "/v1/invites", &sig, body)).await;
+    assert_eq!(status, StatusCode::OK);
+    envelope(&bytes)
+}
+
+/// Run the full cloud device-auth flow (authorize → poll → passcode → confirm → poll) to a `Granted` grant.
+/// Returns `(grant, user_code, device_public_key, device_key)`.
+async fn enroll_to_grant(
+    ctx: &EnrollCtx,
+    invite_op: &str,
+    device_seed: u8,
+    email: &str,
+    skill: &str,
+) -> (String, String, [u8; 32], SigningKey) {
+    let invite = create_invite(ctx, invite_op, &[email], skill).await;
+    let token = token_from_link(invite.data["invite_link"].as_str().unwrap());
+
+    let device = dev_key(device_seed);
+    let device_pk = device.verifying_key().to_bytes();
+
+    // authorize.
+    let (s, _, b) = send(
+        ctx.app(),
+        post_nosig(
+            "/v1/device/authorize",
+            serde_json::json!({
+                "invite_token": token,
+                "device_public_key": b64key(&device_pk),
+                "machine_name": "alice-laptop",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let auth: DeviceAuthorizeResponse = serde_json::from_slice(&b).unwrap();
+
+    // poll → pending (cloud, no identity yet).
+    let (s, _, b) = send(
+        ctx.app(),
+        post_nosig(
+            "/v1/device/token",
+            serde_json::json!({ "device_code": auth.device_code }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let poll: DeviceTokenResponse = serde_json::from_slice(&b).unwrap();
+    assert_eq!(poll.status, DeviceTokenStatus::Pending);
+
+    // passcode start → the FakeMailer receives the code (fire-and-forget send).
+    let (s, _, _) = send(
+        ctx.app(),
+        post_nosig(
+            "/v1/enroll/passcode",
+            serde_json::json!({ "user_code": auth.user_code, "email": email }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let code = wait_for_passcode(&ctx.fake);
+
+    // passcode confirm → the session's identity is confirmed.
+    let (s, _, b) = send(
+        ctx.app(),
+        post_nosig(
+            "/v1/enroll/passcode/confirm",
+            serde_json::json!({ "user_code": auth.user_code, "email": email, "code": code }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let confirm: PasscodeConfirmResponse = serde_json::from_slice(&b).unwrap();
+    assert_eq!(confirm.status, PasscodeConfirmStatus::Confirmed);
+
+    // poll again → granted.
+    let (s, _, b) = send(
+        ctx.app(),
+        post_nosig(
+            "/v1/device/token",
+            serde_json::json!({ "device_code": auth.device_code }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let poll: DeviceTokenResponse = serde_json::from_slice(&b).unwrap();
+    assert_eq!(poll.status, DeviceTokenStatus::Granted);
+    let grant = poll.grant.expect("a granted poll carries the grant");
+
+    (grant, auth.user_code, device_pk, device)
+}
+
+#[tokio::test]
+async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_false() {
+    let ctx = enroll_setup("enroll-bootstrap").await;
+    let env = create_invite(
+        &ctx,
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        &[ALICE_EMAIL],
+        SKILL,
+    )
+    .await;
+    let token = token_from_link(env.data["invite_link"].as_str().unwrap());
+
+    let (status, _, bytes) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let data: BootstrapData = serde_json::from_slice(&bytes).expect("the body is a BootstrapData");
+    // The plane signing key is pinned (the trust root the device TOFU-pins).
+    assert_eq!(data.plane.signing_key.alg, SignatureAlg::Ed25519);
+    assert!(!data.plane.signing_key.key_id.is_empty());
+    assert!(!data.plane.signing_key.value.is_empty());
+    // No role; a first-received skill is never silently landed; the offered skill is disclosed.
+    assert!(!data.invite.first_receive_auto_land);
+    assert_eq!(data.invite.consent, ConsentMode::DirectHumanFirstReceive);
+    assert_eq!(data.workspace.workspace_id, WS);
+    assert_eq!(
+        data.plane.deployment_mode,
+        topos_types::bootstrap::DeploymentMode::Cloud
+    );
+    assert!(data.offered_skills.iter().any(|s| s.skill_id == SKILL));
+    // The bootstrap carries no role anywhere.
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(raw.get("role").is_none() && raw["invite"].get("role").is_none());
+
+    // A bad/unknown token ⇒ the indistinguishable 404.
+    let (s404, _, _) = send(ctx.app(), get("/i/not-a-real-token", &[])).await;
+    assert_eq!(s404, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn full_device_flow_enrolls_and_redeems_read_creds() {
+    let ctx = enroll_setup("enroll-redeem").await;
+    let (grant, user_code, device_pk, device_key) = enroll_to_grant(
+        &ctx,
+        "bbbbbbbb-0000-4000-8000-000000000001",
+        ALICE_SEED,
+        ALICE_EMAIL,
+        SKILL,
+    )
+    .await;
+
+    let device_key_id = device_key_id_for(&device_pk);
+    let grant_hash = digest::sha256(grant.as_bytes());
+    let sig = sign_enroll(
+        &device_key,
+        grant_hash,
+        &user_code,
+        &device_key_id,
+        device_pk,
+        &[SKILL],
+    );
+    let body = serde_json::json!({
+        "workspace_id": WS,
+        "grant": grant,
+        "device_public_key": b64key(&device_pk),
+    });
+
+    let (status, _, bytes) = send(
+        ctx.app(),
+        signed_req("POST", &format!("/v1/workspaces/{WS}/devices"), &sig, body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let env = envelope(&bytes);
+    assert!(env.ok, "redeem should be ok: {env:?}");
+    assert_eq!(env.command, "redeem");
+    let resp: RedeemResponse =
+        serde_json::from_value(env.data).expect("OK data is a RedeemResponse");
+    assert_eq!(resp.workspace_id, WS);
+    assert_eq!(resp.device_key_id, device_key_id);
+    assert!(
+        resp.read_creds.iter().any(|c| c.skill_id == SKILL),
+        "a read cred for the offered skill is minted: {resp:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_redeem_with_a_wrong_device_key_is_denied() {
+    let ctx = enroll_setup("enroll-wrongkey").await;
+    let (grant, user_code, _device_pk, _device_key) = enroll_to_grant(
+        &ctx,
+        "cccccccc-0000-4000-8000-000000000001",
+        ALICE_SEED,
+        ALICE_EMAIL,
+        SKILL,
+    )
+    .await;
+
+    // Present a DIFFERENT device key than the grant binds → the grant's device-key match fails.
+    let wrong = dev_key(99);
+    let wrong_pk = wrong.verifying_key().to_bytes();
+    let wrong_dk = device_key_id_for(&wrong_pk);
+    let grant_hash = digest::sha256(grant.as_bytes());
+    let sig = sign_enroll(
+        &wrong,
+        grant_hash,
+        &user_code,
+        &wrong_dk,
+        wrong_pk,
+        &[SKILL],
+    );
+    let body = serde_json::json!({
+        "workspace_id": WS,
+        "grant": grant,
+        "device_public_key": b64key(&wrong_pk),
+    });
+
+    let (status, _, bytes) = send(
+        ctx.app(),
+        signed_req("POST", &format!("/v1/workspaces/{WS}/devices"), &sig, body),
+    )
+    .await;
+    // A device-key mismatch is a 200 + DENIED envelope, never a 403.
+    assert_eq!(status, StatusCode::OK);
+    let env = envelope(&bytes);
+    assert!(!env.ok, "a wrong device key must be denied: {env:?}");
+    assert_eq!(
+        env.error.expect("DENIED carries a WireError").outcome,
+        TerminalOutcome::Denied
+    );
+}
+
+#[tokio::test]
+async fn an_owner_signed_invite_returns_invite_data() {
+    let ctx = enroll_setup("enroll-invite-ok").await;
+    let env = create_invite(
+        &ctx,
+        "dddddddd-0000-4000-8000-000000000001",
+        &[ALICE_EMAIL],
+        SKILL,
+    )
+    .await;
+    assert!(env.ok, "an owner-signed invite should be ok: {env:?}");
+    assert_eq!(env.command, "invite");
+    assert!(
+        env.data["invite_link"]
+            .as_str()
+            .is_some_and(|l| l.contains("/i/"))
+    );
+    // The seeded roster + offered skills are echoed.
+    assert!(
+        env.data["roster_added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == ALICE_EMAIL)
+    );
+    assert!(
+        env.data["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == SKILL)
+    );
+}
+
+#[tokio::test]
+async fn a_member_signed_invite_is_denied() {
+    let ctx = enroll_setup("enroll-invite-denied").await;
+    // A non-owner member device (governance requires the owner role for invite).
+    let ws = WorkspaceId::parse(WS).unwrap();
+    let member = dev_key(MEMBER_SEED);
+    let member_principal = Principal::parse(MEMBER_PRINCIPAL).unwrap();
+    ctx.authority()
+        .seed_workspace_member(&ws, &member_principal, "member", "confirmed")
+        .await
+        .unwrap();
+    ctx.authority()
+        .seed_device(
+            &ws,
+            MEMBER_DK,
+            &member.verifying_key().to_bytes(),
+            &member_principal,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let op = "eeeeeeee-0000-4000-8000-000000000001";
+    let emails = [ALICE_EMAIL];
+    let skills = [SKILL];
+    let sig = sign_governance(
+        &member,
+        MEMBER_DK,
+        op,
+        GovernanceOpKind::Invite {
+            role: Role::Member.signing_byte(),
+            expires_at: 0,
+            emails: &emails,
+            skills: &skills,
+        },
+    );
+    let body = serde_json::json!({
+        "workspace_id": WS,
+        "op_id": op,
+        "device_key_id": MEMBER_DK,
+        "emails": emails,
+        "role": "member",
+        "skills": [{ "skill_id": SKILL, "name": "Deploy" }],
+    });
+
+    let (status, _, bytes) = send(ctx.app(), signed_req("POST", "/v1/invites", &sig, body)).await;
+    // A role-denial is a 200 + DENIED envelope (the actor is an authenticated member — nothing to hide).
+    assert_eq!(status, StatusCode::OK);
+    let env = envelope(&bytes);
+    assert!(!env.ok, "a member-signed invite must be denied: {env:?}");
+    assert_eq!(
+        env.error.expect("DENIED carries a WireError").outcome,
+        TerminalOutcome::Denied
+    );
+}
+
+#[tokio::test]
+async fn an_owner_revoke_of_a_device_is_ok() {
+    let ctx = enroll_setup("enroll-revoke").await;
+    // A target device for the owner to revoke.
+    let ws = WorkspaceId::parse(WS).unwrap();
+    let target = dev_key(TARGET_SEED);
+    let target_principal = Principal::parse(TARGET_PRINCIPAL).unwrap();
+    ctx.authority()
+        .seed_device(
+            &ws,
+            TARGET_DK,
+            &target.verifying_key().to_bytes(),
+            &target_principal,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let op = "ffffffff-0000-4000-8000-000000000001";
+    let sig = sign_governance(
+        &ctx.owner_key,
+        OWNER_DK,
+        op,
+        GovernanceOpKind::DeviceRevoke {
+            target_device_key_id: TARGET_DK,
+        },
+    );
+    let body = serde_json::json!({
+        "workspace_id": WS,
+        "op_id": op,
+        "device_key_id": OWNER_DK,
+        "target_device_key_id": TARGET_DK,
+    });
+
+    let (status, _, bytes) = send(
+        ctx.app(),
+        signed_req(
+            "DELETE",
+            &format!("/v1/workspaces/{WS}/devices"),
+            &sig,
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let env = envelope(&bytes);
+    assert!(env.ok, "an owner revoke should be ok: {env:?}");
+    assert_eq!(env.command, "revoke");
 }

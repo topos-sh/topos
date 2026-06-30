@@ -1,11 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "FollowData",
-  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED.**",
+  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /\n`workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the\nenrollment surface landed; all are optional, so an old consumer ignores them.",
   "type": "object",
   "properties": {
+    "deployment_mode": {
+      "description": "The workspace's deployment posture (disclosed from the bootstrap).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeploymentMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "enrolled": {
       "type": "boolean"
+    },
+    "pending": {
+      "description": "Present when `follow` returned a pending device-authorization that needs a human verification step\n(the client's two-call enrollment surface — visit the URL, then re-run `follow`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnrollmentPending"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "skills": {
       "description": "First-receive offers — empty when the link is membership-only.",
@@ -13,6 +35,31 @@
       "items": {
         "$ref": "#/$defs/FollowOffer"
       }
+    },
+    "verified_domain": {
+      "description": "The workspace's org-domain claim, if any (disclosed from the bootstrap).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "verified_domain_status": {
+      "description": "The workspace's domain-verification state (disclosed from the bootstrap).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VerifiedDomainStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workspace_display_name": {
+      "description": "The workspace display name (disclosed from the bootstrap).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "workspace_id": {
       "type": "string"
@@ -23,6 +70,46 @@
     "enrolled"
   ],
   "$defs": {
+    "DeploymentMode": {
+      "description": "A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;\n`self_host` grants membership straight from a valid grant.",
+      "oneOf": [
+        {
+          "description": "The hosted plane: enrollment requires a confirmed, already-rostered identity.",
+          "type": "string",
+          "const": "cloud"
+        },
+        {
+          "description": "A self-hosted plane: enrollment grants membership from a valid grant (no human identity step).",
+          "type": "string",
+          "const": "self_host"
+        }
+      ]
+    },
+    "EnrollmentPending": {
+      "description": "A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which\nembeds the `user_code`), then the client re-polls. **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "expires_at": {
+          "description": "The session expiry as an RFC-3339 string, if it expires.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_code": {
+          "description": "The short code shown for cross-checking on the verification page.",
+          "type": "string"
+        },
+        "verification_uri_complete": {
+          "description": "The verification URL with the `user_code` embedded — the human opens it to approve the session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verification_uri_complete",
+        "user_code"
+      ]
+    },
     "FollowOffer": {
       "description": "A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**",
       "type": "object",
@@ -59,6 +146,26 @@
       "required": [
         "version_id",
         "bundle_digest"
+      ]
+    },
+    "VerifiedDomainStatus": {
+      "description": "A workspace's domain-verification state — snake_case on the wire.",
+      "oneOf": [
+        {
+          "description": "No domain claim, or unverified.",
+          "type": "string",
+          "const": "unverified"
+        },
+        {
+          "description": "A claim is pending verification.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "The domain is verified.",
+          "type": "string",
+          "const": "verified"
+        }
       ]
     }
   }

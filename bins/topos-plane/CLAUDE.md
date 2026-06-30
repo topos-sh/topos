@@ -14,16 +14,33 @@
   credential, **404-not-403**, never by bare hash), and the device-signed
   writes `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews`. Each handler is parse → call the authority
   → serialize: **no trust decision, no raw object read, no client-asserted principal** in a handler.
-- The wire mapping (`wire/map.rs`): every terminal protocol outcome → **HTTP 200** carrying the canonical
-  all-outcome receipt (a failure outcome adds the flat wire error + `next_actions`); non-2xx only for
-  transport/auth/integrity (400/404/429/500). `op_id` idempotent retry replays byte-identically.
+- **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
+  unauthenticated TOFU bootstrap `GET /i/{token}` (the workspace + the plane signing root to pin; **no bytes,
+  no role**; a dead invite ⇒ 404); the enrollment flow `POST /v1/device/authorize`, `POST /v1/device/token`,
+  `GET /v1/enroll/verify/{user_code}`, `POST /v1/enroll/passcode` (the returned code is sent fire-and-forget on
+  `spawn_blocking`, so the constant-shaped ack never leaks whether an address was rostered),
+  `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the enroll
+  possession sig rides the `Topos-Device-Signature` header; mints per-skill read creds, **never a user
+  token**), and `POST /v1/admin-claim`; and the governance mutations `POST /v1/invites`,
+  `PUT|DELETE /v1/workspaces/{ws}/roster/{email}`, `DELETE /v1/workspaces/{ws}/devices` (each a governance-frame
+  signature → ONE authority op). A confirmed identity is **never `Principal::parse`d in a handler** (it comes
+  from a server-trusted row in the authority); a target email is op data, bound into the signed frame. The
+  OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off `enroll-oidc` feature (so
+  the committed OpenAPI contract excludes them).
+- The wire mapping (`wire/map.rs`): a *read* enrollment step (bootstrap / device-auth / verification /
+  passcode) → a plain typed DTO (a miss is the route's indistinguishable 404); every terminal protocol outcome
+  of an op_id-carrying *write* (publish/propose/revert/review, and the redeem/admin-claim/invite/roster/revoke
+  envelopes) → **HTTP 200** carrying the canonical all-outcome receipt/envelope (a failure adds the flat wire
+  error + `next_actions`; a governance role-DENIED is a 200+DENIED — the actor is authenticated, nothing to
+  hide). Non-2xx only for transport/auth/integrity (400/404/429/500). `op_id` idempotent retry replays
+  byte-identically.
 - A minimal **in-process token-bucket rate limiter** (`rate_limit.rs`, no extra dependency) that freezes the
   429 wire shape (`Retry-After` + a `RETRYABLE_FAILURE` envelope); on by default, env-disableable.
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 
-**Implemented — the enrollment protocol GLUE the verification routes (landing next) drive** (`src/enroll/`).
-No durable state, no issuance decision (every credential/identity decision is `plane-store::Authority`'s):
+**Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
+issuance decision (every credential/identity decision is `plane-store::Authority`'s):
 
 - **The passcode mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
   no async-trait: the handler runs the blocking send on `spawn_blocking`, fire-and-forget so neither the body
@@ -37,24 +54,24 @@ No durable state, no issuance decision (every credential/identity decision is `p
   (validate state → exchange code → validate the id_token via JWKS/nonce → confirm the session). **The
   id/access token is consumed here and dropped — it NEVER returns to the agent; only the
   proven email crosses to `confirm_external_identity`.** A regression test pins the callback's Ok type to `()`.
-- **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>`; the public
-  `with_enroll_config` builds the mailer INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring
-  `with_rate_limit` + the internal Limiter. A test-gated `with_mailer` shim injects the FakeMailer (a
-  check-arch guard keeps the `test-fixtures` feature off in production).
+- **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>` (+ a feature-gated
+  `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the public `with_enroll_config` builds the mailer
+  INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring `with_rate_limit` + the internal
+  Limiter, and the feature-gated `with_oidc_config` loads the connector. A test-gated `with_mailer` shim
+  injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in production).
 
-**Planned (lands next):** the **enrollment + governance HTTP routes** that wrap the now-built issuance core +
-this glue — the request/response DTOs, the verification-page HTML, the passcode-send + OIDC start/callback
-handlers, the workspace-policy mutation — so today it's the **passcode floor + OIDC behind a feature, no
-routes yet**; plus the **`review-required` workspace policy** + **governance** mutation routes (roster /
-policy); the **audit outbox** read via durable cursors; **TLS termination** (loopback HTTP today — terminate
-at a reverse proxy).
+**Planned (lands later):** the **verification-page HTML** (the routes above are the JSON surface a composing
+web layer renders; the page itself is a separate surface); the **workspace-policy mutation** (the
+`review-required` toggle is config today, not yet a route); the **audit outbox** read via durable cursors;
+**TLS termination** (loopback HTTP today — terminate at a reverse proxy).
 
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / db / git-root /
 large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), opens the `Authority` (now wiring
 `with_enrollment_config` so it mints real credentials) + builds the `EnrollConfig` for `PlaneState`, and
-serves `router(state)`. Under `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` for the connector.
+serves `router(state)`. Under `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto
+`PlaneState` (`with_oidc_config`) so the `/v1/enroll/oidc/*` routes can drive it.
 
 ## The litmus for what belongs in this lib
 

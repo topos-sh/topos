@@ -3,14 +3,29 @@
 //! `xtask` serializes [`openapi()`] into `contracts/openapi/openapi.json` and a drift gate keeps it in sync
 //! with the annotated routes + the `topos-types` wire DTOs — so the committed contract can never silently
 //! diverge from the code (the same discipline the JSON-Schema artifacts use).
+//!
+//! The OIDC routes (behind the default-off `enroll-oidc` feature) are deliberately NOT registered here: the
+//! drift gate generates this contract from the DEFAULT build, so the committed contract stays stable whether
+//! or not the feature is enabled. The OIDC surface is an optional, feature-local extension.
 
 use utoipa::OpenApi;
 
-use topos_types::requests::{
-    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireCandidate, WireFile,
-    WireFileMode, WireVersionFile, WireVersionMeta,
+use topos_types::bootstrap::{
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
+    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
-use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
+use topos_types::requests::{
+    AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
+    DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, InviteRequest, InviteSkill,
+    PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest, PasscodeConfirmResponse,
+    PasscodeConfirmStatus, PasscodeRequest, ProposeRequest, PublishRequest, RedeemRequest,
+    RedeemResponse, RedeemedSkillCred, RevertRequest, ReviewRequest, RosterRemoveRequest,
+    RosterSetRequest, VerificationContextResponse, WireCandidate, WireFile, WireFileMode,
+    WireVersionFile, WireVersionMeta, WorkspaceRole,
+};
+use topos_types::results::{
+    InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
+};
 use topos_types::{
     ActionCode, Affected, CurrentRecord, Generation, JsonEnvelope, NextAction, PointerScope,
     Receipt, Signature, SignatureAlg, SignedCurrentRecord, TerminalOutcome, WireError,
@@ -20,7 +35,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos OSS plane",
-        description = "The self-hostable Topos plane — device-signed writes + token-scoped reads. Every returned protocol outcome rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The self-hostable Topos plane — device-signed writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -32,9 +47,24 @@ use topos_types::{
         crate::routes::current::get_current,
         crate::routes::bundles::get_bundle,
         crate::routes::versions::get_version,
+        // The unauthenticated invite bootstrap (TOFU).
+        crate::routes::bootstrap::read_invite_bootstrap,
+        // Enrollment flow.
+        crate::routes::enroll::start_device_auth,
+        crate::routes::enroll::poll_device_auth,
+        crate::routes::enroll::read_verification_context,
+        crate::routes::enroll::start_passcode,
+        crate::routes::enroll::complete_passcode,
+        crate::routes::enroll::redeem,
+        crate::routes::enroll::admin_claim,
+        // Governance mutations.
+        crate::routes::governance::create_invite,
+        crate::routes::governance::roster_set,
+        crate::routes::governance::roster_remove,
+        crate::routes::governance::revoke_device,
     ),
     components(schemas(
-        // Request DTOs.
+        // Request DTOs (writes).
         PublishRequest,
         ProposeRequest,
         RevertRequest,
@@ -66,10 +96,47 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
+        // The invite bootstrap (TOFU) payload.
+        BootstrapData,
+        BootstrapInvite,
+        ConsentMode,
+        BootstrapPlane,
+        DeploymentMode,
+        BootstrapSigningKey,
+        BootstrapWorkspace,
+        VerifiedDomainStatus,
+        BootstrapSkill,
+        // Enrollment request/response DTOs.
+        DeviceAuthorizeRequest,
+        DeviceAuthorizeResponse,
+        DeviceTokenRequest,
+        DeviceTokenResponse,
+        DeviceTokenStatus,
+        VerificationContextResponse,
+        PasscodeRequest,
+        PasscodeAck,
+        PasscodeAckStatus,
+        PasscodeConfirmRequest,
+        PasscodeConfirmResponse,
+        PasscodeConfirmStatus,
+        RedeemRequest,
+        RedeemResponse,
+        RedeemedSkillCred,
+        AdminClaimRequest,
+        // Governance request DTOs (+ the invite `data` shape).
+        InviteRequest,
+        InviteSkill,
+        RosterSetRequest,
+        RosterRemoveRequest,
+        DeviceRevokeRequest,
+        WorkspaceRole,
+        InviteData,
     )),
     tags(
         (name = "writes", description = "Device-signed writes (publish / propose / revert / review)."),
         (name = "reads", description = "Token-scoped reads (current / bundles / versions)."),
+        (name = "enrollment", description = "Invite bootstrap + the device-auth / passcode / redeem / admin-claim enrollment flow."),
+        (name = "governance", description = "Owner/admin device-op-signed mutations (invite / roster / revoke)."),
     ),
 )]
 struct ApiDoc;

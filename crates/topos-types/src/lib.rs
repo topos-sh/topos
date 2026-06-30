@@ -22,6 +22,15 @@ pub mod persisted;
 /// Wire request/response DTOs for the plane's HTTP write + version-metadata routes (the OpenAPI bodies).
 pub mod requests;
 
+/// The unauthenticated invite-bootstrap payload (`GET /i/{token}`) — read BEFORE enrollment (TOFU).
+pub mod bootstrap;
+
+#[doc(inline)]
+pub use bootstrap::{
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
+    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+};
+
 /// Bumped on any breaking change to a persisted/wire shape; every document carries it.
 pub const SCHEMA_VERSION: u32 = 1;
 

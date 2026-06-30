@@ -92,6 +92,28 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<String, PlaneHttpError
     Ok(token.to_owned())
 }
 
+/// Decode a base64url-unpadded raw 32-byte key (a device public key in an enrollment body) → `[u8; 32]`.
+/// A bad alphabet or the wrong length is a 400 (`BadId`); the server then re-derives the device key id from
+/// these bytes itself (a client-asserted id is never trusted).
+pub(crate) fn base64url_key(s: &str) -> Result<[u8; 32], PlaneHttpError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s.as_bytes())
+        .map_err(|_| PlaneHttpError::BadId("device_public_key must be base64url".to_owned()))?;
+    bytes.try_into().map_err(|_: Vec<u8>| {
+        PlaneHttpError::BadId("device_public_key must be 32 bytes".to_owned())
+    })
+}
+
+/// The wire governance role → the kernel/authority role (1:1).
+pub(crate) fn domain_role(role: topos_types::requests::WorkspaceRole) -> plane_store::Role {
+    use topos_types::requests::WorkspaceRole;
+    match role {
+        WorkspaceRole::Owner => plane_store::Role::Owner,
+        WorkspaceRole::Reviewer => plane_store::Role::Reviewer,
+        WorkspaceRole::Member => plane_store::Role::Member,
+    }
+}
+
 /// Decode exactly 64 hex characters into a 32-byte id (a commit/object id field in a request body). `None` on
 /// any other length or a non-hex byte.
 pub(crate) fn hex32(s: &str) -> Option<[u8; 32]> {

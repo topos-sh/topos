@@ -220,7 +220,9 @@ pub struct AddData {
 }
 
 /// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.
-/// **INFERRED.**
+/// **INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /
+/// `workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the
+/// enrollment surface landed; all are optional, so an old consumer ignores them.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FollowData {
     pub workspace_id: String,
@@ -228,6 +230,35 @@ pub struct FollowData {
     /// First-receive offers — empty when the link is membership-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<FollowOffer>,
+    /// The workspace's deployment posture (disclosed from the bootstrap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_mode: Option<crate::bootstrap::DeploymentMode>,
+    /// The workspace display name (disclosed from the bootstrap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_display_name: Option<String>,
+    /// The workspace's org-domain claim, if any (disclosed from the bootstrap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_domain: Option<String>,
+    /// The workspace's domain-verification state (disclosed from the bootstrap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_domain_status: Option<crate::bootstrap::VerifiedDomainStatus>,
+    /// Present when `follow` returned a pending device-authorization that needs a human verification step
+    /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<EnrollmentPending>,
+}
+
+/// A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which
+/// embeds the `user_code`), then the client re-polls. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnrollmentPending {
+    /// The verification URL with the `user_code` embedded — the human opens it to approve the session.
+    pub verification_uri_complete: String,
+    /// The short code shown for cross-checking on the verification page.
+    pub user_code: String,
+    /// The session expiry as an RFC-3339 string, if it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
@@ -334,8 +365,9 @@ pub enum ReviewDecision {
 }
 
 /// `invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never
-/// enrolls on its own. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+/// enrolls on its own. **INFERRED.** Also the `POST /v1/invites` success `data` shape (the OpenAPI body),
+/// hence the `utoipa::ToSchema` derive alongside `schemars`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct InviteData {
     /// `/i/<token>`.
     pub invite_link: String,
