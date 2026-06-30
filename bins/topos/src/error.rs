@@ -2,7 +2,7 @@
 //! [`TerminalOutcome`]; raw `gix`/io strings stay internal and never reach a user surface.
 
 use topos_gitstore::{GitstoreError, VerifyError};
-use topos_types::TerminalOutcome;
+use topos_types::{Generation, TerminalOutcome};
 
 use topos_core::digest::RejectReason;
 
@@ -80,6 +80,56 @@ pub(crate) enum ClientError {
     /// silently trusting a new key — the human must re-pin out of band.
     #[error("the plane's signing key differs from the pinned key; re-pin required")]
     KeyRepinRequired,
+    /// The `--approve <skill>@<digest>` consent token did not match the digest recomputed over the bytes
+    /// being shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
+    /// mode-flip). The agent re-discloses (via `diff`) and re-approves the exact digest.
+    #[error("the --approve digest does not match the bytes: disclosed {expected}, approved {got}")]
+    ApprovalMismatch {
+        skill: String,
+        expected: String,
+        got: String,
+    },
+    /// A direct `publish` under `review-required`: the plane refused it closed (`APPROVAL_REQUIRED`),
+    /// ingesting nothing. The agent re-runs it as `publish --propose` (NEVER an auto-flip).
+    #[error("this workspace requires review; re-run as `publish --propose`")]
+    ApprovalRequired { skill: String, digest: String },
+    /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
+    /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
+    #[error("the team moved past your base; pull to rebase, then retry")]
+    Conflict {
+        skill: String,
+        current: Option<Generation>,
+    },
+    /// The plane denied the op (`DENIED`) — not rostered, four-eyes self-approve, or an already-resolved
+    /// proposal. Carries the wire code for the agent to branch on; never a secret.
+    #[error("the plane denied this operation ({0})")]
+    Denied(String),
+    /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
+    /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
+    #[error("publish is blocked: resolve the merge conflict in this skill first")]
+    PublishBlocked { skill: String },
+    /// A `revert` needs `--confirm` to proceed (a degenerate/no-op revert — e.g. `--to` names the version
+    /// that is ALREADY `current`). Re-run with `--confirm`, or pick a different good version.
+    #[error("revert needs --confirm: {reason}")]
+    ConfirmRequired { reason: String },
+    /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
+    /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
+    /// its `op_id`), then re-issue this change — never silently replay a different intent.
+    #[error("an in-flight write for '{skill}' must settle first: {detail}")]
+    PendingOp { skill: String, detail: String },
+    /// A definitive, NON-retryable rejection from the plane on a non-2xx status (a 4xx other than 429 — the
+    /// op provably did NOT land), so its op-WAL is dropped rather than replayed forever.
+    #[error("the plane rejected the request (HTTP {0})")]
+    PlaneRejected(u16),
+    /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
+    /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
+    /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
+    #[error("the plane returned {code} ({outcome:?})")]
+    PlaneTerminal {
+        outcome: TerminalOutcome,
+        code: String,
+        retryable: bool,
+    },
 }
 
 impl ClientError {
@@ -104,6 +154,16 @@ impl ClientError {
             ClientError::Plane(_) => "PLANE_ERROR",
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
             ClientError::KeyRepinRequired => "KEY_REPIN_REQUIRED",
+            ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
+            ClientError::ApprovalRequired { .. } => "APPROVAL_REQUIRED",
+            ClientError::Conflict { .. } => "CONFLICT",
+            ClientError::Denied(_) => "DENIED",
+            ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
+            ClientError::ConfirmRequired { .. } => "CONFIRM_REQUIRED",
+            ClientError::PendingOp { .. } => "PENDING_OP",
+            ClientError::PlaneRejected(_) => "PLANE_REJECTED",
+            // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
+            ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
         }
     }
 
@@ -116,7 +176,28 @@ impl ClientError {
             ClientError::Io(_)
             | ClientError::Gitstore(GitstoreError::Io(_))
             | ClientError::Plane(_) => TerminalOutcome::RetryableFailure,
+            // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
+            // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
+            ClientError::ApprovalRequired { .. } => TerminalOutcome::ApprovalRequired,
+            ClientError::Conflict { .. } => TerminalOutcome::Conflict,
+            ClientError::Denied(_) => TerminalOutcome::Denied,
+            ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
+            // An in-flight op must be settled, then the command retried.
+            ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,
+            // A definitive 4xx rejection — the op cannot succeed as-is.
+            ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
+            // The plane's terminal outcome, surfaced verbatim (not flattened to a transport error).
+            ClientError::PlaneTerminal { outcome, .. } => *outcome,
             _ => TerminalOutcome::PermanentFailure,
+        }
+    }
+
+    /// The live `(epoch, seq)` to carry on a `CONFLICT` envelope (the rebase target the agent pulls to) —
+    /// `None` for every other error.
+    pub(crate) fn current_generation(&self) -> Option<Generation> {
+        match self {
+            ClientError::Conflict { current, .. } => *current,
+            _ => None,
         }
     }
 }

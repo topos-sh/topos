@@ -18,16 +18,17 @@ use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest, DeviceTokenResponse,
-    DeviceTokenStatus, InviteRequest, RedeemRequest, RedeemResponse, WireFileMode, WireVersionMeta,
+    DeviceTokenStatus, InviteRequest, ProposeRequest, PublishRequest, RedeemRequest,
+    RedeemResponse, RevertRequest, ReviewRequest, WireFileMode, WireProposalList, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowSource,
-    GovernanceSource, Grant, KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem,
-    RedeemedCred, TokenPoll,
+    ContributeSource, DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext,
+    FollowSource, GovernanceSource, Grant, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
+    Redeem, RedeemedCred, TokenPoll, WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -187,6 +188,31 @@ impl PlaneSource for UreqPlane {
             self.bearer_get(&url, &cred.read_token)
         })
     }
+
+    fn list_open_proposals(&self, skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
+        // No credential for this skill ⇒ none visible (best-effort; the count never errors out a pull).
+        let Some(cred) = self.creds.get(skill_id) else {
+            return Ok(Vec::new());
+        };
+        let url = format!(
+            "{}/v1/workspaces/{}/skills/{}/proposals",
+            self.base_url, cred.workspace_id, skill_id
+        );
+        match self.bearer_get(&url, &cred.read_token) {
+            Ok(bytes) => {
+                let list: WireProposalList = serde_json::from_slice(&bytes).map_err(|e| {
+                    PlaneError::Malformed(format!("proposals list for {skill_id}: {e}"))
+                })?;
+                list.proposals
+                    .iter()
+                    .map(|p| parse_id(&p.version_id))
+                    .collect()
+            }
+            // A 404 is the indistinguishable not-served (unknown/expired token, scope mismatch) ⇒ none visible.
+            Err(PlaneError::NotFound) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// The transport-level classification of a response status — before any body read. Factored out so the
@@ -278,7 +304,8 @@ fn domain_mode(mode: WireFileMode) -> FileMode {
 }
 
 /// The on-disk [`FollowSource`]: the follow-state read from `follows.json` (mapped to consent contexts by
-/// [`crate::enroll::follow_contexts`]). `proposals_awaiting` is `0` until proposals/review land client-side.
+/// [`crate::enroll::follow_contexts`]). The open-proposal count is sourced from the plane (the proposals
+/// read route), not the follow-state, so this carries only the followed set.
 #[derive(Debug)]
 pub(crate) struct FileFollow {
     entries: Vec<(String, FollowContext)>,
@@ -293,9 +320,6 @@ impl FileFollow {
 impl FollowSource for FileFollow {
     fn followed(&self) -> Vec<(String, FollowContext)> {
         self.entries.clone()
-    }
-    fn proposals_awaiting(&self) -> u32 {
-        0
     }
 }
 
@@ -365,6 +389,24 @@ impl UreqEnroll {
         let status = resp.status().as_u16();
         let bytes = read_body(resp).map_err(plane_err)?;
         Ok((status, bytes))
+    }
+
+    /// POST a device-signed contribute write (the 64-byte device-op signature in the
+    /// `Topos-Device-Signature` header) and map the all-outcome **200 envelope** to a [`WriteReceipt`].
+    /// The four verbs differ only by `path` + body type; the signing rode the body's bound identity.
+    fn post_write<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        device_sig: [u8; 64],
+        what: &str,
+    ) -> Result<WriteReceipt, ClientError> {
+        let value = serde_json::to_value(body)
+            .map_err(|e| ClientError::Corrupt(format!("{what} body: {e}")))?;
+        let url = format!("{}{path}", self.base_url);
+        let sig = b64(&device_sig); // 64 bytes → 86 base64url-unpadded chars (the frozen header codec).
+        let (status, bytes) = self.post_json(&url, &value, Some(&sig), what)?;
+        map_write_envelope(status, &bytes)
     }
 }
 
@@ -547,6 +589,78 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
         .map_err(|e| ClientError::Corrupt(format!("invite data is malformed: {e}")))
 }
 
+// =================================================================================================
+// The contribute-write side of `UreqEnroll` — the device-signed publish / propose / revert / review
+// POSTs. Creds-free (the 64-byte device-op signature rides the `Topos-Device-Signature` header). UNLIKE
+// `map_invite_envelope`, a `!ok` body is NOT an error: CONFLICT / APPROVAL_REQUIRED / DENIED are terminal
+// protocol outcomes the verb branches on (carrying `current_generation` + `next_actions`).
+// =================================================================================================
+
+impl ContributeSource for UreqEnroll {
+    fn publish(
+        &self,
+        body: PublishRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/publish", &body, device_sig, "publish")
+    }
+    fn propose(
+        &self,
+        body: ProposeRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/proposals", &body, device_sig, "propose")
+    }
+    fn revert(
+        &self,
+        body: RevertRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/reverts", &body, device_sig, "revert")
+    }
+    fn review(
+        &self,
+        body: ReviewRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/reviews", &body, device_sig, "review")
+    }
+}
+
+/// Map a contribute-write response — the all-outcome **200 envelope** — to a typed [`WriteReceipt`]. EVERY
+/// parsed 200 is an `Ok(WriteReceipt)` (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED are all
+/// terminal protocol outcomes the verb acts on); only a non-200 (transport/auth/integrity) or an
+/// unparseable envelope is a [`ClientError`]. The signed `current` pointer rides `data` ONLY when a pointer
+/// moved — NEEDS_REVIEW, an OK `review --reject`, and every failure carry `{}`, so it is parsed leniently
+/// (`.ok()`), never assuming `outcome == Ok ⟹ data is a record`. **Pure** (status + bytes), so every arm is
+/// unit-tested without a socket (mirrors [`map_invite_envelope`]).
+fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientError> {
+    if classify(status) != HttpClass::Ok {
+        // A 4xx other than 429 is a DEFINITIVE rejection — the op provably did NOT land (a bad request /
+        // payload-too-large), so the caller drops the op-WAL instead of replaying it forever. A 5xx / 429 /
+        // timeout is AMBIGUOUS (the op may have landed) — keep the WAL for a safe same-op_id replay.
+        return Err(if (400..500).contains(&status) && status != 429 {
+            ClientError::PlaneRejected(status)
+        } else {
+            ClientError::Plane(format!("contribute write: HTTP {status}"))
+        });
+    }
+    let env: JsonEnvelope = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::Corrupt(format!("write envelope is malformed: {e}")))?;
+    let receipt = env
+        .receipt
+        .ok_or_else(|| ClientError::Corrupt("a write 200 carried no receipt".to_owned()))?;
+    // The signed pointer is present ONLY when a pointer actually moved. NEEDS_REVIEW, an OK `review
+    // --reject` (the plane returns OK with no signed record → data `{}`), and every failure carry `{}`;
+    // parse leniently so a valid reject is never wrongly rejected as Corrupt.
+    let signed_record = serde_json::from_value::<SignedCurrentRecord>(env.data).ok();
+    Ok(WriteReceipt {
+        receipt,
+        error: env.error,
+        signed_record,
+    })
+}
+
 /// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -564,6 +678,7 @@ fn plane_err(e: PlaneError) -> ClientError {
 mod tests {
     use super::*;
     use topos_types::requests::WireVersionFile;
+    use topos_types::{TerminalOutcome, WireError};
 
     #[test]
     fn classify_maps_the_wire_status_set() {
@@ -721,5 +836,165 @@ mod tests {
         // A non-200 (transport/auth/integrity) never reaches the envelope decode.
         let err = map_invite_envelope(500, b"{}").unwrap_err();
         assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
+    }
+
+    // ---- The contribute-write all-outcome 200 envelope mapping. ----
+
+    fn receipt(outcome: TerminalOutcome) -> topos_types::Receipt {
+        topos_types::Receipt {
+            schema_version: 1,
+            op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
+            command: "publish-direct".to_owned(),
+            outcome,
+            workspace_id: "w_demo".to_owned(),
+            skill_id: Some("s_demo".to_owned()),
+            version_id: Some("a".repeat(64)),
+            bundle_digest: Some("b".repeat(64)),
+            expected_generation: Some(topos_types::Generation { epoch: 1, seq: 1 }),
+            current_generation: Some(topos_types::Generation { epoch: 1, seq: 2 }),
+            created_at: "2026-06-30T00:00:00Z".to_owned(),
+            key_id: Some("pk_plane".to_owned()),
+            details: None,
+        }
+    }
+
+    fn signed_record_value() -> serde_json::Value {
+        serde_json::to_value(SignedCurrentRecord {
+            schema_version: 1,
+            scope: topos_types::PointerScope {
+                workspace_id: "w_demo".to_owned(),
+                skill_id: "s_demo".to_owned(),
+            },
+            record: topos_types::CurrentRecord {
+                version_id: "a".repeat(64),
+                generation: topos_types::Generation { epoch: 1, seq: 2 },
+            },
+            signature: topos_types::Signature {
+                alg: topos_types::SignatureAlg::Ed25519,
+                key_id: "pk_plane".to_owned(),
+                value: "A".repeat(86),
+            },
+        })
+        .unwrap()
+    }
+
+    fn write_env(
+        ok: bool,
+        data: serde_json::Value,
+        r: topos_types::Receipt,
+        error: Option<topos_types::WireError>,
+    ) -> Vec<u8> {
+        envelope_bytes(&JsonEnvelope {
+            schema_version: 1,
+            command: "publish".to_owned(),
+            ok,
+            data,
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: Some(r),
+            error,
+        })
+    }
+
+    #[test]
+    fn map_write_envelope_ok_carries_the_signed_record_and_digest() {
+        let bytes = write_env(
+            true,
+            signed_record_value(),
+            receipt(TerminalOutcome::Ok),
+            None,
+        );
+        let wr = map_write_envelope(200, &bytes).expect("ok maps to a receipt");
+        assert_eq!(wr.outcome(), TerminalOutcome::Ok);
+        assert!(
+            wr.signed_record.is_some(),
+            "an OK move carries the signed pointer"
+        );
+        assert_eq!(
+            wr.receipt.bundle_digest.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        assert!(wr.error.is_none());
+    }
+
+    #[test]
+    fn map_write_envelope_needs_review_is_ok_with_no_record() {
+        // NEEDS_REVIEW: the proposal opened, nothing moved → data `{}`, no signed record, no error.
+        let bytes = write_env(
+            true,
+            serde_json::json!({}),
+            receipt(TerminalOutcome::NeedsReview),
+            None,
+        );
+        let wr = map_write_envelope(200, &bytes).expect("needs_review is a 200 receipt");
+        assert_eq!(wr.outcome(), TerminalOutcome::NeedsReview);
+        assert!(wr.signed_record.is_none());
+        assert!(wr.error.is_none());
+    }
+
+    #[test]
+    fn map_write_envelope_reject_ok_with_empty_data_is_not_corrupt() {
+        // THE regression guard: an OK `review --reject` returns outcome Ok with data `{}` (it signs
+        // nothing). A strict `from_value` would wrongly fail it; the lenient `.ok()` keeps it valid.
+        let bytes = write_env(
+            true,
+            serde_json::json!({}),
+            receipt(TerminalOutcome::Ok),
+            None,
+        );
+        let wr = map_write_envelope(200, &bytes).expect("an OK reject is not Corrupt");
+        assert_eq!(wr.outcome(), TerminalOutcome::Ok);
+        assert!(wr.signed_record.is_none(), "no pointer moved on a reject");
+    }
+
+    #[test]
+    fn map_write_envelope_conflict_is_ok_not_err() {
+        // CONFLICT is a terminal protocol outcome the verb branches on (NOT collapsed into an Err) — it
+        // carries the live current_generation (the rebase target).
+        let err = WireError {
+            code: "CONFLICT".to_owned(),
+            outcome: TerminalOutcome::Conflict,
+            retryable: true,
+            affected: topos_types::Affected::default(),
+            expected_generation: Some(topos_types::Generation { epoch: 1, seq: 1 }),
+            current_generation: Some(topos_types::Generation { epoch: 1, seq: 5 }),
+            context: serde_json::json!({}),
+            next_actions: Vec::new(),
+        };
+        let bytes = write_env(
+            false,
+            serde_json::json!({}),
+            receipt(TerminalOutcome::Conflict),
+            Some(err),
+        );
+        let wr = map_write_envelope(200, &bytes).expect("conflict is a 200 receipt, not an Err");
+        assert_eq!(wr.outcome(), TerminalOutcome::Conflict);
+        assert_eq!(
+            wr.error.and_then(|e| e.current_generation),
+            Some(topos_types::Generation { epoch: 1, seq: 5 }),
+            "the live generation (rebase target) survives the mapping"
+        );
+    }
+
+    #[test]
+    fn map_write_envelope_non_200_is_a_plane_error() {
+        let err = map_write_envelope(500, b"{}").unwrap_err();
+        assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn map_write_envelope_missing_receipt_is_corrupt() {
+        let bytes = envelope_bytes(&JsonEnvelope {
+            schema_version: 1,
+            command: "publish".to_owned(),
+            ok: true,
+            data: serde_json::json!({}),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: None,
+        });
+        let err = map_write_envelope(200, &bytes).unwrap_err();
+        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
     }
 }

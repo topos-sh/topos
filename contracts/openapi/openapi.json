@@ -1336,6 +1336,85 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/skills/{skill}/proposals": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "list_proposals",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "Skill id (must match the read token's scope).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer <read_token>.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The skill's OPEN, non-stale proposals (a possibly-empty list).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireProposalList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No/blank credential, or scope/path mismatch (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}": {
       "get": {
         "tags": [
@@ -2191,7 +2270,7 @@
       },
       "PublishData": {
         "type": "object",
-        "description": "`publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is\nreturned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the\n`publish --propose` next-action) and carries no `data`. **INFERRED.**",
+        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**",
         "required": [
           "skill_id",
           "version_id",
@@ -2211,7 +2290,7 @@
               "string",
               "null"
             ],
-            "description": "Returned only on the first publish (which stands up the workspace): `/i/<token>`."
+            "description": "A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the\npublisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer\nmove is the real outcome; the link is a convenience (the `invite` verb mints one independently)."
           },
           "skill_id": {
             "type": "string"
@@ -2864,6 +2943,45 @@
           "100644",
           "100755"
         ]
+      },
+      "WireOpenProposal": {
+        "type": "object",
+        "description": "One OPEN proposal on the wire — its candidate `version_id` (the `@hash`), the `base_generation` it was\nopened against, and when. The proposals-listing read returns ONLY these three fields: **no bytes, no\nproposer, no roles, no rendered diff**. Mirrors `plane-store`'s `OpenProposalSummary` with the id hex-encoded.",
+        "required": [
+          "version_id",
+          "base_generation",
+          "created_at"
+        ],
+        "properties": {
+          "base_generation": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the\nproposal stales and drops out of this list."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When the proposal was opened (the server-stamped RFC-3339 string)."
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The proposal's candidate commit id (64-char lowercase hex) — the `<skill>@<version_id>` handle."
+          }
+        }
+      },
+      "WireProposalList": {
+        "type": "object",
+        "description": "`GET /v1/workspaces/{ws}/skills/{skill}/proposals` response body — the OPEN, non-stale proposals on a\nrostered skill (a possibly-empty list, ordered by `(created_at, version_id)`). A staled proposal is absent\n(keep == read == list); the list carries no bytes and no proposer — it is the thin handle a client turns\ninto a `diff` / `review` follow-up.",
+        "required": [
+          "proposals"
+        ],
+        "properties": {
+          "proposals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireOpenProposal"
+            },
+            "description": "The open proposals (possibly empty)."
+          }
+        }
       },
       "WireVersionFile": {
         "type": "object",

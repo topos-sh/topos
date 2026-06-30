@@ -14,7 +14,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
-use crate::plane::{EnrollSource, GovernanceSource, PlaneSource};
+use crate::plane::{ContributeSource, EnrollSource, GovernanceSource, PlaneSource};
 use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, ops, render};
@@ -68,12 +68,16 @@ pub fn run() -> ExitCode {
     let device_id = match &command {
         // `follow` also loads (and on first use mints) the device identity: the device-key signer it drives
         // requires `host.json` to exist, and `--approve` authors a draft snapshot through the pull engine.
-        Command::Add { .. } | Command::Pull { .. } | Command::Follow { .. } => {
-            match identity::load_or_create_device_id(&fs, &layout) {
-                Ok(d) => d,
-                Err(e) => return emit_err(json, cmd_name, &e),
-            }
-        }
+        // `publish` authors the candidate commit and `revert` the forward-revert commit, so both load (and
+        // on first use mint) the device id.
+        Command::Add { .. }
+        | Command::Pull { .. }
+        | Command::Follow { .. }
+        | Command::Publish { .. }
+        | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
+            Ok(d) => d,
+            Err(e) => return emit_err(json, cmd_name, &e),
+        },
         _ => String::new(),
     };
     let ctx = Ctx {
@@ -145,8 +149,90 @@ pub fn run() -> ExitCode {
             ops::list(&ctx, skill.as_deref(), footprint),
             render::list_tty,
         ),
-        Command::Diff { skill } => {
-            finish(json, cmd_name, ops::diff(&ctx, &skill), render::diff_tty)
+        Command::Diff { skill, r#ref } => finish(
+            json,
+            cmd_name,
+            ops::diff(&ctx, &skill, r#ref.as_deref()),
+            render::diff_tty,
+        ),
+        Command::Publish {
+            skill,
+            propose,
+            approve,
+        } => {
+            // The device-signed contribute transport, built per the enrolled plane's base URL (read inside
+            // the op from `instance.json`) — the same creds-free `ureq` client that speaks enrollment. The
+            // governance connector is the same client (a genesis publish folds in an owner-signed invite).
+            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            let gov_connect = |base_url: &str| -> Box<dyn GovernanceSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            finish_publish(
+                json,
+                cmd_name,
+                ops::publish(
+                    &ctx,
+                    &contribute_connect,
+                    &gov_connect,
+                    skill.as_deref(),
+                    propose,
+                    &approve,
+                ),
+            )
+        }
+        Command::Review {
+            target,
+            approve,
+            reject,
+        } => {
+            // Exactly one of --approve / --reject (clap leaves both bool; the verdict is mutually exclusive).
+            let resolved = match (approve, reject) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => {
+                    return emit_err(
+                        json,
+                        cmd_name,
+                        &ClientError::Corrupt(
+                            "exactly one of --approve / --reject is required".into(),
+                        ),
+                    );
+                }
+            };
+            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            finish(
+                json,
+                cmd_name,
+                ops::review(&ctx, &contribute_connect, &target, resolved),
+                render::review_tty,
+            )
+        }
+        Command::Revert {
+            skill,
+            to,
+            approve,
+            confirm,
+        } => {
+            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            finish(
+                json,
+                cmd_name,
+                ops::revert(
+                    &ctx,
+                    &contribute_connect,
+                    skill.as_deref(),
+                    &to,
+                    &approve,
+                    confirm,
+                ),
+                render::revert_tty,
+            )
         }
         Command::Log { skill } => finish(json, cmd_name, ops::log(&ctx, &skill), render::log_tty),
         Command::Pull {
@@ -219,6 +305,38 @@ fn finish_follow(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::follow_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e),
+    }
+}
+
+/// `publish`'s finisher — the verb yields either a direct publish ([`PublishData`]) or an opened proposal
+/// ([`ProposeData`]); each renders through its own `--json` payload / TTY line. A typed failure
+/// (APPROVAL_REQUIRED / CONFLICT / DENIED / …) flows through [`emit_err`], which attaches the right
+/// `next_actions`.
+fn finish_publish(
+    json: bool,
+    command: &str,
+    result: Result<ops::PublishOutcome, ClientError>,
+) -> ExitCode {
+    match result {
+        Ok(ops::PublishOutcome::Published(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::publish_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::PublishOutcome::Proposed(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::propose_tty(&data));
             }
             ExitCode::SUCCESS
         }

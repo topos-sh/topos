@@ -19,20 +19,25 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use topos_core::digest::to_hex;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
-use topos_types::results::PullData;
+use topos_types::results::{DiffData, ProposeData, PublishData, PullData, RevertData, ReviewData};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
+use crate::device_signer::DeviceSigner;
+use crate::enroll::{self, FollowEntry, FollowModeDoc, Follows, Instance, UserDoc};
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
 use crate::plane::{
-    EnrollSource, FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, PlaneSource,
+    ContributeSource, EnrollSource, FollowContext, FollowMode, FollowSource, GovernanceSource,
+    InertFollow, InertPlane, PlaneSource,
 };
 use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::Layout;
-use crate::{doc, ops};
+use crate::{doc, ops, scan};
 
 /// The device id local commits (a never-shared draft snapshot) are authored under. Fixed + controlled-ASCII;
 /// the plane never sees it (only the client's own genesis carries it), so any stable value works.
@@ -590,6 +595,370 @@ impl FollowHarness {
     #[must_use]
     pub fn placement_files(&self, skill_id: &str) -> Vec<(String, u32, Vec<u8>)> {
         snapshot_dir(&self.work.0.join(skill_id))
+    }
+}
+
+/// The result of a [`ContributeHarness::publish`]: either `current` moved (a direct publish) or a proposal
+/// opened (`--propose`). The public face of the client's internal `PublishOutcome`.
+#[derive(Debug, Clone)]
+pub enum PublishResult {
+    /// A direct publish moved `current`.
+    Published(PublishData),
+    /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
+    Proposed(ProposeData),
+}
+
+/// The contribute rig: an ENROLLED publisher/reviewer home (instance/user/follows + a device key) with one
+/// adopted, followed skill, over a real `~/.topos/` + work dir. Drives the GENUINE write verbs
+/// (`publish`/`review`/`revert`/`diff`) over the GENUINE `ureq` transports against a loopback plane, so an
+/// external e2e crate proves the contribute loop without reaching the client's `pub(crate)` internals.
+#[derive(Debug)]
+pub struct ContributeHarness {
+    home: Scratch,
+    work: Scratch,
+    fs: RealFs,
+    ids: RealIds,
+    clock: RealClock,
+    harness: WorkHarness,
+    skill_id: String,
+    workspace_id: String,
+    read_token: String,
+}
+
+impl ContributeHarness {
+    /// A fresh rig over unique temp dirs (cleaned on drop).
+    #[must_use]
+    pub fn new(tag: &str) -> Self {
+        let work = Scratch::new(&format!("{tag}-cwork"));
+        let harness = WorkHarness {
+            work: work.0.clone(),
+        };
+        Self {
+            home: Scratch::new(&format!("{tag}-chome")),
+            work,
+            fs: RealFs,
+            ids: RealIds,
+            clock: RealClock,
+            harness,
+            skill_id: String::new(),
+            workspace_id: String::new(),
+            read_token: String::new(),
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::new(&self.home.0)
+    }
+
+    /// The device public key this client's signer mints (load-or-generate is idempotent) — so the e2e can
+    /// register it on the plane (`seed_device`) before driving a write.
+    #[must_use]
+    pub fn device_pubkey(&self) -> [u8; 32] {
+        DeviceSigner::load_or_generate(&self.fs, &self.layout())
+            .expect("load-or-generate device key")
+            .public_key()
+    }
+
+    /// The device key id the plane re-derives + selects to verify this client's device-op signature.
+    #[must_use]
+    pub fn device_key_id(&self) -> String {
+        DeviceSigner::load_or_generate(&self.fs, &self.layout())
+            .expect("load-or-generate device key")
+            .device_key_id()
+            .to_owned()
+    }
+
+    /// Enroll this client EXACTLY as `follow` would: write `instance.json` (the plane + pinned key),
+    /// `user.json` (the workspace), and `follows.json` (one followed skill with the minted read token), then
+    /// adopt the skill under its exact id with `placeholder_files`. A subsequent [`pull`](Self::pull)
+    /// fast-forwards onto the plane's current.
+    ///
+    /// # Panics
+    /// If a write or the adopt fails (a test-precondition error).
+    #[allow(clippy::too_many_arguments)]
+    pub fn enroll(
+        &mut self,
+        base_url: &str,
+        plane_key: [u8; 32],
+        workspace_id: &str,
+        skill_id: &str,
+        read_token: &str,
+        review_required: bool,
+        placeholder_files: &[(&str, bool, &[u8])],
+    ) {
+        let layout = self.layout();
+        enroll::write_instance(
+            &self.fs,
+            &layout,
+            &Instance {
+                schema_version: 1,
+                base_url: base_url.to_owned(),
+                plane_key: hex::encode(plane_key),
+                plane_key_id: "pk_test".to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                enrollment_method: "device_code".to_owned(),
+                workspace_display_name: Some("Test".to_owned()),
+                verified_domain: None,
+                verified_domain_status: VerifiedDomainStatus::Unverified,
+            },
+        )
+        .expect("write instance.json");
+        enroll::write_user(
+            &self.fs,
+            &layout,
+            &UserDoc {
+                schema_version: 1,
+                workspace_id: workspace_id.to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                email: None,
+                roles: Vec::new(),
+                invite_rooted: true,
+                enrolled_at: 1,
+            },
+        )
+        .expect("write user.json");
+        doc::write_doc_private(
+            &self.fs,
+            &layout.follows_path(),
+            &Follows {
+                schema_version: 1,
+                follows: vec![FollowEntry {
+                    skill_id: skill_id.to_owned(),
+                    workspace_id: workspace_id.to_owned(),
+                    read_token: read_token.to_owned(),
+                    mode: FollowModeDoc::Auto,
+                    review_required,
+                    following: true,
+                }],
+            },
+        )
+        .expect("write follows.json");
+
+        // Adopt the skill under its exact id (so the local id == the plane skill id), via the genuine add.
+        let dir = self.work.0.join(skill_id);
+        write_tree(&dir, placeholder_files);
+        let fixed = FixedId(skill_id.to_owned());
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &layout)
+            .expect("load-or-create device id");
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &fixed,
+            clock: &self.clock,
+            device_id,
+            layout: layout.clone(),
+            harness: &self.harness,
+            plane: &inert_plane,
+            plane_key: [0u8; 32],
+            follow: &inert_follow,
+        };
+        let added =
+            ops::add(&ctx, &dir).unwrap_or_else(|e| panic!("contribute: adopt {skill_id}: {e}"));
+        assert_eq!(
+            added.skill_id, skill_id,
+            "the fixed id source mints the requested id"
+        );
+
+        self.skill_id = skill_id.to_owned();
+        self.workspace_id = workspace_id.to_owned();
+        self.read_token = read_token.to_owned();
+    }
+
+    /// The placement directory this client's skill is tracked at (where edits become a draft).
+    fn placement(&self) -> PathBuf {
+        self.work.0.join(&self.skill_id)
+    }
+
+    /// The real `UreqPlane` read transport + `FileFollow`, built from the enrolled follow-state.
+    fn read_transport(&self) -> (UreqPlane, FileFollow) {
+        let follows = enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .expect("follows.json exists after enroll");
+        (
+            UreqPlane::new(self.base_url(), enroll::skill_creds(&follows)),
+            FileFollow::new(enroll::follow_contexts(&follows)),
+        )
+    }
+
+    fn base_url(&self) -> String {
+        enroll::read_instance(&self.fs, &self.layout())
+            .expect("read instance.json")
+            .expect("instance.json exists after enroll")
+            .base_url
+    }
+
+    /// Run the real pull engine (reach the plane's current). Panics on a hard wiring fault.
+    #[must_use]
+    pub fn pull(&self, plane_key: [u8; 32]) -> PullData {
+        let (plane, follow) = self.read_transport();
+        let device_id =
+            crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            plane_key,
+            follow: &follow,
+        };
+        ops::pull(&ctx, ops::PullScope::AllFollowed)
+            .unwrap_or_else(|e| panic!("contribute: pull: {e}"))
+    }
+
+    /// Overwrite the placement with `files` (a fresh draft ahead of `current`).
+    pub fn edit_placement(&self, files: &[(&str, bool, &[u8])]) {
+        write_tree(&self.placement(), files);
+    }
+
+    /// The current placement bundle's digest (lowercase hex) — the `<digest>` an outward verb's `--approve`
+    /// must carry.
+    #[must_use]
+    pub fn draft_digest(&self) -> String {
+        let scanned = scan::scan(&self.placement()).expect("scan the placement");
+        to_hex(&scanned.bundle_digest)
+    }
+
+    /// Build the device-signed-write `Ctx` + connectors and run `op` (a closure over the wired transports).
+    fn with_write_ctx<T>(
+        &self,
+        plane_key: [u8; 32],
+        op: impl FnOnce(
+            &Ctx<'_>,
+            &dyn Fn(&str) -> Box<dyn ContributeSource>,
+            &dyn Fn(&str) -> Box<dyn GovernanceSource>,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let (plane, follow) = self.read_transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            plane_key,
+            follow: &follow,
+        };
+        let contribute =
+            |b: &str| -> Box<dyn ContributeSource> { Box::new(UreqEnroll::new(b.to_owned())) };
+        let governance =
+            |b: &str| -> Box<dyn GovernanceSource> { Box::new(UreqEnroll::new(b.to_owned())) };
+        op(&ctx, &contribute, &governance)
+    }
+
+    /// Drive `publish` (or `--propose`).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn publish(
+        &self,
+        plane_key: [u8; 32],
+        propose: bool,
+        approve: &str,
+    ) -> Result<PublishResult, String> {
+        self.with_write_ctx(plane_key, |ctx, contribute, governance| match ops::publish(
+            ctx, contribute, governance, None, propose, approve,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
+            ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
+        })
+    }
+
+    /// Drive `review --approve | --reject` on `<skill>@<hash>`.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn review(
+        &self,
+        plane_key: [u8; 32],
+        target: &str,
+        approve: bool,
+    ) -> Result<ReviewData, String> {
+        self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
+            ops::review(ctx, contribute, target, approve).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Drive `revert --to <good> --approve <skill>@<hash>`.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn revert(
+        &self,
+        plane_key: [u8; 32],
+        to: &str,
+        approve: &str,
+        confirm: bool,
+    ) -> Result<RevertData, String> {
+        self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
+            ops::revert(ctx, contribute, None, to, approve, confirm).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Drive `diff <skill> [<ref>]` (a plane ref fetches + re-verifies).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn diff(&self, plane_key: [u8; 32], r#ref: Option<&str>) -> Result<DiffData, String> {
+        let skill = self.skill_id.clone();
+        self.with_write_ctx(plane_key, |ctx, _c, _g| {
+            ops::diff(ctx, &skill, r#ref).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Run `pull` and return the `proposals_awaiting` count (the plane proposals route summed over the
+    /// followed skills).
+    #[must_use]
+    pub fn proposals_awaiting(&self, plane_key: [u8; 32]) -> u32 {
+        self.pull(plane_key).proposals_awaiting
+    }
+
+    /// Run `list <skill>` (narrowed), returning the entry's `pending_proposals` (each `<skill>@<hash>`, from
+    /// the plane proposals route).
+    #[must_use]
+    pub fn list_pending_proposals(&self, plane_key: [u8; 32]) -> Vec<String> {
+        let (plane, follow) = self.read_transport();
+        let device_id =
+            crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            plane_key,
+            follow: &follow,
+        };
+        let data = ops::list(&ctx, Some(&self.skill_id), false).expect("list");
+        data.tracked
+            .into_iter()
+            .flat_map(|e| e.pending_proposals)
+            .collect()
+    }
+
+    /// This skill's `sync.json` (the floor/applied state).
+    #[must_use]
+    pub fn sync_state(&self) -> SyncState {
+        doc::read_doc(&self.fs, &self.layout().published(&self.skill_id).sync)
+            .expect("read sync.json")
+            .expect("sync.json exists")
+    }
+
+    /// The placement bundle: `(relative path, mode & 0o777, bytes)`, sorted — for a byte-exact assert.
+    #[must_use]
+    pub fn placement_files(&self) -> Vec<(String, u32, Vec<u8>)> {
+        snapshot_dir(&self.placement())
     }
 }
 

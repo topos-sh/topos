@@ -14,7 +14,8 @@
 
 use topos_core::digest::FileMode;
 use topos_core::sync::Generation as KernelGen;
-use topos_types::{Generation, SignedCurrentRecord};
+use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
+use topos_types::{Generation, Receipt, SignedCurrentRecord, TerminalOutcome, WireError};
 
 use crate::error::ClientError;
 
@@ -99,6 +100,15 @@ pub(crate) trait PlaneSource {
         skill_id: &str,
         version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError>;
+
+    /// The OPEN proposals' version ids (the `@hash` handles) for a followed skill — the count feeds
+    /// `pull --json`'s `proposals_awaiting`, and the handles drive `list <skill>`. A read (no signature):
+    /// the per-skill read token authorizes it. The default is empty (fixtures / the inert source see no
+    /// proposals); the real `UreqPlane` overrides it with the GET, mapping a 404 (no/unknown token or scope
+    /// mismatch — indistinguishable) to an empty list rather than an error, so the count is best-effort.
+    fn list_open_proposals(&self, _skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
+        Ok(Vec::new())
+    }
 }
 
 /// How a skill is followed — the engine consults this to choose the consent situation. Fixture-supplied
@@ -134,8 +144,6 @@ pub(crate) struct FollowContext {
 pub(crate) trait FollowSource {
     /// The followed skills, each with its follow-state, keyed by stable skill id.
     fn followed(&self) -> Vec<(String, FollowContext)>;
-    /// Proposals awaiting *me* as a reviewer (always `0` until proposals/review land).
-    fn proposals_awaiting(&self) -> u32;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -309,6 +317,91 @@ pub(crate) trait GovernanceSource {
     ) -> Result<topos_types::results::InviteData, ClientError>;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The contribute-write seam — the device-signed write side (publish / propose / revert / review),
+// behind a port so the contribute tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte
+// device-op signature is the auth, riding a header, not a read token; the base URL is baked in when
+// the connector builds it from `instance.json`. The real impl is `crate::plane_http::UreqEnroll` (the
+// same creds-free client that speaks enrollment + governance); the fake lives in the contribute tests.
+// ---------------------------------------------------------------------------------------------
+
+/// The typed result of a contribute write. Carries the three parts of the all-outcome **200 envelope**
+/// verbatim — the client mirror of the plane's `SetCurrentReceipt`. EVERY terminal protocol outcome
+/// (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED) is a `WriteReceipt`; only a transport /
+/// non-200 / malformed-body fault is a [`ClientError`].
+#[derive(Debug, Clone)]
+pub(crate) struct WriteReceipt {
+    /// The canonical all-outcome receipt (present on every write 200). `outcome` is the branch
+    /// discriminant; `version_id` + `bundle_digest` + `current_generation` build the verb's `--json` data.
+    pub receipt: Receipt,
+    /// The flat wire error on a non-OK outcome (CONFLICT / APPROVAL_REQUIRED / DENIED) — the fine `code`,
+    /// the live `current_generation` (the CONFLICT rebase target), and the typed `next_actions`. `None` on
+    /// OK / NEEDS_REVIEW.
+    pub error: Option<WireError>,
+    /// The signed `current` pointer — `Some` ONLY when a pointer actually moved (publish / revert /
+    /// review-approve OK). `None` for NEEDS_REVIEW, an OK `review --reject` (signs nothing → data `{}`), and
+    /// every failure. NOT trusted here: the caller verifies it against the pinned plane key before advancing
+    /// the anti-rollback floor.
+    pub signed_record: Option<SignedCurrentRecord>,
+}
+
+impl WriteReceipt {
+    /// The terminal outcome the verb branches on.
+    pub(crate) fn outcome(&self) -> TerminalOutcome {
+        self.receipt.outcome
+    }
+}
+
+/// The device-signed contribute-write transport — the four POST verbs that move (or propose to move)
+/// `current`. Creds-free: the 64-byte device-op signature is the auth, riding the `Topos-Device-Signature`
+/// header (NOT a read token); the body carries only the `device_key_id` that names the signing key. The op
+/// kind is derived from the route server-side, so the transport ships only the body + the signature and is
+/// op-agnostic. EVERY terminal protocol outcome (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED)
+/// is an `Ok(WriteReceipt)`; only a transport / non-200 / malformed-body fault is an `Err`. The real impl is
+/// [`crate::plane_http::UreqEnroll`].
+pub(crate) trait ContributeSource {
+    /// `POST /v1/publish` — a direct publish that moves `current` (or genesis).
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault / non-200 status; [`ClientError::Corrupt`] on a malformed
+    /// envelope (a body that carries no receipt is corrupt).
+    fn publish(
+        &self,
+        body: PublishRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError>;
+
+    /// `POST /v1/proposals` — open a proposal (ingest a candidate WITHOUT moving `current`).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish).
+    fn propose(
+        &self,
+        body: ProposeRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError>;
+
+    /// `POST /v1/reverts` — a forward revert (the server builds the forward commit from `good`'s tree).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish).
+    fn revert(
+        &self,
+        body: RevertRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError>;
+
+    /// `POST /v1/reviews` — approve or reject a proposal (the verdict rides `ReviewRequest.decision`).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish).
+    fn review(
+        &self,
+        body: ReviewRequest,
+        device_sig: [u8; 64],
+    ) -> Result<WriteReceipt, ClientError>;
+}
+
 /// Compare two wire generations with the kernel's epoch-dominant order (the wire type derives none).
 pub(crate) fn gen_cmp(a: Generation, b: Generation) -> core::cmp::Ordering {
     KernelGen {
@@ -360,8 +453,5 @@ pub(crate) struct InertFollow;
 impl FollowSource for InertFollow {
     fn followed(&self) -> Vec<(String, FollowContext)> {
         Vec::new()
-    }
-    fn proposals_awaiting(&self) -> u32 {
-        0
     }
 }

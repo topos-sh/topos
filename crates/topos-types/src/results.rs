@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PullData {
     pub skills: Vec<PullSkill>,
-    /// Proposals awaiting *me* as a reviewer.
+    /// Open proposals on your followed skills (v0 is single-approver — any rostered member may review, so
+    /// the count is all open-non-stale proposals across what you follow, not a reviewer-assignment queue).
     pub proposals_awaiting: u32,
 }
 
@@ -289,9 +290,11 @@ pub struct LogData {
     pub team: Option<Vec<serde_json::Value>>,
 }
 
-/// `publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is
-/// returned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the
-/// `publish --propose` next-action) and carries no `data`. **INFERRED.**
+/// `publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in
+/// a shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a
+/// governance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by
+/// an owner, and `None` otherwise. Under `review-required` a direct publish instead returns
+/// `APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct PublishData {
     pub skill_id: String,
@@ -302,7 +305,9 @@ pub struct PublishData {
     pub bundle_digest: String,
     /// The pointer's new generation after the move.
     pub current_generation: Generation,
-    /// Returned only on the first publish (which stands up the workspace): `/i/<token>`.
+    /// A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the
+    /// publisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer
+    /// move is the real outcome; the link is a convenience (the `invite` verb mints one independently).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_link: Option<String>,
 }

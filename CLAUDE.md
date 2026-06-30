@@ -150,10 +150,31 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > first skill byte-exact; a leaked invite is inert to an off-roster identity). The client still carries **no
 > `plane-store`/`sqlx`/`tokio`/`reqwest`/`hyper` edge** (only `ed25519-dalek`/`getrandom`/`zeroize`).
 >
+> **The contribute loop closes — the client finally *writes*.** The four device-signed write verbs are wired:
+> **`publish`** (and **`--propose`**), **`review --approve | --reject`**, and **`revert --to`**, plus the
+> plane-sourced **`diff <skill> current..<hash>`**. A creds-free **`ContributeSource`** transport (the
+> 64-byte device-op signature in the `Topos-Device-Signature` header) POSTs the four frozen write routes and
+> maps the all-outcome **200 receipt** to a typed outcome (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED /
+> DENIED). The crux — **I-COMMIT-PARITY** — holds: the client computes the byte-identical `commit_id` +
+> `bundle_digest` the plane re-derives (the same `topos-core` digest + commit encoder; author = the device id,
+> a fixed per-verb message; the candidate bytes ride **inline base64** in one signed POST — no upload route),
+> so a valid signature *is* the binding of this device to this exact identity (a two-halves wire test fails on
+> any post-sign tweak). `publish` gates the outward ship behind **`--approve <skill>@<digest>`** (recompute +
+> refuse on mismatch — never a silent mode-flip), persists an **op-WAL** (`0600`) before the first send so an
+> uncertain retry **replays the same `op_id`** (no double-advance), advances local state read-your-writes on
+> OK, and (on a genesis publish) folds in a best-effort owner-gated `/i/` link; a direct publish under
+> `review_required` fails typed (`APPROVAL_REQUIRED`). `review` binds the proposal's re-derived identity at the
+> fresh `current` base (four-eyes + delegated consent enforced by the plane); `revert` builds the **forward**
+> commit on the fresh `current` parent. A minimal **proposals-listing read route**
+> (`GET …/skills/{skill}/proposals`, rostered, 404-not-403, the shared `open ∧ base==current` predicate so a
+> staled proposal vanishes — count + handles only, no bytes/roles) makes `pull --json`'s `proposals_awaiting`
+> and `list <skill>` real. The whole loop is proven **end-to-end over loopback HTTP** (publish-direct →
+> follower auto-applies byte-exact; `--propose` → a four-eyes `review --approve` → follower applies with no
+> prompt; `revert` → follower rolls forward; the plane `diff` renders a proposal). The client stays
+> edge-clean.
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
-> client-invisible); the **client contribute loop** (the `publish --propose` / `review` / `revert` / `diff` CLI
-> verbs that wire the now-built device-key signer + session-poll currency — the server authority + its HTTP
-> routes are built, the client UX + multi-reviewer governance are not); the **hosted verification-page HTML +
+> client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
 > multi-IdP / HRD / SAML / SCIM — one generic OIDC connector ships feature-gated); **magic-link** as a primary
 > rung; **active read-token rotation** (per-device revoke + expiry are built; rotation in the `current` path is

@@ -12,7 +12,7 @@ use crate::enroll::{
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
-use crate::read::{CurrentPointer, ReadScope, VersionMeta};
+use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 use crate::sqlite::Db;
@@ -212,6 +212,27 @@ impl Authority {
         version_id_hex: &str,
     ) -> Result<VersionMeta> {
         crate::read::read_version_metadata(self, scope, req_ws, req_skill, version_id_hex).await
+    }
+
+    /// List a skill's OPEN, non-stale proposals for an authenticated [`ReadScope`] (the proposals-listing
+    /// route's core): each `(version_id, base, created_at)` — **NO bytes, NO proposer, NO roles, NO rendered
+    /// view**. Asserts the scope/path match (the cross-skill/workspace leak guard) and enumerates the
+    /// rostered ∧ `open ∧ base == current` rows, so a staled proposal vanishes exactly as it drops out of the
+    /// object/version reads (keep == read == list). A NON-rostered principal with a valid token yields an
+    /// EMPTY list, never a not-found (the roster JOIN is the authz; there is no per-row probe); a scope/path
+    /// mismatch is the single indistinguishable [`AuthorityError::NotFound`]. This is a READ — nothing is
+    /// signed, no governance is consulted, no body is taken.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a scope/path mismatch; [`AuthorityError::Integrity`] if a stored row is
+    /// corrupt; [`AuthorityError::Internal`] on a database fault.
+    pub async fn list_open_proposals(
+        &self,
+        scope: &ReadScope,
+        req_ws: &str,
+        req_skill: &str,
+    ) -> Result<Vec<OpenProposalSummary>> {
+        crate::read::list_open_proposals(self, scope, req_ws, req_skill).await
     }
 
     /// Evaluate the cross-skill lineage predicate over a candidate set (a read-only gather + the pure
@@ -845,6 +866,20 @@ impl Authority {
         self.db
             .seed_device(ws, device_key_id, public_key, principal, revoked)
             .await
+    }
+
+    /// Set the workspace's `review_required` policy (the anti-poisoning gate). Test-only — the real toggle
+    /// is a plane/console setting; the client only enforces the typed-fail / four-eyes / delegated-consent
+    /// outcomes.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_review_required(
+        &self,
+        ws: &WorkspaceId,
+        review_required: bool,
+    ) -> Result<()> {
+        self.db.set_review_required(ws, review_required).await
     }
 
     /// Mint a read token (store only its sha256, exactly as [`resolve_read_token`](Self::resolve_read_token)

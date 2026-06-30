@@ -124,6 +124,19 @@ impl Layout {
     pub(crate) fn enrollment_path(&self) -> PathBuf {
         self.identity_dir().join("enrollment.json")
     }
+
+    /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A
+    /// home-level dir (outside `skills/<id>/`, so a publish rename never disturbs an in-flight record), it
+    /// is covered by the footprint walk + uninstall like any other `~/.topos/` path.
+    pub(crate) fn ops_dir(&self) -> PathBuf {
+        self.home.join("ops")
+    }
+
+    /// `ops/<op_id>.json` — one contribute op's durable write-ahead record (a `0600` doc, persisted before
+    /// the first send so an uncertain write replays the SAME `op_id`).
+    pub(crate) fn op_path(&self, op_id: &str) -> PathBuf {
+        self.ops_dir().join(format!("{op_id}.json"))
+    }
 }
 
 /// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file
@@ -181,6 +194,21 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Result<(), ClientError> {
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
+
+    // Sweep any orphaned op-WAL temp (`ops/<op_id>.json.tmp`) a faulted WAL write left — harmless litter
+    // (find_pending only matches a `.json` name) but nothing else cleans the ops dir.
+    let ops_dir = layout.ops_dir();
+    if fs.exists(&ops_dir) {
+        for entry in fs.read_dir(&ops_dir)? {
+            if entry
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(TMP_SUFFIX))
+            {
+                fs.remove_file(&entry)?;
+            }
+        }
+    }
 
     for entry in fs.read_dir(&layout.skills_dir())? {
         let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {

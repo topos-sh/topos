@@ -3,7 +3,8 @@
 
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::results::{
-    AddData, DiffData, FollowData, InviteData, ListData, LogData, PullData,
+    AddData, DiffData, FollowData, InviteData, ListData, LogData, ProposeData, PublishData,
+    PullData, RevertData, ReviewData, ReviewDecision,
 };
 use topos_types::{
     ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
@@ -49,7 +50,8 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
             retryable,
             affected: Affected::default(),
             expected_generation: None,
-            current_generation: None,
+            // A CONFLICT carries the live generation (the rebase target); every other error has none.
+            current_generation: err.current_generation(),
             context: serde_json::json!({ "message": safe_message(err) }),
             next_actions,
         }),
@@ -66,6 +68,61 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
         ClientError::KeyRepinRequired => vec![NextAction {
             code: ActionCode::RepinPlaneKey,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
+        }],
+        // The plane refused a direct publish under review-required — the agent re-runs it as a proposal.
+        // The CLIENT fills the executable argv (the plane sends an empty one — it doesn't know the local
+        // skill name); never an auto-flip.
+        ClientError::ApprovalRequired { skill, digest } => vec![NextAction {
+            code: ActionCode::ProposePublish,
+            argv: vec![
+                "topos".into(),
+                "publish".into(),
+                skill.clone(),
+                "--propose".into(),
+                "--approve".into(),
+                format!("{skill}@{digest}"),
+                "--json".into(),
+            ],
+        }],
+        // A stale base — pull to rebase, then re-show the diff and retry. Never a silent retry.
+        ClientError::Conflict { skill, .. } => vec![NextAction {
+            code: ActionCode::RebaseAndRetry,
+            argv: vec![
+                "topos".into(),
+                "pull".into(),
+                skill.clone(),
+                "--json".into(),
+            ],
+        }],
+        // An unresolved author merge blocks publish — resolve it (the pull surfaces/runs the resolution).
+        ClientError::PublishBlocked { skill } => vec![NextAction {
+            code: ActionCode::ResolveDivergedDraft,
+            argv: vec![
+                "topos".into(),
+                "pull".into(),
+                skill.clone(),
+                "--json".into(),
+            ],
+        }],
+        // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
+        // codes carry no executable argv.
+        ClientError::Denied(_) => vec![
+            NextAction {
+                code: ActionCode::RequestAccess,
+                argv: Vec::new(),
+            },
+            NextAction {
+                code: ActionCode::ContactAdmin,
+                argv: Vec::new(),
+            },
+        ],
+        // A retryable plane outcome (e.g. a not-yet-committed lease) — re-run the same command. The agent
+        // owns the argv (this surface doesn't carry the verb); a permanent one carries no Retry.
+        ClientError::PlaneTerminal {
+            retryable: true, ..
+        } => vec![NextAction {
+            code: ActionCode::Retry,
+            argv: Vec::new(),
         }],
         _ => Vec::new(),
     }
@@ -284,6 +341,63 @@ pub(crate) fn invite_tty(data: &InviteData) -> String {
     }
     out.push_str("\nShare the link; redeeming it never enrolls on its own.");
     out
+}
+
+pub(crate) fn publish_tty(data: &PublishData) -> String {
+    let mut out = format!(
+        "Published {}@{} (digest {}) — current is now ({},{}).",
+        data.skill_id,
+        short(&data.version_id),
+        short(&data.bundle_digest),
+        data.current_generation.epoch,
+        data.current_generation.seq,
+    );
+    // On a first (genesis) publish that minted a shareable door, surface the link.
+    if let Some(link) = &data.invite_link {
+        out.push_str(&format!("\nShare this skill: {link}"));
+    }
+    out
+}
+
+pub(crate) fn propose_tty(data: &ProposeData) -> String {
+    // Honest: this is NEEDS_REVIEW — a proposal opened, `current` did NOT move.
+    format!(
+        "Opened proposal {} on base {}. Awaiting review — a reviewer runs `topos review {} --approve`.",
+        data.proposal,
+        short(&data.base_version_id),
+        data.proposal,
+    )
+}
+
+pub(crate) fn revert_tty(data: &RevertData) -> String {
+    format!(
+        "Reverted {} to {} as forward commit {} — current is now ({},{}). Nothing was deleted; move \
+         current forward again to redo.",
+        data.skill_id,
+        short(&data.reverted_to),
+        short(&data.new_version_id),
+        data.current_generation.epoch,
+        data.current_generation.seq,
+    )
+}
+
+pub(crate) fn review_tty(data: &ReviewData) -> String {
+    match data.decision {
+        ReviewDecision::Approve => {
+            let moved_to = data
+                .current_generation
+                .map(|g| format!("({},{})", g.epoch, g.seq))
+                .unwrap_or_else(|| "the new version".to_owned());
+            format!(
+                "Approved {} — current moved to {moved_to}. Every follower picks it up on their next pull.",
+                data.proposal,
+            )
+        }
+        ReviewDecision::Reject => format!(
+            "Rejected {}. It will no longer be applied; `current` is unchanged.",
+            data.proposal,
+        ),
+    }
 }
 
 pub(crate) fn pull_tty(data: &PullData) -> String {

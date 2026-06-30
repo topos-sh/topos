@@ -4885,6 +4885,139 @@ async fn resolve_read_token_resolves_a_scope_and_a_miss_is_notfound() {
     ));
 }
 
+// ── the proposals-listing read (`list_open_proposals`) — keep == read == LIST ─────────────────────────
+//
+// The thin, low-disclosure proposals listing reuses the SAME `open ∧ base == current` predicate the object
+// and version reads use (the 5th verbatim copy), so a staled proposal vanishes from the list exactly as it
+// drops out of read + retention. The roster JOIN is the authorization (non-rostered ⇒ empty, never a probe);
+// the scope/path assert is the cross-skill/workspace leak guard (a mismatch ⇒ the indistinguishable 404).
+
+#[tokio::test]
+async fn list_open_proposals_lists_open_then_a_staled_one_vanishes() {
+    // keep == read == LIST: an OPEN, non-stale proposal is listed (its @hash + base, no bytes/proposer); the
+    // instant a publish stales it, it VANISHES from the list on the shared predicate — no event, no reaper.
+    let fx = Fixture::new("prop-list").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+
+    // `current` points at a base commit Cb at (1,1) — the proposal's base.
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+
+    // A read token for the rostered reader → its (ws, skill, principal) scope.
+    a.db()
+        .seed_read_token(&w, &s, &reader, "tok-list")
+        .await
+        .unwrap();
+    let scope = a.resolve_read_token("tok-list", 0).await.unwrap();
+
+    // Rostered, but no proposals yet → an EMPTY list (never a not-found).
+    assert!(
+        a.list_open_proposals(&scope, "w_acme", "s_x")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // An OPEN, non-stale proposal cp based at (1,1).
+    let cp = CommitId([0xC0; 32]);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+
+    // It lists — with its @hash + base generation; nothing else crosses.
+    let listed = a
+        .list_open_proposals(&scope, "w_acme", "s_x")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].version_id, cp.0);
+    assert_eq!(listed[0].base, gn(1, 1));
+
+    // STALE it: a publish advances `current` past the base — the eventless derived transition.
+    a.db().force_current_generation(&w, &s, 1, 2).await.unwrap();
+
+    // It VANISHES from the list in the SAME step (a gate, not a reaper) — keep == read == list.
+    assert!(
+        a.list_open_proposals(&scope, "w_acme", "s_x")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn list_open_proposals_non_rostered_token_is_empty_not_notfound() {
+    // The roster JOIN IS the authorization: a VALID token whose principal is NOT on the skill's roster yields
+    // an EMPTY list (silent membership), never a not-found — there is no per-row probe. (A scope/path mismatch
+    // is the only 404 this op raises; membership is invisible.)
+    let fx = Fixture::new("prop-list-noroster").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let outsider = prin("p_outsider");
+    // A token for the outsider's scope, but NO roster row for them.
+    a.db()
+        .seed_read_token(&w, &s, &outsider, "tok-out")
+        .await
+        .unwrap();
+    let scope = a.resolve_read_token("tok-out", 0).await.unwrap();
+
+    // Even with an OPEN, non-stale proposal present, the non-rostered principal sees an empty list.
+    let cb = CommitId([0xB0; 32]);
+    a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
+    a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
+    let cp = CommitId([0xC0; 32]);
+    a.db()
+        .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+    assert!(
+        a.list_open_proposals(&scope, "w_acme", "s_x")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn list_open_proposals_rejects_a_scope_or_path_mismatch() {
+    // The FIRST line of the op is the scope/path assert (the cross-skill/workspace leak guard): a token scoped
+    // to (w_acme, s_x) used against another skill — or another workspace — is the indistinguishable not-found,
+    // BEFORE any roster/proposal fact is read.
+    let fx = Fixture::new("prop-list-scope").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_x"));
+    let reader = prin("p_dev");
+    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    a.db()
+        .seed_read_token(&w, &s, &reader, "tok-scope")
+        .await
+        .unwrap();
+    let scope = a.resolve_read_token("tok-scope", 0).await.unwrap();
+
+    // The in-scope path lists fine (empty here — no proposals).
+    assert!(
+        a.list_open_proposals(&scope, "w_acme", "s_x")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A path whose skill differs from the scope's → the indistinguishable not-found (bound to one skill).
+    assert!(matches!(
+        a.list_open_proposals(&scope, "w_acme", "s_OTHER").await,
+        Err(AuthorityError::NotFound)
+    ));
+    // …and a path whose workspace differs.
+    assert!(matches!(
+        a.list_open_proposals(&scope, "w_OTHER", "s_x").await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
 #[tokio::test]
 async fn read_current_present_absent_and_corrupt_blob() {
     let fx = Fixture::new("rt-readcur").await;

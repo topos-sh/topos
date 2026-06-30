@@ -42,6 +42,10 @@ pub fn router(state: PlaneState) -> Router {
         .route(
             "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}",
             get(routes::versions::get_version),
+        )
+        .route(
+            "/v1/workspaces/{ws}/skills/{skill}/proposals",
+            get(routes::proposals::list_proposals),
         );
 
     // The unauthenticated invite bootstrap (TOFU) — a GET, no body, no body-size belt.

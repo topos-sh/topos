@@ -52,6 +52,16 @@ pub(crate) struct OpenProposal {
     pub proposer: Principal,
 }
 
+/// One OPEN, non-stale proposal as the proposals-listing read returns it — the candidate `commit` (the
+/// `@hash`), the `base` generation it was opened against, and when. NO proposer, NO objects: the listing is
+/// a thin, low-disclosure read (the bytes ride the per-blob object route; the proposer/audit stays internal).
+#[derive(Debug, Clone)]
+pub(crate) struct OpenProposalRow {
+    pub commit: CommitId,
+    pub base: Generation,
+    pub created_at: String,
+}
+
 impl Db {
     /// Resolve the IMMUTABLE promote inputs (`base_commit` + the rooted object set) for the proposal of
     /// `(ws, skill, commit, base)` — preferring an `open` row but accepting any status (the base commit and
@@ -145,6 +155,60 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         Ok(row.is_some())
+    }
+
+    /// List the OPEN, non-stale proposals on `(ws, skill)` for a rostered `principal` — the proposals-listing
+    /// read. ONE join over `roster ⋈ proposals ⋈ current`, gated on the SAME `open ∧ base == current`
+    /// staleness predicate the read-authorization join ([`super::Db::authorize_object_read`] /
+    /// [`super::Db::authorize_version_read`]) and both GC keep-checks
+    /// ([`super::Db::claim_for_delete`] / [`super::Db::claim_stale_for_recovery`]) use — this is the 5th
+    /// verbatim copy of that literal — so a staled proposal vanishes from the list exactly as it drops out of
+    /// read + retention (**keep == read == list**). The roster JOIN **is** the authorization: a NON-rostered
+    /// principal (a valid token, not on this skill's roster) yields an EMPTY list, never a not-found — there is
+    /// no per-row authorize call to probe (the route's scope/path assert is the cross-skill guard; membership
+    /// is silent). Every table is bound on `workspace_id`, so no fact crosses a tenant. Ordered by
+    /// `(created_at, commit_id)` for a stable enumeration.
+    pub(crate) async fn list_open_proposals(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+    ) -> Result<Vec<OpenProposalRow>> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        let principal_s = principal.as_str();
+        let rows = sqlx::query!(
+            r#"
+            SELECT p.commit_id  AS "commit_id!: Vec<u8>",
+                   p.base_epoch AS "base_epoch!: i64",
+                   p.base_seq   AS "base_seq!: i64",
+                   p.created_at AS "created_at!"
+            FROM roster r
+            JOIN proposals p ON p.workspace_id = r.workspace_id AND p.skill_id = r.skill_id
+            JOIN current   c ON c.workspace_id = p.workspace_id AND c.skill_id = p.skill_id
+            WHERE r.workspace_id = ?1 AND r.skill_id = ?2 AND r.principal = ?3
+              AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+            ORDER BY p.created_at, p.commit_id
+            "#,
+            ws_s,
+            skill_s,
+            principal_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(OpenProposalRow {
+                    commit: CommitId(blob32(&r.commit_id)?),
+                    base: Generation {
+                        epoch: i64_to_u64(r.base_epoch)?,
+                        seq: i64_to_u64(r.base_seq)?,
+                    },
+                    created_at: r.created_at,
+                })
+            })
+            .collect()
     }
 }
 
@@ -383,6 +447,10 @@ fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
 
 fn u64_to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| AuthorityError::integrity(GenerationOutOfRange))
+}
+
+fn i64_to_u64(v: i64) -> Result<u64> {
+    u64::try_from(v).map_err(|_| AuthorityError::integrity(GenerationOutOfRange))
 }
 
 #[derive(Debug, thiserror::Error)]

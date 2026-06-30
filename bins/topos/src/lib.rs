@@ -27,6 +27,7 @@ pub(crate) mod identity;
 pub(crate) mod ids;
 pub(crate) mod logfile;
 pub(crate) mod materialize;
+pub(crate) mod op_wal;
 pub(crate) mod ops;
 pub(crate) mod plane;
 pub(crate) mod plane_http;

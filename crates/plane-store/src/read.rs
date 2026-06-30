@@ -164,6 +164,17 @@ pub struct VersionMeta {
     pub files: Vec<VersionFile>,
 }
 
+/// One OPEN, non-stale proposal as the proposals-listing read exposes it — the candidate's `version_id` (the
+/// `@hash`), the `base` generation it was opened against, and when. NO bytes, NO proposer, NO roles, NO
+/// rendered view: a proposals listing is a thin, low-disclosure read (a client turns each handle into a
+/// `diff` / `review` follow-up). Mirrors the SQL `OpenProposalRow` with the commit id widened to `[u8; 32]`.
+#[derive(Debug, Clone)]
+pub struct OpenProposalSummary {
+    pub version_id: [u8; 32],
+    pub base: Generation,
+    pub created_at: String,
+}
+
 /// Resolve a presented read token to its opaque [`ReadScope`] — the read-credential resolver.
 ///
 /// Hashes the token (the table stores ONLY the sha256 — the plaintext is a `0600` secret at rest on the
@@ -335,6 +346,44 @@ pub(crate) async fn read_version_metadata(
         bundle_digest,
         files,
     })
+}
+
+/// List a skill's OPEN, non-stale proposals for an authenticated scope (the proposals-listing route's core).
+/// Asserts the scope/path match (the cross-skill/workspace leak guard — the **FIRST** thing it does, copied
+/// verbatim from [`serve_object`] / [`read_version_metadata`]), then enumerates the rostered ∧
+/// `open ∧ base == current` rows. Returns only `(version_id, base, created_at)` per proposal — NO bytes, NO
+/// proposer.
+///
+/// The roster JOIN inside the query **is** the authorization, so a NON-rostered principal (a valid token, not
+/// on this skill's roster) yields `Ok(empty)`, NOT a not-found — there is no per-row authorize call to probe.
+/// A staled proposal vanishes from the list on the SAME `open ∧ base == current` predicate the object/version
+/// reads use, so keep == read == list.
+///
+/// # Errors
+/// [`AuthorityError::NotFound`] on a scope/path mismatch; [`AuthorityError::Integrity`] if a stored row is
+/// corrupt (a bad-width commit id / an out-of-range generation); [`AuthorityError::Internal`] on a database
+/// fault.
+pub(crate) async fn list_open_proposals(
+    authority: &Authority,
+    scope: &ReadScope,
+    req_ws: &str,
+    req_skill: &str,
+) -> Result<Vec<OpenProposalSummary>> {
+    if scope.ws().as_str() != req_ws || scope.skill().as_str() != req_skill {
+        return Err(AuthorityError::NotFound);
+    }
+    let rows = authority
+        .db()
+        .list_open_proposals(scope.ws(), scope.skill(), scope.principal())
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| OpenProposalSummary {
+            version_id: r.commit.0,
+            base: r.base,
+            created_at: r.created_at,
+        })
+        .collect())
 }
 
 /// Parse EXACTLY 64 lowercase-hex characters into a 32-byte content id. `None` on any other length or a

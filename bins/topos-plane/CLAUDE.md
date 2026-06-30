@@ -11,9 +11,13 @@
   GET, `ETag = "<epoch>.<seq>"`, a commit-sensitive 304 via a `Topos-Known-Version-Id` header),
   `GET /v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}` and the sibling
   `GET /v1/workspaces/{ws}/skills/{skill}/versions/{version_id}` (both skill-scoped via an opaque read
-  credential, **404-not-403**, never by bare hash), and the device-signed
-  writes `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews`. Each handler is parse → call the authority
-  → serialize: **no trust decision, no raw object read, no client-asserted principal** in a handler.
+  credential, **404-not-403**, never by bare hash), the proposals-listing read
+  `GET /v1/workspaces/{ws}/skills/{skill}/proposals` (the OPEN proposals' `{version_id, base, created_at}` —
+  count + handles only, no bytes/roles; same Bearer-read scope + 404-not-403 + the shared `open ∧ base==current`
+  staleness clause, so a staled proposal vanishes; a mutable list, so `must-revalidate`, no ETag), and the
+  device-signed writes `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews`. Each handler is parse → call
+  the authority → serialize: **no trust decision, no raw object read, no client-asserted principal** in a
+  handler.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
   unauthenticated TOFU bootstrap `GET /i/{token}` (the workspace + the plane signing root to pin; **no bytes,
   no role**; a dead invite ⇒ 404); the enrollment flow `POST /v1/device/authorize`, `POST /v1/device/token`,

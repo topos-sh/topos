@@ -65,10 +65,61 @@ pub(crate) enum Command {
         #[arg(long)]
         footprint: bool,
     },
-    /// Show a skill's local draft against its current version.
+    /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
+    /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`
+    /// emits the target digest + `source: local|plane`.
     Diff {
         /// The skill name.
         skill: String,
+        /// The optional ref: `<hash>` / `@<hash>` / `current..<hash>` / `<a>..<b>`. Omitted = draft ↔ current.
+        #[arg(value_name = "REF")]
+        r#ref: Option<String>,
+    },
+    /// Ship a draft to the team. `publish` moves `current` to your draft (or genesis-creates a never-yet-
+    /// published skill); `--propose` opens a PR **without** moving `current`. Gated by `--approve
+    /// <skill>@<digest>` (the disclosed consent digest matching the bytes being shipped). Under
+    /// review-required a direct publish fails typed — re-run as `--propose` (never an auto-flip). Requires
+    /// prior enrollment (`follow` first). Device-signed; roster-gated.
+    Publish {
+        /// The skill to publish — optional; inferred from the `--approve <skill>@<digest>` token if omitted
+        /// (they must agree when both are given).
+        skill: Option<String>,
+        /// Open a proposal (a PR) instead of moving `current`.
+        #[arg(long)]
+        propose: bool,
+        /// The consent token `<skill>@<digest>` matching the bytes being shipped (required).
+        #[arg(long = "approve")]
+        approve: String,
+    },
+    /// Resolve a proposal (the `gh pr review --approve` model). `--approve` moves `current` to the candidate
+    /// (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer) or
+    /// withdraws your own (proposer). Exactly one of `--approve` / `--reject` is required. Device-signed.
+    Review {
+        /// The proposal to resolve, as `<skill>@<hash>`.
+        target: String,
+        /// Approve the proposal — move `current` to the candidate.
+        #[arg(long)]
+        approve: bool,
+        /// Reject the proposal (reviewer) or withdraw your own (proposer).
+        #[arg(long)]
+        reject: bool,
+    },
+    /// Undo a release for the TEAM: move `current` to the older version named by `--to` — a **forward**
+    /// pointer-move (nothing deleted; invertible). `--to <hash>` is the GOOD version you go back TO (not the
+    /// bad one). `--approve <skill>@<hash>` binds that good version. `--confirm` for a no-op (already-current)
+    /// revert. Team-only — the local go-back is `pull <skill>@<hash>`. Device-signed; roster-gated.
+    Revert {
+        /// The skill to revert (optional — inferred from the `--approve <skill>@<hash>` token if omitted).
+        skill: Option<String>,
+        /// The GOOD version id (64-char hex) to restore — the destination, NOT the bad version.
+        #[arg(long = "to")]
+        to: String,
+        /// The consent token `<skill>@<hash>` naming the same good version as `--to` (required).
+        #[arg(long = "approve")]
+        approve: String,
+        /// Acknowledge a no-op revert (the `--to` version is already `current`).
+        #[arg(long)]
+        confirm: bool,
     },
     /// Show a skill's local action log + embedded-git history.
     Log {
@@ -133,6 +184,9 @@ impl Command {
             Command::Invite { .. } => "invite",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
+            Command::Publish { .. } => "publish",
+            Command::Review { .. } => "review",
+            Command::Revert { .. } => "revert",
             Command::Log { .. } => "log",
             Command::Pull { .. } => "pull",
             Command::Uninstall { .. } => "uninstall",

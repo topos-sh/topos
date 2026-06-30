@@ -206,8 +206,28 @@ pub enum ConflictPathKind {
     Oversize,
 }
 
-/// `ops/<op_id>.json` — the durable request identity, persisted BEFORE the first network send so an
-/// uncertain write can be reconciled against the receipt. **Field-set pinned.**
+/// The device-signed operation an [`OpRecord`] carries — a serde mirror of the kernel's `DeviceOp` (which
+/// lives in `topos-core`, not a dependency of this crate). The client maps it 1:1 to `DeviceOp` when
+/// re-signing a replayed op. snake_case on the wire/disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpKind {
+    /// `publish` that moves `current` directly (or genesis).
+    PublishDirect,
+    /// `publish --propose` that opens a proposal.
+    PublishPropose,
+    /// `revert --to <good>`.
+    Revert,
+    /// `review --approve` of a proposal.
+    ReviewApprove,
+    /// `review --reject` of a proposal.
+    ReviewReject,
+}
+
+/// `ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so
+/// an uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no
+/// double-advance, no duplicate commit). It carries the full bound identity the device-op signature binds,
+/// so a replay re-signs the identical frame. **Field-set pinned.**
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpRecord {
     #[schemars(extend("const" = 1))]
@@ -215,11 +235,27 @@ pub struct OpRecord {
     /// The client-minted UUIDv4 (also the filename).
     #[schemars(extend("format" = "uuid"))]
     pub op_id: String,
-    /// The built commit (`version_id`) this op publishes / reverts / reviews.
+    /// The workspace this op targets — part of the device-op bound identity.
+    pub workspace_id: String,
+    /// The skill this op targets — part of the device-op bound identity.
+    pub skill_id: String,
+    /// The operation kind (the device-op subtype is an integrity property — an approve never replays as a
+    /// reject).
+    pub op: OpKind,
+    /// The built commit (`version_id`) this op publishes / reverts / reviews — bound by the signature.
     #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
     pub candidate_commit: String,
-    /// The `(epoch,seq)` this op's compare-and-set targets.
+    /// The candidate's byte-exact bundle digest (the consent hash) — bound by the signature.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub bundle_digest: String,
+    /// The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.
     pub expected_generation: Generation,
+    /// The GOOD version a `revert` restores (the wire `good`) — present only for a `Revert` op (the
+    /// server builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry
+    /// it). `None` for every other op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub good: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

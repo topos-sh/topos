@@ -93,9 +93,15 @@ impl Db {
     ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
     ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
     ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
-    ///   and the bind-parameter numbering differs per call site); a dedicated equivalence test pins the three
-    ///   copies together against drift. A reclaimed object that briefly outlives this check on a concurrent
-    ///   read is handled by [`crate::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
+    ///   and the bind-parameter numbering differs per call site); there are now **FIVE** verbatim copies of
+    ///   `open ∧ base == current` — this object-read arm, [`Self::authorize_version_read`]'s proposal arm,
+    ///   the two GC keep-checks ([`claim_for_delete`](Self::claim_for_delete) /
+    ///   [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)), and the proposals-listing read
+    ///   ([`list_open_proposals`](Self::list_open_proposals)) — and a dedicated equivalence test pins the three
+    ///   object-keyed copies (this arm + the two GC keep-checks) together against drift, while behavioral
+    ///   tests pin the version-read and the listing copies to the same staleness semantics. A reclaimed object
+    ///   that briefly outlives this check on a concurrent read is handled by
+    ///   [`crate::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
     pub(crate) async fn authorize_object_read(
         &self,
         ws: &WorkspaceId,
@@ -210,8 +216,9 @@ impl Db {
     ///   reuses the SAME `status='open' ∧ (base_epoch, base_seq) == current.(epoch, seq)` staleness predicate
     ///   the object read arm ([`Self::authorize_object_read`]) and the two GC keep-checks
     ///   ([`Self::claim_for_delete`] / [`Self::claim_stale_for_recovery`]) use — here anchored on
-    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is a 4th copy
-    ///   of the literal, not a shared string; the behavioral proposal-version tests pin it to the same
+    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is the 4th copy
+    ///   of the literal — the proposals-listing read [`Self::list_open_proposals`] is the 5th — not a shared
+    ///   string; the behavioral proposal-version tests pin it to the same
     ///   staleness semantics). It deliberately does NOT authorize on bare `skill_commit`, which also names
     ///   unaccepted/rejected proposal candidates — that would leak a never-accepted version's metadata.
     ///

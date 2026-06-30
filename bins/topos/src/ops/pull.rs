@@ -43,7 +43,7 @@ pub(crate) enum TargetMode {
 /// A hard failure resolving a targeted skill, or (for a targeted pull) a plane-read failure; the bare
 /// sweep isolates per-skill failures instead of erroring.
 pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullData, ClientError> {
-    let proposals_awaiting = ctx.follow.proposals_awaiting();
+    let proposals_awaiting = sum_open_proposals(ctx);
     match scope {
         PullScope::AllFollowed => {
             let mut skills = Vec::new();
@@ -93,4 +93,22 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullData, ClientEr
             })
         }
     }
+}
+
+/// The count of OPEN proposals across the FOLLOWED skills (the `proposals_awaiting` figure) — sourced from
+/// the plane's proposals read route, one GET per followed skill. **Best-effort:** a per-skill read failure
+/// contributes `0` and never aborts the pull (and never writes to stdout — the session-start hook injects
+/// stdout). The inert source follows nothing, so production's bare `pull` sums zero skills → `0`.
+fn sum_open_proposals(ctx: &Ctx<'_>) -> u32 {
+    ctx.follow
+        .followed()
+        .into_iter()
+        .filter(|(_, f)| f.following)
+        .map(|(id, _)| {
+            ctx.plane
+                .list_open_proposals(&id)
+                .map(|p| u32::try_from(p.len()).unwrap_or(u32::MAX))
+                .unwrap_or(0)
+        })
+        .fold(0u32, u32::saturating_add)
 }

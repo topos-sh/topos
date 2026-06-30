@@ -146,9 +146,6 @@ impl FollowSource for FixtureFollow {
     fn followed(&self) -> Vec<(String, FollowContext)> {
         self.entries.clone()
     }
-    fn proposals_awaiting(&self) -> u32 {
-        0
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

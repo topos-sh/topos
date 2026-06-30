@@ -210,6 +210,31 @@ pub struct WireVersionMeta {
     pub files: Vec<WireVersionFile>,
 }
 
+/// One OPEN proposal on the wire — its candidate `version_id` (the `@hash`), the `base_generation` it was
+/// opened against, and when. The proposals-listing read returns ONLY these three fields: **no bytes, no
+/// proposer, no roles, no rendered diff**. Mirrors `plane-store`'s `OpenProposalSummary` with the id hex-encoded.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct WireOpenProposal {
+    /// The proposal's candidate commit id (64-char lowercase hex) — the `<skill>@<version_id>` handle.
+    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    pub version_id: String,
+    /// The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the
+    /// proposal stales and drops out of this list.
+    pub base_generation: Generation,
+    /// When the proposal was opened (the server-stamped RFC-3339 string).
+    pub created_at: String,
+}
+
+/// `GET /v1/workspaces/{ws}/skills/{skill}/proposals` response body — the OPEN, non-stale proposals on a
+/// rostered skill (a possibly-empty list, ordered by `(created_at, version_id)`). A staled proposal is absent
+/// (keep == read == list); the list carries no bytes and no proposer — it is the thin handle a client turns
+/// into a `diff` / `review` follow-up.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct WireProposalList {
+    /// The open proposals (possibly empty).
+    pub proposals: Vec<WireOpenProposal>,
+}
+
 // =================================================================================================
 // Enrollment request/response DTOs — the device-flow / passcode / redeem / admin-claim wire bodies.
 //
@@ -613,6 +638,28 @@ mod tests {
         let back: WireVersionMeta = serde_json::from_value(v).unwrap();
         assert_eq!(back.version_id, "a".repeat(64));
         assert_eq!(back.files[0].object_id, "d".repeat(64));
+    }
+
+    #[test]
+    fn proposal_list_round_trips() {
+        let list = WireProposalList {
+            proposals: vec![WireOpenProposal {
+                version_id: "e".repeat(64),
+                base_generation: Generation { epoch: 1, seq: 7 },
+                created_at: "2026-06-30T00:00:00Z".to_owned(),
+            }],
+        };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["proposals"][0]["version_id"], "e".repeat(64));
+        assert_eq!(v["proposals"][0]["base_generation"]["seq"], 7);
+        assert_eq!(v["proposals"][0]["created_at"], "2026-06-30T00:00:00Z");
+        let back: WireProposalList = serde_json::from_value(v).unwrap();
+        assert_eq!(back.proposals.len(), 1);
+        assert_eq!(back.proposals[0].base_generation.epoch, 1);
+        // An empty list is a valid response (no open proposals).
+        let empty: WireProposalList =
+            serde_json::from_value(serde_json::json!({ "proposals": [] })).unwrap();
+        assert!(empty.proposals.is_empty());
     }
 
     #[test]

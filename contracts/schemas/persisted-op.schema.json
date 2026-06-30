@@ -1,17 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OpRecord",
-  "description": "`ops/<op_id>.json` — the durable request identity, persisted BEFORE the first network send so an\nuncertain write can be reconciled against the receipt. **Field-set pinned.**",
+  "description": "`ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so\nan uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no\ndouble-advance, no duplicate commit). It carries the full bound identity the device-op signature binds,\nso a replay re-signs the identical frame. **Field-set pinned.**",
   "type": "object",
   "properties": {
+    "bundle_digest": {
+      "description": "The candidate's byte-exact bundle digest (the consent hash) — bound by the signature.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "candidate_commit": {
-      "description": "The built commit (`version_id`) this op publishes / reverts / reviews.",
+      "description": "The built commit (`version_id`) this op publishes / reverts / reviews — bound by the signature.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "expected_generation": {
-      "description": "The `(epoch,seq)` this op's compare-and-set targets.",
+      "description": "The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.",
       "$ref": "#/$defs/Generation"
+    },
+    "good": {
+      "description": "The GOOD version a `revert` restores (the wire `good`) — present only for a `Revert` op (the\nserver builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry\nit). `None` for every other op.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
     },
     "last_receipt": {
       "description": "The stored terminal receipt, once one is known (the source of idempotent-retry truth).",
@@ -24,6 +37,10 @@
         }
       ]
     },
+    "op": {
+      "description": "The operation kind (the device-op subtype is an integrity property — an approve never replays as a\nreject).",
+      "$ref": "#/$defs/OpKind"
+    },
     "op_id": {
       "description": "The client-minted UUIDv4 (also the filename).",
       "type": "string",
@@ -34,12 +51,24 @@
       "format": "uint32",
       "const": 1,
       "minimum": 0
+    },
+    "skill_id": {
+      "description": "The skill this op targets — part of the device-op bound identity.",
+      "type": "string"
+    },
+    "workspace_id": {
+      "description": "The workspace this op targets — part of the device-op bound identity.",
+      "type": "string"
     }
   },
   "required": [
     "schema_version",
     "op_id",
+    "workspace_id",
+    "skill_id",
+    "op",
     "candidate_commit",
+    "bundle_digest",
     "expected_generation"
   ],
   "$defs": {
@@ -61,6 +90,36 @@
       "required": [
         "epoch",
         "seq"
+      ]
+    },
+    "OpKind": {
+      "description": "The device-signed operation an [`OpRecord`] carries — a serde mirror of the kernel's `DeviceOp` (which\nlives in `topos-core`, not a dependency of this crate). The client maps it 1:1 to `DeviceOp` when\nre-signing a replayed op. snake_case on the wire/disk.",
+      "oneOf": [
+        {
+          "description": "`publish` that moves `current` directly (or genesis).",
+          "type": "string",
+          "const": "publish_direct"
+        },
+        {
+          "description": "`publish --propose` that opens a proposal.",
+          "type": "string",
+          "const": "publish_propose"
+        },
+        {
+          "description": "`revert --to <good>`.",
+          "type": "string",
+          "const": "revert"
+        },
+        {
+          "description": "`review --approve` of a proposal.",
+          "type": "string",
+          "const": "review_approve"
+        },
+        {
+          "description": "`review --reject` of a proposal.",
+          "type": "string",
+          "const": "review_reject"
+        }
       ]
     },
     "Receipt": {

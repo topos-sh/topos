@@ -408,7 +408,7 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
     ops::add(&h.ctx(), &root).unwrap();
 
     // Clean: an unmodified added skill has an empty diff.
-    let clean = ops::diff(&h.ctx(), "pr-describe").unwrap();
+    let clean = ops::diff(&h.ctx(), "pr-describe", None).unwrap();
     assert!(
         clean.diff.is_empty(),
         "unmodified -> empty diff, got: {:?}",
@@ -421,7 +421,7 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
         "---\nname: pr-describe\n---\n\n# PR describe\n\nWrite a GREAT PR description.\n",
     )
     .unwrap();
-    let edited = ops::diff(&h.ctx(), "pr-describe").unwrap();
+    let edited = ops::diff(&h.ctx(), "pr-describe", None).unwrap();
     assert_eq!(edited.source, topos_types::results::DiffSource::Local);
     assert_golden("diff.ok", "diff", serde_json::to_value(&edited).unwrap());
 }
@@ -571,7 +571,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
                 "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
             );
             // Complete + usable: it renders + diffs without an integrity error.
-            ops::diff(&clean_ctx, "pr-describe").unwrap_or_else(|e| {
+            ops::diff(&clean_ctx, "pr-describe", None).unwrap_or_else(|e| {
                 panic!("fail_at={fail_at}: tracked skill must be usable: {e:?}")
             });
         }

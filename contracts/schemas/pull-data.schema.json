@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "proposals_awaiting": {
-      "description": "Proposals awaiting *me* as a reviewer.",
+      "description": "Open proposals on your followed skills (v0 is single-approver — any rostered member may review, so\nthe count is all open-non-stale proposals across what you follow, not a reviewer-assignment queue).",
       "type": "integer",
       "format": "uint32",
       "minimum": 0

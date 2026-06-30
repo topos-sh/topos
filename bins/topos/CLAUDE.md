@@ -141,15 +141,37 @@ Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes 
 message, so injectable id/time sources make `add` deterministic. Golden `--json` fixtures (add/list/diff/log)
 are asserted byte-equal in tests.
 
+- **The contribute write verbs** (`ops/{publish,review,revert}` + `ops/contribute` + `op_wal` + the plane
+  half of `ops/diff`) — the client device-signed writes that WIRE `sign_device_op`. A new creds-free
+  **`ContributeSource`** transport seam (mirroring `GovernanceSource` on `UreqEnroll`) POSTs the four write
+  routes; `map_write_envelope` maps the **all-outcome 200 envelope** to a typed `WriteReceipt` (every
+  protocol outcome — OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`;
+  only a transport/non-200/malformed body is an `Err`; the signed pointer is parsed leniently because an OK
+  `review --reject` carries `data: {}`). **`publish [--propose] --approve <skill>@<digest>`** scans the draft
+  (the same source `diff` uses), runs the **`--approve` consent gate** (recompute the digest over the scanned
+  bytes; refuse on mismatch — never a silent mode-flip), computes the byte-identical `commit_id`/`bundle_digest`
+  via the kernel (**I-COMMIT-PARITY** — author = `ctx.device_id`, message = a fixed `"topos: publish"`), pins
+  the candidate in the store, persists an **op-WAL** (the extended `OpRecord`, `0600`) BEFORE the first send,
+  POSTs, and maps the outcome (OK advances local state read-your-writes; APPROVAL_REQUIRED surfaces the
+  `publish --propose` next-action; CONFLICT surfaces rebase; a genesis publish folds in a best-effort,
+  owner-gated `/i/` link). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
+  identity at `expected` = the FRESH `current` (a reviewable proposal's base). **`revert --to <good>`** binds
+  the forward commit `{parents:[FRESH current], tree: good.tree}` (a stale local parent would be a DENIED, so
+  it reads the live current). An UNCERTAIN send keeps the WAL so the next attempt **replays the SAME `op_id`**
+  (no double-advance); a settled op deletes it. **`diff <skill> <ref>`** gained the plane half
+  (`current..<hash>` / `<hash>` / `<a>..<b>` — a plane endpoint fetches + re-verifies). The two-halves
+  I-COMMIT-PARITY wire test + the op_id-replay test are in `ops/contribute`; the full loop is proven e2e over
+  loopback HTTP in `tests/`.
+
 ## Planned (lands later)
 
-`unfollow` (stop following `current`, keep the bytes) + signing-at-rest land later; the client
-`publish`/`review`/`revert` verbs that
-WIRE the now-built `sign_device_op` (the **publish guard** over `conflict.json` is built + unit-tested now,
-wired then); the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters
-(Claude Code is the reference — only it guarantees the swap completes before skills resolve; the others
-leave a named, bounded multi-file-read residual). The passcode / magic-link / OIDC identity steps run on the
-plane's verification page (the agent only polls), so the client needs no UI for them.
+`unfollow` (stop following `current`, keep the bytes) + signing-at-rest land later; **multi-reviewer
+governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
+the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
+setting) + `log --team`'s plane half; the OpenClaw/Hermes harness adapters (Claude Code is the reference —
+only it guarantees the swap completes before skills resolve; the others leave a named, bounded
+multi-file-read residual). The passcode / magic-link / OIDC identity steps run on the plane's verification
+page (the agent only polls), so the client needs no UI for them.
 
 ## Architectural layering (enforced at the dependency graph)
 

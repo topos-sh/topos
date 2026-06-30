@@ -40,11 +40,16 @@ same-process code.) The error type holds this line too: internal faults carry a 
   are built from the trusted row — **never** a caller-asserted id — a miss being the same indistinguishable
   `NotFound`. Over it: `read_current` (the signed-`current` record + its generation/version, for the
   conditional-GET/ETag/304 read), `serve_object` (the bundle read — a scope/path mismatch or a malformed id
-  is `NotFound`, then the same `read_object`), and `read_version_metadata` (a version's
-  parents/author/message/digest/file-list — **no blob bytes** — for the client's reassembly walk). The last
-  is R1-scoped by `authorize_version_read`, which **mirrors `read_object`'s predicate** (rostered ∧
-  accepted-trunk-or-open-non-stale-proposal), so an unaccepted/rejected proposal version is the
-  indistinguishable `NotFound`. Commit metadata comes from gitstore's exact one-commit `read_commit_meta`
+  is `NotFound`, then the same `read_object`), `read_version_metadata` (a version's
+  parents/author/message/digest/file-list — **no blob bytes** — for the client's reassembly walk), and
+  `list_open_proposals` (the OPEN proposals on a rostered skill as `{version_id, base, created_at}` —
+  **count + handles only, no bytes, no roles**: the reviewer's discovery surface for `proposals_awaiting` /
+  `list <skill>`; reuses the SAME `open ∧ base==current` staleness clause verbatim — the **fifth** tracked
+  copy — so a staled proposal vanishes [keep==read==list], and folds not-rostered into an empty list via the
+  roster join, never a 403/oracle). The version-metadata read is R1-scoped by `authorize_version_read`, which
+  **mirrors `read_object`'s predicate** (rostered ∧ accepted-trunk-or-open-non-stale-proposal), so an
+  unaccepted/rejected proposal version is the indistinguishable `NotFound`; `list_open_proposals` applies the
+  same scope/path assert first (a cross-skill/workspace token ⇒ `NotFound`). Commit metadata comes from gitstore's exact one-commit `read_commit_meta`
   (fails closed on an unmapped parent, never the lossy `log`). `read_signed_record` is now `pub(crate)` (the
   public authenticated read is `read_current`). `SetCurrentReceipt` is enriched (command/skill/version/digest/
   expected/created_at — all already persisted) so the network layer builds the canonical all-outcome receipt
@@ -197,11 +202,10 @@ domain-typed boundary with no change to callers.
 
 The large-object store's **S3-compatible remote backend** (a second `LargeObjectStore` impl + a
 `large-remote` `location` arm — a no-op extraction) and its **idempotent online backfill** (copy → verify →
-flip `location` → `git repack`), both additive + client-invisible; the **client contribute loop** (the
-`publish --propose` / `review` / `diff <skill> current..<hash>` CLI verbs, the plane-sourced diff, client
-rebase orchestration, the displayed proposal-status strings — the server authority is built, the client UX is
-not); **multi-reviewer governance** (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff
-UI — single-approver only today, no role column); the **HTTP plane's still-to-come surfaces** over the issuance
+flip `location` → `git repack`), both additive + client-invisible; **multi-reviewer governance**
+(`min_approvers` / N-approver / reviewer roles / queues / a rendered diff UI — single-approver only today, no
+role column; the client contribute loop + the proposals-listing read route that feeds it are now BUILT); the
+**HTTP plane's still-to-come surfaces** over the issuance
 core (the verification-page HTML, the workspace-policy mutation route, the audit outbox — the enrollment +
 governance request/response DTOs, the mailer, and one generic OSS OIDC connector all landed in `topos-plane`
 this increment, so the network surface itself is wired; these three remain unbuilt); **active read-token

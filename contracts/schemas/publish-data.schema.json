@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PublishData",
-  "description": "`publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is\nreturned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the\n`publish --propose` next-action) and carries no `data`. **INFERRED.**",
+  "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**",
   "type": "object",
   "properties": {
     "bundle_digest": {
@@ -13,7 +13,7 @@
       "$ref": "#/$defs/Generation"
     },
     "invite_link": {
-      "description": "Returned only on the first publish (which stands up the workspace): `/i/<token>`.",
+      "description": "A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the\npublisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer\nmove is the real outcome; the link is a convenience (the `invite` verb mints one independently).",
       "type": [
         "string",
         "null"

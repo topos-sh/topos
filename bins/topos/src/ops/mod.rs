@@ -1,13 +1,17 @@
 //! The local, accountless verbs over the kernel + the embedded-git store + the crash-safe sidecar.
 
 mod add;
+mod contribute;
 mod diff;
 mod follow;
 mod invite;
 mod list;
 mod log;
 mod merge_resolve;
+mod publish;
 mod pull;
+mod revert;
+mod review;
 mod sync_engine;
 mod uninstall;
 
@@ -17,7 +21,10 @@ pub(crate) use follow::{FollowConnectors, FollowOpts, follow};
 pub(crate) use invite::invite;
 pub(crate) use list::list;
 pub(crate) use log::log;
+pub(crate) use publish::{PublishOutcome, publish};
 pub(crate) use pull::{PullScope, TargetMode, pull};
+pub(crate) use revert::revert;
+pub(crate) use review::review;
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
 
 use topos_types::persisted::Lock;

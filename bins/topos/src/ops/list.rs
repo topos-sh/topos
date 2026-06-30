@@ -25,7 +25,8 @@ pub(crate) fn list(
     skill: Option<&str>,
     want_footprint: bool,
 ) -> Result<ListData, ClientError> {
-    let mut tracked = Vec::new();
+    // Carry the stable skill id alongside each entry — the proposals read route is keyed by id, not name.
+    let mut tracked: Vec<(String, SkillEntry)> = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -39,30 +40,46 @@ pub(crate) fn list(
             continue;
         };
         let draft = is_draft(ctx, &paths.map, &lock)?;
-        tracked.push(SkillEntry {
-            skill: lock.name,
-            version_id: lock.base_commit,
-            bundle_digest: lock.bundle_digest,
-            draft,
-            pending_proposals: Vec::new(),
-        });
+        tracked.push((
+            id.to_owned(),
+            SkillEntry {
+                skill: lock.name,
+                version_id: lock.base_commit,
+                bundle_digest: lock.bundle_digest,
+                draft,
+                pending_proposals: Vec::new(),
+            },
+        ));
     }
     // Deterministic order (name, then version).
     tracked.sort_by(|a, b| {
-        a.skill
-            .cmp(&b.skill)
-            .then_with(|| a.version_id.cmp(&b.version_id))
+        a.1.skill
+            .cmp(&b.1.skill)
+            .then_with(|| a.1.version_id.cmp(&b.1.version_id))
     });
 
     if let Some(want) = skill {
-        let count = tracked.iter().filter(|e| e.skill == want).count();
+        let count = tracked.iter().filter(|(_, e)| e.skill == want).count();
         match count {
             0 => {
                 return Err(ClientError::NoSuchSkill {
                     name: want.to_owned(),
                 });
             }
-            1 => tracked.retain(|e| e.skill == want),
+            1 => {
+                tracked.retain(|(_, e)| e.skill == want);
+                // For the narrowed skill, annotate its OPEN proposals as `<skill>@<hash>` (best-effort —
+                // a plane-read failure / a local-only skill leaves it empty; the bare `list` skips this to
+                // avoid a network GET per skill).
+                if let Some((id, entry)) = tracked.first_mut()
+                    && let Ok(handles) = ctx.plane.list_open_proposals(id)
+                {
+                    entry.pending_proposals = handles
+                        .iter()
+                        .map(|h| format!("{}@{}", entry.skill, to_hex(h)))
+                        .collect();
+                }
+            }
             count => {
                 return Err(ClientError::AmbiguousName {
                     name: want.to_owned(),
@@ -71,6 +88,7 @@ pub(crate) fn list(
             }
         }
     }
+    let tracked: Vec<SkillEntry> = tracked.into_iter().map(|(_, e)| e).collect();
 
     let footprint = if want_footprint {
         // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in (disclosed,

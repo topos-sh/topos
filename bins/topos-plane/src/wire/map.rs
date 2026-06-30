@@ -5,8 +5,9 @@
 use base64::Engine as _;
 use plane_store::{
     CandidateUpload, CommitId, CreateInviteOutcome, DeploymentMode as StoreDeploymentMode,
-    DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, PasscodeComplete,
-    RedeemOutcome, SetCurrentReceipt, UploadedFile, VerificationContext, VersionMeta,
+    DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, OpenProposalSummary,
+    PasscodeComplete, RedeemOutcome, SetCurrentReceipt, UploadedFile, VerificationContext,
+    VersionMeta,
 };
 use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
@@ -15,7 +16,7 @@ use topos_types::bootstrap::{
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, PasscodeConfirmResponse,
     PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred, VerificationContextResponse,
-    WireCandidate, WireVersionFile, WireVersionMeta,
+    WireCandidate, WireOpenProposal, WireProposalList, WireVersionFile, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{
@@ -150,6 +151,21 @@ pub(crate) fn version_meta_to_wire(meta: VersionMeta) -> WireVersionMeta {
                 path: f.path,
                 mode: super::wire_mode(f.mode),
                 object_id: hex::encode(f.object_id),
+            })
+            .collect(),
+    }
+}
+
+/// Map a skill's OPEN-proposal summaries to the wire [`WireProposalList`] — hex-encode each `version_id`,
+/// carry the base generation + `created_at` through. NO bytes, no proposer (the domain summary holds none).
+pub(crate) fn open_proposals_to_wire(v: Vec<OpenProposalSummary>) -> WireProposalList {
+    WireProposalList {
+        proposals: v
+            .into_iter()
+            .map(|p| WireOpenProposal {
+                version_id: hex::encode(p.version_id),
+                base_generation: p.base,
+                created_at: p.created_at,
             })
             .collect(),
     }
