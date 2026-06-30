@@ -1,6 +1,7 @@
 //! The composition root for the binary: parse argv, wire the real seams, run recovery, dispatch a verb,
 //! and emit either the `--json` envelope (stdout) or thin TTY text.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -12,8 +13,9 @@ use crate::cli::{Cli, Command};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
-use crate::ids::{RealClock, RealIds};
-use crate::plane_http::{FileFollow, UreqPlane};
+use crate::ids::{Clock, RealClock, RealIds};
+use crate::plane::{EnrollSource, PlaneSource};
+use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, ops, render};
 
@@ -33,8 +35,10 @@ pub fn run() -> ExitCode {
     // honored; it touches that home only when adopting a recognized skill or on uninstall.
     let harness = ClaudeCode::new(ClaudeCode::resolve_home(), &fs);
 
-    // Recovery runs at the start of every command (it also sweeps a torn enrollment-doc temp).
-    if let Err(e) = recover(&fs, &layout) {
+    // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
+    // enrollment WAL against the real wall clock).
+    let now_millis = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
+    if let Err(e) = recover(&fs, &layout, now_millis) {
         return emit_err(json, cmd_name, &e);
     }
 
@@ -62,7 +66,9 @@ pub fn run() -> ExitCode {
     // (and on first use, mint) the device identity — `uninstall` must never create or require it before
     // tearing the home down.
     let device_id = match &command {
-        Command::Add { .. } | Command::Pull { .. } => {
+        // `follow` also loads (and on first use mints) the device identity: the device-key signer it drives
+        // requires `host.json` to exist, and `--approve` authors a draft snapshot through the pull engine.
+        Command::Add { .. } | Command::Pull { .. } | Command::Follow { .. } => {
             match identity::load_or_create_device_id(&fs, &layout) {
                 Ok(d) => d,
                 Err(e) => return emit_err(json, cmd_name, &e),
@@ -84,6 +90,32 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Add { path } => finish(json, cmd_name, ops::add(&ctx, &path), render::add_tty),
+        Command::Follow {
+            link,
+            manual,
+            resume,
+            approve,
+        } => {
+            // The transports are built per-base-URL (known only after the op parses the link / reads the
+            // WAL): a creds-free `ureq` enroll client + the read transport for the offer disclosure.
+            let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            let plane_connect =
+                |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
+                    Box::new(UreqPlane::new(base_url.to_owned(), creds))
+                };
+            let connectors = ops::FollowConnectors {
+                enroll: &enroll_connect,
+                plane: &plane_connect,
+            };
+            let opts = ops::FollowOpts {
+                manual,
+                resume,
+                approve,
+            };
+            finish_follow(json, cmd_name, ops::follow(&ctx, &connectors, link, opts))
+        }
         Command::List { skill, footprint } => finish(
             json,
             cmd_name,
@@ -141,6 +173,29 @@ fn finish<T: Serialize>(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e),
+    }
+}
+
+/// `follow`'s finisher — like [`finish`], but it carries the success-path `next_actions` (run
+/// `follow --resume` while pending; `pull` once offers are disclosed) on the envelope.
+fn finish_follow(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::FollowData, ClientError>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::follow_next_actions(&data);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::follow_tty(&data));
             }
             ExitCode::SUCCESS
         }

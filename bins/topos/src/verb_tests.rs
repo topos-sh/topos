@@ -543,7 +543,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
 
         // Recover, then read the state with a clean fs.
         let real = RealFs;
-        crate::sidecar::recover(&real, &layout).unwrap();
+        crate::sidecar::recover(&real, &layout, 0).unwrap();
         let clean_ids = SeqIds::new("t");
         let clean_ctx = Ctx {
             fs: &real,
@@ -585,7 +585,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
 
         // Recovery is idempotent.
         let before_fp = crate::sidecar::footprint(&real, &layout).unwrap();
-        crate::sidecar::recover(&real, &layout).unwrap();
+        crate::sidecar::recover(&real, &layout, 0).unwrap();
         assert_eq!(
             before_fp,
             crate::sidecar::footprint(&real, &layout).unwrap()

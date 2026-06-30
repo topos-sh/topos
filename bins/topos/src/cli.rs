@@ -24,6 +24,23 @@ pub(crate) enum Command {
         /// The skill directory to adopt.
         path: PathBuf,
     },
+    /// Enroll with a plane via an `/i/` invite link, then follow its skills. Two-call resume: `follow
+    /// <link>` returns a verification URL; `follow --resume` polls + completes. `follow --approve
+    /// <skill>[@<hash>]` places a disclosed first-receive offer.
+    Follow {
+        /// The `/i/<token>` invite link (the full URL, or a bare token once already enrolled). Omitted
+        /// with `--resume` / `--approve`.
+        link: Option<String>,
+        /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
+        #[arg(long)]
+        manual: bool,
+        /// Poll a pending enrollment (started by an earlier `follow <link>`) and complete it.
+        #[arg(long)]
+        resume: bool,
+        /// Place the named, already-disclosed first-receive offer(s): `<skill>` or `<skill>@<hash>`.
+        #[arg(long = "approve")]
+        approve: Vec<String>,
+    },
     /// Inventory the skills on this machine.
     List {
         /// Narrow to one skill by name (errors if the name is ambiguous).
@@ -72,6 +89,7 @@ impl Command {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Command::Add { .. } => "add",
+            Command::Follow { .. } => "follow",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
             Command::Log { .. } => "log",

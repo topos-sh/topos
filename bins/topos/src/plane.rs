@@ -16,6 +16,8 @@ use topos_core::digest::FileMode;
 use topos_core::sync::Generation as KernelGen;
 use topos_types::{Generation, SignedCurrentRecord};
 
+use crate::error::ClientError;
+
 /// The response to a conditional `get_current`: either the pointer is unchanged (a 304), or the signed
 /// record (which the caller authenticates before trusting).
 ///
@@ -72,6 +74,7 @@ pub(crate) enum PlaneError {
 /// record that reuses the same `(epoch,seq)` for a DIFFERENT `version_id` is always returned (and caught
 /// as a reused-tuple ALARM) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
 /// commit-sensitive, not just `<epoch>.<seq>`.)
+#[derive(Clone, Copy)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct KnownCurrent {
     pub generation: Generation,
@@ -133,6 +136,151 @@ pub(crate) trait FollowSource {
     fn followed(&self) -> Vec<(String, FollowContext)>;
     /// Proposals awaiting *me* as a reviewer (always `0` until proposals/review land).
     fn proposals_awaiting(&self) -> u32;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The enrollment seam — the device-flow CLIENT's read/write side, behind a port so the `follow`
+// tests run against a fake WITHOUT HTTP. Creds-free (it holds no read token): the device code + the
+// grant are the only secrets it carries, and they are redacted from every `Debug`. The real impl is
+// `crate::plane_http::UreqEnroll`; the fake lives in the follow tests.
+// ---------------------------------------------------------------------------------------------
+
+/// The RFC-8628 device-authorization grant from `device/authorize`.
+#[derive(Clone)]
+pub(crate) struct DeviceAuthorize {
+    /// **SECRET** — the device code the client polls with. Redacted in `Debug`, never logged / in a URL.
+    pub device_code: String,
+    /// The short user code (also the `device_auth_id` the enroll possession frame binds).
+    pub user_code: String,
+    /// The verification URL a human visits to approve the session.
+    pub verification_uri: String,
+    /// The session lifetime, in seconds.
+    pub expires_in: u64,
+    /// The minimum poll interval, in seconds.
+    pub interval: u64,
+}
+
+impl std::fmt::Debug for DeviceAuthorize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceAuthorize")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+/// The opaque single-use enrollment grant (the redeem credential). **SECRET** — its `Debug` is redacted
+/// and it is never logged / placed in a URL / surfaced in an error.
+#[derive(Clone)]
+pub(crate) struct Grant(String);
+
+impl Grant {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+    /// The raw grant — used only to compute its `sha256` and to send it in the redeem body.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Grant(<redacted>)")
+    }
+}
+
+/// The outcome of a `device/token` poll (RFC-8628). NOT an error — every variant is a legitimate poll
+/// state. `Granted` carries the opaque grant (redacted `Debug`).
+#[derive(Debug, Clone)]
+pub(crate) enum TokenPoll {
+    /// Not yet confirmed — the human hasn't approved the session yet; run `follow --resume` again later.
+    /// (The two-call resume re-polls on demand, so no in-process interval is carried.)
+    Pending,
+    /// Polled too fast — back off (treated as still-pending by the on-demand resume).
+    SlowDown,
+    /// Denied at the verification page.
+    Denied,
+    /// The session expired before confirmation.
+    Expired,
+    /// Confirmed — the grant is present.
+    Granted(Grant),
+}
+
+/// One minted per-skill read credential from a redeem (the `read_token` is a `0600` at-rest secret —
+/// redacted `Debug`).
+#[derive(Clone)]
+pub(crate) struct RedeemedCred {
+    pub skill_id: String,
+    /// **SECRET** — redacted in `Debug`.
+    pub read_token: String,
+    pub expires_at: Option<i64>,
+}
+
+impl std::fmt::Debug for RedeemedCred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedeemedCred")
+            .field("skill_id", &self.skill_id)
+            .field("read_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// A successful redeem — the registered device key id + the minted per-skill read creds. **NO user token.**
+#[derive(Debug, Clone)]
+pub(crate) struct Redeem {
+    pub workspace_id: String,
+    pub device_key_id: String,
+    pub read_creds: Vec<RedeemedCred>,
+}
+
+/// The creds-free enrollment transport (device-flow). The follow op drives it: read the TOFU bootstrap,
+/// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
+/// redeem the grant (the enroll possession signature rides a header) into per-skill read creds. The real
+/// impl is `UreqEnroll`; the fake is the follow tests'.
+pub(crate) trait EnrollSource {
+    /// `GET /i/{token}` — the unauthenticated TOFU bootstrap (the workspace + the plane signing root).
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] for a dead/unknown invite (404) or a transport fault; [`ClientError::Corrupt`]
+    /// for a malformed body (incl. a non-Ed25519 `alg`, which fails the closed-enum deserialize).
+    fn fetch_bootstrap(&self, token: &str) -> Result<topos_types::BootstrapData, ClientError>;
+
+    /// `POST /v1/device/authorize` — begin a device-authorization against the invite.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::Corrupt`] on a malformed body.
+    fn device_authorize(
+        &self,
+        token: &str,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<DeviceAuthorize, ClientError>;
+
+    /// `POST /v1/device/token` — one poll of the session. The poll STATE (pending/slow_down/denied/expired/
+    /// granted) is the `Ok` value; only a transport/parse fault is an `Err`.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault; [`ClientError::Corrupt`] on a malformed body.
+    fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError>;
+
+    /// `POST /v1/workspaces/{ws}/devices` — redeem the grant into a registered device + read creds. The
+    /// 64-byte enroll possession signature rides the `Topos-Device-Signature` header.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault or a 200+DENIED redeem (e.g. a device-key mismatch);
+    /// [`ClientError::Corrupt`] on a malformed body.
+    fn redeem(
+        &self,
+        workspace_id: &str,
+        grant: &str,
+        device_public_key: [u8; 32],
+        enroll_sig: [u8; 64],
+    ) -> Result<Redeem, ClientError>;
 }
 
 /// Compare two wire generations with the kernel's epoch-dominant order (the wire type derives none).

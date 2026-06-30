@@ -1,7 +1,8 @@
 //! Two presentations of one typed outcome: the `--json` envelope (the agent surface) and a thin TTY
 //! renderer. Error messages are summarized so a raw git/io string never reaches a user surface.
 
-use topos_types::results::{AddData, DiffData, ListData, LogData, PullData};
+use topos_types::bootstrap::VerifiedDomainStatus;
+use topos_types::results::{AddData, DiffData, FollowData, ListData, LogData, PullData};
 use topos_types::{
     ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
     WireError,
@@ -59,8 +60,37 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
+        // A pinned-key change is not self-service in v0 — surface the repin action code.
+        ClientError::KeyRepinRequired => vec![NextAction {
+            code: ActionCode::RepinPlaneKey,
+            argv: vec!["topos".into(), "list".into(), "--json".into()],
+        }],
         _ => Vec::new(),
     }
+}
+
+/// The success-path next actions for `follow`: a pending enrollment ⇒ run `follow --resume`; a completed
+/// enrollment that disclosed offers ⇒ `pull` to surface/place them.
+pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
+    if data.pending.is_some() {
+        return vec![NextAction {
+            // An OPEN action code (carries the executable argv); no schema change to the closed set.
+            code: ActionCode::from("ENROLL_RESUME".to_owned()),
+            argv: vec![
+                "topos".into(),
+                "follow".into(),
+                "--resume".into(),
+                "--json".into(),
+            ],
+        }];
+    }
+    if data.enrolled && !data.skills.is_empty() {
+        return vec![NextAction {
+            code: ActionCode::ApplyWaitingUpdate,
+            argv: vec!["topos".into(), "pull".into(), "--json".into()],
+        }];
+    }
+    Vec::new()
 }
 
 /// A clean, leak-free summary for a user surface — variants whose `Display` could embed a raw serde / io
@@ -183,6 +213,57 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
         out.push_str(&format!("\nRemoved the binary at {bin}."));
     }
     out.push_str("\nNo skill bytes were touched.");
+    out
+}
+
+pub(crate) fn follow_tty(data: &FollowData) -> String {
+    // A pending enrollment: surface the verification URL WITH the workspace + verified-domain provenance
+    // (the relay-phishing guard — the human checks the domain before approving).
+    if let Some(pending) = &data.pending {
+        let workspace = data
+            .workspace_display_name
+            .clone()
+            .unwrap_or_else(|| data.workspace_id.clone());
+        let mut out = format!("Enrolling with {workspace}");
+        if let Some(domain) = &data.verified_domain {
+            let status = match data.verified_domain_status {
+                Some(VerifiedDomainStatus::Verified) => "verified",
+                Some(VerifiedDomainStatus::Pending) => "pending verification",
+                _ => "unverified",
+            };
+            out.push_str(&format!(" ({domain}, {status})"));
+        }
+        out.push_str(&format!(
+            "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}",
+            pending.verification_uri_complete, pending.user_code
+        ));
+        return out;
+    }
+    // A completed enrollment.
+    if !data.enrolled {
+        return format!("Enrolled with workspace {}.", data.workspace_id);
+    }
+    if data.skills.is_empty() {
+        return format!(
+            "Enrolled with workspace {} (no skills to follow).",
+            data.workspace_id
+        );
+    }
+    let mut out = format!(
+        "Enrolled with workspace {}. Offered skills:",
+        data.workspace_id
+    );
+    for s in &data.skills {
+        out.push_str(&format!(
+            "\n  {}  {}@{}",
+            s.name,
+            s.name,
+            short(&s.offer.version_id)
+        ));
+    }
+    out.push_str(
+        "\nApprove a skill with `topos follow --approve <skill>` (or `topos pull <skill>`).",
+    );
     out
 }
 

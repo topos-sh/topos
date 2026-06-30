@@ -14,13 +14,18 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
-use topos_types::SignedCurrentRecord;
-use topos_types::requests::{WireFileMode, WireVersionMeta};
+use topos_types::requests::{
+    DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest, DeviceTokenResponse,
+    DeviceTokenStatus, RedeemRequest, RedeemResponse, WireFileMode, WireVersionMeta,
+};
+use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
 
+use crate::error::ClientError;
 use crate::plane::{
-    FetchedFile, FetchedVersion, FollowContext, FollowSource, KnownCurrent, PlaneError,
-    PlaneSource, PointerFetch,
+    DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowSource, Grant,
+    KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem, RedeemedCred, TokenPoll,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -289,6 +294,224 @@ impl FollowSource for FileFollow {
     }
     fn proposals_awaiting(&self) -> u32 {
         0
+    }
+}
+
+// =================================================================================================
+// UreqEnroll — the real creds-free device-flow transport (sibling of `UreqPlane`). It speaks the plane's
+// enrollment routes: `GET /i/{token}`, `POST /v1/device/authorize`, `POST /v1/device/token`, and
+// `POST /v1/workspaces/{ws}/devices` (the enroll sig in the `Topos-Device-Signature` header). The
+// `/i/{token}` URL, the device code, and the grant are sensitive — never logged or put in an error.
+// =================================================================================================
+
+/// The blocking `ureq` enrollment transport. Holds the base URL + one configured agent (no credential
+/// map — enrollment is creds-free until the redeem mints the read tokens).
+pub(crate) struct UreqEnroll {
+    base_url: String,
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for UreqEnroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The agent is not Debug; the base_url alone is safe (the secret /i/ token is never stored here).
+        f.debug_struct("UreqEnroll")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl UreqEnroll {
+    /// Build the transport against `base_url` (trailing slash trimmed). Status-as-error is OFF so every
+    /// status comes back as an inspectable response, mirroring [`UreqPlane`].
+    pub(crate) fn new(base_url: String) -> Self {
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+            .timeout_recv_response(Some(Duration::from_secs(RECV_RESPONSE_TIMEOUT_SECS)))
+            .build();
+        Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            agent: ureq::Agent::new_with_config(config),
+        }
+    }
+
+    /// POST a JSON body (optionally with the device-signature header). Returns `(status, body bytes)`.
+    /// `what` names the step for a transport-fault message; the body is NEVER echoed (it may hold a secret).
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        sig_b64: Option<&str>,
+        what: &str,
+    ) -> Result<(u16, Vec<u8>), ClientError> {
+        // Serialize ourselves + `send` the bytes (the `ureq` `json` feature is not enabled — this keeps the
+        // dependency surface unchanged). The body may carry a secret (the device code / grant), so a serde
+        // failure message never echoes it.
+        let payload = serde_json::to_vec(body).map_err(|_| {
+            ClientError::Corrupt(format!("{what}: could not serialize the request"))
+        })?;
+        let mut req = self
+            .agent
+            .post(url)
+            .header("content-type", "application/json");
+        if let Some(sig) = sig_b64 {
+            req = req.header("topos-device-signature", sig);
+        }
+        let resp = req
+            .send(payload.as_slice())
+            .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?;
+        let status = resp.status().as_u16();
+        let bytes = read_body(resp).map_err(plane_err)?;
+        Ok((status, bytes))
+    }
+}
+
+impl EnrollSource for UreqEnroll {
+    fn fetch_bootstrap(&self, token: &str) -> Result<BootstrapData, ClientError> {
+        // The `/i/{token}` URL is SECRET (the token grants the bootstrap read) — error text names no URL.
+        let url = format!("{}/i/{}", self.base_url, token);
+        let resp = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|e| ClientError::Plane(format!("fetch invite bootstrap: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                // A non-Ed25519 `alg` is a CLOSED-enum deserialize failure here — fail closed (Corrupt).
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    ClientError::Corrupt(format!("invite bootstrap is malformed: {e}"))
+                })
+            }
+            HttpClass::NotFound => Err(ClientError::Plane(
+                "the invite link is invalid or has expired".into(),
+            )),
+            HttpClass::NotModified | HttpClass::Other => Err(ClientError::Plane(format!(
+                "fetch invite bootstrap: HTTP {status}"
+            ))),
+        }
+    }
+
+    fn device_authorize(
+        &self,
+        token: &str,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<DeviceAuthorize, ClientError> {
+        let body = serde_json::to_value(DeviceAuthorizeRequest {
+            invite_token: token.to_owned(),
+            device_public_key: b64(&device_public_key),
+            machine_name: machine_name.to_owned(),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
+        let url = format!("{}/v1/device/authorize", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, None, "device authorize")?;
+        if classify(status) != HttpClass::Ok {
+            return Err(ClientError::Plane(format!(
+                "device authorize: HTTP {status}"
+            )));
+        }
+        let resp: DeviceAuthorizeResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| ClientError::Corrupt(format!("authorize response is malformed: {e}")))?;
+        Ok(DeviceAuthorize {
+            device_code: resp.device_code,
+            user_code: resp.user_code,
+            verification_uri: resp.verification_uri,
+            expires_in: resp.expires_in,
+            interval: resp.interval,
+        })
+    }
+
+    fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError> {
+        let body = serde_json::to_value(DeviceTokenRequest {
+            device_code: device_code.to_owned(),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("token body: {e}")))?;
+        let url = format!("{}/v1/device/token", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, None, "device token poll")?;
+        if classify(status) != HttpClass::Ok {
+            return Err(ClientError::Plane(format!(
+                "device token poll: HTTP {status}"
+            )));
+        }
+        let resp: DeviceTokenResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| ClientError::Corrupt(format!("token response is malformed: {e}")))?;
+        Ok(match resp.status {
+            DeviceTokenStatus::Pending => TokenPoll::Pending,
+            DeviceTokenStatus::SlowDown => TokenPoll::SlowDown,
+            DeviceTokenStatus::Denied => TokenPoll::Denied,
+            DeviceTokenStatus::Expired => TokenPoll::Expired,
+            DeviceTokenStatus::Granted => match resp.grant {
+                Some(g) => TokenPoll::Granted(Grant::new(g)),
+                // `granted` without a grant is a malformed response, not a silent re-poll.
+                None => {
+                    return Err(ClientError::Corrupt(
+                        "a granted device-token poll carried no grant".into(),
+                    ));
+                }
+            },
+        })
+    }
+
+    fn redeem(
+        &self,
+        workspace_id: &str,
+        grant: &str,
+        device_public_key: [u8; 32],
+        enroll_sig: [u8; 64],
+    ) -> Result<Redeem, ClientError> {
+        let body = serde_json::to_value(RedeemRequest {
+            workspace_id: workspace_id.to_owned(),
+            grant: grant.to_owned(),
+            device_public_key: b64(&device_public_key),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("redeem body: {e}")))?;
+        let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
+        let sig = b64(&enroll_sig);
+        let (status, bytes) = self.post_json(&url, &body, Some(&sig), "redeem")?;
+        // The redeem is an all-outcome 200 envelope; a non-2xx is a transport/auth/integrity fault.
+        if classify(status) != HttpClass::Ok {
+            return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
+        }
+        let env: JsonEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|e| ClientError::Corrupt(format!("redeem envelope is malformed: {e}")))?;
+        if !env.ok {
+            // A DENIED redeem (e.g. a device-key mismatch) — surface the code, never any secret.
+            let code = env
+                .error
+                .map(|e| e.code)
+                .unwrap_or_else(|| "DENIED".to_owned());
+            return Err(ClientError::Plane(format!("redeem refused ({code})")));
+        }
+        let resp: RedeemResponse = serde_json::from_value(env.data)
+            .map_err(|e| ClientError::Corrupt(format!("redeem data is malformed: {e}")))?;
+        Ok(Redeem {
+            workspace_id: resp.workspace_id,
+            device_key_id: resp.device_key_id,
+            read_creds: resp
+                .read_creds
+                .into_iter()
+                .map(|c| RedeemedCred {
+                    skill_id: c.skill_id,
+                    read_token: c.read_token,
+                    expires_at: c.expires_at,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Map a transport-level [`PlaneError`] from a shared body read into the client error family.
+fn plane_err(e: PlaneError) -> ClientError {
+    match e {
+        PlaneError::NotFound => ClientError::Plane("not found".into()),
+        PlaneError::Unavailable(m) | PlaneError::Malformed(m) => ClientError::Plane(m),
     }
 }
 

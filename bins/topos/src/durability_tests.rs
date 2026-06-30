@@ -181,7 +181,7 @@ fn recover_sweeps_tmp_repairs_log_and_is_idempotent() {
     real.append_fsync(&layout.log_path(), b"{\"ok\":1}\n{\"partial\":")
         .unwrap();
 
-    recover(&real, &layout).unwrap();
+    recover(&real, &layout, 0).unwrap();
 
     // tmp swept, the valid skill + its docs intact, the torn tail dropped.
     assert!(!real.exists(&stray), "stray temp must be swept");
@@ -196,7 +196,7 @@ fn recover_sweeps_tmp_repairs_log_and_is_idempotent() {
 
     // Idempotent: a second sweep changes nothing.
     let footprint_before = footprint(&real, &layout).unwrap();
-    recover(&real, &layout).unwrap();
+    recover(&real, &layout, 0).unwrap();
     let footprint_after = footprint(&real, &layout).unwrap();
     assert_eq!(
         footprint_before, footprint_after,
@@ -248,7 +248,7 @@ fn recover_removes_unlocked_staging_keeps_locked() {
     let _held = real
         .lock_exclusive(&layout.lock_file("topos_live"))
         .unwrap();
-    recover(&real, &layout).unwrap();
+    recover(&real, &layout, 0).unwrap();
 
     assert!(
         !real.exists(&dead_base),
@@ -278,7 +278,7 @@ fn recover_never_deletes_on_unknown_schema() {
     bytes.push(b'\n');
     atomic_write(&real, &paths.lock, &bytes).unwrap();
 
-    recover(&real, &layout).unwrap();
+    recover(&real, &layout, 0).unwrap();
 
     assert!(
         real.exists(&paths.lock),

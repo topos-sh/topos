@@ -35,9 +35,11 @@ rustix.workspace = true
 # (its own TLS stack); it carries NO plane-store/sqlx/libsqlite3-sys/tokio edge — check-arch holds the line.
 ureq.workspace = true
 hex.workspace = true
-# DECODE-ONLY: the signed `current` pointer's base64url-unpadded Signature.value (86 chars), verified
-# against the pinned plane key. This is the public verify-side codec, NOT the private-key signing edge
-# (no key, no RNG) — so it does not cross the architectural line check-arch enforces (no plane-store/sqlx).
+# base64url: DECODE-side for the signed `current` pointer's Signature.value (86 chars) + the bootstrap's
+# plane signing key (verified against the pinned key); ENCODE-side for the enrollment wire (the device
+# public key in the authorize/redeem bodies + the enroll-possession signature in the `Topos-Device-Signature`
+# header). Wire encoding only, NOT the private-key signing edge (no key, no RNG) — so it does not cross the
+# architectural line check-arch enforces (no plane-store/sqlx).
 base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

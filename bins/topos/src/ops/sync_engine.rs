@@ -86,9 +86,15 @@ pub(crate) fn sync_one(
     validate_recorded_unique(&sync.recorded)?;
     let name = lock.name.clone();
 
+    // A never-received followed skill (the first-receive baseline `follow` lays: nothing authenticated yet,
+    // no placement). I-TOFU: its first version is an OFFER behind one explicit accept/`--approve`, never
+    // auto-landed — captured BEFORE checkForUpdates mutates `recorded`.
+    let first_receive = is_never_received(&sync);
+
     // The conditional-GET validator: what the client currently holds (its floor generation AND the commit
     // recorded there) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd.
-    let known_commit = recorded_commit(&sync, sync.observed)?;
+    // `None` for the never-received baseline (empty `recorded`) → an unconditional first GET.
+    let known = known_current(&sync)?;
 
     // An unresolved conflict is on record. The escape (`--onto-current`) RESOLVES it (plane-independent, so
     // it runs even when the plane is unreachable — the no-deadlock guarantee). Any OTHER invocation heals a
@@ -111,7 +117,7 @@ pub(crate) fn sync_one(
                 &cs,
             );
         }
-        if served_current_is_alarm(ctx, skill_id, follow, &sync, known_commit)? {
+        if served_current_is_alarm(ctx, skill_id, follow, &sync, known)? {
             return Ok(alarm(&name, &sync, PullAction::Alarm));
         }
         super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
@@ -123,16 +129,11 @@ pub(crate) fn sync_one(
     let mut raised = false;
 
     // ---- checkForUpdates ----
-    match ctx.plane.get_current(
-        skill_id,
-        Some(KnownCurrent {
-            generation: sync.observed,
-            version_id: known_commit,
-        }),
-    ) {
+    match ctx.plane.get_current(skill_id, known) {
         Ok(PointerFetch::NotModified) => {}
         Ok(PointerFetch::Record(rec)) => {
-            let Some(authed) = authenticate(&rec, skill_id, follow, &ctx.plane_key) else {
+            let Some(authed) = authenticate(&rec, skill_id, &follow.workspace_id, &ctx.plane_key)
+            else {
                 return Ok(alarm(&name, &sync, PullAction::Alarm));
             };
             match sync::evaluate_floor(
@@ -244,12 +245,14 @@ pub(crate) fn sync_one(
         ApplyClass::CleanForward => {
             // A swap happens only here, and only when `work_eq_base` (a clean follower) — so a swap never
             // overwrites a local draft.
-            if topos_core::consent::decide(situation_for(follow, explicit, raised)).applies_bytes()
+            if topos_core::consent::decide(situation_for(follow, explicit, raised, first_receive))
+                .applies_bytes()
             {
                 apply_forward(ctx, &sp, &map, &lock, &sync, skill_id, &t)?;
                 Ok(applied_row(&name, &sync, target_commit))
             } else {
-                // confirm-each / TOFU: re-disclose the digest as a one-tap offer; nothing materializes.
+                // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
+                // materializes (a bare sweep never auto-lands a never-received skill — I-TOFU).
                 Ok(offer_row(&name, &sync, target_commit, &target_digest_hex))
             }
         }
@@ -427,12 +430,25 @@ pub(crate) fn current_state(ctx: &Ctx<'_>, skill_id: &str) -> Result<PullSkill, 
 /// ONLY when this pull did NOT discover a newer version (`!raised`). If the pointer advanced during the
 /// accept (`raised`), that newer version was never offered, so it goes through the follow-mode gate — a
 /// confirm-each skill re-offers it (re-disclosing its digest) rather than applying bytes it never showed.
+///
+/// A `first_receive` skill is TOFU (I-TOFU): a bare sweep maps to `FirstReceiveFromLink` (an OFFER, never
+/// auto-landed — even an `auto` follower), while an explicit accept / `--approve` is the user's direct
+/// first-receive yes and maps to `ExplicitLocalPull` (places the first bytes). This takes precedence over
+/// the follow-mode gate, so a never-received skill is never silently materialized by a session-start sweep.
 fn situation_for(
     follow: &FollowContext,
     explicit: bool,
     raised: bool,
+    first_receive: bool,
 ) -> topos_core::consent::Situation {
     use topos_core::consent::Situation;
+    if first_receive {
+        return if explicit {
+            Situation::ExplicitLocalPull
+        } else {
+            Situation::FirstReceiveFromLink
+        };
+    }
     if explicit && !raised {
         Situation::ExplicitLocalPull
     } else if follow.review_required {
@@ -767,17 +783,12 @@ fn served_current_is_alarm(
     skill_id: &str,
     follow: &FollowContext,
     sync: &SyncState,
-    known_commit: [u8; 32],
+    known: Option<KnownCurrent>,
 ) -> Result<bool, ClientError> {
-    match ctx.plane.get_current(
-        skill_id,
-        Some(KnownCurrent {
-            generation: sync.observed,
-            version_id: known_commit,
-        }),
-    ) {
+    match ctx.plane.get_current(skill_id, known) {
         Ok(PointerFetch::Record(rec)) => {
-            let Some(authed) = authenticate(&rec, skill_id, follow, &ctx.plane_key) else {
+            let Some(authed) = authenticate(&rec, skill_id, &follow.workspace_id, &ctx.plane_key)
+            else {
                 return Ok(true); // bad signature / wrong scope
             };
             Ok(sync::evaluate_floor(
@@ -800,16 +811,27 @@ struct Authed {
     generation: Generation,
 }
 
+/// Authenticate a served `current` record and return its `version_id` — the reusable verify the `follow`
+/// offer disclosure shares with the engine. `None` on any signature/scope failure.
+pub(crate) fn authenticated_version_id(
+    rec: &topos_types::SignedCurrentRecord,
+    skill_id: &str,
+    workspace_id: &str,
+    plane_key: &[u8; 32],
+) -> Option<[u8; 32]> {
+    authenticate(rec, skill_id, workspace_id, plane_key).map(|a| a.version_id)
+}
+
 /// Authenticate a served `current` record: decode + verify the signature against the pinned plane key,
 /// and confirm the record's `(workspace_id, skill_id)` scope is the one we follow (defeating a
 /// cross-workspace / cross-skill replay of an otherwise-valid signed pointer). `None` on any failure.
 fn authenticate(
     rec: &topos_types::SignedCurrentRecord,
     skill_id: &str,
-    follow: &FollowContext,
+    workspace_id: &str,
     plane_key: &[u8; 32],
 ) -> Option<Authed> {
-    if rec.scope.skill_id != skill_id || rec.scope.workspace_id != follow.workspace_id {
+    if rec.scope.skill_id != skill_id || rec.scope.workspace_id != workspace_id {
         return None;
     }
     let version_id = super::parse_hex32(&rec.record.version_id).ok()?;
@@ -891,6 +913,33 @@ fn validate_recorded_unique(recorded: &[RecordedTuple]) -> Result<(), ClientErro
         }
     }
     Ok(())
+}
+
+/// Whether `g` is the genesis sentinel `(0,0)`.
+fn is_zero_gen(g: Generation) -> bool {
+    g.epoch == 0 && g.seq == 0
+}
+
+/// Whether this followed skill has NEVER received bytes — the first-receive baseline `follow` lays:
+/// nothing authenticated (empty `recorded`) at the genesis floor `(0,0)`, nothing applied. An `add`-ed
+/// skill always carries a genesis recorded tuple, and a received skill has a recorded history, so neither
+/// is ever mistaken for first-receive.
+fn is_never_received(sync: &SyncState) -> bool {
+    sync.recorded.is_empty() && is_zero_gen(sync.observed) && is_zero_gen(sync.applied)
+}
+
+/// What the client holds for the conditional GET: the floor generation + the commit recorded there, or
+/// `None` for the never-received baseline (empty `recorded`) → an unconditional first GET. A non-empty
+/// `recorded` always carries the observed generation (it is recorded the instant the floor rises), so a
+/// real skill resolves to `Some`; an absence there is the existing local-corruption error.
+fn known_current(sync: &SyncState) -> Result<Option<KnownCurrent>, ClientError> {
+    if sync.recorded.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(KnownCurrent {
+        generation: sync.observed,
+        version_id: recorded_commit(sync, sync.observed)?,
+    }))
 }
 
 fn recorded_commit(sync: &SyncState, wanted: Generation) -> Result<[u8; 32], ClientError> {

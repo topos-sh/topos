@@ -111,6 +111,19 @@ impl Layout {
     pub(crate) fn follows_path(&self) -> PathBuf {
         self.home.join("follows.json")
     }
+
+    /// `identity/user.json` — the enrolled principal's NON-secret metadata (email / roles / workspace /
+    /// deployment posture / enrolled-at). Ordinary perms — it carries no secret.
+    pub(crate) fn user_path(&self) -> PathBuf {
+        self.identity_dir().join("user.json")
+    }
+
+    /// `identity/enrollment.json` — the in-flight enrollment WAL (a `0600` secret: it holds the device
+    /// code and, once redeemed, the read creds). Present only between `follow <link>` and a completed
+    /// `follow --resume`; swept by recovery once expired-and-unredeemed, deleted on promotion.
+    pub(crate) fn enrollment_path(&self) -> PathBuf {
+        self.identity_dir().join("enrollment.json")
+    }
 }
 
 /// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file
@@ -152,6 +165,7 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 /// The idempotent recovery sweep, run at the start of every command.
 ///
 /// - repairs a torn `log.jsonl` tail;
+/// - abandons an expired, never-redeemed enrollment WAL (`now_millis` is the comparison clock);
 /// - removes an incomplete staging dir (`skills/.staging-<id>/`) — but only if no live writer holds its
 ///   lock (else it is a concurrent `add`, left alone);
 /// - removes a published `skills/<id>/` **only** if `lock.json` is absent (an impossible-via-atomic-add
@@ -164,8 +178,9 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 ///
 /// # Errors
 /// An [`FsOps`] failure during the sweep.
-pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientError> {
+pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Result<(), ClientError> {
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
+    crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
 
     for entry in fs.read_dir(&layout.skills_dir())? {
         let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
