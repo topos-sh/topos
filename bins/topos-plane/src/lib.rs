@@ -1,7 +1,7 @@
 //! `topos-plane` (lib) — the composable `plane-core`.
 //!
 //! The public API a downstream plane composes: the authority operations (over `plane-store`, re-exported
-//! through the typed routes), a [`router`] builder, and the generated [`openapi`] document. **The private
+//! through the typed routes), a [`router`] builder, and the generated [`openapi()`] document. **The private
 //! cloud plane IMPORTS this lib and COMPOSES it** — it does NOT fork it, and there is **no** extension hook
 //! in the OSS repo (no `PlaneExtension`/`NoOpExtension`, no callback seam). `router(state)` is the entire
 //! composed surface the cloud mounts verbatim; its own entitlements / billing / SSO middleware sit *in
@@ -14,7 +14,7 @@
 //! - [`router`] — wires the seven routes (4 device-signed writes + 3 token-scoped reads) with the
 //!   rate-limit middleware and a body-size limit; every handler is **thin** (parse → call the authority →
 //!   serialize), never a trust decision.
-//! - [`openapi`] — the `utoipa`-generated OpenAPI document (emitted to `contracts/openapi/` by `xtask`).
+//! - [`openapi()`] — the `utoipa`-generated OpenAPI document (emitted to `contracts/openapi/` by `xtask`).
 //!
 //! The `review-required` workspace policy + the enrollment connectors are the authority's / the enrollment
 //! port's, not this layer's; they land behind their own seams.

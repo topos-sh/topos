@@ -33,6 +33,12 @@ pub(crate) mod render;
 pub(crate) mod scan;
 pub(crate) mod sidecar;
 
+/// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real
+/// pull engine over the real transport without reaching the `pub(crate)` internals. Never compiled into a
+/// production build (the feature is off by default; a `check-arch` guard asserts it stays off).
+#[cfg(feature = "test-fixtures")]
+pub mod test_support;
+
 #[cfg(test)]
 mod durability_tests;
 #[cfg(test)]

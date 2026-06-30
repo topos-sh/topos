@@ -13,6 +13,7 @@ members = [
     "bins/topos",
     "bins/topos-plane",
     "xtask",
+    "tests",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ topos-gitstore = { path = "crates/topos-gitstore" }
 topos-harness = { path = "crates/topos-harness" }
 plane-store = { path = "crates/plane-store" }
 topos-plane = { path = "bins/topos-plane" } # the OSS plane lib — referenced by xtask (OpenAPI generation)
+topos = { path = "bins/topos" } # the client lib — referenced by the tests/ member (its test-fixtures HERO surface)
 
 # --- the wire leaf (topos-types) ---
 serde = { version = "1", features = ["derive"] }

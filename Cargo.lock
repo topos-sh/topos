@@ -3527,6 +3527,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "topos-e2e"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "ed25519-dalek",
+ "hex",
+ "plane-store",
+ "tokio",
+ "topos",
+ "topos-plane",
+ "topos-types",
+]
+
+[[package]]
 name = "topos-gitstore"
 version = "0.0.0"
 dependencies = [

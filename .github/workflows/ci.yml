@@ -78,10 +78,11 @@ jobs:
         run: |
           sqlx database create
           sqlx migrate run --source crates/plane-store/migrations
-      # `-- --tests` matches the scope the committed metadata was generated with
-      # (`cargo sqlx prepare -- --tests`): three of the `.sqlx` files are `#[cfg(test)]`-only seed
-      # queries, so a lib-only check would neither validate them nor regenerate them (it would just warn
-      # they look unused), leaving them silently unguarded.
+      # `-- --tests --features test-fixtures` matches the scope the committed metadata was generated with:
+      # the seed/shim queries are gated `#[cfg(any(test, feature = "test-fixtures"))]`, so both `--tests`
+      # (the `test` cfg) and `--features test-fixtures` activate them. Covering the feature here keeps the
+      # downstream-facing shims (which the HERO + plane route tests drive) under the drift gate too. (sqlx's
+      # `prepare` forwards every token after `--` to the build, so `--features` belongs there, not before it.)
       - name: prepare --check (fails if the committed .sqlx has drifted from the schema)
         working-directory: crates/plane-store
-        run: cargo sqlx prepare --check -- --tests
+        run: cargo sqlx prepare --check -- --tests --features test-fixtures

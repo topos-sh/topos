@@ -103,9 +103,9 @@ struct GitLocatorMismatch;
 /// An **opaque read capability** — the (workspace, skill, principal) a presented read token resolves to.
 ///
 /// The fields are private on purpose: a consumer (the HTTP layer) holds this as a token and passes it back to
-/// the bound reads ([`serve_object`] / [`read_current`] / [`read_version_metadata`]); it never inspects the
+/// the bound reads (`serve_object` / `read_current` / `read_version_metadata`); it never inspects the
 /// principal (no public accessor exposes it), so the credential cannot be re-used to forge a different scope.
-/// Built ONLY by [`resolve_read_token`] from a trusted database row — never by parsing a client value.
+/// Built ONLY by `resolve_read_token` from a trusted database row — never by parsing a client value.
 #[derive(Debug, Clone)]
 pub struct ReadScope {
     ws: WorkspaceId,
@@ -142,7 +142,7 @@ pub struct CurrentPointer {
 }
 
 /// One file of a version's metadata — its bundle-relative path, mode, and content id (`object_id`). The
-/// bytes are NOT here: a client fetches each by id through [`serve_object`].
+/// bytes are NOT here: a client fetches each by id through `serve_object`.
 #[derive(Debug, Clone)]
 pub struct VersionFile {
     pub path: String,
@@ -152,7 +152,7 @@ pub struct VersionFile {
 
 /// A version's authenticated metadata — its id, the COMPLETE parent set, display author + message, the
 /// consent `bundle_digest`, and the per-file `(path, mode, object_id)` leaves. Assembled WITHOUT reading any
-/// blob bytes (a client walks the files via [`serve_object`]); the digest is the pin those byte fetches +
+/// blob bytes (a client walks the files via `serve_object`); the digest is the pin those byte fetches +
 /// the client's own re-hash must reproduce.
 #[derive(Debug, Clone)]
 pub struct VersionMeta {

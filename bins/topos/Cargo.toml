@@ -8,6 +8,14 @@ repository.workspace = true
 publish = false
 description = "The CLIENT app (lib + thin bin): the 12-verb domain ops, the pull state machine, the sidecar, namespace-atomic materialization, the device-flow client + device-key signer. A thin sync tool, never an authority — depends on NO SQL and NO plane-store (architectural layering, asserted by a cargo-tree check)."
 
+[features]
+# Exposes the narrow, test-only `test_support` module — a public facade an EXTERNAL integration crate (the
+# HERO loopback) drives to set up a `~/.topos/` + run the REAL pull engine over the REAL `ureq` transport,
+# WITHOUT reaching the client's `pub(crate)` internals. It enables NO dependency (the surface is purely
+# client-internal types + the already-present deps) — a CI guard (`check-arch`) asserts it adds no
+# `plane-store`/`sqlx`/`tokio` edge and stays OFF in any production build.
+test-fixtures = []
+
 # The architectural-layering rule: this binary's graph
 # carries NO plane-store, NO sqlx, NO libsqlite3-sys. Enforced by a `cargo tree -p topos` CI check
 # (see xtask), NOT a global cargo-deny ban (those crates live elsewhere in the workspace).

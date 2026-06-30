@@ -675,6 +675,48 @@ fn assert_excludes(pkg: &str, banned: &[&str]) -> Result<()> {
     }
 }
 
+/// The PRODUCTION normal-dependency graph of `pkg` (NO `--all-features` — the artifact a real `cargo build`
+/// resolves), one line per node as `{p} {f}` (package + its active features), prefix-free.
+fn production_dep_lines(pkg: &str) -> Result<Vec<String>> {
+    let out = Command::new(env!("CARGO"))
+        .current_dir(workspace_root())
+        .args([
+            "tree", "-p", pkg, "-e", "normal", "-f", "{p} {f}", "--prefix", "none",
+        ])
+        .output()
+        .with_context(|| format!("running `cargo tree -p {pkg}` (production features)"))?;
+    if !out.status.success() {
+        bail!(
+            "`cargo tree -p {pkg}` (production features) failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Assert the test-only `test-fixtures` feature stays OFF in `pkg`'s PRODUCTION graph — i.e. the node for
+/// `on_crate` carries no `test-fixtures` feature. This is the cross-repo trust guard: a production
+/// `topos-plane` must never enable `plane-store/test-fixtures` (the seed/move/tamper shims), and a production
+/// `topos` must never enable its own `test-fixtures` (the `test_support` facade). `test-fixtures` cannot
+/// appear in a version or a path, so its presence on the node's line means the feature is on.
+fn assert_test_fixtures_off(pkg: &str, on_crate: &str) -> Result<()> {
+    for line in production_dep_lines(pkg)? {
+        let name = line.split_whitespace().next().unwrap_or("");
+        if name == on_crate && line.contains("test-fixtures") {
+            bail!(
+                "production graph of `{pkg}` enables `{on_crate}/test-fixtures` (`{}`) — that feature is \
+                 test-only and must stay OFF in any production build",
+                line.trim()
+            );
+        }
+    }
+    println!("ok: production `{pkg}` does not enable `{on_crate}/test-fixtures`");
+    Ok(())
+}
+
 /// Every workspace member must opt into the shared lints (`[lints]\nworkspace = true`) — Cargo does
 /// NOT inherit them automatically, so a member that forgets the stanza silently escapes
 /// `unsafe_code = forbid` and the clippy gate.
@@ -693,6 +735,9 @@ fn check_member_lints() -> Result<()> {
         }
     }
     manifests.push(root.join("xtask/Cargo.toml"));
+    // The integration-test member (`tests/`) is a workspace member too — it must opt into the shared lints
+    // (incl. `unsafe_code = forbid`), exactly like crates/ + bins/ + xtask.
+    manifests.push(root.join("tests/Cargo.toml"));
 
     let mut offenders = Vec::new();
     for manifest in manifests {
@@ -754,6 +799,12 @@ fn check_arch() -> Result<()> {
             "hyper",
         ],
     )?;
+    // The test-only `test-fixtures` feature must never be enabled in a production build: a downstream cloud
+    // plane composes the PRODUCTION `topos-plane`, which must not carry `plane-store`'s seed/move/tamper
+    // shims; and the production client must not carry its own `test_support` facade. (The `tests/` member
+    // enables both, but it is excluded from the production artifact — `cargo build -p topos-plane`.)
+    assert_test_fixtures_off("topos-plane", "plane-store")?;
+    assert_test_fixtures_off("topos", "topos")?;
     // No member silently escapes the shared lint floor (incl. unsafe_code = forbid).
     check_member_lints()?;
     Ok(())
