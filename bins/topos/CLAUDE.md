@@ -29,7 +29,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
 - **The verbs** (`ops`) — `add` (mint id+name, scan + import, stage + publish with one rename — all-or-
   nothing; **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
-  below), `list [--footprint]` (the tracked bucket; others render
+  below), `invite` (an owner mints an `/i/` link by signing + POSTing the governance Invite op — see below),
+  `list [--footprint]` (the tracked bucket; others render
   empty; footprint = the `~/.topos/` walk plus any harness config topos holds an entry in), `diff`
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
@@ -53,6 +54,21 @@ renderer over the SAME typed outcomes (one value, two presentations).
   place a disclosed first-receive offer (the I-TOFU "one --approve"). The enrollment transports (`UreqEnroll`
   + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lands with the test member next).
+- **The `invite` verb** (`ops/invite`, `plane_http::UreqEnroll`) — an OWNER mints an `/i/<token>` invite link
+  by signing the governance Invite op and POSTing it. Requires prior enrollment: the pinned plane (`base_url`
+  from `instance.json`), the workspace (`workspace_id` from `identity/user.json`), and the device key all come
+  from what `follow` wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the raw 16 bytes
+  via the ids seam — the canonical hyphenated UUID rides the wire, the plane re-parses it to the SAME bytes),
+  builds the `GovernanceOpKind::Invite` frame, and **wires `sign_governance`** for the 64-byte signature. The
+  **cross-component agreement** is replicated byte-for-byte so the plane's re-derived frame verifies: the role
+  byte (`Owner=1, Reviewer=2, Member=3`, an omitted `--role` defaulting to **Member=3** to match the plane's
+  `role.unwrap_or(member)`), `expires_at = 0` (the plane's invite handler hardcodes no expiry), and the emails
+  + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant). The POST rides
+  through the same creds-free `UreqEnroll` client behind a `GovernanceSource` seam (the 64-byte signature in
+  the `Topos-Device-Signature` header), mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a
+  role-DENIED `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the client
+  signature **verifies via `topos_core::sign::verify_governance_op`** over the frame the plane rebuilds — the
+  cross-component proof, run over a **fake** with no HTTP.
 - **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
   `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
   the signed `current` pointer through the `PlaneSource` seam, signature + workspace/skill scope
@@ -109,8 +125,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
   next) — each unit-proven to round-trip through the kernel's `verify_*` (one shared preimage, so signer +
   verifier agree by construction). `host.json` now carries a secret-free **`DeviceKeyRef`** (the PUBLIC key +
   a pointer to the sibling `0600` seed, NEVER the seed) via `set_device_key`. **`sign_enroll` is now wired**
-  — `follow --resume` signs the enroll possession proof + records the device key in `host.json`;
-  `sign_governance` / `sign_device_op` are wired by the invite / contribute verbs next.
+  — `follow --resume` signs the enroll possession proof + records the device key in `host.json`.
+  **`sign_governance` is now wired** too — `invite` signs the governance Invite op (see the `invite` verb
+  above); `sign_device_op` is wired by the contribute verbs next.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
   `write_private` (mode 0600 **from creation** — no world-readable window, no chmod-after-write race) +
   `private_perms_ok` (the refuse-on-permissive read gate), both threaded through the `FaultFs` crash gate;
@@ -126,8 +143,8 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-The `invite` verb (mint an `/i/` link — wires `sign_governance`) lands next; `unfollow` (stop following
-`current`, keep the bytes) + signing-at-rest still later; the client `publish`/`review`/`revert` verbs that
+`unfollow` (stop following `current`, keep the bytes) + signing-at-rest land later; the client
+`publish`/`review`/`revert` verbs that
 WIRE the now-built `sign_device_op` (the **publish guard** over `conflict.json` is built + unit-tested now,
 wired then); the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters
 (Claude Code is the reference — only it guarantees the swap completes before skills resolve; the others

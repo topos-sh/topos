@@ -9,12 +9,12 @@ use clap::Parser;
 use serde::Serialize;
 use topos_harness::ClaudeCode;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, RoleArg};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
-use crate::plane::{EnrollSource, PlaneSource};
+use crate::plane::{EnrollSource, GovernanceSource, PlaneSource};
 use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, ops, render};
@@ -115,6 +115,29 @@ pub fn run() -> ExitCode {
                 approve,
             };
             finish_follow(json, cmd_name, ops::follow(&ctx, &connectors, link, opts))
+        }
+        Command::Invite {
+            emails,
+            role,
+            skills,
+        } => {
+            // The owner's governance-write transport, built per the enrolled plane's base URL (read inside
+            // the op from `instance.json`) — the same creds-free `ureq` client that speaks enrollment.
+            let gov_connect = |base_url: &str| -> Box<dyn GovernanceSource> {
+                Box::new(UreqEnroll::new(base_url.to_owned()))
+            };
+            finish(
+                json,
+                cmd_name,
+                ops::invite(
+                    &ctx,
+                    &gov_connect,
+                    emails,
+                    role.map(RoleArg::to_workspace_role),
+                    skills,
+                ),
+                render::invite_tty,
+            )
         }
         Command::List { skill, footprint } => finish(
             json,

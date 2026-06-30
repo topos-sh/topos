@@ -283,6 +283,32 @@ pub(crate) trait EnrollSource {
     ) -> Result<Redeem, ClientError>;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The governance-write seam — the OWNER's signed-op write side (invite today), behind a port so the
+// `invite` tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte governance signature rides a
+// header, not a read token; the base URL is baked in when the connector builds it from `instance.json`.
+// The real impl is `crate::plane_http::UreqEnroll` (the same client that speaks enrollment); the fake
+// lives in the invite tests.
+// ---------------------------------------------------------------------------------------------
+
+/// The owner's governance-write transport. The `invite` op drives it: POST the owner-signed governance
+/// Invite op to `/v1/invites`, the 64-byte signature in the `Topos-Device-Signature` header.
+pub(crate) trait GovernanceSource {
+    /// `POST /v1/invites` — submit the owner-signed governance Invite op (the body is the
+    /// [`InviteRequest`](topos_types::requests::InviteRequest); the signature rides the header). Maps the
+    /// all-outcome **200 envelope**: `ok` ⇒ the [`InviteData`](topos_types::results::InviteData); `!ok` ⇒ a
+    /// typed error carrying the wire error's code (a role-DENIED surfaces as a clear "not authorized").
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault, a non-200 status, or a 200+DENIED envelope (e.g. the
+    /// signer is not an owner); [`ClientError::Corrupt`] on a malformed body.
+    fn create_invite(
+        &self,
+        body: topos_types::requests::InviteRequest,
+        governance_sig: [u8; 64],
+    ) -> Result<topos_types::results::InviteData, ClientError>;
+}
+
 /// Compare two wire generations with the kernel's epoch-dominant order (the wire type derives none).
 pub(crate) fn gen_cmp(a: Generation, b: Generation) -> core::cmp::Ordering {
     KernelGen {

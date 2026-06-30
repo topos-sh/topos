@@ -160,6 +160,10 @@ impl IdSource for FixedId {
     fn new_skill_id(&self) -> String {
         self.0.clone()
     }
+    fn new_op_id(&self) -> [u8; 16] {
+        // This harness exercises no op_id-minting verb; a fixed value keeps the seam total.
+        [0u8; 16]
+    }
 }
 
 /// The HERO rig: a temp `~/.topos/` home + a temp work dir holding each adopted (placement) skill, the real

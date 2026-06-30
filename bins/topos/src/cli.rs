@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use topos_types::requests::WorkspaceRole;
 
 /// `topos` — share agent skills across a team. The agent drives it non-interactively with `--json`.
 #[derive(Debug, Parser)]
@@ -40,6 +42,20 @@ pub(crate) enum Command {
         /// Place the named, already-disclosed first-receive offer(s): `<skill>` or `<skill>@<hash>`.
         #[arg(long = "approve")]
         approve: Vec<String>,
+    },
+    /// Mint an `/i/<token>` invite link (OWNER only): sign the governance Invite op with this device's key,
+    /// then POST it. Seeds the invited emails onto the workspace roster and pre-offers the named skills.
+    /// Requires prior enrollment (run `follow` first); the link itself never carries a role.
+    Invite {
+        /// The emails to invite (0 or more). Seeded onto the roster as `invited`; bound as a set in the
+        /// signed governance frame (order is irrelevant — the kernel sorts + dedups).
+        emails: Vec<String>,
+        /// The role the invitees are granted; omitted defaults to `member` (the least-privilege default).
+        #[arg(long)]
+        role: Option<RoleArg>,
+        /// The skill ids to pre-offer on the invite (bound as a set in the signed frame).
+        #[arg(long = "skills")]
+        skills: Vec<String>,
     },
     /// Inventory the skills on this machine.
     List {
@@ -84,12 +100,37 @@ pub(crate) enum Command {
     },
 }
 
+/// The workspace role an invite grants, as a CLI arg — maps 1:1 to [`WorkspaceRole`]. The client signs the
+/// SAME role byte the plane re-derives + verifies, so this mapping is load-bearing.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum RoleArg {
+    /// Full governance authority (invite, roster, revoke).
+    Owner,
+    /// A reviewer (review-gate authority; no governance authority in v0).
+    Reviewer,
+    /// An ordinary member (no governance authority).
+    Member,
+}
+
+impl RoleArg {
+    /// Map to the wire [`WorkspaceRole`]. The op then maps that to the governance signing byte the plane
+    /// agrees on (Owner=1, Reviewer=2, Member=3).
+    pub(crate) fn to_workspace_role(self) -> WorkspaceRole {
+        match self {
+            RoleArg::Owner => WorkspaceRole::Owner,
+            RoleArg::Reviewer => WorkspaceRole::Reviewer,
+            RoleArg::Member => WorkspaceRole::Member,
+        }
+    }
+}
+
 impl Command {
     /// The verb name carried in the `--json` envelope + receipt.
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Command::Add { .. } => "add",
             Command::Follow { .. } => "follow",
+            Command::Invite { .. } => "invite",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
             Command::Log { .. } => "log",

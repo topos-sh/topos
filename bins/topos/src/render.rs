@@ -2,7 +2,9 @@
 //! renderer. Error messages are summarized so a raw git/io string never reaches a user surface.
 
 use topos_types::bootstrap::VerifiedDomainStatus;
-use topos_types::results::{AddData, DiffData, FollowData, ListData, LogData, PullData};
+use topos_types::results::{
+    AddData, DiffData, FollowData, InviteData, ListData, LogData, PullData,
+};
 use topos_types::{
     ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
     WireError,
@@ -264,6 +266,23 @@ pub(crate) fn follow_tty(data: &FollowData) -> String {
     out.push_str(
         "\nApprove a skill with `topos follow --approve <skill>` (or `topos pull <skill>`).",
     );
+    out
+}
+
+pub(crate) fn invite_tty(data: &InviteData) -> String {
+    let mut out = format!("Invite link: {}", data.invite_link);
+    if !data.roster_added.is_empty() {
+        out.push_str(&format!(
+            "\nSeeded onto the roster: {}",
+            data.roster_added.join(", ")
+        ));
+    }
+    if data.skills.is_empty() {
+        out.push_str("\nA membership-only door (no skills pre-offered).");
+    } else {
+        out.push_str(&format!("\nPre-offers: {}", data.skills.join(", ")));
+    }
+    out.push_str("\nShare the link; redeeming it never enrolls on its own.");
     out
 }
 

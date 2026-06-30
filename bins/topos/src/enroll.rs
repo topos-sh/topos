@@ -147,6 +147,13 @@ pub(crate) fn read_follows(
     doc::read_doc_private(fs, &layout.follows_path())
 }
 
+/// Read `identity/user.json`, or `None` if absent. Metadata only (no secret) → ordinary `read_doc`.
+/// Fail-closed on an unknown/newer `schema_version`. The `invite` verb reads the enrolled `workspace_id`
+/// (the governance frame's scope) from here.
+pub(crate) fn read_user(fs: &dyn FsOps, layout: &Layout) -> Result<Option<UserDoc>, ClientError> {
+    doc::read_doc(fs, &layout.user_path())
+}
+
 /// The follow-state fan-out → the engine's consent seam (`FileFollow` returns these). Every entry is
 /// carried (the engine itself skips a `following == false` skill); creds live in the transport, not here.
 pub(crate) fn follow_contexts(follows: &Follows) -> Vec<(String, FollowContext)> {

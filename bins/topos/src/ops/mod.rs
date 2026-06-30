@@ -3,6 +3,7 @@
 mod add;
 mod diff;
 mod follow;
+mod invite;
 mod list;
 mod log;
 mod merge_resolve;
@@ -13,6 +14,7 @@ mod uninstall;
 pub(crate) use add::add;
 pub(crate) use diff::diff;
 pub(crate) use follow::{FollowConnectors, FollowOpts, follow};
+pub(crate) use invite::invite;
 pub(crate) use list::list;
 pub(crate) use log::log;
 pub(crate) use pull::{PullScope, TargetMode, pull};

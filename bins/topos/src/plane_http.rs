@@ -18,14 +18,16 @@ use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest, DeviceTokenResponse,
-    DeviceTokenStatus, RedeemRequest, RedeemResponse, WireFileMode, WireVersionMeta,
+    DeviceTokenStatus, InviteRequest, RedeemRequest, RedeemResponse, WireFileMode, WireVersionMeta,
 };
+use topos_types::results::InviteData;
 use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowSource, Grant,
-    KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem, RedeemedCred, TokenPoll,
+    DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowSource,
+    GovernanceSource, Grant, KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem,
+    RedeemedCred, TokenPoll,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -502,6 +504,49 @@ impl EnrollSource for UreqEnroll {
     }
 }
 
+// =================================================================================================
+// The governance-write side of `UreqEnroll` — the owner's signed Invite POST. Creds-free (the 64-byte
+// governance signature is the auth, riding the `Topos-Device-Signature` header); mirrors `redeem`'s
+// all-outcome 200 envelope mapping.
+// =================================================================================================
+
+impl GovernanceSource for UreqEnroll {
+    fn create_invite(
+        &self,
+        body: InviteRequest,
+        governance_sig: [u8; 64],
+    ) -> Result<InviteData, ClientError> {
+        let value = serde_json::to_value(&body)
+            .map_err(|e| ClientError::Corrupt(format!("invite body: {e}")))?;
+        let url = format!("{}/v1/invites", self.base_url);
+        let sig = b64(&governance_sig);
+        let (status, bytes) = self.post_json(&url, &value, Some(&sig), "create invite")?;
+        map_invite_envelope(status, &bytes)
+    }
+}
+
+/// Map a create-invite response — the all-outcome **200 envelope** — to the typed result. A non-200 is a
+/// transport/auth/integrity fault; `ok` carries the [`InviteData`]; `!ok` is a typed DENIED error carrying
+/// the wire error's code (never a secret). **Pure** (status + bytes in), so the ok / denied / non-200 /
+/// malformed arms are all unit-tested without a socket (mirrors [`build_fetched_version`]).
+fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientError> {
+    if classify(status) != HttpClass::Ok {
+        return Err(ClientError::Plane(format!("create invite: HTTP {status}")));
+    }
+    let env: JsonEnvelope = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::Corrupt(format!("invite envelope is malformed: {e}")))?;
+    if !env.ok {
+        // A DENIED invite (e.g. the signer is not an owner) — surface the code, never any secret.
+        let code = env
+            .error
+            .map(|e| e.code)
+            .unwrap_or_else(|| "DENIED".to_owned());
+        return Err(ClientError::Plane(format!("invite refused ({code})")));
+    }
+    serde_json::from_value(env.data)
+        .map_err(|e| ClientError::Corrupt(format!("invite data is malformed: {e}")))
+}
+
 /// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -611,5 +656,70 @@ mod tests {
         let meta = meta_for(files, vec![]);
         let err = build_fetched_version(&meta, |_id| Err(PlaneError::NotFound)).unwrap_err();
         assert!(matches!(err, PlaneError::NotFound), "got {err:?}");
+    }
+
+    // ---- The create-invite all-outcome 200 envelope mapping. ----
+
+    fn envelope_bytes(env: &JsonEnvelope) -> Vec<u8> {
+        serde_json::to_vec(env).expect("serialize envelope")
+    }
+
+    #[test]
+    fn map_invite_envelope_ok_yields_invite_data() {
+        let env = JsonEnvelope {
+            schema_version: 1,
+            command: "invite".to_owned(),
+            ok: true,
+            data: serde_json::to_value(InviteData {
+                invite_link: "https://acme.topos.test/i/tok_abc".to_owned(),
+                roster_added: vec!["alice@acme.com".to_owned()],
+                skills: vec!["s_deploy".to_owned()],
+            })
+            .unwrap(),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: None,
+        };
+        let data = map_invite_envelope(200, &envelope_bytes(&env)).expect("ok maps to InviteData");
+        assert_eq!(data.invite_link, "https://acme.topos.test/i/tok_abc");
+        assert_eq!(data.roster_added, vec!["alice@acme.com".to_owned()]);
+        assert_eq!(data.skills, vec!["s_deploy".to_owned()]);
+    }
+
+    #[test]
+    fn map_invite_envelope_denied_is_a_typed_error_carrying_the_code() {
+        use topos_types::{Affected, TerminalOutcome, WireError};
+        let env = JsonEnvelope {
+            schema_version: 1,
+            command: "invite".to_owned(),
+            ok: false,
+            data: serde_json::json!({}),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: Some(WireError {
+                code: "NOT_AUTHORIZED".to_owned(),
+                outcome: TerminalOutcome::Denied,
+                retryable: false,
+                affected: Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            }),
+        };
+        let err = map_invite_envelope(200, &envelope_bytes(&env)).unwrap_err();
+        match err {
+            ClientError::Plane(m) => assert!(m.contains("NOT_AUTHORIZED"), "got {m}"),
+            other => panic!("expected a typed Plane error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_invite_envelope_non_200_is_a_typed_error() {
+        // A non-200 (transport/auth/integrity) never reaches the envelope decode.
+        let err = map_invite_envelope(500, b"{}").unwrap_err();
+        assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
     }
 }
