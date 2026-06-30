@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plane_store::{CommitId, DeviceSignedOp, OpId, SkillId, WorkspaceId};
+use plane_store::{CommitId, DeviceSignedOp, SkillId, WorkspaceId};
 use topos_core::sign::DeviceOp;
 use topos_types::JsonEnvelope;
 use topos_types::requests::RevertRequest;
@@ -36,7 +36,7 @@ pub(crate) async fn revert(
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-    let op_id = OpId::parse(&req.op_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
+    let op_id = wire::parse_op_id(&req.op_id)?;
     let good = wire::hex32(&req.good)
         .map(CommitId)
         .ok_or_else(|| PlaneHttpError::BadId(format!("invalid good version id {:?}", req.good)))?;

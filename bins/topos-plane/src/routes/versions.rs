@@ -29,6 +29,7 @@ const CACHE_CONTROL_IMMUTABLE: &str = "max-age=31536000, immutable";
     responses(
         (status = 200, description = "The version's authenticated metadata (immutable).", body = WireVersionMeta),
         (status = 404, description = "No/blank credential, scope/path mismatch, or unauthorized/unreachable version.", body = topos_types::JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = topos_types::JsonEnvelope),
     ),
 )]

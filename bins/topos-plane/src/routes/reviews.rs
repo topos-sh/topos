@@ -6,7 +6,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plane_store::{CommitId, DeviceSignedOp, OpId, SkillId, WorkspaceId};
+use plane_store::{CommitId, DeviceSignedOp, SkillId, WorkspaceId};
 use topos_core::sign::DeviceOp;
 use topos_types::JsonEnvelope;
 use topos_types::requests::ReviewRequest;
@@ -38,7 +38,7 @@ pub(crate) async fn review(
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-    let op_id = OpId::parse(&req.op_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
+    let op_id = wire::parse_op_id(&req.op_id)?;
     let proposal = wire::hex32(&req.proposal)
         .map(CommitId)
         .ok_or_else(|| PlaneHttpError::BadId(format!("invalid proposal id {:?}", req.proposal)))?;

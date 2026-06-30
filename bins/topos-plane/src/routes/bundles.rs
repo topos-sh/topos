@@ -26,6 +26,7 @@ const CACHE_CONTROL_IMMUTABLE: &str = "max-age=31536000, immutable";
     responses(
         (status = 200, description = "The raw object bytes (content-addressed, immutable).", body = String, content_type = "application/octet-stream"),
         (status = 404, description = "No/blank credential, scope/path mismatch, or unreachable object.", body = topos_types::JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = topos_types::JsonEnvelope),
     ),
 )]

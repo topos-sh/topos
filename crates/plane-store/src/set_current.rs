@@ -238,7 +238,6 @@ pub(crate) async fn revert(
             skill,
             good_digest,
             device.expected,
-            created_at,
         )
         .await?
     {

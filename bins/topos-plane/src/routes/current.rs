@@ -27,9 +27,11 @@ const CACHE_CONTROL_CURRENT: &str = "max-age=10, must-revalidate";
         ("Topos-Known-Version-Id" = Option<String>, Header, description = "The client's known current commit id (hex64) — the commit-sensitive half of the 304."),
     ),
     responses(
-        (status = 200, description = "The signed current record (application/json) + a commit-sensitive ETag.", body = String, content_type = "application/json"),
+        (status = 200, description = "The signed current record (application/json) + a commit-sensitive ETag.", body = topos_types::SignedCurrentRecord, content_type = "application/json"),
         (status = 304, description = "Pointer unchanged (the ETag AND the known version both match)."),
         (status = 404, description = "No such token, or no current pointer yet.", body = topos_types::JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = topos_types::JsonEnvelope),
     ),
 )]
 pub(crate) async fn get_current(

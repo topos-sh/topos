@@ -44,9 +44,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
   byte-writing materialization** (staging sibling → fsync → atomic dir-swap → fsync parent → `map → lock →
   sync` commit; `applied` advances only post-swap). `pull <skill>` accepts a pending update (the explicit
   command is the consent a confirm-each offer solicited); `pull <skill>@<hash>` goes back to a version
-  locally (sets `held`, never lowers the floor). The plane response + follow-state are **fixture-fed**
-  this increment (the inert production sources follow nothing, so production `pull` is an honest no-op);
-  the HTTP transport + real enrollment land later.
+  locally (sets `held`, never lowers the floor). In tests the plane response + follow-state are
+  **fixture-fed**; in production they now come from the real `ureq` transport + on-disk follow-state (below),
+  inert until enrollment writes those docs — so a bare `pull` with nothing followed stays an honest no-op.
 - **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft (not just detects it).
   Reachable only through a `DivergedWitness` capability token minted in the sync engine's diverged arm (the
   structural author-only gate; followers never reach merge code). The kernel `topos-core::merge` plans +
@@ -62,6 +62,16 @@ renderer over the SAME typed outcomes (one value, two presentations).
   a **2-way** manual choice, never a silent merge. Per the full-auto posture, an `auto` follower's
   bare sweep resolves unattended; a confirm-each follower is surfaced. Materialization never fires the
   currency/harness hook.
+- **The real plane transport** (`plane_http`, `enroll`) — a blocking `ureq` (rustls+ring) `PlaneSource` that
+  feeds the engine above (no engine change). `get_current` is the commit-sensitive conditional GET
+  (`If-None-Match` + `Topos-Known-Version-Id`); `fetch_version` is a version-metadata GET + per-blob
+  content-addressed bundle GETs that **re-verify each `sha256 == object_id`**. It is a dumb transport — the
+  engine still verifies the pointer signature against the pinned key. `FileFollow` + the crash-safe
+  `instance.json` (base URL + pinned plane **public** key) and `follows.json` (per-skill workspace + read
+  token + mode) docs supply the transport creds + the consent state; the read token is a **secret** (redacted
+  from `Debug`, never in an error message or URL). `app.rs` selects the real transport + pinned key only when
+  enrolled AND following ≥1 skill, else stays inert. The end-to-end pull-over-loopback-HTTP proof lives in the
+  `tests/` member; adding `ureq` keeps the client arch-clean (no `plane-store`/`sqlx`/`tokio` edge).
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
 message, so injectable id/time sources make `add` deterministic. Golden `--json` fixtures (add/list/diff/log)
@@ -69,8 +79,9 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-The HTTP plane transport + enrollment + signing-at-rest; `follow`/`unfollow`; `publish`/`review`/`revert`
-(the **publish guard** over `conflict.json` is built + unit-tested now, wired when networked publish lands);
+Enrollment (invite redemption + read-credential minting — the transport reads `instance.json`/`follows.json`,
+nothing writes them yet) + signing-at-rest; `follow`/`unfollow`; the client `publish`/`review`/`revert` verbs +
+the device-key signer (the **publish guard** over `conflict.json` is built + unit-tested now, wired then);
 the `diff current..<hash>` + `log --team` plane halves; the OpenClaw/Hermes harness adapters (Claude Code
 is the reference — only it guarantees the swap completes before skills resolve; the others leave a named,
 bounded multi-file-read residual).
@@ -86,5 +97,6 @@ your skills.
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `clap`, `serde`/`serde_json`,
 `uuid`, `rustix` (safe fsync/flock + the atomic dir-swap), `hex` (decode sidecar id fields), `base64`
 (**decode-only**: the signed pointer's base64url `Signature.value`, verify-side — not the private-key
-signing edge `check-arch` forbids), `anyhow`, `thiserror`; a test-only `ed25519-dalek` dev-dependency signs
-fixture pointers. (The HTTP plane transport + device-key signer land later.)
+signing edge `check-arch` forbids), `ureq` (the blocking rustls+ring plane transport — self-contained, so no
+`tokio`/`plane-store`/`sqlx` edge), `anyhow`, `thiserror`; a test-only `ed25519-dalek` dev-dependency signs
+fixture pointers. (The client device-key signer for the contribute verbs lands later.)

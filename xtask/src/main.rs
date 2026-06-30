@@ -780,8 +780,21 @@ fn lints_opt_in(toml: &str) -> bool {
 
 /// The architectural invariants the dependency graph must hold — the central trust claims, as a gate.
 fn check_arch() -> Result<()> {
-    // The client is never an authority: no edge to the server store, SQL, or a SQLite C lib.
-    assert_excludes("topos", &["plane-store", "sqlx", "libsqlite3-sys"])?;
+    // The client is never an authority and stays a thin SYNC tool: no edge to the server store, SQL, or a
+    // SQLite C lib, and no async runtime / async HTTP stack (`ureq` is blocking + self-contained). `tokio`
+    // is the load-bearing one — a future `reqwest`/async-`ureq` transport would pull it in without touching
+    // `plane-store`/`sqlx`, so the gate must name it explicitly to hold the documented tokio-free line.
+    assert_excludes(
+        "topos",
+        &[
+            "plane-store",
+            "sqlx",
+            "libsqlite3-sys",
+            "tokio",
+            "reqwest",
+            "hyper",
+        ],
+    )?;
     // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates, no diff/merge engines — only
     // crypto primitives. (`diffy`/`imara-diff` are byte execution; they live in `topos-gitstore`.)
     assert_excludes(

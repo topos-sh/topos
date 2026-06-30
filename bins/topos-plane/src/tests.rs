@@ -310,6 +310,41 @@ async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt() {
 }
 
 #[tokio::test]
+async fn a_write_with_a_non_uuid_op_id_is_rejected_before_ingest() {
+    // A path-safe op_id that is NOT a canonical UUID: `OpId::parse` accepts it, but the authority binds op_id
+    // as 16 bytes only AFTER it ingests + leases the candidate, so without an edge guard a malformed
+    // unauthenticated request would pin the uploaded objects on the later parse failure. The edge must reject
+    // it with a 400 BEFORE reaching the authority (so the candidate is never ingested).
+    let ctx = setup("publish-bad-opid").await;
+    let (g_vid, _) = seed_genesis(&ctx, "20000000-0000-4000-8000-000000000000").await;
+
+    let op = "not-a-canonical-uuid"; // lowercase + hyphens → path-safe, but not a UUID
+    let files = vec![file("SKILL.md", b"must never be ingested\n")];
+    let parents = [g_vid];
+    // A well-formed (86-char base64url) but unchecked signature: the op_id is rejected before the authority
+    // ever verifies a signature, so a real one is unnecessary.
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
+    let body = candidate_body(op, gn(1, 1), &parents, &files);
+
+    let (status, _h, bytes) = run(&ctx, post("/v1/publish", &sig, body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-UUID op_id must be a 400 at the edge, never a 200 that ingested the candidate"
+    );
+    let env = envelope(&bytes);
+    assert!(!env.ok);
+    assert!(
+        env.error.is_some(),
+        "a malformed op_id is a wire error: {env:?}"
+    );
+    assert!(
+        env.receipt.is_none(),
+        "no receipt — the authority was never reached"
+    );
+}
+
+#[tokio::test]
 async fn an_idempotent_retry_replays_a_byte_identical_response() {
     let ctx = setup("publish-retry").await;
     let (g_vid, _) = seed_genesis(&ctx, "10000000-0000-4000-8000-000000000000").await;

@@ -12,7 +12,7 @@ use axum::Json;
 use axum::extract::{FromRequest, Request};
 use axum::http::{HeaderMap, header};
 use base64::Engine as _;
-use plane_store::FileMode;
+use plane_store::{FileMode, OpId};
 use topos_types::requests::WireFileMode;
 
 use error::PlaneHttpError;
@@ -53,6 +53,22 @@ pub(crate) fn device_signature(headers: &HeaderMap) -> Result<[u8; 64], PlaneHtt
     bytes
         .try_into()
         .map_err(|_| PlaneHttpError::BadDeviceSignature)
+}
+
+/// Parse + validate a WRITE `op_id` at the edge. The authority binds `op_id` as 16 bytes in the device-op
+/// preimage and, on the write paths, **ingests + leases the candidate BEFORE** that bind — so a path-safe but
+/// non-canonical-UUID `op_id` accepted here would let an unauthenticated malformed request pin the uploaded
+/// objects when the later parse fails (the failure path does not release the lease). Reject anything but the
+/// canonical lowercase-hyphenated UUID with a 400 here (exactly matching plane-store's own `op_id` parse), so
+/// a bad `op_id` never reaches ingest.
+pub(crate) fn parse_op_id(s: &str) -> Result<OpId, PlaneHttpError> {
+    let canonical_uuid = uuid::Uuid::parse_str(s).is_ok_and(|u| u.as_hyphenated().to_string() == s);
+    if !canonical_uuid {
+        return Err(PlaneHttpError::BadId(
+            "op_id must be a canonical hyphenated UUID".to_owned(),
+        ));
+    }
+    OpId::parse(s).map_err(|e| PlaneHttpError::BadId(e.to_string()))
 }
 
 /// Parse the READ credential — `Authorization: Bearer <token>` → the token string. A missing/blank/no-scheme

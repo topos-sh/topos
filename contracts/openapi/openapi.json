@@ -56,7 +56,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/SignedCurrentRecord"
                 }
               }
             }
@@ -66,6 +66,26 @@
           },
           "404": {
             "description": "No such token, or no current pointer yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -426,6 +446,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Integrity / internal store fault.",
             "content": {
@@ -496,6 +526,16 @@
           },
           "404": {
             "description": "No/blank credential, scope/path mismatch, or unauthorized/unreachable version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
             "content": {
               "application/json": {
                 "schema": {

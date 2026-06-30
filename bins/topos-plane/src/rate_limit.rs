@@ -1,9 +1,13 @@
 //! A minimal in-process token-bucket rate limiter + the axum middleware that enforces it.
 //!
-//! Deliberately NOT `tower-governor`: one `Arc<Mutex<HashMap<Key, Bucket>>>`, keyed by the (hashed)
-//! `Authorization` header when present else the peer IP, with a generous default bucket and an env switch
-//! (`TOPOS_PLANE_RATELIMIT=off`) to disable it. A composing server that wants distributed limiting puts its
-//! own middleware *in front* of `router(state)`; this is the honest single-process floor.
+//! Deliberately NOT `tower-governor`: one `Arc<Mutex<HashMap<Key, Bucket>>>`, keyed by the **peer IP**, with
+//! a generous default bucket and an env switch (`TOPOS_PLANE_RATELIMIT=off`) to disable it. It deliberately
+//! does NOT key on the `Authorization` header: this middleware runs BEFORE any route validates a credential,
+//! so keying on an attacker-controlled value would let each request mint a fresh full bucket (and a new map
+//! entry) — bypassing the limit and growing the map without bound. The map is also size-capped (a
+//! self-healing memory bound) against a flood from many source IPs. A composing server that wants
+//! per-credential or distributed limiting puts its own middleware *in front* of `router(state)`; this is the
+//! honest single-process floor.
 //!
 //! On exceed the response is the **frozen 429**: HTTP 429 + a `Retry-After` header + an
 //! `application/json` [`JsonEnvelope`] whose flat [`WireError`] carries `code = "RATE_LIMITED"`,
@@ -17,7 +21,7 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use topos_types::{
@@ -69,15 +73,19 @@ struct Bucket {
     last_refill: Instant,
 }
 
-/// The rate-limit key: a presented credential (hashed, so no secret sits in the map), the peer IP, or a
-/// single global bucket when neither is known (e.g. an in-process `oneshot` test).
+/// The largest number of distinct buckets held at once — a memory bound against a flood from many source
+/// IPs. On overflow the whole map is dropped (a brief, self-healing reset; the buckets are best-effort, not
+/// a ledger). 100k IPs is far beyond any real small-team plane.
+const MAX_BUCKETS: usize = 100_000;
+
+/// The rate-limit key: the peer IP, or a single global bucket when the peer is unknown (e.g. an in-process
+/// `oneshot` test). Deliberately NOT the credential — keying on an unvalidated header is bypassable and
+/// unbounded (see the module docs).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Key {
-    /// `sha256(Authorization header value)`.
-    Credential([u8; 32]),
     /// The peer socket address's IP.
     Peer(IpAddr),
-    /// Neither a credential nor a peer (a degenerate fallback).
+    /// The peer is unknown (a degenerate fallback — one shared bucket).
     Global,
 }
 
@@ -115,6 +123,11 @@ impl Limiter {
             .buckets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Memory bound: a flood from many distinct source IPs could otherwise grow the map without limit.
+        // When full, drop everything (a brief, self-healing reset) before admitting the new key.
+        if buckets.len() >= MAX_BUCKETS && !buckets.contains_key(&key) {
+            buckets.clear();
+        }
         let bucket = buckets.entry(key).or_insert_with(|| Bucket {
             tokens: self.limits.burst,
             last_refill: now,
@@ -144,7 +157,7 @@ pub(crate) async fn enforce(State(state): State<PlaneState>, req: Request, next:
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
-    let key = key_for(req.headers(), peer);
+    let key = key_for(peer);
     match state.limiter().check(key) {
         Decision::Allow => next.run(req).await,
         Decision::Limited {
@@ -153,12 +166,11 @@ pub(crate) async fn enforce(State(state): State<PlaneState>, req: Request, next:
     }
 }
 
-/// Prefer the credential (so two clients behind one NAT do not share a budget); fall back to the peer IP,
-/// then a single global bucket.
-fn key_for(headers: &HeaderMap, peer: Option<IpAddr>) -> Key {
-    if let Some(auth) = headers.get(header::AUTHORIZATION) {
-        return Key::Credential(topos_core::digest::sha256(auth.as_bytes()));
-    }
+/// Key on the peer IP (a single global bucket when it is unknown). Deliberately NOT the `Authorization`
+/// header: this layer runs before any route validates a credential, so keying on an attacker-controlled
+/// value would let each request mint a fresh bucket + map entry (bypass + unbounded growth — see the module
+/// docs). A composing server keys on a validated credential in its own middleware in front.
+fn key_for(peer: Option<IpAddr>) -> Key {
     match peer {
         Some(ip) => Key::Peer(ip),
         None => Key::Global,

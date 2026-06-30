@@ -35,6 +35,22 @@ same-process code.) The error type holds this line too: internal faults carry a 
   fetch miss **re-authorizes** (the read-time TOCTOU guard): a proposal that staled — and whose unique bytes
   a GC reclaimed — between the authorize and the fetch reads **404, never Integrity**. **No object is served
   by bare hash.**
+- **The network read surface (what the HTTP plane composes over).** `resolve_read_token` maps an opaque
+  per-skill read token (stored only as its **sha256**) to a `ReadScope` whose `(workspace, skill, principal)`
+  are built from the trusted row — **never** a caller-asserted id — a miss being the same indistinguishable
+  `NotFound`. Over it: `read_current` (the signed-`current` record + its generation/version, for the
+  conditional-GET/ETag/304 read), `serve_object` (the bundle read — a scope/path mismatch or a malformed id
+  is `NotFound`, then the same `read_object`), and `read_version_metadata` (a version's
+  parents/author/message/digest/file-list — **no blob bytes** — for the client's reassembly walk). The last
+  is R1-scoped by `authorize_version_read`, which **mirrors `read_object`'s predicate** (rostered ∧
+  accepted-trunk-or-open-non-stale-proposal), so an unaccepted/rejected proposal version is the
+  indistinguishable `NotFound`. Commit metadata comes from gitstore's exact one-commit `read_commit_meta`
+  (fails closed on an unmapped parent, never the lossy `log`). `read_signed_record` is now `pub(crate)` (the
+  public authenticated read is `read_current`). `SetCurrentReceipt` is enriched (command/skill/version/digest/
+  expected/created_at — all already persisted) so the network layer builds the canonical all-outcome receipt
+  and replays it byte-for-byte. A feature-gated **`test-fixtures`** surface (roster / device / read-token / a
+  published genesis + child + a signature-tamper helper) lets an out-of-crate test drive a loopback plane; it
+  is gated **out of the production build** (a check-arch guard proves production never enables it).
 - **Candidate ingest (server rehash — the confused-deputy guard).** Every write that introduces bytes
   (`publish`/`propose`/`revert`) ingests the full candidate tree and **recomputes every id from the bytes**
   (no client id trusted; no reference-by-id), applies the canonical rules, and migrates the
@@ -144,8 +160,10 @@ flip `location` → `git repack`), both additive + client-invisible; the **clien
 `publish --propose` / `review` / `diff <skill> current..<hash>` CLI verbs, the plane-sourced diff, client
 rebase orchestration, the displayed proposal-status strings — the server authority is built, the client UX is
 not); **multi-reviewer governance** (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff
-UI — single-approver only today, no role column); the **HTTP plane** (every write is exercised in-process
-only); **at-rest key encryption / KMS** (the plane key is a plaintext `0600` seed for now); the `purge` verb +
+UI — single-approver only today, no role column); the **HTTP plane's still-to-come routes** (enrollment +
+read-credential minting, governance roster/policy mutation, the audit outbox — the read + write authority
+routes are now served, but nothing mints a real read token yet); **at-rest key encryption / KMS** (the plane
+key is a plaintext `0600` seed for now); the `purge` verb +
 force-unlink (the tombstones table + denylist check already exist); Postgres (SQLite-first — the interleaving
 tests assert on outcome/invariant, never an error code, so the Postgres arm is a pure later extension);
 two-parent author merges; real device/roster issuance + revocation routes (the registry is fixture-seeded);

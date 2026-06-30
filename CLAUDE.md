@@ -100,17 +100,40 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > `accepted` (sideways, signed); `review --reject`/withdraw is a standalone status-flip (nothing signed),
 > after which GC reclaims the now-unrooted unique bytes. The legacy standalone `upload_candidate` path was
 > **retired** — every write now goes through the shared ingest, so a `commit_object` edge means
-> accepted-trunk by construction. Exercised **in-process** by the stale-approve + ABA interleavings — no HTTP,
-> no client. Still to come: the large-object
-> store's **S3-compatible remote
-> backend + online backfill** (additive, client-invisible); the **client contribute loop** (the
-> `publish --propose` / `review` / `diff` CLI verbs, the plane-sourced diff, rebase orchestration — the server
-> authority is built, the client UX + multi-reviewer governance are not); the HTTP plane (the transport
-> that feeds the now-built client pull engine real responses); at-rest key encryption;
-> `follow`/enrollment + identity/roster + device issuance;
-> the OpenClaw/Hermes adapters; and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the
-> client build — `check-arch` forbids that edge); `axum` stays declared but unreferenced until the HTTP
-> plane lands.
+> accepted-trunk by construction. Exercised **in-process** by the stale-approve + ABA interleavings (its HTTP
+> write routes + per-route tests land with the plane below).
+>
+> The **HTTP plane** now exposes that authority over the network — the seam the two built halves meet at. The
+> OSS `topos-plane` is a `router(state)` **library** (the single surface a downstream plane composes — **no
+> extension/fork hook**) plus a thin `axum` bin; every handler is thin (parse the wire DTO → call the
+> authority → serialize; **no trust decision, no raw object read, no client-asserted principal** in a
+> handler). The frozen routes: the conditional-GET signed-`current` read (`ETag = "<epoch>.<seq>"`, a
+> **commit-sensitive 304**), the skill-scoped object read and a version-metadata read (both **404-not-403**,
+> never by bare hash, behind an opaque per-skill read credential resolved inside the authority), and the
+> device-signed writes (`publish`/`proposals`/`reverts`/`reviews`). **Every terminal protocol outcome is an
+> HTTP 200** carrying the canonical all-outcome receipt (a failure adds the flat wire error + `next_actions`;
+> non-2xx is reserved for transport/auth/integrity faults), an `op_id` retry replays it byte-identically, a
+> minimal **in-process rate limiter** freezes the 429 shape, and a generated **OpenAPI** lands under
+> `contracts/openapi/` (drift-gated). The **client's real transport** is wired too: a blocking `ureq`
+> `PlaneSource` conditional-GETs the signed pointer and reassembles a version (metadata + per-blob
+> content-addressed GETs, **re-verifying each sha256**) to feed the **existing** pull engine — the read
+> credential + the pinned plane key come from on-disk `instance.json`/`follows.json` (**fixture-seeded**; the
+> enrollment that mints them lands later, so production still follows nothing and the bare `pull` stays an
+> honest no-op). The whole distribute loop is proven **end-to-end over loopback HTTP** (a first pull
+> fast-forwards byte-exact incl. the exec bit, a second is a 304 no-op, a tampered signature is refused with
+> last-known-good retained). The client gains **no `plane-store`/`sqlx`/`tokio` edge** (`check-arch` holds the
+> line), and the test-only seeding shims are feature-gated out of the production build (a check-arch guard
+> proves it).
+>
+> Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
+> client-invisible); the **client contribute loop** (the `publish --propose` / `review` / `diff` CLI verbs +
+> the device-key signer, the plane-sourced diff, rebase orchestration — the server authority + its HTTP routes
+> are built, the client UX + multi-reviewer governance are not); **enrollment** (device-flow / passcode /
+> magic-link / OIDC, invite + read-credential minting) and `follow`/identity/roster/device issuance; the
+> **governance mutation routes** (roster / policy); **TLS termination** at the plane (loopback HTTP today —
+> terminate at a reverse proxy); the **audit outbox**; at-rest key encryption; the OpenClaw/Hermes adapters;
+> and Postgres. `sqlx` is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids
+> that edge); `axum` now powers the OSS plane's HTTP server and `ureq` the client transport.
 >
 > **Keep this status honest (no stale docs).** This block — and the per-folder `CLAUDE.md` "Implemented /
 > Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
