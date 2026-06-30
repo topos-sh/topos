@@ -18,6 +18,9 @@ topos = { workspace = true, features = ["test-fixtures"] }
 plane-store = { workspace = true, features = ["test-fixtures"] }
 topos-plane.workspace = true
 topos-types.workspace = true
+# Build the governance-op signing preimage for the in-process invite mint (the owner signs the SAME frame the
+# plane re-derives + verifies) — the one shared kernel encoder, so the e2e cannot drift from production.
+topos-core.workspace = true
 # A multi-threaded runtime so the plane's async handlers make progress while the SYNC client (blocking
 # `ureq`) runs on a plain thread; `net` for the loopback listener.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }

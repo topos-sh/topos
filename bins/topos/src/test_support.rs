@@ -27,8 +27,10 @@ use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 use crate::ctx::Ctx;
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
-use crate::plane::{FollowContext, FollowMode, InertFollow, InertPlane};
-use crate::plane_http::{FileFollow, SkillCred, UreqPlane};
+use crate::plane::{
+    EnrollSource, FollowContext, FollowMode, FollowSource, InertFollow, InertPlane, PlaneSource,
+};
+use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::Layout;
 use crate::{doc, ops};
 
@@ -359,6 +361,235 @@ impl PullHarness {
         doc::read_doc(&self.fs, &self.layout().published(skill_id).sync)
             .expect("read sync.json")
             .expect("sync.json exists for a followed skill")
+    }
+}
+
+/// A harness adapter whose placement is an ABSOLUTE directory under a test work root — so a followed skill's
+/// first-receive baseline (which records `harness.placement_for(skill_id).dir` into `map.json`) materializes
+/// where the e2e can read it back, never a process-relative path. Otherwise identical to [`NoHarness`].
+#[derive(Debug)]
+struct WorkHarness {
+    work: PathBuf,
+}
+
+impl HarnessAdapter for WorkHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::ClaudeCode
+    }
+    fn discover(&self) -> Vec<DiscoveredPlacement> {
+        Vec::new()
+    }
+    fn placement_for(&self, skill_id: &str, _d: Option<&DiscoveredPlacement>) -> PlacementTarget {
+        PlacementTarget {
+            dir: self.work.join(skill_id),
+        }
+    }
+    fn currency_kind(&self) -> CurrencyKind {
+        CurrencyKind::ExplicitPullOnly
+    }
+    fn install_currency_trigger(&self) -> TriggerReport {
+        no_trigger()
+    }
+    fn remove_currency_trigger(&self) -> TriggerReport {
+        no_trigger()
+    }
+    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+/// The real-`follow` rig: a fresh temp `~/.topos/` (NO pre-adopted skill — `follow` enrolls from scratch) + a
+/// temp work root where the first-received skill is placed. Drives the GENUINE `ops::follow` over the GENUINE
+/// `ureq` enroll/read transports, so an EXTERNAL e2e crate can prove the whole loop (bootstrap → enroll →
+/// redeem → TOFU-pin → first-receive placement) without reaching the client's `pub(crate)` internals.
+#[derive(Debug)]
+pub struct FollowHarness {
+    home: Scratch,
+    work: Scratch,
+    fs: RealFs,
+    ids: RealIds,
+    clock: RealClock,
+    harness: WorkHarness,
+}
+
+impl FollowHarness {
+    /// A fresh rig over unique temp dirs (cleaned on drop).
+    #[must_use]
+    pub fn new(tag: &str) -> Self {
+        let work = Scratch::new(&format!("{tag}-work"));
+        let harness = WorkHarness {
+            work: work.0.clone(),
+        };
+        Self {
+            home: Scratch::new(&format!("{tag}-home")),
+            work,
+            fs: RealFs,
+            ids: RealIds,
+            clock: RealClock,
+            harness,
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::new(&self.home.0)
+    }
+
+    /// The `ops::follow` connector closures (a creds-free `ureq` enroll client + the read transport), built
+    /// EXACTLY as the production composition root builds them.
+    fn run_follow(
+        &self,
+        plane: &dyn PlaneSource,
+        follow: &dyn FollowSource,
+        plane_key: [u8; 32],
+        link: Option<String>,
+        opts: ops::FollowOpts,
+    ) -> Result<topos_types::results::FollowData, String> {
+        let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
+            Box::new(UreqEnroll::new(base_url.to_owned()))
+        };
+        let plane_connect =
+            |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
+                Box::new(UreqPlane::new(base_url.to_owned(), creds))
+            };
+        let connectors = ops::FollowConnectors {
+            enroll: &enroll_connect,
+            plane: &plane_connect,
+        };
+        // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op, so the
+        // enrollment writer can record the device key into it; mirror that here.
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane,
+            plane_key,
+            follow,
+        };
+        ops::follow(&ctx, &connectors, link, opts).map_err(|e| e.to_string())
+    }
+
+    /// Call 1: `topos follow <link>` — fetch the bootstrap, TOFU-pin, device-authorize, write the pending WAL.
+    ///
+    /// # Errors
+    /// The follow op's typed error rendered to a string (a TOFU mismatch / denied / transport failure).
+    pub fn follow(
+        &self,
+        link: &str,
+        plane_key: [u8; 32],
+    ) -> Result<topos_types::results::FollowData, String> {
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        let opts = ops::FollowOpts {
+            manual: false,
+            resume: false,
+            approve: Vec::new(),
+        };
+        self.run_follow(
+            &inert_plane,
+            &inert_follow,
+            plane_key,
+            Some(link.to_owned()),
+            opts,
+        )
+    }
+
+    /// Call 2: `topos follow --resume` — poll, redeem (sign the enroll possession proof over the wire), promote.
+    ///
+    /// # Errors
+    /// The follow op's typed error (pending/denied/expired/transport).
+    pub fn resume(&self, plane_key: [u8; 32]) -> Result<topos_types::results::FollowData, String> {
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        let opts = ops::FollowOpts {
+            manual: false,
+            resume: true,
+            approve: Vec::new(),
+        };
+        self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts)
+    }
+
+    /// `topos follow --approve <targets>` — place the first-received bytes through the REAL read transport
+    /// (wired from the minted creds the resume wrote into `follows.json`).
+    ///
+    /// # Errors
+    /// The follow op's typed error.
+    pub fn approve(
+        &self,
+        base_url: &str,
+        plane_key: [u8; 32],
+        targets: &[String],
+    ) -> Result<topos_types::results::FollowData, String> {
+        // Wire ctx.plane from the minted follow-state (the approve arm places through ctx.plane).
+        let follows = crate::enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .expect("follows.json exists after resume");
+        let creds = crate::enroll::skill_creds(&follows);
+        let contexts = crate::enroll::follow_contexts(&follows);
+        let plane = UreqPlane::new(base_url.to_owned(), creds);
+        let follow = FileFollow::new(contexts);
+        let opts = ops::FollowOpts {
+            manual: false,
+            resume: false,
+            approve: targets.to_vec(),
+        };
+        self.run_follow(&plane, &follow, plane_key, None, opts)
+    }
+
+    /// The plane public key pinned in `instance.json` (or `None` if not yet enrolled), as raw 32 bytes.
+    #[must_use]
+    pub fn instance_pinned_key(&self) -> Option<[u8; 32]> {
+        let instance = crate::enroll::read_instance(&self.fs, &self.layout()).ok()??;
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(&instance.plane_key, &mut out).ok()?;
+        Some(out)
+    }
+
+    /// The number of followed skills in `follows.json` (0 if absent).
+    #[must_use]
+    pub fn follows_count(&self) -> usize {
+        crate::enroll::read_follows(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map_or(0, |f| f.follows.len())
+    }
+
+    /// The unix permission bits of the `0600` device-key seed file (`None` if absent).
+    #[must_use]
+    pub fn device_key_mode(&self) -> Option<u32> {
+        std::fs::metadata(self.layout().device_key_path())
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+    }
+
+    /// Whether the pending-enrollment WAL is present (it must be after call 1, absent after a completed resume).
+    #[must_use]
+    pub fn wal_exists(&self) -> bool {
+        self.layout().enrollment_path().exists()
+    }
+
+    /// Whether enrollment is complete enough that the production `load_enrollment` would light up: `instance.json`
+    /// present AND `follows.json` names at least one followed skill.
+    #[must_use]
+    pub fn enrolled(&self) -> bool {
+        let layout = self.layout();
+        let Ok(Some(_)) = crate::enroll::read_instance(&self.fs, &layout) else {
+            return false;
+        };
+        crate::enroll::read_follows(&self.fs, &layout)
+            .ok()
+            .flatten()
+            .is_some_and(|f| f.follows.iter().any(|e| e.following))
+    }
+
+    /// The placed bundle for `skill_id`: `(relative path, mode & 0o777, bytes)`, sorted — for a byte-exact assert.
+    #[must_use]
+    pub fn placement_files(&self, skill_id: &str) -> Vec<(String, u32, Vec<u8>)> {
+        snapshot_dir(&self.work.0.join(skill_id))
     }
 }
 

@@ -4186,6 +4186,7 @@ dependencies = [
  "plane-store",
  "tokio",
  "topos",
+ "topos-core",
  "topos-plane",
  "topos-types",
 ]
