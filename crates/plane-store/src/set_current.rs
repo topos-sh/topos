@@ -42,6 +42,18 @@ pub struct DeviceSignedOp {
 pub struct SetCurrentReceipt {
     /// The client-minted op id this receipt is keyed by (with the workspace + device key id).
     pub op_id: String,
+    /// The canonical command this op carried (`publish-direct` / `publish-propose` / `revert` /
+    /// `review-approve` / `review-reject`) — part of the bound identity a same-`op_id` retry must match.
+    pub command: String,
+    /// The skill the op targets — part of the bound identity.
+    pub skill_id: String,
+    /// The candidate's server-rehashed version id. `None` for an outcome that ingested no version (a
+    /// rejected key-reuse, or a pre-ingest typed failure), never a client-claimed value.
+    pub version_id: Option<CommitId>,
+    /// The candidate's server-rehashed bundle digest — `None` whenever `version_id` is (no version ingested).
+    pub bundle_digest: Option<[u8; 32]>,
+    /// The `(epoch, seq)` the compare-and-set targeted — part of the bound identity.
+    pub expected: Generation,
     /// The terminal outcome.
     pub outcome: TerminalOutcome,
     /// The live `(epoch, seq)` — the **new** generation on `OK`, the **current** generation on `CONFLICT`.
@@ -51,6 +63,9 @@ pub struct SetCurrentReceipt {
     pub signed_record: Option<Vec<u8>>,
     /// The plane signing key id (`OK` only).
     pub key_id: Option<String>,
+    /// The server-stamped creation timestamp — STORED (not recomputed), so a lost-ack retry replays it
+    /// byte-for-byte.
+    pub created_at: String,
     /// Outcome-specific structured detail (e.g. the live commit id on a first-parent-mismatch `DENIED`).
     pub details: Option<serde_json::Value>,
 }
@@ -223,6 +238,7 @@ pub(crate) async fn revert(
             skill,
             good_digest,
             device.expected,
+            created_at,
         )
         .await?
     {

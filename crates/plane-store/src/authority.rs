@@ -7,6 +7,7 @@ use topos_gitstore::{LocalLargeStore, Store};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
+use crate::read::{CurrentPointer, ReadScope, VersionMeta};
 use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 use crate::sqlite::Db;
@@ -125,6 +126,69 @@ impl Authority {
         object_id: ObjectId,
     ) -> Result<Vec<u8>> {
         crate::read::read_object(self, principal, ws, skill, object_id).await
+    }
+
+    /// Resolve a presented **read token** to its opaque [`ReadScope`] — the read-credential resolver (the
+    /// entry point for every authenticated read). Only the token's sha256 is stored, so the plaintext is
+    /// never recoverable from the database; an unknown token is the single indistinguishable
+    /// [`AuthorityError::NotFound`]. The returned scope is a capability: it is passed back to
+    /// [`serve_object`](Self::serve_object) / [`read_current`](Self::read_current) /
+    /// [`read_version_metadata`](Self::read_version_metadata), never parsed by the caller.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
+    /// [`AuthorityError::Integrity`] if a stored token row is corrupt.
+    pub async fn resolve_read_token(&self, token: &str) -> Result<ReadScope> {
+        crate::read::resolve_read_token(self, token).await
+    }
+
+    /// Read a skill's signed `current` pointer for an authenticated [`ReadScope`] — the public authenticated
+    /// pointer-fetch surface (what a follower's currency check returns). `None` until the pointer has been
+    /// moved (signed); otherwise the raw `SignedCurrentRecord` bytes plus the extracted `(epoch, seq)`.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Integrity`] if the stored record blob is unparseable (corruption, never not-found);
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn read_current(&self, scope: &ReadScope) -> Result<Option<CurrentPointer>> {
+        crate::read::read_current(self, scope).await
+    }
+
+    /// Serve one object's bytes for an authenticated [`ReadScope`], asserting the scope's `(ws, skill)`
+    /// matches the request path's. A scope/path mismatch or a malformed object id is the single
+    /// indistinguishable [`AuthorityError::NotFound`]; otherwise the read goes through the skill-scoped
+    /// [`read_object`](Self::read_object).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a scope/path mismatch, a malformed id, or an unreachable object;
+    /// [`AuthorityError::Integrity`]/[`AuthorityError::Internal`] as [`read_object`](Self::read_object).
+    pub async fn serve_object(
+        &self,
+        scope: &ReadScope,
+        req_ws: &str,
+        req_skill: &str,
+        object_id_hex: &str,
+    ) -> Result<Vec<u8>> {
+        crate::read::serve_object(self, scope, req_ws, req_skill, object_id_hex).await
+    }
+
+    /// Read a version's authenticated metadata for a [`ReadScope`] (the version-metadata route's core):
+    /// `(version_id, parents, author, message, bundle_digest, files)`, assembled WITHOUT reading any blob
+    /// bytes. Asserts the scope/path match, R1-authorizes the version read (rostered ∧ accepted-trunk or
+    /// open-non-stale proposal), and returns the single indistinguishable [`AuthorityError::NotFound`] for an
+    /// unauthorized/unreachable version (never a `403`).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on scope/path mismatch, a bad id, or an unauthorized/unreachable version;
+    /// [`AuthorityError::Integrity`] on a provenance/store divergence; [`AuthorityError::Internal`] on a
+    /// database fault.
+    pub async fn read_version_metadata(
+        &self,
+        scope: &ReadScope,
+        req_ws: &str,
+        req_skill: &str,
+        version_id_hex: &str,
+    ) -> Result<VersionMeta> {
+        crate::read::read_version_metadata(self, scope, req_ws, req_skill, version_id_hex).await
     }
 
     /// Evaluate the cross-skill lineage predicate over a candidate set (a read-only gather + the pure
@@ -373,12 +437,14 @@ impl Authority {
         Ok(self.plane_signer()?.key_id().to_owned())
     }
 
-    /// Read back a skill's signed `current` record — the serialized `SignedCurrentRecord` a follower's
-    /// pointer fetch returns. `None` until the pointer has been moved (signed).
+    /// Read back a skill's signed `current` record — the serialized `SignedCurrentRecord` bytes. `None`
+    /// until the pointer has been moved (signed). **Unauthenticated** and `pub(crate)`: the public
+    /// authenticated pointer-fetch surface is [`read_current`](Self::read_current), which takes a resolved
+    /// [`ReadScope`]; this raw read is an internal building block (and the in-crate tests' assertion hook).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
-    pub async fn read_signed_record(
+    pub(crate) async fn read_signed_record(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,

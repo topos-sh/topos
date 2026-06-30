@@ -5,6 +5,8 @@
 //! a public seed would let any in-process linker grant itself read entitlement, the exact hole the
 //! privacy wall closes — and `#[cfg(test)]` keeps them out of every release artifact.
 
+use topos_core::digest;
+
 use super::Db;
 use super::lifecycle::GIT_OID_LEN;
 use crate::error::{AuthorityError, Result};
@@ -278,6 +280,56 @@ impl Db {
              ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
             ws_s,
             rr,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Stage a read token (the per-follower, per-skill read credential) — storing only its sha256, never the
+    /// plaintext, exactly as the resolver looks it up. Real minting (and the 0600 at-rest token file) lands
+    /// later behind the enrollment port.
+    pub(crate) async fn seed_read_token(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+        token: &str,
+    ) -> Result<()> {
+        let (ws_s, skill_s, principal_s) = (ws.as_str(), skill.as_str(), principal.as_str());
+        let token_sha256 = digest::sha256(token.as_bytes());
+        let key = token_sha256.as_slice();
+        sqlx::query!(
+            "INSERT INTO read_token (workspace_id, skill_id, principal, token_sha256) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (token_sha256) DO UPDATE SET \
+               workspace_id = excluded.workspace_id, skill_id = excluded.skill_id, principal = excluded.principal",
+            ws_s,
+            skill_s,
+            principal_s,
+            key,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Overwrite a skill's `current.signed_record` with arbitrary bytes (test-only) — drives the
+    /// `read_current` corrupt-blob path (an unparseable stored record is an Integrity fault, never not-found).
+    /// Requires the pointer to exist first.
+    pub(crate) async fn force_signed_record(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
+        sqlx::query!(
+            "UPDATE current SET signed_record = ?3 WHERE workspace_id = ?1 AND skill_id = ?2",
+            ws_s,
+            skill_s,
+            bytes,
         )
         .execute(&self.pool)
         .await

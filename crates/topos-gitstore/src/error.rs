@@ -62,6 +62,12 @@ pub enum VerifyError {
     /// Two version refs point at one git commit, making first-parent lineage ambiguous.
     #[error("two version refs point at one commit (ambiguous lineage)")]
     DuplicateLineage,
+    /// A commit's parent git OID maps to no version ref in this store, so its `version_id` cannot be
+    /// resolved. [`crate::Store::read_commit_meta`] maps EVERY parent and fails here rather than silently
+    /// dropping one (as the lenient first-parent [`crate::Store::log`] walk does) — the exact parent set is
+    /// load-bearing for the authority's version-metadata response.
+    #[error("a commit parent is not a known version in this store")]
+    UnmappedParent,
     /// No blob in the requested version's tree re-hashes to the requested object id — the object is
     /// not reachable in that version. Distinct from [`Self::MissingObject`] (a referenced object
     /// absent from the object database, i.e. corruption): this is a clean "not in this tree" answer.

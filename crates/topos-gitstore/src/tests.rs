@@ -254,6 +254,68 @@ fn first_parent_lineage_and_missing_parent() {
 }
 
 #[test]
+fn read_commit_meta_reads_exact_metadata_and_fails_on_an_unmapped_parent() {
+    let scratch = Scratch::new("commit-meta");
+    let store = Store::init(&scratch.0).expect("init");
+
+    // genesis, then a child with a distinct author + message.
+    let (vid1, _bd1) = commit_genesis(
+        &store,
+        &[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"v1\n",
+        }],
+    );
+    let th2 = store
+        .write_bundle(&[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"v2\n",
+        }])
+        .expect("write2");
+    let vid2 = sign::commit_id(&Commit {
+        parents: &[vid1],
+        tree: th2.bundle_digest,
+        author: "alice",
+        message: "second",
+    })
+    .unwrap();
+    store
+        .commit(vid2, &[vid1], &th2, "alice", "second")
+        .expect("commit2");
+
+    // Exact metadata for the child: its id, the COMPLETE parent set, and the display author + message
+    // (cross-checked against `log`, which decodes the same commit identically).
+    let meta = store.read_commit_meta(vid2).expect("read_commit_meta");
+    assert_eq!(meta.version_id, vid2);
+    assert_eq!(meta.parents, vec![vid1]);
+    assert_eq!(meta.author, "alice");
+    let log0 = store.log(vid2).expect("log");
+    assert_eq!(meta.author, log0[0].author);
+    assert_eq!(meta.message, log0[0].message);
+
+    // A genesis commit has no parents.
+    let g = store
+        .read_commit_meta(vid1)
+        .expect("read_commit_meta genesis");
+    assert!(g.parents.is_empty());
+
+    // Delete vid1's version ref so the child's parent maps to no known version. read_commit_meta must FAIL
+    // (never silently drop the parent, unlike `log`'s lenient first-parent walk). Re-open to read fresh refs.
+    let ref_path = store
+        .git_dir()
+        .join("refs/topos/versions")
+        .join(digest::to_hex(&vid1));
+    std::fs::remove_file(&ref_path).expect("remove vid1 ref");
+    let store = Store::open(store.git_dir()).expect("reopen");
+    assert!(matches!(
+        store.read_commit_meta(vid2),
+        Err(VerifyError::UnmappedParent)
+    ));
+}
+
+#[test]
 fn commit_refuses_a_lying_version_id() {
     let scratch = Scratch::new("lying");
     let store = Store::init(&scratch.0).expect("init");

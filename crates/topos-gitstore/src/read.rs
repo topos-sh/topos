@@ -307,6 +307,60 @@ impl Store {
         Ok(out)
     }
 
+    /// Read EXACTLY one commit's metadata — `(version_id, parents, author, message)` — **without walking
+    /// history**. Resolves `version_id` to its git commit, decodes its display author + message, and maps
+    /// EVERY parent's git OID back to a `version_id` via the version-ref set.
+    ///
+    /// Unlike [`Self::log`] — whose `filter_map` silently drops a parent it cannot map (correct for a partial
+    /// sidecar's display history, where the walk stops at its boundary) — this **fails** [`VerifyError::
+    /// UnmappedParent`] on any unmapped parent: the authority's version-metadata response must carry the
+    /// complete, exact parent set, never a quietly truncated one. Author/message are display-only (the
+    /// consent-critical fact is `bundle_digest`, re-verified in [`Self::render_verified`]).
+    ///
+    /// # Errors
+    /// [`VerifyError::MissingVersion`] if `version_id` is absent; [`VerifyError::UnmappedParent`] if a parent
+    /// is not in the version-ref set; [`VerifyError::DuplicateLineage`] on an ambiguous map;
+    /// [`VerifyError::MissingObject`] / [`VerifyError::Malformed`] if the commit cannot be read/decoded;
+    /// [`VerifyError::Gix`] on a ref-read failure.
+    pub fn read_commit_meta(&self, version_id: [u8; 32]) -> Result<VersionNode, VerifyError> {
+        // The reverse map (owned) is built first so its transient repo borrow is released before the commit
+        // borrow below; it maps each parent git OID back to its topos version_id.
+        let reverse = self.reverse_map()?;
+        let commit_oid = self
+            .resolve_version(&version_id)?
+            .ok_or(VerifyError::MissingVersion)?;
+        let commit = self
+            .repo()
+            .find_object(commit_oid)
+            .map_err(|_| VerifyError::MissingObject)?
+            .try_into_commit()
+            .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+        let parent_git: Vec<gix::ObjectId> = commit.parent_ids().map(|id| id.detach()).collect();
+        let (author, message) = {
+            let decoded = commit
+                .decode()
+                .map_err(|e| VerifyError::Malformed(format!("{e}")))?;
+            let author = decoded
+                .author()
+                .map(|s| s.name.to_string())
+                .unwrap_or_default();
+            (author, decoded.message.to_string())
+        };
+        // Map EVERY parent (never a lenient `filter_map`): a parent outside the version-ref set is a fault,
+        // not a silent history boundary — the metadata response reports the complete, exact lineage.
+        let mut parents = Vec::with_capacity(parent_git.len());
+        for g in &parent_git {
+            let vid = reverse.get(g).copied().ok_or(VerifyError::UnmappedParent)?;
+            parents.push(vid);
+        }
+        Ok(VersionNode {
+            version_id,
+            parents,
+            author,
+            message,
+        })
+    }
+
     /// Every `version_id` recorded in this store (unordered).
     ///
     /// # Errors

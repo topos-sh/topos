@@ -84,7 +84,7 @@ impl Db {
         };
         let outcome = match replay(&mut tx, r.ws, r.device_key_id, r.op_id, &bound).await? {
             Replay::Hit(receipt) => receipt,
-            Replay::Mismatch => permanent_key_reuse(r.op_id),
+            Replay::Mismatch => permanent_key_reuse(r.op_id, &bound, r.created_at),
             Replay::Fresh => {
                 let stored = StoredReceipt {
                     op_id: r.op_id.to_owned(),
@@ -146,6 +146,7 @@ impl Db {
     /// the op as `OP_ID_REUSED` instead of replaying the original `OK`). Run this BEFORE rebuilding the
     /// forward commit: `Some(receipt)` replays a prior result (a true retry — or a permanent `OP_ID_REUSED`
     /// if the same op id was reused for a different target/generation); `None` means proceed (a fresh op).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn replay_revert(
         &self,
         ws: &WorkspaceId,
@@ -154,6 +155,7 @@ impl Db {
         skill: &SkillId,
         good_digest: [u8; 32],
         expected: Generation,
+        created_at: &str,
     ) -> Result<Option<SetCurrentReceipt>> {
         let Some(stored) = get_receipt(self.pool(), ws, device_key_id, op_id).await? else {
             return Ok(None);
@@ -165,7 +167,16 @@ impl Db {
         Ok(Some(if stable_match {
             stored.into_receipt()
         } else {
-            permanent_key_reuse(op_id)
+            // The reuse receipt's bound identity is the revert's STABLE request key (no forward commit id,
+            // which re-parents on the live `current`); `permanent_key_reuse` carries no version regardless.
+            let bound = BoundIdentity {
+                command: "revert",
+                skill_id: skill.as_str(),
+                commit: None,
+                bundle_digest: Some(good_digest),
+                expected,
+            };
+            permanent_key_reuse(op_id, &bound, created_at)
         }))
     }
 
@@ -301,7 +312,7 @@ async fn run(
     // permanent key-reuse (the receipt slot belongs to the original op, never overwritten).
     match replay(tx, input.ws, input.device_key_id, input.op_id, &bound).await? {
         Replay::Hit(receipt) => return Ok(receipt),
-        Replay::Mismatch => return Ok(permanent_key_reuse(input.op_id)),
+        Replay::Mismatch => return Ok(permanent_key_reuse(input.op_id, &bound, input.created_at)),
         Replay::Fresh => {}
     }
 
@@ -718,7 +729,7 @@ async fn reject_run(
     // (1) Replay — a same-op_id retry replays the stored receipt; a different bound identity is key-reuse.
     match replay(tx, r.ws, r.device_key_id, r.op_id, &bound).await? {
         Replay::Hit(receipt) => return Ok(receipt),
-        Replay::Mismatch => return Ok(permanent_key_reuse(r.op_id)),
+        Replay::Mismatch => return Ok(permanent_key_reuse(r.op_id, &bound, r.created_at)),
         Replay::Fresh => {}
     }
 
@@ -981,13 +992,26 @@ fn detail(msg: &str) -> Option<serde_json::Value> {
 
 /// A same-`op_id` retry whose bound identity differs from the recorded op — a permanent key-reuse. NOT
 /// receipted (the slot belongs to the original op); determinism makes re-running it return this same value.
-fn permanent_key_reuse(op_id: &str) -> SetCurrentReceipt {
+/// The identity fields (command / skill_id / expected) come from the **incoming** request's `bound`; the
+/// candidate fields are `None` because a rejected reuse ingests no version (the original op's bytes are not
+/// this op's to claim).
+fn permanent_key_reuse(
+    op_id: &str,
+    bound: &BoundIdentity<'_>,
+    created_at: &str,
+) -> SetCurrentReceipt {
     SetCurrentReceipt {
         op_id: op_id.to_owned(),
+        command: bound.command.to_owned(),
+        skill_id: bound.skill_id.to_owned(),
+        version_id: None,
+        bundle_digest: None,
+        expected: bound.expected,
         outcome: TerminalOutcome::PermanentFailure,
         current: None,
         signed_record: None,
         key_id: None,
+        created_at: created_at.to_owned(),
         details: Some(serde_json::json!({ "code": "OP_ID_REUSED" })),
     }
 }
@@ -1003,6 +1027,10 @@ struct BoundIdentity<'a> {
     expected: Generation,
 }
 
+// A transient control-flow enum: built and immediately destructured in `replay`, never stored or collected,
+// so the size gap between the (intentionally rich) `Hit` receipt and the unit arms is irrelevant — boxing it
+// would add a heap alloc on the replay path for no benefit.
+#[allow(clippy::large_enum_variant)]
 enum Replay {
     Hit(SetCurrentReceipt),
     Mismatch,
@@ -1054,10 +1082,16 @@ impl StoredReceipt {
     fn into_receipt(self) -> SetCurrentReceipt {
         SetCurrentReceipt {
             op_id: self.op_id,
+            command: self.command,
+            skill_id: self.skill_id,
+            version_id: self.commit,
+            bundle_digest: self.bundle_digest,
+            expected: self.expected,
             outcome: self.outcome,
             current: self.current,
             signed_record: self.signed_record,
             key_id: self.key_id,
+            created_at: self.created_at,
             details: self.details,
         }
     }

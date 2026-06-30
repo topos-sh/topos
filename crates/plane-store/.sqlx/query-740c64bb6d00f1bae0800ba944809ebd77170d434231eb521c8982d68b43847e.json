@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE current SET signed_record = ?3 WHERE workspace_id = ?1 AND skill_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "740c64bb6d00f1bae0800ba944809ebd77170d434231eb521c8982d68b43847e"
+}

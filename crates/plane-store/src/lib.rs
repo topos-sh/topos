@@ -77,6 +77,7 @@ pub use authority::Authority;
 pub use error::{AuthorityError, Result};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
+pub use read::{CurrentPointer, ReadScope, VersionFile, VersionMeta};
 pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 

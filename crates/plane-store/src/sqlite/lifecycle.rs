@@ -4,6 +4,8 @@
 //! the module boundary and no caller can run an unbound query. The database is the sole authority for an
 //! object's byte status; the git store always trails it.
 
+use std::collections::HashMap;
+
 use super::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
@@ -421,6 +423,36 @@ impl Db {
                 ))
             })
             .collect()
+    }
+
+    /// Every PRESENT object in the workspace as `git_oid -> object_id`, BOTH locations — the version-metadata
+    /// read's join table. Each tree leaf's `git_oid` (the loose-object id for a git-resident blob, the
+    /// tree-entry bridge key for an offloaded one — both stored in `object_presence.git_oid`) resolves to its
+    /// content id WITHOUT reading any blob bytes (pure metadata). Mirrors [`Self::large_local_objects`] but
+    /// without the `location` filter. Bound on `workspace_id`; big-blob sets are small and version trees tiny,
+    /// so the existing `(workspace_id, status)` index suffices (no `git_oid` index needed).
+    pub(crate) async fn objects_by_git_oid(
+        &self,
+        ws: &WorkspaceId,
+    ) -> Result<HashMap<[u8; GIT_OID_LEN], [u8; 32]>> {
+        let ws_s = ws.as_str();
+        let rows = sqlx::query!(
+            r#"SELECT git_oid AS "git_oid: Vec<u8>", object_id AS "object_id!: Vec<u8>"
+               FROM object_presence
+               WHERE workspace_id = ?1 AND status = 'present'"#,
+            ws_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        let mut map = HashMap::with_capacity(rows.len());
+        for r in rows {
+            map.insert(
+                git_oid_from_row(r.git_oid)?,
+                object_id_from_row(r.object_id)?.0,
+            );
+        }
+        Ok(map)
     }
 
     /// The object ids of every STALE `deleting` row in the workspace — ones a crashed GC left behind (older

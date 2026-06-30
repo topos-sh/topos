@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT workspace_id AS \"workspace_id!\", skill_id AS \"skill_id!\", principal AS \"principal!\"\n               FROM read_token WHERE token_sha256 = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "workspace_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "skill_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "principal!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "96d2f672714a5daf317a4277059935e739695a08be51e35af15e35be9278dc96"
+}

@@ -169,6 +169,91 @@ impl Db {
         }
         Ok(out)
     }
+
+    /// Resolve a read token's sha256 to its `(workspace, skill, principal)` scope — the read-credential
+    /// resolver. **The one lookup NOT bound on `workspace_id`:** the token IS what resolves the workspace,
+    /// so this probes the globally-unique `token_sha256` primary key (O(1)) and ESTABLISHES the binding
+    /// every subsequent query carries. Only the hash is stored, never the plaintext. The row's strings were
+    /// validated when the token was minted, so a re-parse failure is store corruption (an integrity fault),
+    /// not a client error — mirroring `commit_owners` / `resolve_device`. `None` ⇒ no such token.
+    pub(crate) async fn lookup_read_token(
+        &self,
+        token_sha256: &[u8; 32],
+    ) -> Result<Option<(WorkspaceId, SkillId, Principal)>> {
+        let key = token_sha256.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT workspace_id AS "workspace_id!", skill_id AS "skill_id!", principal AS "principal!"
+               FROM read_token WHERE token_sha256 = ?1"#,
+            key,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some((
+                WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity)?,
+                SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
+                Principal::parse(&r.principal).map_err(AuthorityError::integrity)?,
+            ))),
+        }
+    }
+
+    /// The version-read authorization — the R1 gate the version-metadata route runs, mirroring
+    /// [`Self::authorize_object_read`] but anchored on a VERSION (`commit_id`) rather than an object. `true`
+    /// iff `principal` is rostered for `skill` AND the version is readable through EITHER:
+    /// - **trunk**: the version is owned by the skill (`skill_commit`) AND has ≥1 `commit_object` edge — the
+    ///   accepted-trunk test (every accepted version roots ≥1 object, so a non-empty edge set is exact), OR
+    /// - **proposal**: an OPEN, NON-STALE proposal of the skill whose `commit_id` is this version. This arm
+    ///   reuses the SAME `status='open' ∧ (base_epoch, base_seq) == current.(epoch, seq)` staleness predicate
+    ///   the object read arm ([`Self::authorize_object_read`]) and the two GC keep-checks
+    ///   ([`Self::claim_for_delete`] / [`Self::claim_stale_for_recovery`]) use — here anchored on
+    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is a 4th copy
+    ///   of the literal, not a shared string; the behavioral proposal-version tests pin it to the same
+    ///   staleness semantics). It deliberately does NOT authorize on bare `skill_commit`, which also names
+    ///   unaccepted/rejected proposal candidates — that would leak a never-accepted version's metadata.
+    ///
+    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
+    pub(crate) async fn authorize_version_read(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+        version_id: CommitId,
+    ) -> Result<bool> {
+        let ws = ws.as_str();
+        let skill = skill.as_str();
+        let principal = principal.as_str();
+        let cid = version_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!: i64" FROM (
+                SELECT 1 AS ok
+                FROM roster r
+                JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id AND sc.commit_id = ?4
+                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
+                WHERE r.workspace_id = ?1 AND r.skill_id = ?2 AND r.principal = ?3
+              UNION ALL
+                SELECT 1 AS ok
+                FROM roster   r2
+                JOIN proposals p ON p.workspace_id = r2.workspace_id AND p.skill_id = r2.skill_id
+                JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                WHERE r2.workspace_id = ?1 AND r2.skill_id = ?2 AND r2.principal = ?3
+                  AND p.commit_id = ?4 AND p.status = 'open'
+                  AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+            ) w
+            LIMIT 1
+            "#,
+            ws,
+            skill,
+            principal,
+            cid,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.is_some())
+    }
 }
 
 /// Shared roster-existence probe (used by both the cheap pre-read on the pool and the authoritative
