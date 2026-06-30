@@ -1,0 +1,1347 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Topos OSS plane",
+    "description": "The self-hostable Topos plane — device-signed writes + token-scoped reads. Every returned protocol outcome rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "license": {
+      "name": "Apache-2.0"
+    },
+    "version": "0.0.0"
+  },
+  "paths": {
+    "/v1/current/{read_token}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_current",
+        "parameters": [
+          {
+            "name": "read_token",
+            "in": "path",
+            "description": "The per-follower read token (resolves to an opaque scope).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The cached ETag \"<epoch>.<seq>\".",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Topos-Known-Version-Id",
+            "in": "header",
+            "description": "The client's known current commit id (hex64) — the commit-sensitive half of the 304.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The signed current record (application/json) + a commit-sensitive ETag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Pointer unchanged (the ETag AND the known version both match)."
+          },
+          "404": {
+            "description": "No such token, or no current pointer yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/proposals": {
+      "post": {
+        "tags": [
+          "writes"
+        ],
+        "operationId": "propose",
+        "parameters": [
+          {
+            "name": "Topos-Device-Signature",
+            "in": "header",
+            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The proposal receipt (NEEDS_REVIEW on success; CONFLICT / DENIED / … otherwise).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, identifier, or device signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/publish": {
+      "post": {
+        "tags": [
+          "writes"
+        ],
+        "operationId": "publish",
+        "parameters": [
+          {
+            "name": "Topos-Device-Signature",
+            "in": "header",
+            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The publish receipt — EVERY protocol outcome (OK / CONFLICT / APPROVAL_REQUIRED / DENIED / …).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, identifier, or device signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reverts": {
+      "post": {
+        "tags": [
+          "writes"
+        ],
+        "operationId": "revert",
+        "parameters": [
+          {
+            "name": "Topos-Device-Signature",
+            "in": "header",
+            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The revert receipt (OK on success; CONFLICT / DENIED / … otherwise).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, identifier, or device signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reviews": {
+      "post": {
+        "tags": [
+          "writes"
+        ],
+        "operationId": "review",
+        "parameters": [
+          {
+            "name": "Topos-Device-Signature",
+            "in": "header",
+            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review receipt (OK on an approve that promoted; CONFLICT / DENIED / … otherwise).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, identifier, or device signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_bundle",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "Skill id (must match the read token's scope).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "path",
+            "description": "The content id (hex64) of the object to fetch.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer <read_token>.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The raw object bytes (content-addressed, immutable).",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No/blank credential, scope/path mismatch, or unreachable object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "Skill id (must match the read token's scope).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "The version (commit) id (hex64) whose metadata to read.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer <read_token>.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version's authenticated metadata (immutable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireVersionMeta"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No/blank credential, scope/path mismatch, or unauthorized/unreachable version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActionCode": {
+        "type": "string",
+        "title": "ActionCode",
+        "description": "A machine-actionable next-action code. The values in `examples` are the known set; an unrecognized future code is still valid and MUST be executed via the action's `argv` (never rejected).",
+        "examples": [
+          "PROPOSE_PUBLISH",
+          "REBASE_AND_RETRY",
+          "RESOLVE_DIVERGED_DRAFT",
+          "APPLY_WAITING_UPDATE",
+          "DISAMBIGUATE_NAME",
+          "REPIN_PLANE_KEY",
+          "REQUEST_ACCESS",
+          "RETRY",
+          "CONTACT_ADMIN"
+        ]
+      },
+      "Affected": {
+        "type": "object",
+        "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
+        "properties": {
+          "proposal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skill": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `version_id` (commit SHA-256, lowercase hex) when the outcome refers to a version."
+          },
+          "workspace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CurrentRecord": {
+        "type": "object",
+        "required": [
+          "version_id",
+          "generation"
+        ],
+        "properties": {
+          "generation": {
+            "$ref": "#/components/schemas/Generation"
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the\npointer names the version, and the commit transitively pins the bytes."
+          }
+        }
+      },
+      "Generation": {
+        "type": "object",
+        "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+        "required": [
+          "epoch",
+          "seq"
+        ],
+        "properties": {
+          "epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "JsonEnvelope": {
+        "type": "object",
+        "description": "The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the\nSAME typed value where practical.",
+        "required": [
+          "schema_version",
+          "command",
+          "ok"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …)."
+          },
+          "data": {
+            "description": "Command-specific payload (`{}` when empty)."
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WireError",
+                "description": "The actionable failure detail (when `ok == false`)."
+              }
+            ]
+          },
+          "next_actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NextAction"
+            },
+            "description": "Stable, machine-actionable next steps — each carries a complete argv."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "receipt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Receipt",
+                "description": "The durable idempotency record — present on **every** terminal op, including failures."
+              }
+            ]
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "NextAction": {
+        "type": "object",
+        "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
+        "required": [
+          "code",
+          "argv"
+        ],
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A complete argv array — execute as-is (no TTY parsing)."
+          },
+          "code": {
+            "$ref": "#/components/schemas/ActionCode"
+          }
+        }
+      },
+      "PointerScope": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "skill_id"
+        ],
+        "properties": {
+          "skill_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ProposeData": {
+        "type": "object",
+        "description": "`publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns\n`NEEDS_REVIEW`. **INFERRED.**",
+        "required": [
+          "proposal",
+          "base_version_id",
+          "title"
+        ],
+        "properties": {
+          "base_version_id": {
+            "type": "string"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proposal": {
+            "type": "string",
+            "description": "`<skill>@<version_id>` of the candidate."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "ProposeRequest": {
+        "type": "object",
+        "description": "`POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving\n`current` or signing** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as\n`publish` (candidate + device + `op_id` + `expected`); there is **no** separate title/body on the op (a\ntitle/body, if ever surfaced, would be composed into the candidate's commit message).",
+        "required": [
+          "workspace_id",
+          "skill_id",
+          "op_id",
+          "device_key_id",
+          "expected",
+          "candidate"
+        ],
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/WireCandidate",
+            "description": "The full candidate bundle to ingest as the proposal's content."
+          },
+          "device_key_id": {
+            "type": "string",
+            "description": "The id of the device key whose signature (in the header) authorizes this op."
+          },
+          "expected": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current."
+          },
+          "op_id": {
+            "type": "string",
+            "description": "The client-minted UUIDv4 idempotency key (replays the stored receipt on retry)."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The target skill id within the workspace."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The target workspace id."
+          }
+        }
+      },
+      "PublishData": {
+        "type": "object",
+        "description": "`publish` (a direct publish that moves `current`). On the FIRST publish the `/i/` link is\nreturned. Under `review-required` a direct publish instead returns `APPROVAL_REQUIRED` (with the\n`publish --propose` next-action) and carries no `data`. **INFERRED.**",
+        "required": [
+          "skill_id",
+          "version_id",
+          "bundle_digest",
+          "current_generation"
+        ],
+        "properties": {
+          "bundle_digest": {
+            "type": "string"
+          },
+          "current_generation": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The pointer's new generation after the move."
+          },
+          "invite_link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Returned only on the first publish (which stands up the workspace): `/i/<token>`."
+          },
+          "skill_id": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The new commit."
+          }
+        }
+      },
+      "PublishRequest": {
+        "type": "object",
+        "description": "`POST /v1/publish` body — a direct publish that moves `current`. The device signature is the\n`Topos-Device-Signature` header (not a body field); the server stamps `created_at`. Under\n`review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.",
+        "required": [
+          "workspace_id",
+          "skill_id",
+          "op_id",
+          "device_key_id",
+          "expected",
+          "candidate"
+        ],
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/WireCandidate",
+            "description": "The full candidate bundle to ingest + publish."
+          },
+          "device_key_id": {
+            "type": "string",
+            "description": "The id of the device key whose signature (in the header) authorizes this op."
+          },
+          "expected": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`."
+          },
+          "op_id": {
+            "type": "string",
+            "description": "The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The target skill id within the workspace."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The target workspace id (the receipt + pointer scope)."
+          }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
+        "required": [
+          "schema_version",
+          "op_id",
+          "command",
+          "outcome",
+          "workspace_id",
+          "created_at"
+        ],
+        "properties": {
+          "bundle_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The byte-exact consent hash (lowercase hex)."
+          },
+          "command": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`)."
+          },
+          "current_generation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation"
+              }
+            ]
+          },
+          "details": {
+            "description": "Outcome-specific extra detail."
+          },
+          "expected_generation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation"
+              }
+            ]
+          },
+          "key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The signing key id that covered this op."
+          },
+          "op_id": {
+            "type": "string",
+            "description": "Client-minted UUIDv4, persisted before the first send."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/TerminalOutcome"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          },
+          "skill_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit SHA-256 (lowercase hex)."
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RevertData": {
+        "type": "object",
+        "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a\npointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
+        "required": [
+          "skill_id",
+          "reverted_to",
+          "new_version_id",
+          "current_generation"
+        ],
+        "properties": {
+          "current_generation": {
+            "$ref": "#/components/schemas/Generation"
+          },
+          "new_version_id": {
+            "type": "string",
+            "description": "The new forward-revert commit that carries those bytes."
+          },
+          "reverted_to": {
+            "type": "string",
+            "description": "The good version named by `--to` (the bytes being restored)."
+          },
+          "skill_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RevertRequest": {
+        "type": "object",
+        "description": "`POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the\n`good` version's bytes on top of `current` (`seq` advances; the pointer never moves backward). There is\n**no candidate** — the server reads `good`'s tree + digest from its provenance and builds the commit.",
+        "required": [
+          "workspace_id",
+          "skill_id",
+          "op_id",
+          "device_key_id",
+          "expected",
+          "good",
+          "author",
+          "message"
+        ],
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "The author device id recorded in the forward-revert commit frame."
+          },
+          "device_key_id": {
+            "type": "string",
+            "description": "The id of the device key whose signature (in the header) authorizes this op."
+          },
+          "expected": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`."
+          },
+          "good": {
+            "type": "string",
+            "description": "The GOOD version (the `version_id` whose bytes are restored) as 64-char lowercase hex."
+          },
+          "message": {
+            "type": "string",
+            "description": "The forward-revert commit message."
+          },
+          "op_id": {
+            "type": "string",
+            "description": "The client-minted UUIDv4 idempotency key (replays the stored receipt on retry)."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The target skill id within the workspace."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The target workspace id."
+          }
+        }
+      },
+      "ReviewData": {
+        "type": "object",
+        "description": "`review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale\nbase returns `CONFLICT`. **INFERRED.**",
+        "required": [
+          "proposal",
+          "decision"
+        ],
+        "properties": {
+          "current_generation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation",
+                "description": "The pointer's new generation when an approval moved `current`."
+              }
+            ]
+          },
+          "decision": {
+            "$ref": "#/components/schemas/ReviewDecision"
+          },
+          "proposal": {
+            "type": "string",
+            "description": "`<skill>@<version_id>` of the reviewed proposal."
+          }
+        }
+      },
+      "ReviewDecision": {
+        "type": "string",
+        "description": "A review verdict. **INFERRED.**",
+        "enum": [
+          "approve",
+          "reject"
+        ]
+      },
+      "ReviewRequest": {
+        "type": "object",
+        "description": "`POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared\n`(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under\n`review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`\nis a standalone status flip (nothing signed).",
+        "required": [
+          "workspace_id",
+          "skill_id",
+          "op_id",
+          "device_key_id",
+          "expected",
+          "proposal",
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ReviewDecision",
+            "description": "The verdict — `approve` (promote) or `reject`."
+          },
+          "device_key_id": {
+            "type": "string",
+            "description": "The id of the device key whose signature (in the header) authorizes this op."
+          },
+          "expected": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an\n`approve` yields `CONFLICT`."
+          },
+          "op_id": {
+            "type": "string",
+            "description": "The client-minted UUIDv4 idempotency key (replays the stored receipt on retry)."
+          },
+          "proposal": {
+            "type": "string",
+            "description": "The proposal being reviewed, named by its candidate commit id (64-char lowercase hex)."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The target skill id within the workspace."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The target workspace id."
+          }
+        }
+      },
+      "Signature": {
+        "type": "object",
+        "required": [
+          "alg",
+          "key_id",
+          "value"
+        ],
+        "properties": {
+          "alg": {
+            "$ref": "#/components/schemas/SignatureAlg"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "description": "base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars."
+          }
+        }
+      },
+      "SignatureAlg": {
+        "type": "string",
+        "description": "The signature algorithm — a CLOSED set. v0 is Ed25519 only; an unknown or `none` algorithm must\nfail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root\npointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the\nexact opposite of a next-action code and must never silently pass through.)",
+        "enum": [
+          "Ed25519"
+        ]
+      },
+      "SignedCurrentRecord": {
+        "type": "object",
+        "description": "The signed `current` pointer — a versioned envelope; `ETag = \"<epoch>.<seq>\"`.",
+        "required": [
+          "schema_version",
+          "scope",
+          "record",
+          "signature"
+        ],
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/CurrentRecord"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/PointerScope"
+          },
+          "signature": {
+            "$ref": "#/components/schemas/Signature"
+          }
+        }
+      },
+      "TerminalOutcome": {
+        "type": "string",
+        "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
+        "enum": [
+          "OK",
+          "APPROVAL_REQUIRED",
+          "NEEDS_REVIEW",
+          "CONFLICT",
+          "DIVERGED",
+          "DENIED",
+          "UNAVAILABLE",
+          "AMBIGUOUS_NAME",
+          "KEY_REPIN_REQUIRED",
+          "RETRYABLE_FAILURE",
+          "PERMANENT_FAILURE"
+        ]
+      },
+      "WireCandidate": {
+        "type": "object",
+        "description": "A full candidate bundle: every file's bytes, the declared parents, and the author + message — the\nshared input the `publish` and `propose` writes ingest (the `revert` write needs no candidate; the\nserver builds that forward commit from the good version). Maps to `plane-store`'s\n`CandidateUpload { files, parents, author, message }` — each `parents` entry hex-decoded into a\n`CommitId`.",
+        "required": [
+          "files",
+          "parents",
+          "author",
+          "message"
+        ],
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "The author device id recorded in the commit frame."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireFile"
+            },
+            "description": "Every file in the candidate bundle (each server-rehashed)."
+          },
+          "message": {
+            "type": "string",
+            "description": "The commit message (title + body composed into one string)."
+          },
+          "parents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The candidate commit's declared parents, each a 64-char lowercase-hex `version_id` (`0` parents for a\ngenesis publish, `1` for a normal publish / propose, `2` for an author merge). Each must already be\npresent in the workspace; a lie changes the recomputed commit id, so the server need not trust it."
+          }
+        }
+      },
+      "WireError": {
+        "type": "object",
+        "description": "The flat wire error (rich `thiserror` enums stay internal). Carries a\nstable code + retryability + the safe next actions; never raw SQL/git strings.",
+        "required": [
+          "code",
+          "outcome",
+          "retryable"
+        ],
+        "properties": {
+          "affected": {
+            "$ref": "#/components/schemas/Affected"
+          },
+          "code": {
+            "type": "string",
+            "description": "A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an\n**open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are\nadded over time, and a consumer must treat an unrecognized `code` as the `outcome` it carries."
+          },
+          "context": {
+            "description": "Structured context (no TTY prose to parse)."
+          },
+          "current_generation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation"
+              }
+            ]
+          },
+          "expected_generation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation"
+              }
+            ]
+          },
+          "next_actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NextAction"
+            }
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/TerminalOutcome"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WireFile": {
+        "type": "object",
+        "description": "One file of a candidate bundle, uploaded **by value**. The raw bytes ride as base64 in the JSON body\n(`content_base64`, standard alphabet); the server base64-decodes them and **rehashes every byte** to\nderive the content id — there is no reference-by-id, and a client hash is never trusted. Maps to\n`plane-store`'s `UploadedFile { path, mode, bytes }` (decode `content_base64` → `bytes`).",
+        "required": [
+          "path",
+          "mode",
+          "content_base64"
+        ],
+        "properties": {
+          "content_base64": {
+            "type": "string",
+            "description": "The raw file bytes, base64-encoded. The server decodes then rehashes them (server-side digest)."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/WireFileMode",
+            "description": "The file mode (regular or executable)."
+          },
+          "path": {
+            "type": "string",
+            "description": "The bundle-relative, forward-slash path."
+          }
+        }
+      },
+      "WireFileMode": {
+        "type": "string",
+        "description": "A candidate file's mode on the wire — the two git regular-file modes as their literal octal strings\n(`\"100644\"` / `\"100755\"`). A **closed** wire mirror of `topos_core::digest::FileMode`: that kernel enum\nlives in a `no_std` crate `topos-types` does not depend on (and it carries no serde/schema derives), so\nthe wire leaf owns its own copy. The route handler maps it 1:1 at the edge —\n`Regular ⇔ FileMode::Regular`, `Executable ⇔ FileMode::Executable` — for both the inbound candidate\n([`WireFile`]) and the outbound version metadata ([`WireVersionFile`]).",
+        "enum": [
+          "100644",
+          "100755"
+        ]
+      },
+      "WireVersionFile": {
+        "type": "object",
+        "description": "One file of a version's metadata on the wire — its path, mode, and content id (`object_id`), mirroring\n`plane-store`'s `VersionFile` with the id hex-encoded. The **bytes are NOT here**: a client fetches each\nby `object_id` through the bundle (object) read route.",
+        "required": [
+          "path",
+          "mode",
+          "object_id"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/WireFileMode",
+            "description": "The file mode (regular or executable)."
+          },
+          "object_id": {
+            "type": "string",
+            "description": "The file's content id (64-char lowercase hex) — the handle the per-blob read route resolves."
+          },
+          "path": {
+            "type": "string",
+            "description": "The bundle-relative, forward-slash path."
+          }
+        }
+      },
+      "WireVersionMeta": {
+        "type": "object",
+        "description": "`GET /v1/workspaces/{ws}/skills/{skill}/versions/{version_id}` response body — a version's authenticated\nmetadata: its id, the COMPLETE parent set, display author + message, the consent `bundle_digest`, and the\nper-file `(path, mode, object_id)` leaves. Mirrors `plane-store`'s `VersionMeta` with every 32-byte id\nhex-encoded. Assembled WITHOUT reading any blob bytes; the `bundle_digest` is the pin the client's\nper-blob fetches + its own re-hash must reproduce.",
+        "required": [
+          "version_id",
+          "parents",
+          "author",
+          "message",
+          "bundle_digest",
+          "files"
+        ],
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "The author device id from the commit frame."
+          },
+          "bundle_digest": {
+            "type": "string",
+            "description": "The byte-exact consent hash over the bundle (64-char lowercase hex) — the fetch + re-hash pin."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireVersionFile"
+            },
+            "description": "The per-file leaves, in the version's recorded order."
+          },
+          "message": {
+            "type": "string",
+            "description": "The commit message (title + body as one string)."
+          },
+          "parents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The COMPLETE parent set, each a 64-char lowercase-hex commit id (`0` for genesis, `1` normally, `2`\nfor an author merge)."
+          },
+          "version_id": {
+            "type": "string",
+            "description": "This version's commit id (64-char lowercase hex)."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "writes",
+      "description": "Device-signed writes (publish / propose / revert / review)."
+    },
+    {
+      "name": "reads",
+      "description": "Token-scoped reads (current / bundles / versions)."
+    }
+  ]
+}

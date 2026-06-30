@@ -309,5 +309,8 @@ mod set_current;
 // The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
 mod proposals;
 
-#[cfg(test)]
+// Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
+// `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them
+// to the feature-gated `Authority` shims a downstream test crate drives.
+#[cfg(any(test, feature = "test-fixtures"))]
 mod seed;

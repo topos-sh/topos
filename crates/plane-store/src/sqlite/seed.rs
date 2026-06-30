@@ -1,9 +1,13 @@
-//! Test-only staging helpers — `#[cfg(test)] pub(crate)`, **never public.**
+//! Test-only staging helpers — `pub(crate)`, **never public.**
 //!
 //! These insert roster / provenance / pointer rows directly so the access-port, lineage, and
 //! isolation tests can stage state without the (deferred) pointer-move write. They are never `pub` —
 //! a public seed would let any in-process linker grant itself read entitlement, the exact hole the
-//! privacy wall closes — and `#[cfg(test)]` keeps them out of every release artifact.
+//! privacy wall closes. The module is gated under `cfg(any(test, feature = "test-fixtures"))`: `test`
+//! keeps them out of every release artifact, while the feature exposes the small subset the
+//! `Authority` test-fixtures shims drive (the rest stay `pub(crate)` staging helpers the in-crate tests
+//! use, so they are legitimately dead in a feature-only — non-test — build).
+#![cfg_attr(not(test), allow(dead_code))]
 
 use topos_core::digest;
 

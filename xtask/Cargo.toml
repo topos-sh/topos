@@ -10,7 +10,9 @@ description = "The ONE codegen + conformance entrypoint (a cargo-xtask bin, not 
 
 [dependencies]
 topos-types.workspace = true
+topos-plane.workspace = true # the OSS plane lib — for `topos_plane::openapi()` (the OpenAPI drift gate)
 schemars.workspace = true
+utoipa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

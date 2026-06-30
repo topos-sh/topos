@@ -10,7 +10,7 @@
 //! `migrate` is split into `lease` / `install` / `finish` so a test can interleave a GC between them
 //! deterministically (no timing).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use topos_core::sign::{self, Commit};
@@ -170,9 +170,11 @@ pub(crate) async fn migrate_install(
     staged: &StagedCandidate,
     now: i64,
 ) -> Result<()> {
-    let quarantine = Store::open(&staged.quarantine_dir).map_err(AuthorityError::internal)?;
+    // Pass the quarantine DIR (not an open `Store`) into `install_one`: the gix `Store` (which is not `Send`)
+    // is opened fresh inside the synchronous install helpers and never held across an `.await`, so the
+    // migrate future stays `Send` (axum's handlers require it). The fence logic + write order are unchanged.
     for entry in distinct_entries(&staged.entries) {
-        install_one(authority, ws, &quarantine, entry, now).await?;
+        install_one(authority, ws, &staged.quarantine_dir, entry, now).await?;
     }
     Ok(())
 }
@@ -186,22 +188,26 @@ pub(crate) async fn migrate_finish(
     staged: &StagedCandidate,
     now: i64,
 ) -> Result<()> {
-    let main = authority.store_for_write(ws)?;
-    let entries: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = staged
-        .entries
-        .iter()
-        .map(|e| (e.path.as_str(), e.mode, e.git_oid))
-        .collect();
-    let parents: Vec<[u8; 32]> = staged.parents.iter().map(|c| c.0).collect();
-    main.commit_durable(
-        staged.version_id.0,
-        &parents,
-        &entries,
-        staged.bundle_digest,
-        &staged.author,
-        &staged.message,
-    )
-    .map_err(map_stage_reject)?;
+    // Scope the (non-`Send`) gix `Store` to this synchronous block so it is dropped before the awaits below
+    // — keeping the migrate future `Send` (axum requires it). The commit-then-lease ORDER is unchanged.
+    {
+        let main = authority.store_for_write(ws)?;
+        let entries: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = staged
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.mode, e.git_oid))
+            .collect();
+        let parents: Vec<[u8; 32]> = staged.parents.iter().map(|c| c.0).collect();
+        main.commit_durable(
+            staged.version_id.0,
+            &parents,
+            &entries,
+            staged.bundle_digest,
+            &staged.author,
+            &staged.message,
+        )
+        .map_err(map_stage_reject)?;
+    }
 
     // Success: the lease becomes the durable root until the pointer-move consumes it. The CAS on the
     // staged commit + lease liveness fails closed if this migrate's lease lapsed (so it cannot claim a
@@ -246,21 +252,25 @@ pub(crate) async fn stage_forward_commit(
         .insert_lease(ws, op_id, version_id, object_ids, now + LEASE_TTL_SECS)
         .await?;
 
-    let main = authority.store_for_write(ws)?;
-    let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
-        .iter()
-        .map(|(p, m, g)| (p.as_str(), *m, *g))
-        .collect();
-    let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
-    main.commit_durable(
-        version_id.0,
-        &parent_bytes,
-        &entry_refs,
-        bundle_digest,
-        author,
-        message,
-    )
-    .map_err(map_stage_reject)?;
+    // Scope the (non-`Send`) gix `Store` to this synchronous block so it drops before the `commit_lease`
+    // await (axum requires the future to be `Send`); the write order is unchanged.
+    {
+        let main = authority.store_for_write(ws)?;
+        let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
+            .iter()
+            .map(|(p, m, g)| (p.as_str(), *m, *g))
+            .collect();
+        let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
+        main.commit_durable(
+            version_id.0,
+            &parent_bytes,
+            &entry_refs,
+            bundle_digest,
+            author,
+            message,
+        )
+        .map_err(map_stage_reject)?;
+    }
 
     authority
         .db()
@@ -311,7 +321,7 @@ pub(crate) async fn migrate(
 async fn install_one(
     authority: &Authority,
     ws: &WorkspaceId,
-    quarantine: &Store,
+    quarantine_dir: &Path,
     entry: &StagedEntry,
     now: i64,
 ) -> Result<()> {
@@ -331,7 +341,7 @@ async fn install_one(
                     .object_location(ws, object_id)
                     .await?
                     .unwrap_or(Location::Git);
-                rematerialize_if_gone(authority, ws, quarantine, entry, location)?;
+                rematerialize_if_gone(authority, ws, quarantine_dir, entry, location)?;
                 return Ok(()); // dedup: reuse the already-present (and now verified) bytes
             }
             ObjectStatus::Unavailable => {
@@ -351,7 +361,7 @@ async fn install_one(
                 // Install the bytes durably FIRST, then the `absent → present` CAS records that location — so
                 // a `present` row always denotes durably-installed bytes, in either store.
                 let location = route_location(entry.size, authority.large_threshold());
-                install_bytes(authority, ws, quarantine, entry, location)?;
+                install_bytes(authority, ws, quarantine_dir, entry, location)?;
                 match authority
                     .db()
                     .install_object(
@@ -407,14 +417,17 @@ fn route_location(size: u64, threshold: u64) -> Location {
 fn install_bytes(
     authority: &Authority,
     ws: &WorkspaceId,
-    quarantine: &Store,
+    quarantine_dir: &Path,
     entry: &StagedEntry,
     location: Location,
 ) -> Result<()> {
+    // A fresh quarantine handle, opened + dropped within this synchronous fn — so the non-`Send` gix `Store`
+    // is never alive across an `.await` in the calling migrate future.
+    let quarantine = Store::open(quarantine_dir).map_err(AuthorityError::internal)?;
     match location {
         Location::Git => {
             let main = authority.store_for_write(ws)?;
-            main.install_object_durable(quarantine, entry.git_oid)
+            main.install_object_durable(&quarantine, entry.git_oid)
                 .map_err(AuthorityError::internal)?;
         }
         Location::LargeLocal => {
@@ -436,7 +449,7 @@ fn install_bytes(
 fn rematerialize_if_gone(
     authority: &Authority,
     ws: &WorkspaceId,
-    quarantine: &Store,
+    quarantine_dir: &Path,
     entry: &StagedEntry,
     location: Location,
 ) -> Result<()> {
@@ -451,7 +464,7 @@ fn rematerialize_if_gone(
             .map_err(AuthorityError::internal)?,
     };
     if !present {
-        install_bytes(authority, ws, quarantine, entry, location)?;
+        install_bytes(authority, ws, quarantine_dir, entry, location)?;
     }
     Ok(())
 }

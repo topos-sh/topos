@@ -524,6 +524,151 @@ impl Authority {
     }
 }
 
+// ── test-fixtures shims (feature-gated; NEVER part of the production API) ──────────────────────────────
+//
+// A clearly-marked, feature-gated surface a DOWNSTREAM test crate (the OSS plane's HTTP routes, the HERO
+// loopback) drives to stage an authority without a real enrollment subsystem. Each shim only DRIVES an
+// existing op or seed helper — it grants no capability the production API doesn't already enforce (a write
+// still needs a registered, non-revoked, rostered device; a read still needs a minted token). Gated behind
+// `feature = "test-fixtures"`, which the production `topos-plane` build never enables (a CI guard asserts
+// it), so none of this ships.
+#[cfg(feature = "test-fixtures")]
+impl Authority {
+    /// Stage a roster membership (the read/write entitlement for a principal on a skill). Test-only.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_roster(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+    ) -> Result<()> {
+        self.db.seed_roster(ws, skill, principal).await
+    }
+
+    /// Register a device key — `(device_key_id) -> (public_key, principal, revoked)` — the pointer-move's
+    /// in-transaction authorization resolves against. Test-only (real issuance is the enrollment port's).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_device(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        public_key: &[u8; 32],
+        principal: &Principal,
+        revoked: bool,
+    ) -> Result<()> {
+        self.db
+            .seed_device(ws, device_key_id, public_key, principal, revoked)
+            .await
+    }
+
+    /// Mint a read token (store only its sha256, exactly as [`resolve_read_token`](Self::resolve_read_token)
+    /// looks it up). Test-only — the real minting + the `0600` at-rest token file land with the enrollment port.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn mint_read_token(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+        token: &str,
+    ) -> Result<()> {
+        self.db.seed_read_token(ws, skill, principal, token).await
+    }
+
+    /// Drive a REAL genesis [`publish`](Self::publish): recompute the server-trusted ids the publish's ingest
+    /// will derive (so the device op signs over them, exactly as an honest client would), sign with the given
+    /// device seed, then publish — producing a SIGNED `current` pointer at generation (1,1). The device must
+    /// already be registered ([`seed_device`](Self::seed_device)) + rostered ([`seed_roster`](Self::seed_roster)).
+    /// Test-only.
+    ///
+    /// Returns the durable [`SetCurrentReceipt`] (its `version_id`/`current` drive a follow-up test).
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish); [`AuthorityError::RejectedUpload`] if the candidate is malformed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seed_published_genesis(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        device_key_id: &str,
+        device_seed: &[u8; 32],
+        op_id: &OpId,
+        files: Vec<crate::UploadedFile>,
+        author: &str,
+        message: &str,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use topos_core::digest::{self, ManifestEntry};
+        use topos_core::sign::{self, Commit, DeviceOp, DeviceOpFields, device_op_preimage};
+
+        // The server-trusted genesis ids — identical to what `publish`'s ingest recomputes (both run the
+        // kernel digest over the same `(path, mode, sha256(bytes))` manifest, with `parents = []`), so the
+        // device op below signs over exactly what the in-transaction authz reconstructs.
+        let manifest: Vec<ManifestEntry> = files
+            .iter()
+            .map(|f| ManifestEntry {
+                path: f.path.clone(),
+                mode: f.mode,
+                content_sha256: digest::sha256(&f.bytes),
+            })
+            .collect();
+        let bundle_digest = digest::bundle_digest(&manifest)
+            .map_err(|r| AuthorityError::RejectedUpload(format!("{r:?}")))?;
+        let version_id = sign::commit_id(&Commit {
+            parents: &[],
+            tree: bundle_digest,
+            author,
+            message,
+        })
+        .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
+
+        // Sign the device op over those ids at the genesis base (0,0).
+        let op_id_bytes = uuid::Uuid::parse_str(op_id.as_str())
+            .map_err(|_| {
+                AuthorityError::RejectedUpload("op_id is not a canonical UUID".to_owned())
+            })?
+            .into_bytes();
+        let fields = DeviceOpFields {
+            workspace_id: ws.as_str(),
+            skill_id: skill.as_str(),
+            op: DeviceOp::PublishDirect,
+            op_id: op_id_bytes,
+            device_key_id,
+            expected_epoch: 0,
+            expected_seq: 0,
+            commit_id: version_id,
+            bundle_digest,
+        };
+        let preimage = device_op_preimage(&fields)
+            .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
+        let signature = SigningKey::from_bytes(device_seed)
+            .sign(&preimage)
+            .to_bytes();
+
+        let device = DeviceSignedOp {
+            device_key_id: device_key_id.to_owned(),
+            op: DeviceOp::PublishDirect,
+            signature,
+            expected: topos_types::Generation { epoch: 0, seq: 0 },
+        };
+        let candidate = crate::CandidateUpload {
+            files,
+            parents: vec![],
+            author: author.to_owned(),
+            message: message.to_owned(),
+        };
+        self.publish(ws, skill, op_id, candidate, device, created_at, now)
+            .await
+    }
+}
+
 /// The pointer-move was attempted with no plane signing key configured (a precondition fault, not a
 /// protocol outcome — wired as an internal error so no key state crosses the public boundary).
 #[derive(Debug, thiserror::Error)]

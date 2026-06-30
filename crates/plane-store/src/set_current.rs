@@ -295,14 +295,18 @@ pub(crate) async fn revert(
             .await;
     }
 
-    let store = authority.store_for_write(ws)?;
-    let leaves = store
-        .read_tree_structure(good.0)
-        .map_err(AuthorityError::integrity)?;
-    let entries: Vec<(String, topos_gitstore::FileMode, [u8; 20])> = leaves
-        .into_iter()
-        .map(|l| (l.path, l.mode, l.git_oid))
-        .collect();
+    // Scope the (non-`Send`) gix `Store` to this synchronous block so it drops before the
+    // `stage_forward_commit` await below — keeping the revert future `Send` (axum requires it).
+    let entries: Vec<(String, topos_gitstore::FileMode, [u8; 20])> = {
+        let store = authority.store_for_write(ws)?;
+        let leaves = store
+            .read_tree_structure(good.0)
+            .map_err(AuthorityError::integrity)?;
+        leaves
+            .into_iter()
+            .map(|l| (l.path, l.mode, l.git_oid))
+            .collect()
+    };
 
     // The forward commit: same tree (digest) as good, parented on current. Re-derive its id through the
     // kernel; the store refuses a lying id.

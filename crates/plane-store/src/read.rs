@@ -129,11 +129,15 @@ impl ReadScope {
 }
 
 /// A skill's signed `current` pointer, ready to serve: the raw `SignedCurrentRecord` bytes a follower
-/// verifies, plus the `(epoch, seq)` extracted from them (so the caller can build a commit-sensitive ETag /
-/// `304` without re-parsing the blob).
+/// verifies, plus the `(epoch, seq)` AND the `version_id` extracted from them (so the caller can build a
+/// **commit-sensitive** ETag / `304` — a clean field comparison against the client's known commit — without
+/// re-parsing the blob in the handler).
 #[derive(Debug, Clone)]
 pub struct CurrentPointer {
     pub generation: Generation,
+    /// The commit id `current` names — pulled from the deserialized `record.record.version_id` so the
+    /// current handler can compare it to the client's `Topos-Known-Version-Id` for the commit-sensitive 304.
+    pub version_id: [u8; 32],
     pub signed_record: Vec<u8>,
 }
 
@@ -202,11 +206,20 @@ pub(crate) async fn read_current(
     };
     let record: SignedCurrentRecord =
         serde_json::from_slice(&signed_record).map_err(AuthorityError::integrity)?;
+    // Pull the version_id (hex64 → [u8;32]) alongside the generation: the record exists, so a malformed
+    // version_id field is store corruption (an Integrity fault), never a not-found.
+    let version_id = parse_hex32(&record.record.version_id)
+        .ok_or_else(|| AuthorityError::integrity(BadVersionIdHex))?;
     Ok(Some(CurrentPointer {
         generation: record.record.generation,
+        version_id,
         signed_record,
     }))
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("a stored signed record carries a malformed version_id")]
+struct BadVersionIdHex;
 
 /// Serve one object's bytes for an authenticated scope, asserting the scope's `(ws, skill)` matches the
 /// request path's. A scope/path mismatch — or a malformed object id — is the single indistinguishable
@@ -372,12 +385,10 @@ pub(crate) async fn render_version(
     version_id: [u8; 32],
     expected_bundle_digest: [u8; 32],
 ) -> Result<RenderedBundle> {
-    let store = authority.open_store(ws)?;
-    let structure = store
-        .read_tree_structure(version_id)
-        .map_err(AuthorityError::integrity)?;
     // The offloaded set for this workspace: git_oid -> object_id (small — big blobs are rare). A git-resident
-    // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency.
+    // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency. Read
+    // it FIRST (the only `.await` here) so the non-`Send` gix `Store` opened below is never held across an
+    // await — keeping every authority future that renders `Send` (axum's handlers require it).
     let offloaded: HashMap<[u8; 20], [u8; 32]> = authority
         .db()
         .large_local_objects(ws)
@@ -385,6 +396,11 @@ pub(crate) async fn render_version(
         .into_iter()
         .map(|(git_oid, object_id)| (git_oid, object_id.0))
         .collect();
+
+    let store = authority.open_store(ws)?;
+    let structure = store
+        .read_tree_structure(version_id)
+        .map_err(AuthorityError::integrity)?;
 
     let mut files = Vec::with_capacity(structure.len());
     let mut manifest = Vec::with_capacity(structure.len());

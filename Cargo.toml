@@ -32,6 +32,7 @@ topos-core = { path = "crates/topos-core" }
 topos-gitstore = { path = "crates/topos-gitstore" }
 topos-harness = { path = "crates/topos-harness" }
 plane-store = { path = "crates/plane-store" }
+topos-plane = { path = "bins/topos-plane" } # the OSS plane lib — referenced by xtask (OpenAPI generation)
 
 # --- the wire leaf (topos-types) ---
 serde = { version = "1", features = ["derive"] }
@@ -77,7 +78,7 @@ ureq = "3"                    # topos client transport — default, blocking, ru
 rustix = { version = "1", features = ["fs"] } # topos client: safe fsync / F_FULLFSYNC / flock (no unsafe)
 hex = "0.4"                   # one shared hex codec for the std crates (the client decodes 64-char sidecar id fields); the no_std kernel keeps its own tiny impl
 tracing = "0.1"              # observability spine
-tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] } # topos-plane bin: JSON logs + RUST_LOG filter
 
 [workspace.lints.rust]
 unsafe_code = "forbid"        # no unsafe in our crates (deps may use it internally)

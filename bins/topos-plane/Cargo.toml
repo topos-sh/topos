@@ -8,11 +8,32 @@ repository.workspace = true
 publish = false
 description = "The OSS plane, library-first (lib + thin bin). The lib is the composable plane-core (the public authority API over plane-store, a router(state) builder, the review-required workspace policy, the enrollment state machine). The bin is a thin axum main. The private cloud plane IMPORTS this lib and COMPOSES it — no fork, no extension hook."
 
-# axum + tower + oauth2/openidconnect (feature-gated) + lettre land later.
+# oauth2/openidconnect (feature-gated enrollment) + lettre land later.
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
 plane-store.workspace = true
+# The HTTP surface: axum (default features cover json/http1/tokio/query; matchit is built-in), the OpenAPI
+# generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.
+axum.workspace = true
+utoipa.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { workspace = true, features = ["env"] } # `derive` from the workspace base; `env` for arg env-fallback
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+# The per-route tests drive `router(state)` via `oneshot` (no socket), seeding an authority through the
+# feature-gated shims and signing device ops with a deterministic key. `plane-store/test-fixtures` is dev-ONLY
+# here, so the production `cargo build -p topos-plane` never enables it (the CI guard asserts this).
+plane-store = { workspace = true, features = ["test-fixtures"] }
+tower = { version = "0.5", features = ["util"] }
+ed25519-dalek = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
