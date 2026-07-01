@@ -183,16 +183,42 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > This is what a separate, private downstream plane *composes* (imports + `.merge`s `router(state)`, gates in
 > front, sets policy via the API) — never forks, never the authority.
 >
+> **The distribute hero closes — proven on the real Claude Code adapter.** The last-mile gaps between the
+> built halves are wired: a **genesis publish stands up its own roster** (a brand-new skill's first publish
+> by a CONFIRMED workspace member self-inserts the author's per-skill roster row in the same transaction as
+> the pointer — a fresh identity's first publish now succeeds end-to-end; a non-member / unconfirmed /
+> non-genesis shape stays DENIED); the **`unfollow` verb** lands (flip `following=false` keeping the read
+> credential for a resume; byte-inert — never a skill file, never the sync state, never the hook; idempotent;
+> a golden `--json` fixture) with `load_enrollment` decoupled from active following (the pinned plane key
+> loads whenever `instance.json` exists, so an enrolled author with zero follows still publishes); **follower
+> currency arms at `follow`** (the promote step installs the session-start hook best-effort + idempotent,
+> mirroring `add` — a pure follower's machine now self-updates; disclosed on the result's additive `currency`
+> field); the app's harness wiring is an **`adapter_for(HarnessId)` dispatch** (one match arm per harness —
+> the OpenClaw/Hermes increments each add theirs); and the self-host **admin-token policy route** (`PUT
+> /v1/workspaces/{ws}/policy/review-required`, 404-invisible unless `--admin-token` is set, 401 on a wrong
+> token, 204 on the idempotent set) toggles the review gate a self-hoster already had enforcement for. The
+> whole loop is proven by a **real-adapter hero e2e** over loopback HTTP: an author (a plain member)
+> genesis-publishes over the wire, a pure follower's real two-call `follow` arms the REAL `settings.json`
+> hook (asserted as the full byte-exact command) and lands the first bundle byte-exact incl. the exec bit
+> into a temp stand-in `$CLAUDE_CONFIG_DIR`, an author update fast-forwards on the follower's next bare
+> sweep, a real client `revert --to <good>` (a FORWARD move) restores the good bytes on the next sweep, and a
+> drafting confirm-each follower surfaces every move as a `diverged` row (the floor still advances) with its
+> local draft never clobbered. The e2e runner is table-driven so a sibling adapter is one case row + one
+> test. Honest ceiling, stated in the test's module doc: it proves hook-installed + pull-materializes; that a
+> live Claude session's SessionStart stdout reaches model context before skill resolution is a documented
+> manual MUST-VERIFY, never a headless assertion.
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
 > client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
 > multi-IdP / HRD / SAML / SCIM — one generic OIDC connector ships feature-gated); **magic-link** as a primary
 > rung; **active read-token rotation** (per-device revoke + expiry are built; rotation in the `current` path is
-> deferred — v0 mints long-lived device-bound tokens); the **device-signed `PUT /policy` governance route**
-> (the `review-required` toggle is a public library method now — a composing admin route calls it; a
-> device-op-signed route over it needs a new kernel frame) + the
+> deferred — v0 mints long-lived device-bound tokens); the **device-signed `PUT /policy` variant** (the
+> self-host admin-token route is built — see above; a device-op-signed governance route over the same policy
+> needs a new kernel frame) + the
 > client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
-> workspace standup** (`admin-claim` stands up self-host today); **TLS termination** at the plane (loopback HTTP
+> workspace standup** (`admin-claim` stands up self-host today; the per-skill roster standup at a genesis
+> publish is now built — what remains is the cloud seating a signup's owner); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
 > the enrollment secret are plaintext `0600` seeds for now); and the OpenClaw/Hermes adapters. `sqlx`
 > is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
