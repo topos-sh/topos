@@ -247,6 +247,11 @@ pub struct FollowData {
     /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<EnrollmentPending>,
+    /// The currency-trigger outcome, present when completing the enrollment armed the session-start hook
+    /// (a pure follower never runs `add`, so enrollment is where their currency gets armed — best-effort:
+    /// a degraded config edit is disclosed here, never a rolled-back enrollment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<crate::TriggerReport>,
 }
 
 /// A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which

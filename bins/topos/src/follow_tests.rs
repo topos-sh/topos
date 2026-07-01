@@ -85,6 +85,8 @@ fn device_key_id_for(pubkey: &[u8; 32]) -> String {
 
 struct TmpHarness {
     skills_root: PathBuf,
+    /// Counts `install_currency_trigger` calls — the promote path must arm the follower's hook.
+    installs: std::sync::atomic::AtomicU32,
 }
 impl HarnessAdapter for TmpHarness {
     fn id(&self) -> HarnessId {
@@ -102,6 +104,8 @@ impl HarnessAdapter for TmpHarness {
         CurrencyKind::ExplicitPullOnly
     }
     fn install_currency_trigger(&self) -> TriggerReport {
+        self.installs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         no_trigger()
     }
     fn remove_currency_trigger(&self) -> TriggerReport {
@@ -399,6 +403,7 @@ impl Rig {
         let work = Scratch::new(&format!("{tag}-work"));
         let harness = TmpHarness {
             skills_root: work.0.join("skills"),
+            installs: std::sync::atomic::AtomicU32::new(0),
         };
         Self {
             home: Scratch::new(&format!("{tag}-home")),
@@ -535,6 +540,15 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
 
     assert!(data.enrolled);
     assert_eq!(data.workspace_id, WS);
+    // The promote armed the follower's session-start currency hook (a pure follower never runs `add`,
+    // so this is their only arm point) and disclosed the outcome on the result.
+    assert_eq!(
+        rig.harness
+            .installs
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(data.currency.is_some());
     // The offer is disclosed (the read-only metadata fetch), with a real version + digest.
     assert_eq!(data.skills.len(), 1);
     assert_eq!(data.skills[0].skill_id, "s_deploy");

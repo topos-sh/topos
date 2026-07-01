@@ -409,7 +409,14 @@ fn promote(
     // 6) Delete the WAL — enrollment is complete.
     enroll::delete_wal(ctx.fs, &ctx.layout)?;
 
-    // 7) Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
+    // 7) Arm session-start currency for this follower — best-effort + idempotent, mirroring `add`. A pure
+    // follower never runs `add`, so this is the one place their hook gets installed; it edits the harness
+    // CONFIG (never a skill dir), and the sweep no-ops until the first bytes land. Infallible (a
+    // TriggerReport, degraded on a config hiccup), so it can never roll back the completed enrollment;
+    // the outcome is disclosed on the result.
+    let currency = ctx.harness.install_currency_trigger();
+
+    // 8) Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
     // sidecar, so first-receive stays an OFFER). Best-effort: a fetch hiccup omits that skill's offer.
     let skills = disclose_offers(connectors, context, read_creds);
 
@@ -422,6 +429,7 @@ fn promote(
         verified_domain: context.verified_domain.clone(),
         verified_domain_status: Some(context.verified_domain_status),
         pending: None,
+        currency: Some(currency),
     })
 }
 
@@ -630,6 +638,7 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError>
         verified_domain: None,
         verified_domain_status: None,
         pending: None,
+        currency: None,
     })
 }
 
@@ -681,6 +690,7 @@ fn pending_followdata(
             // No RFC-3339 formatter client-side; the WAL holds the absolute expiry for the recovery sweep.
             expires_at: None,
         }),
+        currency: None,
     }
 }
 

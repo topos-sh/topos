@@ -4,6 +4,17 @@
   "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /\n`workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the\nenrollment surface landed; all are optional, so an old consumer ignores them.",
   "type": "object",
   "properties": {
+    "currency": {
+      "description": "The currency-trigger outcome, present when completing the enrollment armed the session-start hook\n(a pure follower never runs `add`, so enrollment is where their currency gets armed — best-effort:\na degraded config edit is disclosed here, never a rolled-back enrollment).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriggerReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "deployment_mode": {
       "description": "The workspace's deployment posture (disclosed from the bootstrap).",
       "anyOf": [
@@ -70,6 +81,16 @@
     "enrolled"
   ],
   "$defs": {
+    "CurrencyKind": {
+      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"next topos touch\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "type": "string",
+      "enum": [
+        "session_start",
+        "first_topos_touch",
+        "first_turn",
+        "explicit_pull_only"
+      ]
+    },
     "DeploymentMode": {
       "description": "A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;\n`self_host` grants membership straight from a valid grant.",
       "oneOf": [
@@ -130,6 +151,14 @@
         "offer"
       ]
     },
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
     "Offer": {
       "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
       "type": "object",
@@ -146,6 +175,55 @@
       "required": [
         "version_id",
         "bundle_digest"
+      ]
+    },
+    "TriggerReport": {
+      "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "type": "object",
+      "properties": {
+        "currency_kind": {
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "harness": {
+          "$ref": "#/$defs/HarnessId"
+        },
+        "marker_id": {
+          "description": "`topos` + harness id + schema version + command identity.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file edited (never a skill dir).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "harness",
+        "currency_kind",
+        "marker_id",
+        "state"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "const": "already_present_unmanaged"
+        }
       ]
     },
     "VerifiedDomainStatus": {

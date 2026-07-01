@@ -50,7 +50,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
   **first-receive baseline** per skill. The agent only ever holds the opaque grant + the read creds — never a
   user token (I-NO-USER-TOKEN); the device code / grant / read tokens are redacted from every `Debug` and
-  never reach a URL / log / error. `follow --approve <skill>[@<hash>]` drives the existing pull engine to
+  never reach a URL / log / error. The promote also **arms the session-start currency hook** — best-effort
+  + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
+  degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
+  `follow --approve <skill>[@<hash>]` drives the existing pull engine to
   place a disclosed first-receive offer (the I-TOFU "one --approve"). The enrollment transports (`UreqEnroll`
   + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lands with the test member next).
