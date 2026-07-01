@@ -451,8 +451,27 @@ fn is_command_line(trimmed: &str) -> bool {
     trimmed.starts_with("- command:") || trimmed.starts_with("command:")
 }
 
+/// Whether a zero-indent line could introduce the top-level `hooks` key in a valid YAML spelling
+/// OTHER than the one canonical `hooks:` form this merge reasons about — a quoted key
+/// (`"hooks":` / `'hooks':`) or a space before the colon (`hooks :`). Such a config already HAS a
+/// hooks key, so appending a second one would duplicate/shadow it; it is never provable and forces
+/// the fail-closed path.
+fn is_alternate_hooks_spelling(line: &str) -> bool {
+    line.starts_with("\"hooks\"")
+        || line.starts_with("'hooks'")
+        || (line.starts_with("hooks") && matches!(line.as_bytes().get(5), Some(b' ' | b'\t')))
+}
+
 fn analyze(text: &str) -> Analysis {
+    // A byte-order mark hides the first line's true column 0 from every prefix anchor below —
+    // a BOM'd config is never reasoned about.
+    if text.starts_with('\u{feff}') {
+        return Analysis::Unprovable;
+    }
     let lines = split_lines(text);
+    if lines.iter().any(|l| is_alternate_hooks_spelling(l)) {
+        return Analysis::Unprovable; // a hooks key in a spelling we never write — never touch it
+    }
     let hooks_lines: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -509,8 +528,15 @@ fn analyze(text: &str) -> Analysis {
             }
             break;
         }
+        // The block's list-item indent is set by its FIRST item line; a managed entry is claimed
+        // only at exactly that indent, so a deeper look-alike (e.g. inside an item's nested block
+        // scalar) is never treated as ours — and never scrubbed.
+        let item_indent = (event_idx + 1..block_end)
+            .map(|i| lines[i])
+            .find(|l| !is_blank_or_comment(l) && l.trim().starts_with("- "))
+            .map(indent_of);
         let entry_lines: Vec<usize> = (event_idx + 1..block_end)
-            .filter(|&i| lines[i].trim() == ENTRY_LINE)
+            .filter(|&i| lines[i].trim() == ENTRY_LINE && Some(indent_of(lines[i])) == item_indent)
             .collect();
         if !entry_lines.is_empty() {
             return Analysis::Managed(ManagedEntry {
@@ -611,8 +637,11 @@ fn plan_remove(current: Option<&[u8]>) -> EditPlan {
                 drop.push(m.event_idx);
             }
             // Restore the shipped `hooks: {}` form ONLY when the whole region is then empty of
-            // content — never disturbing any sibling event or user line.
+            // content AND the key line is the bare `hooks:` (a key line carrying anything more —
+            // a user's trailing comment, say — is kept verbatim; a dangling `hooks:` is valid
+            // YAML and Hermes reads it as no hooks).
             let region_emptied = block_emptied
+                && lines[m.hooks_idx].trim() == HOOKS_KEY_PREFIX
                 && (m.hooks_idx + 1..m.region_end)
                     .all(|i| drop.contains(&i) || is_blank_or_comment(lines[i]));
             let mut out = Vec::with_capacity(text.len());
@@ -930,6 +959,11 @@ personalities: {}
             "hooks: {}  # none\n",                              // trailing comment on the key
             "hooks: {}\nmodel: a\nhooks: {}\n",                 // duplicate top-level keys
             "hooks: {}\n  stray: 1\n",                          // empty-flow with indented content
+            "\"hooks\": {}\n", // quoted key — a spelling we never write
+            "'hooks': {}\n",   // single-quoted key
+            "hooks : {}\n",    // space before the colon
+            "\"hooks\":\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n", // ours under a quoted key
+            "\u{feff}hooks: {}\n", // a BOM hides column 0 from every anchor — never reasoned about
         ] {
             let cfg = MemConfig::with_config(bad);
             let report = adapter(&cfg).install_currency_trigger();
@@ -1094,6 +1128,40 @@ personalities: {}
             cfg.config_text().as_deref(),
             Some("hooks:\n  pre_llm_call:\n  # keep me\n  - command: echo keep\n"),
             "only our entry line is removed; the user's comment and item survive, no pruning"
+        );
+    }
+
+    #[test]
+    fn remove_never_scrubs_a_look_alike_inside_a_nested_block_scalar() {
+        // Our exact line as CONTENT of a block scalar nested in a user's own item is not a list
+        // item at the block's item indent — it is never claimed as ours and never deleted.
+        let before = "hooks:\n  pre_llm_call:\n  - command: echo hi\n    notes: |\n      - command: topos pull --quiet  # topos:currency\n";
+        let cfg = MemConfig::with_config(before);
+        let report = adapter(&cfg).remove_currency_trigger();
+        assert_eq!(
+            report.state,
+            TriggerState::AlreadyPresentUnmanaged,
+            "a topos-pull look-alike we cannot prove ours is adopt-or-leave"
+        );
+        assert_eq!(cfg.writes(), 0);
+        assert_eq!(
+            cfg.config_text().as_deref(),
+            Some(before),
+            "user bytes untouched"
+        );
+    }
+
+    #[test]
+    fn remove_keeps_a_user_comment_on_the_hooks_key_line() {
+        let cfg = MemConfig::with_config(
+            "hooks:  # keep this comment\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n",
+        );
+        let report = adapter(&cfg).remove_currency_trigger();
+        assert_eq!(report.state, TriggerState::Inactive);
+        assert_eq!(
+            cfg.config_text().as_deref(),
+            Some("hooks:  # keep this comment\n"),
+            "the user's key-line comment survives; a dangling `hooks:` is valid and reads as none"
         );
     }
 
