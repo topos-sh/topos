@@ -1,20 +1,23 @@
 //! `topos-harness` — the `HarnessAdapter` trait + the `ConfigStore` port + the Claude Code reference
-//! impl (OpenClaw and Hermes land later).
+//! impl and the OpenClaw impl (Hermes lands later).
 //!
 //! The ONE real client-side port. Content-blind: no `translate`, no `project`, no `to_dialect` (cut).
 //! Placement *bytes* are identical across adapters; an adapter differs only in *where* + *when currency
 //! fires*, and edits its own harness *config* (never a skill dir) to (un)install the currency trigger.
 //!
 //! This **harness-independent** unit is frozen (the trait + `CurrencyKind` incl. `ExplicitPullOnly` +
-//! `TriggerReport` + the idempotency-marker convention); the OpenClaw/Hermes concrete config bytes stay
-//! build-first behind the trait until the pilot's real builds are probed.
+//! `TriggerReport` + the idempotency-marker convention); the OpenClaw impl ships **build-first behind the
+//! trait** — its concrete config bytes stay provisional until the pilot's real build is probed (see the
+//! `openclaw` module doc) — and the Hermes concrete bytes stay the same way until that impl lands.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 
 mod claude_code;
+mod openclaw;
 pub use claude_code::ClaudeCode;
+pub use openclaw::OpenClaw;
 
 /// A discovered skill placement — probe known dirs; read frontmatter to CONFIRM only. Carries the
 /// concrete path + category/layer (Hermes `<category>/<name>`, project/global).
@@ -83,4 +86,5 @@ pub trait HarnessAdapter {
     fn uninstall_footprint(&self) -> Vec<PathBuf>;
 }
 
-// OpenClaw + Hermes impls land later — ClaudeCode (this crate's `claude_code` module) is the reference.
+// The Hermes impl lands later — ClaudeCode (this crate's `claude_code` module) is the reference;
+// OpenClaw (the `openclaw` module) ships build-first behind the pilot readiness probe.
