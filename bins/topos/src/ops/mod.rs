@@ -13,6 +13,7 @@ mod pull;
 mod revert;
 mod review;
 mod sync_engine;
+mod unfollow;
 mod uninstall;
 
 pub(crate) use add::add;
@@ -25,6 +26,7 @@ pub(crate) use publish::{PublishOutcome, publish};
 pub(crate) use pull::{PullScope, TargetMode, pull};
 pub(crate) use revert::revert;
 pub(crate) use review::review;
+pub(crate) use unfollow::unfollow;
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
 
 use topos_types::persisted::Lock;

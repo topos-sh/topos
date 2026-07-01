@@ -251,7 +251,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
         AddData, ConflictPathReport, DiffData, DiffSource, ListData, LogData, MergeReport,
-        PullAction, PullData, PullSkill, SkillEntry,
+        PullAction, PullData, PullSkill, SkillEntry, UnfollowData,
     };
     use topos_types::{
         ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
@@ -282,6 +282,23 @@ fn fixtures() -> Vec<(&'static str, String)> {
             currency: None,
         })
         .expect("AddData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `unfollow` of the fixture skill (local-only; the bytes are kept, so the flip is the whole story).
+    let unfollow_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "unfollow".to_owned(),
+        ok: true,
+        data: serde_json::to_value(UnfollowData {
+            skill_id: "topos_t00".to_owned(),
+            following: false,
+            bytes_kept: true,
+        })
+        .expect("UnfollowData serializes"),
         warnings: vec![],
         next_actions: vec![],
         receipt: None,
@@ -542,6 +559,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/pull.merged", emit_json(&pull_merged)),
         ("json/pull.conflicted", emit_json(&pull_conflicted)),
         ("json/add.ok", emit_json(&add_ok)),
+        ("json/unfollow.ok", emit_json(&unfollow_ok)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),

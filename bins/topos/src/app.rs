@@ -120,6 +120,12 @@ pub fn run() -> ExitCode {
             };
             finish_follow(json, cmd_name, ops::follow(&ctx, &connectors, link, opts))
         }
+        Command::Unfollow { skill } => finish(
+            json,
+            cmd_name,
+            ops::unfollow(&ctx, &skill),
+            render::unfollow_tty,
+        ),
         Command::Invite {
             emails,
             role,
@@ -404,21 +410,22 @@ struct Enrollment {
     plane_key: [u8; 32],
 }
 
-/// Load the enrollment docs read-only. Returns `Some` ONLY when `instance.json` is present AND
-/// `follows.json` names at least one followed skill — so the bare `pull` stays an honest no-op until a real
-/// enrollment exists. A corrupt / newer-schema doc fails closed (propagated), never silently degraded to
-/// inert. (This increment never WRITES these docs — see [`crate::enroll`] for the `0600` requirement the
-/// future enrollment writer must honor for `follows.json`'s secret read tokens.)
+/// Load the enrollment docs read-only. Returns `Some` whenever `instance.json` is present — enrollment is
+/// what writes it, so its presence IS the enrolled state; `follows.json` is optional (an empty membership
+/// door, or every follow since flipped off by `unfollow`). The pinned plane key must stay loaded even with
+/// zero active follows: the write verbs (publish/revert/review) verify the OK receipt's signed pointer
+/// against it, and an enrolled author with nothing followed is a normal state. The bare `pull` stays an
+/// honest no-op either way (the sweep skips a `following == false` entry, and renders "No followed
+/// skills." over an empty set). A corrupt / newer-schema doc fails closed (propagated), never silently
+/// degraded to inert.
 fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>, ClientError> {
     let Some(instance) = enroll::read_instance(fs, layout)? else {
         return Ok(None);
     };
-    let Some(follows) = enroll::read_follows(fs, layout)? else {
-        return Ok(None);
-    };
-    if !follows.follows.iter().any(|f| f.following) {
-        return Ok(None);
-    }
+    let follows = enroll::read_follows(fs, layout)?.unwrap_or_else(|| enroll::Follows {
+        schema_version: topos_types::SCHEMA_VERSION,
+        follows: Vec::new(),
+    });
     let plane_key = ops::parse_hex32(&instance.plane_key).map_err(|_| {
         ClientError::Corrupt("instance.json plane_key is not 32-byte lowercase hex".into())
     })?;

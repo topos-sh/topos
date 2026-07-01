@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "unfollow",
+  "ok": true,
+  "data": {
+    "bytes_kept": true,
+    "following": false,
+    "skill_id": "topos_t00"
+  },
+  "warnings": [],
+  "next_actions": []
+}

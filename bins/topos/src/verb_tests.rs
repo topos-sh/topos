@@ -837,3 +837,143 @@ fn fs_hashes(root: &Path) -> Vec<(String, String)> {
 fn dump(value: &JsonEnvelope) -> String {
     serde_json::to_string_pretty(value).unwrap()
 }
+
+// ── unfollow: flag-flip only — bytes kept, token retained, idempotent, sweep skips ──────────────────
+
+/// Read every file (path → bytes) under a dir, sorted — the byte-identity oracle for I-KEEP-LOCAL.
+fn dir_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let p = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                walk(&p, base, out);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[test]
+fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
+    use crate::enroll::{self, FollowEntry, FollowModeDoc};
+
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("unfollow");
+    let ctx = h.ctx();
+    let a = ops::add(&ctx, &root).unwrap();
+
+    // Seed the enrolled follow-state for the tracked skill (what a real `follow` promote writes).
+    enroll::write_follows_merged(
+        ctx.fs,
+        &ctx.layout,
+        &[FollowEntry {
+            skill_id: a.skill_id.clone(),
+            workspace_id: "w_acme".to_owned(),
+            read_token: "rt_secret".to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+        }],
+    )
+    .unwrap();
+
+    let before = dir_bytes(&root);
+    let u = ops::unfollow(&ctx, "pr-describe").unwrap();
+    assert_eq!(u.skill_id, a.skill_id);
+    assert!(!u.following);
+    assert!(u.bytes_kept);
+    // The committed golden equals the real output.
+    assert_golden("unfollow.ok", "unfollow", serde_json::to_value(&u).unwrap());
+
+    // The placement bytes are byte-identical — unfollow never touches a skill file (I-KEEP-LOCAL).
+    assert_eq!(before, dir_bytes(&root));
+
+    // The entry flipped in place, retaining workspace/token/mode so a later follow resumes.
+    let follows = enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap();
+    let e = follows
+        .follows
+        .iter()
+        .find(|e| e.skill_id == a.skill_id)
+        .unwrap();
+    assert!(!e.following);
+    assert_eq!(e.read_token, "rt_secret");
+    assert_eq!(e.workspace_id, "w_acme");
+
+    // Idempotent: a second unfollow is the same clean success, and the doc is unchanged.
+    let u2 = ops::unfollow(&ctx, "pr-describe").unwrap();
+    assert!(!u2.following);
+    assert!(u2.bytes_kept);
+    assert_eq!(
+        enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap(),
+        follows
+    );
+
+    // The bare sweep skips the unfollowed skill (the currency subscription is off).
+    let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
+    let sweep_ctx = Ctx {
+        follow: &file_follow,
+        ..h.ctx()
+    };
+    let data = ops::pull(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();
+    assert!(
+        data.skills.is_empty(),
+        "an unfollowed skill must not be swept: {:?}",
+        data.skills
+    );
+
+    // A re-follow resumes: the promote path replace-by-skill_id flips `following` back on (with a fresh
+    // token), and the entry is swept again.
+    enroll::write_follows_merged(
+        ctx.fs,
+        &ctx.layout,
+        &[FollowEntry {
+            following: true,
+            read_token: "rt_reminted".to_owned(),
+            ..e.clone()
+        }],
+    )
+    .unwrap();
+    let resumed = enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap();
+    let r = resumed
+        .follows
+        .iter()
+        .find(|e| e.skill_id == a.skill_id)
+        .unwrap();
+    assert!(r.following);
+    assert_eq!(r.read_token, "rt_reminted");
+}
+
+#[test]
+fn unfollow_of_a_tracked_but_never_followed_skill_is_a_clean_success() {
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("unfollow-nf");
+    let ctx = h.ctx();
+    let a = ops::add(&ctx, &root).unwrap();
+
+    // No follows.json at all — an add-only local skill is already not followed.
+    let u = ops::unfollow(&ctx, "pr-describe").unwrap();
+    assert_eq!(u.skill_id, a.skill_id);
+    assert!(!u.following);
+    assert!(u.bytes_kept);
+    assert!(
+        crate::enroll::read_follows(ctx.fs, &ctx.layout)
+            .unwrap()
+            .is_none(),
+        "unfollow writes nothing when there is nothing to flip"
+    );
+
+    // An unknown name is the sibling verbs' typed error, not a silent success.
+    assert!(matches!(
+        ops::unfollow(&ctx, "no-such-skill"),
+        Err(crate::error::ClientError::NoSuchSkill { .. })
+    ));
+}

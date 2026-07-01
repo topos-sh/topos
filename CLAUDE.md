@@ -190,7 +190,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > rung; **active read-token rotation** (per-device revoke + expiry are built; rotation in the `current` path is
 > deferred — v0 mints long-lived device-bound tokens); the **device-signed `PUT /policy` governance route**
 > (the `review-required` toggle is a public library method now — a composing admin route calls it; a
-> device-op-signed route over it needs a new kernel frame) + **`unfollow`** + the
+> device-op-signed route over it needs a new kernel frame) + the
 > client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
 > workspace standup** (`admin-claim` stands up self-host today); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +

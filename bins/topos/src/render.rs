@@ -4,7 +4,7 @@
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::results::{
     AddData, DiffData, FollowData, InviteData, ListData, LogData, ProposeData, PublishData,
-    PullData, RevertData, ReviewData, ReviewDecision,
+    PullData, RevertData, ReviewData, ReviewDecision, UnfollowData,
 };
 use topos_types::{
     ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
@@ -341,6 +341,14 @@ pub(crate) fn invite_tty(data: &InviteData) -> String {
     }
     out.push_str("\nShare the link; redeeming it never enrolls on its own.");
     out
+}
+
+pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
+    format!(
+        "Stopped following {} — auto-updates stop; your local copy is kept, nothing was deleted. \
+         `follow` resumes.",
+        data.skill_id,
+    )
 }
 
 pub(crate) fn publish_tty(data: &PublishData) -> String {

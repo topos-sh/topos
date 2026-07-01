@@ -43,6 +43,12 @@ pub(crate) enum Command {
         #[arg(long = "approve")]
         approve: Vec<String>,
     },
+    /// Stop following a skill's `current`. Your local copy is KEPT as a frozen copy (nothing is deleted);
+    /// auto-updates stop, and a later `follow` resumes. Local-only.
+    Unfollow {
+        /// The skill name to stop following.
+        skill: String,
+    },
     /// Mint an `/i/<token>` invite link (OWNER only): sign the governance Invite op with this device's key,
     /// then POST it. Seeds the invited emails onto the workspace roster and pre-offers the named skills.
     /// Requires prior enrollment (run `follow` first); the link itself never carries a role.
@@ -181,6 +187,7 @@ impl Command {
         match self {
             Command::Add { .. } => "add",
             Command::Follow { .. } => "follow",
+            Command::Unfollow { .. } => "unfollow",
             Command::Invite { .. } => "invite",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",

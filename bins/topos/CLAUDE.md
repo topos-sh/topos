@@ -163,9 +163,19 @@ are asserted byte-equal in tests.
   I-COMMIT-PARITY wire test + the op_id-replay test are in `ops/contribute`; the full loop is proven e2e over
   loopback HTTP in `tests/`.
 
+- **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
+  byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
+  the enrollment uses (retaining the workspace / mode / read credential so a later `follow` resumes),
+  and touches nothing else — never a skill file, never the sync state or a `held` pin, never the currency
+  hook (the per-install hook's sweep simply skips an unfollowed skill; `load_enrollment` keeps the pinned
+  plane key loaded even with zero active follows, so an enrolled author who unfollowed everything can
+  still publish/revert/review). Idempotent: not-followed / already-unfollowed is the same clean success;
+  an explicit local `pull <skill>@<hash>` (a user-initiated go-back) remains available on an unfollowed
+  copy. Golden `--json` fixture + a byte-identity test (the placement bytes hash equal across unfollow).
+
 ## Planned (lands later)
 
-`unfollow` (stop following `current`, keep the bytes) + signing-at-rest land later; **multi-reviewer
+Signing-at-rest lands later; **multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
 setting) + `log --team`'s plane half; the OpenClaw/Hermes harness adapters (Claude Code is the reference —
