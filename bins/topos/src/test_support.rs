@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::to_hex;
-use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
 use topos_types::results::{DiffData, ProposeData, PublishData, PullData, RevertData, ReviewData};
@@ -407,6 +407,12 @@ impl HarnessAdapter for WorkHarness {
 /// temp work root where the first-received skill is placed. Drives the GENUINE `ops::follow` over the GENUINE
 /// `ureq` enroll/read transports, so an EXTERNAL e2e crate can prove the whole loop (bootstrap → enroll →
 /// redeem → TOFU-pin → first-receive placement) without reaching the client's `pub(crate)` internals.
+///
+/// Two adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
+/// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
+/// temp config home — placements land in `<config-home>/skills/<skill_id>` and the enrollment promote arms
+/// the REAL `settings.json` session-start hook, so an e2e can prove the whole second-machine story against
+/// the genuine adapter.
 #[derive(Debug)]
 pub struct FollowHarness {
     home: Scratch,
@@ -415,6 +421,8 @@ pub struct FollowHarness {
     ids: RealIds,
     clock: RealClock,
     harness: WorkHarness,
+    /// `Some` = the real-Claude mode: the temp `$CLAUDE_CONFIG_DIR` the real adapter resolves against.
+    claude: Option<Scratch>,
 }
 
 impl FollowHarness {
@@ -432,11 +440,32 @@ impl FollowHarness {
             ids: RealIds,
             clock: RealClock,
             harness,
+            claude: None,
         }
+    }
+
+    /// A fresh rig wired to the REAL Claude Code adapter over a temp config home (a stand-in
+    /// `$CLAUDE_CONFIG_DIR` — the real `~/.claude` is never touched). Placement + the currency hook then
+    /// go through the genuine adapter: skills land in `<config-home>/skills/<skill_id>` and the promote
+    /// writes the real `settings.json` session-start entry.
+    #[must_use]
+    pub fn new_claude(tag: &str) -> Self {
+        let mut rig = Self::new(tag);
+        rig.claude = Some(Scratch::new(&format!("{tag}-claude")));
+        rig
     }
 
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0)
+    }
+
+    /// Run `f` over the rig's adapter: the real `ClaudeCode` (a stack local borrowing the fs seam — the
+    /// adapter borrows its `ConfigStore`, so it cannot be an owned field) or the `WorkHarness` stub.
+    fn with_adapter<R>(&self, f: impl FnOnce(&dyn HarnessAdapter) -> R) -> R {
+        match &self.claude {
+            Some(home) => f(&ClaudeCode::new(home.0.clone(), &self.fs)),
+            None => f(&self.harness),
+        }
     }
 
     /// The `ops::follow` connector closures (a creds-free `ureq` enroll client + the read transport), built
@@ -464,18 +493,20 @@ impl FollowHarness {
         // enrollment writer can record the device key into it; mirror that here.
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .map_err(|e| e.to_string())?;
-        let ctx = Ctx {
-            fs: &self.fs,
-            ids: &self.ids,
-            clock: &self.clock,
-            device_id,
-            layout: self.layout(),
-            harness: &self.harness,
-            plane,
-            plane_key,
-            follow,
-        };
-        ops::follow(&ctx, &connectors, link, opts).map_err(|e| e.to_string())
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane,
+                plane_key,
+                follow,
+            };
+            ops::follow(&ctx, &connectors, link, opts).map_err(|e| e.to_string())
+        })
     }
 
     /// Call 1: `topos follow <link>` — fetch the bootstrap, TOFU-pin, device-authorize, write the pending WAL.
@@ -487,10 +518,23 @@ impl FollowHarness {
         link: &str,
         plane_key: [u8; 32],
     ) -> Result<topos_types::results::FollowData, String> {
+        self.follow_with(link, plane_key, false)
+    }
+
+    /// Call 1 with an explicit adopt mode: `manual = true` is `follow <link> --manual` (confirm-each).
+    ///
+    /// # Errors
+    /// As [`follow`](Self::follow).
+    pub fn follow_with(
+        &self,
+        link: &str,
+        plane_key: [u8; 32],
+        manual: bool,
+    ) -> Result<topos_types::results::FollowData, String> {
         let inert_plane = InertPlane;
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
-            manual: false,
+            manual,
             resume: false,
             approve: Vec::new(),
         };
@@ -594,7 +638,93 @@ impl FollowHarness {
     /// The placed bundle for `skill_id`: `(relative path, mode & 0o777, bytes)`, sorted — for a byte-exact assert.
     #[must_use]
     pub fn placement_files(&self, skill_id: &str) -> Vec<(String, u32, Vec<u8>)> {
-        snapshot_dir(&self.work.0.join(skill_id))
+        snapshot_dir(&self.placement_dir(skill_id))
+    }
+
+    /// Where this rig's adapter places `skill_id`: the real Claude layout (`<config-home>/skills/<id>`) in
+    /// claude mode, else the work root.
+    fn placement_dir(&self, skill_id: &str) -> PathBuf {
+        match &self.claude {
+            Some(home) => home.0.join("skills").join(skill_id),
+            None => self.work.0.join(skill_id),
+        }
+    }
+
+    /// Overwrite the placement with `files` — a local draft ahead of `current` (work != base), for the
+    /// never-clobber / diverged assertions.
+    pub fn edit_placement(&self, skill_id: &str, files: &[(&str, bool, &[u8])]) {
+        write_tree(&self.placement_dir(skill_id), files);
+    }
+
+    /// The raw `settings.json` in the claude config home (`None` when absent or not in claude mode) — the
+    /// e2e asserts the exact installed hook command against it.
+    #[must_use]
+    pub fn settings_json(&self) -> Option<String> {
+        let home = self.claude.as_ref()?;
+        std::fs::read_to_string(home.0.join("settings.json")).ok()
+    }
+
+    /// The followed skill's `sync.json` (the durable floor/applied state).
+    ///
+    /// # Panics
+    /// If `sync.json` is missing or unreadable.
+    #[must_use]
+    pub fn sync_state(&self, skill_id: &str) -> SyncState {
+        doc::read_doc(&self.fs, &self.layout().published(skill_id).sync)
+            .expect("read sync.json")
+            .expect("sync.json exists for a followed skill")
+    }
+
+    /// Run the REAL pull engine over the enrollment THIS rig's own `follow` wrote — the transports, the
+    /// pinned plane key, and the base URL all come from `instance.json`/`follows.json`, exactly as the
+    /// production `load_enrollment` wires them (the session-start hook's `topos pull` runs this path).
+    ///
+    /// # Panics
+    /// If the enrollment docs are missing/corrupt or the pull errors (a hard wiring fault).
+    #[must_use]
+    pub fn pull(&self, scope: Scope) -> PullData {
+        let instance = enroll::read_instance(&self.fs, &self.layout())
+            .expect("read instance.json")
+            .expect("instance.json exists after resume");
+        let follows = enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .expect("follows.json exists after resume");
+        let plane_key = ops::parse_hex32(&instance.plane_key).expect("pinned key is 32-byte hex");
+        let plane = UreqPlane::new(instance.base_url, enroll::skill_creds(&follows));
+        let follow = FileFollow::new(enroll::follow_contexts(&follows));
+        let internal = match scope {
+            Scope::AllFollowed => ops::PullScope::AllFollowed,
+            Scope::Accept { name } => ops::PullScope::One {
+                name,
+                mode: ops::TargetMode::AcceptPending,
+            },
+            Scope::GoBack {
+                name,
+                version_id_hex,
+            } => ops::PullScope::One {
+                name,
+                mode: ops::TargetMode::GoBack(
+                    ops::parse_hex32(&version_id_hex).expect("go-back id is 32-byte hex"),
+                ),
+            },
+        };
+        // Production's `Command::Pull` arm loads (or mints) the device id — a draft snapshot authors under it.
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("load-or-create device id");
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id,
+                layout: self.layout(),
+                harness,
+                plane: &plane,
+                plane_key,
+                follow: &follow,
+            };
+            ops::pull(&ctx, internal).unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
+        })
     }
 }
 

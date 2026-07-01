@@ -4184,6 +4184,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "plane-store",
+ "serde_json",
  "sqlx",
  "tokio",
  "topos",

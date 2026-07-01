@@ -33,6 +33,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 # Derive the device public key from the deterministic signing seed for `seed_device`.
 ed25519-dalek = { workspace = true, features = ["std"] }
+# Parse the follower's real settings.json to assert the EXACT installed SessionStart hook command.
+serde_json.workspace = true
 # Compare the client's `sync.json` base_commit (hex) to the plane's genesis version id.
 hex.workspace = true
 

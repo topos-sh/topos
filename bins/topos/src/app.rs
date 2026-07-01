@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde::Serialize;
-use topos_harness::ClaudeCode;
+use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter};
+use topos_types::HarnessId;
 
 use crate::cli::{Cli, Command, RoleArg};
 use crate::ctx::Ctx;
@@ -30,10 +31,10 @@ pub fn run() -> ExitCode {
     let ids = RealIds;
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
-    // The Claude Code adapter, wired to the real config-store seam (the same `RealFs`). It resolves
-    // Claude Code's own config home (`$CLAUDE_CONFIG_DIR` else `$HOME/.claude`) so a relocated config is
-    // honored; it touches that home only when adopting a recognized skill or on uninstall.
-    let harness = ClaudeCode::new(ClaudeCode::resolve_home(), &fs);
+    // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
+    // adapter touches its config home only when adopting a recognized skill, arming currency, or on
+    // uninstall.
+    let harness = adapter_for(HarnessId::ClaudeCode, &fs);
 
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
     // enrollment WAL against the real wall clock).
@@ -86,7 +87,7 @@ pub fn run() -> ExitCode {
         clock: &clock,
         device_id,
         layout,
-        harness: &harness,
+        harness: harness.as_ref(),
         plane,
         plane_key,
         follow,
@@ -436,6 +437,19 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         follow,
         plane_key,
     }))
+}
+
+/// Build the harness adapter for `id`, borrowing the shared config-store seam. Adding a harness is ONE
+/// new match arm — no caller change. v0 only ever selects Claude Code (the sole wired adapter; it
+/// resolves its own config home, `$CLAUDE_CONFIG_DIR` else `$HOME/.claude`); the OpenClaw / Hermes arms
+/// land with their adapters.
+fn adapter_for<'a>(id: HarnessId, fs: &'a dyn ConfigStore) -> Box<dyn HarnessAdapter + 'a> {
+    match id {
+        HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home(), fs)),
+        HarnessId::OpenClaw | HarnessId::Hermes => {
+            unreachable!("harness adapter not yet wired for {id:?}")
+        }
+    }
 }
 
 /// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort).
