@@ -7,8 +7,8 @@ use topos_types::results::{
     PullData, RevertData, ReviewData, ReviewDecision, UnfollowData,
 };
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, TriggerState,
-    WireError,
+    ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome,
+    TriggerState, WireError,
 };
 
 use crate::error::ClientError;
@@ -178,20 +178,37 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         data.skill_id,
         short(&data.version_id)
     );
-    // Disclose the one write `add` makes outside ~/.topos/ — the session-start currency hook — honestly
-    // (it is plumbing: it runs a no-op `pull` until the sync engine lands; never "it auto-updates").
+    // Disclose the one write `add` makes outside ~/.topos/ — the currency trigger — honestly (it is
+    // plumbing: it runs a no-op `pull` until something is followed; never "it auto-updates"). The copy
+    // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
+    // (a session-start hook fires at session start; an inject surface only on the first `topos` touch).
     if let Some(report) = &data.currency {
-        out.push_str(match report.state {
-            TriggerState::Active => {
+        out.push_str(match (report.state, report.currency_kind) {
+            (TriggerState::Active, CurrencyKind::SessionStart) => {
                 "\nInstalled the session-start currency hook (runs `topos pull` at session start)."
             }
-            TriggerState::AlreadyPresentUnmanaged => {
+            (TriggerState::Active, CurrencyKind::FirstToposTouch) => {
+                "\nInstalled the currency trigger (updates surface on the first `topos` touch)."
+            }
+            (TriggerState::Active, CurrencyKind::FirstTurn) => {
+                "\nInstalled the currency trigger (updates surface on the first turn)."
+            }
+            (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
+                "\nNo automatic currency trigger — run `topos pull` to check for updates."
+            }
+            (TriggerState::AlreadyPresentUnmanaged, CurrencyKind::SessionStart) => {
                 "\nLeft your existing `topos pull` session-start hook untouched."
             }
-            TriggerState::Degraded => {
+            (TriggerState::AlreadyPresentUnmanaged, _) => {
+                "\nLeft your existing `topos pull` currency trigger untouched."
+            }
+            (TriggerState::Degraded, CurrencyKind::SessionStart) => {
                 "\nCouldn't update settings.json for the currency hook — left it untouched."
             }
-            TriggerState::Inactive => "",
+            (TriggerState::Degraded, _) => {
+                "\nCouldn't update the harness config for the currency trigger — left it untouched; run `topos pull` to check for updates."
+            }
+            (TriggerState::Inactive, _) => "",
         });
     }
     out
@@ -252,15 +269,23 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
         }
     }
     if let Some(report) = &data.currency {
-        out.push_str(match report.state {
-            TriggerState::Inactive => "Scrubbed the session-start currency hook.\n",
-            TriggerState::AlreadyPresentUnmanaged => {
+        out.push_str(match (report.state, report.currency_kind) {
+            (TriggerState::Inactive, CurrencyKind::SessionStart) => {
+                "Scrubbed the session-start currency hook.\n"
+            }
+            (TriggerState::Inactive, _) => {
+                "Scrubbed the currency trigger from the harness config.\n"
+            }
+            (TriggerState::AlreadyPresentUnmanaged, _) => {
                 "Left your own (unmanaged) `topos pull` hook in place.\n"
             }
-            TriggerState::Degraded => {
+            (TriggerState::Degraded, CurrencyKind::SessionStart) => {
                 "Couldn't scrub the currency hook from settings.json — remove it by hand if present.\n"
             }
-            TriggerState::Active => "",
+            (TriggerState::Degraded, _) => {
+                "Couldn't scrub the currency trigger from the harness config — remove it by hand if present.\n"
+            }
+            (TriggerState::Active, _) => "",
         });
     }
     out.push_str(if data.home_removed {

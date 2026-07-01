@@ -132,8 +132,8 @@ pub(crate) enum Command {
         /// The skill name.
         skill: String,
     },
-    /// Check for and apply updates to followed skills — the session-start currency entry point. Bare =
-    /// the sweep over every followed skill (the installed hook runs `pull --quiet`). `<skill>` accepts a
+    /// Check for and apply updates to followed skills — the harness currency entry point. Bare = the
+    /// sweep over every followed skill (the installed currency trigger runs `pull --quiet`). `<skill>` accepts a
     /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
     Pull {
         /// Optional target: `<name>` accepts a pending update / resumes a hold / resolves a divergence;
