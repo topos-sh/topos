@@ -60,6 +60,10 @@ struct Config {
     /// The SMTP from-address.
     #[arg(long, env = "TOPOS_PLANE_SMTP_FROM")]
     smtp_from: Option<String>,
+    /// The operator admin token (a secret — never logged; only its sha256 is retained). Enables the
+    /// `PUT /v1/workspaces/{ws}/policy/review-required` toggle; unset, that route answers 404.
+    #[arg(long, env = "TOPOS_PLANE_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
 }
 
 #[tokio::main]
@@ -115,6 +119,11 @@ async fn main() -> Result<()> {
         smtp,
     })
     .await?;
+    // The operator admin token (post-construction, like the rate limits): only its sha256 is retained.
+    let state = match cfg.admin_token.as_deref() {
+        Some(token) if !token.trim().is_empty() => state.with_admin_token(token),
+        _ => state,
+    };
 
     // The OIDC connector is feature-gated + default-off; when built in, read its config from the environment
     // and load it onto the state so the `/v1/enroll/oidc/*` routes can drive it.

@@ -570,6 +570,16 @@ pub struct DeviceRevokeRequest {
     pub target_device_key_id: String,
 }
 
+/// `PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the
+/// `review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a
+/// path-shape change). Authenticated by the plane's admin token, not a device-op signature; the route is
+/// invisible (404) on a plane with no admin token configured.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+pub struct PolicyReviewRequiredRequest {
+    /// The desired policy value: `true` gates any direct publish behind a reviewer's approval.
+    pub review_required: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,10 +18,11 @@ use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
     DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, InviteRequest, InviteSkill,
     PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest, PasscodeConfirmResponse,
-    PasscodeConfirmStatus, PasscodeRequest, ProposeRequest, PublishRequest, RedeemRequest,
-    RedeemResponse, RedeemedSkillCred, RevertRequest, ReviewRequest, RosterRemoveRequest,
-    RosterSetRequest, VerificationContextResponse, WireCandidate, WireFile, WireFileMode,
-    WireOpenProposal, WireProposalList, WireVersionFile, WireVersionMeta, WorkspaceRole,
+    PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest, ProposeRequest,
+    PublishRequest, RedeemRequest, RedeemResponse, RedeemedSkillCred, RevertRequest, ReviewRequest,
+    RosterRemoveRequest, RosterSetRequest, VerificationContextResponse, WireCandidate, WireFile,
+    WireFileMode, WireOpenProposal, WireProposalList, WireVersionFile, WireVersionMeta,
+    WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
@@ -63,6 +64,8 @@ use topos_types::{
         crate::routes::governance::roster_set,
         crate::routes::governance::roster_remove,
         crate::routes::governance::revoke_device,
+        // The self-host operator policy toggle (admin bearer token).
+        crate::routes::policy::set_review_required,
     ),
     components(schemas(
         // Request DTOs (writes).
@@ -73,6 +76,8 @@ use topos_types::{
         WireCandidate,
         WireFile,
         WireFileMode,
+        // The self-host operator policy toggle.
+        PolicyReviewRequiredRequest,
         // Response / envelope DTOs.
         JsonEnvelope,
         Receipt,

@@ -4,8 +4,13 @@
 //! Design rule: a returned protocol outcome (OK / CONFLICT / DENIED / …) is ALWAYS a 200 carrying a receipt
 //! (see [`crate::wire::map::write_envelope`]); a non-2xx is ONLY a transport/auth/integrity fault:
 //! - `400` — a malformed body / id / device-signature header;
-//! - `404` — a missing/blank read credential OR `AuthorityError::NotFound` (indistinguishable, never
-//!   401/403: the plane never reveals whether a token, workspace, skill, object, or version exists);
+//! - `404` — a missing/blank read credential OR `AuthorityError::NotFound` (indistinguishable — for READ
+//!   credentials the plane never answers 401/403, so it reveals nothing about whether a token, workspace,
+//!   skill, object, or version exists);
+//! - `401` — ONLY the operator admin-token surface (a configured route with a missing/wrong token). The
+//!   404-not-403 posture hides object existence from untrusted readers; it does not apply to an operator's
+//!   own shared secret, where an honest, debuggable auth failure is worth more than uniformity (an
+//!   UNCONFIGURED admin route still answers 404 — invisible, never an oracle);
 //! - `500` — `AuthorityError::{Integrity, Internal}`.
 
 use axum::Json;
@@ -28,6 +33,9 @@ pub(crate) enum PlaneHttpError {
     BadId(String),
     /// A missing/blank read credential → 404 (indistinguishable; never 401/403).
     MissingReadCredential,
+    /// A configured admin-token surface with a missing/wrong bearer token → 401 (the one honest auth
+    /// failure — an operator debugging their own secret; see the module doc's scoping note).
+    Unauthorized,
     /// An authority fault carried through and mapped by variant.
     Authority(AuthorityError),
 }
@@ -60,6 +68,13 @@ impl IntoResponse for PlaneHttpError {
                 false,
                 vec![],
                 "not found".to_owned(),
+            ),
+            PlaneHttpError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                false,
+                vec![],
+                "missing or invalid admin token".to_owned(),
             ),
             PlaneHttpError::Authority(e) => match e {
                 AuthorityError::NotFound => (

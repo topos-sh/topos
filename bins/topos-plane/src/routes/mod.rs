@@ -12,6 +12,7 @@ pub(crate) mod bundles;
 pub(crate) mod current;
 pub(crate) mod enroll;
 pub(crate) mod governance;
+pub(crate) mod policy;
 pub(crate) mod proposals;
 pub(crate) mod publish;
 pub(crate) mod reverts;

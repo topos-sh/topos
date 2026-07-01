@@ -1072,6 +1072,99 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/policy/review-required": {
+      "put": {
+        "tags": [
+          "policy"
+        ],
+        "operationId": "set_review_required",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer <admin token> (the plane operator's secret).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyReviewRequiredRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The policy was set (an idempotent write)."
+          },
+          "400": {
+            "description": "Malformed body or workspace id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin token configured but missing/invalid on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No admin token is configured on this plane (the route is disabled).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/roster/{email}": {
       "put": {
         "tags": [
@@ -2200,6 +2293,19 @@
           },
           "workspace_id": {
             "type": "string"
+          }
+        }
+      },
+      "PolicyReviewRequiredRequest": {
+        "type": "object",
+        "description": "`PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the\n`review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a\npath-shape change). Authenticated by the plane's admin token, not a device-op signature; the route is\ninvisible (404) on a plane with no admin token configured.",
+        "required": [
+          "review_required"
+        ],
+        "properties": {
+          "review_required": {
+            "type": "boolean",
+            "description": "The desired policy value: `true` gates any direct publish behind a reviewer's approval."
           }
         }
       },

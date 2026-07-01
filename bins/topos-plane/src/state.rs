@@ -29,6 +29,11 @@ pub struct PlaneState {
     /// environment via [`with_oidc_config`](Self::with_oidc_config); `None` until configured.
     #[cfg(feature = "enroll-oidc")]
     oidc: Option<Arc<crate::enroll::oidc::OidcConfig>>,
+    /// The sha256 of the self-host operator's admin token, when one is configured
+    /// ([`with_admin_token`](Self::with_admin_token)) — the raw token is never stored. `None` ⇒ the
+    /// admin-authenticated policy route is disabled (it answers 404, so a composition that never sets a
+    /// token can't accidentally expose an unauthenticated toggle).
+    admin_token_sha256: Option<[u8; 32]>,
 }
 
 /// The static enrollment configuration the verification routes read: the public base URL, the deployment
@@ -140,6 +145,7 @@ impl PlaneState {
             enroll: Arc::new(EnrollConfig::default()),
             #[cfg(feature = "enroll-oidc")]
             oidc: None,
+            admin_token_sha256: None,
         }
     }
 
@@ -240,6 +246,29 @@ impl PlaneState {
     pub fn with_rate_limit(mut self, limits: Limits) -> Self {
         self.limiter = Limiter::new(limits);
         self
+    }
+
+    /// Enable the self-host operator's admin-authenticated policy route by configuring its bearer token.
+    /// Only the token's sha256 is retained (never the raw secret — it can't reach a `Debug`/log); with no
+    /// token configured the route stays disabled and answers 404. The OSS bin wires this from
+    /// `--admin-token` / `TOPOS_PLANE_ADMIN_TOKEN`; a composing plane may call it too.
+    #[must_use]
+    pub fn with_admin_token(mut self, token: &str) -> Self {
+        self.admin_token_sha256 = Some(topos_core::digest::sha256(token.as_bytes()));
+        self
+    }
+
+    /// Whether an admin token is configured (the policy route is 404-invisible otherwise).
+    pub(crate) fn admin_token_configured(&self) -> bool {
+        self.admin_token_sha256.is_some()
+    }
+
+    /// Whether `provided` is the configured admin token — a fixed 32-byte sha256 compare (timing-independent
+    /// of any prefix match), the same token-as-sha256 idiom the enrollment credentials use. `false` when no
+    /// token is configured.
+    pub(crate) fn admin_token_matches(&self, provided: &str) -> bool {
+        self.admin_token_sha256
+            .is_some_and(|stored| topos_core::digest::sha256(provided.as_bytes()) == stored)
     }
 
     /// Set the enrollment config, constructing the mailer **internally** — a real [`SmtpMailer`] when `smtp`

@@ -98,6 +98,11 @@ fn enroll_and_governance_routes() -> Router<PlaneState> {
         .route(
             "/v1/workspaces/{ws}/roster/{email}",
             put(routes::governance::roster_set).delete(routes::governance::roster_remove),
+        )
+        // The SELF-HOST operator policy toggle (admin bearer token; 404-invisible when unconfigured).
+        .route(
+            "/v1/workspaces/{ws}/policy/review-required",
+            put(routes::policy::set_review_required),
         );
 
     // The OIDC connector routes — only present under the default-off feature.

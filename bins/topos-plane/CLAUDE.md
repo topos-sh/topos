@@ -51,6 +51,16 @@
   byte-identically.
 - A minimal **in-process token-bucket rate limiter** (`rate_limit.rs`, no extra dependency) that freezes the
   429 wire shape (`Retry-After` + a `RETRYABLE_FAILURE` envelope); on by default, env-disableable.
+- **The self-host operator policy route** (`routes/policy.rs`): `PUT
+  /v1/workspaces/{ws}/policy/review-required` sets the `review-required` workspace policy through
+  `Authority::set_review_required` (enforcement stays in the write path — a direct publish under the gate
+  fails typed). Authenticated by the plane's **admin bearer token** (`--admin-token` /
+  `TOPOS_PLANE_ADMIN_TOKEN`; the state retains only its sha256 via `PlaneState::with_admin_token`): with NO
+  token configured the route answers **404** (invisible — a downstream composition that merges
+  `router(state)` without setting a token can never expose an unauthenticated toggle on its open `/v1/`
+  lane); configured-but-wrong is an honest **401** (the one scoped exception to the 404-not-403 read
+  posture — an operator's own secret, not an object-existence oracle); success is **204**, an idempotent
+  set. NOT device-op-signed (the device-signed governance variant needs a new kernel frame — later work).
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 
@@ -78,16 +88,16 @@ issuance decision (every credential/identity decision is `plane-store::Authority
   production).
 
 **Planned (lands later):** the **verification-page HTML** (the routes above are the JSON surface a composing
-web layer renders; the page itself is a separate surface); the **device-signed `PUT /policy` route** (the
-`review-required` toggle is now a public library method — `PlaneState::set_review_required` — that a composing
-admin route calls; a device-op-signed governance route over it needs a new kernel frame, still later work);
-the **audit outbox** read via durable cursors; **TLS termination** (loopback HTTP today — terminate at a
-reverse proxy).
+web layer renders; the page itself is a separate surface); the **device-signed `PUT /policy` variant** (the
+admin-token operator route is built — see above; a device-op-signed governance route over the same policy
+needs a new kernel frame, still later work); the **audit outbox** read via durable cursors; **TLS
+termination** (loopback HTTP today — terminate at a reverse proxy).
 
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / database URL / git-root /
-large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), resolves its two bin-local
+large-root / plane-key / enrollment secret / base URL / mode / SMTP relay / the optional operator
+admin token, which enables the policy route), resolves its two bin-local
 marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
 **single leak-free constructor** `PlaneState::open(PlaneConfig { .. })` — which opens the `Authority`,
 loads the plane key + enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
