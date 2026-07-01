@@ -4,9 +4,15 @@
 //! [`UreqPlane`] is a **dumb transport** — it speaks the B3 wire (`GET /v1/current/{read_token}` with the
 //! commit-sensitive conditional-GET headers; `GET …/versions/{id}` + per-blob `GET …/bundles/{id}` under a
 //! Bearer token) and verifies each blob's `sha256 == object_id`, but it does **not** verify the pointer
-//! signature — the engine does that against `ctx.plane_key`. Status mapping ([`classify`]) and version
-//! assembly ([`build_fetched_version`]) are factored as pure functions so the wire logic is unit-tested
-//! without a live server (the full loopback round-trip is the next leaf).
+//! signature — the engine does that against `ctx.plane_key`. Status mapping ([`classify`]), version
+//! assembly ([`build_fetched_version`]), and the envelope mappings are factored as pure functions so the
+//! wire logic is unit-tested without a live server; the full loopback round-trips live in the `tests/`
+//! member.
+//!
+//! **Ids are validated at this boundary.** Every skill/workspace id a response carries (the redeem's
+//! read creds, the bootstrap's offered skills) is parsed through [`crate::id`] before it is returned —
+//! a plane-chosen `"../../x"` fails here as a malformed response, never reaching a path join or a URL
+//! splice.
 //!
 //! The client stays **sync + tokio-free**: `ureq` brings its own blocking TLS stack, so this adds no
 //! `plane-store`/`sqlx`/`tokio` edge (`check-arch` holds the line).
@@ -33,8 +39,11 @@ use crate::plane::{
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
 const CONNECT_TIMEOUT_SECS: u64 = 10;
-/// Fail fast waiting for the response head (body streaming is uncapped so a large legit blob isn't cut off).
+/// Fail fast waiting for the response head.
 const RECV_RESPONSE_TIMEOUT_SECS: u64 = 30;
+/// Bound the whole body read, so a stalled or byte-trickling plane cannot hang the session-start hook
+/// indefinitely. Generous: a legitimate blob near the plane's ~100 MiB cap fits at ~350 KiB/s.
+const RECV_BODY_TIMEOUT_SECS: u64 = 300;
 /// The read cap for any single response body — comfortably above the plane's ~100 MiB per-blob reject cap,
 /// with headroom for the metadata/record JSON. `ureq`'s default `read_to_vec` caps at 10 MiB, too small.
 const MAX_FETCH_BYTES: u64 = 128 * 1024 * 1024;
@@ -85,26 +94,20 @@ impl std::fmt::Debug for UreqPlane {
 }
 
 impl UreqPlane {
-    /// Build the transport: one blocking agent (rustls+ring, sane connect/recv timeouts, status-as-error
-    /// OFF so a 304/404/5xx comes back as an inspectable status rather than an error variant) + the cred map.
-    /// `base_url`'s trailing slash is trimmed so URL joins never double up.
+    /// Build the transport: one blocking agent (rustls+ring, sane connect/recv/body timeouts,
+    /// status-as-error OFF so a 304/404/5xx comes back as an inspectable status rather than an error
+    /// variant) + the cred map. `base_url`'s trailing slash is trimmed so URL joins never double up.
     pub(crate) fn new(base_url: String, creds: HashMap<String, SkillCred>) -> Self {
-        let config = ureq::Agent::config_builder()
-            // Treat EVERY status (incl. 304 / 404 / 5xx) as a returned response, not an `Err`, so the status
-            // mapping is uniform; only a genuine transport/timeout/TLS fault surfaces as `Err`.
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
-            .timeout_recv_response(Some(Duration::from_secs(RECV_RESPONSE_TIMEOUT_SECS)))
-            .build();
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             creds,
-            agent: ureq::Agent::new_with_config(config),
+            agent: ureq::Agent::new_with_config(agent_config()),
         }
     }
 
     /// A `GET` carrying `Authorization: Bearer <read_token>` (versions + bundles). Returns the raw body on
-    /// 2xx, [`PlaneError::NotFound`] on 404, [`PlaneError::Unavailable`] on transport / any other status.
+    /// 2xx, [`PlaneError::NotFound`] on 404, [`PlaneError::Unreachable`] on a connect-level fault, and
+    /// [`PlaneError::Unavailable`] on any other status.
     /// `url` here never contains the secret (the token is in the header), so it is safe in the error text.
     fn bearer_get(&self, url: &str, read_token: &str) -> Result<Vec<u8>, PlaneError> {
         let resp = self
@@ -112,7 +115,9 @@ impl UreqPlane {
             .get(url)
             .header("authorization", format!("Bearer {read_token}"))
             .call()
-            .map_err(|e| PlaneError::Unavailable(format!("GET {url}: {e}")))?;
+            // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
+            // unreachable, so the sweep's circuit breaker may trip on it.
+            .map_err(|e| PlaneError::Unreachable(format!("GET {url}: {e}")))?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => read_body(resp),
@@ -147,7 +152,8 @@ impl PlaneSource for UreqPlane {
         }
         let resp = req
             .call()
-            .map_err(|e| PlaneError::Unavailable(format!("get_current {skill_id}: {e}")))?;
+            // Connect-level (see `bearer_get`) — distinguishable so the sweep breaker can trip.
+            .map_err(|e| PlaneError::Unreachable(format!("get_current {skill_id}: {e}")))?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::NotModified => Ok(PointerFetch::NotModified),
@@ -172,6 +178,9 @@ impl PlaneSource for UreqPlane {
         version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
         let cred = self.creds.get(skill_id).ok_or(PlaneError::NotFound)?;
+        // Both ids are spliced into the URL path — refuse anything outside the validated id charset
+        // (defense in depth; the enrollment loaders already validated what they persisted).
+        ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
         let vid_hex = to_hex(&version_id);
         let meta_url = format!(
             "{}/v1/workspaces/{}/skills/{}/versions/{}",
@@ -194,6 +203,7 @@ impl PlaneSource for UreqPlane {
         let Some(cred) = self.creds.get(skill_id) else {
             return Ok(Vec::new());
         };
+        ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
         let url = format!(
             "{}/v1/workspaces/{}/skills/{}/proposals",
             self.base_url, cred.workspace_id, skill_id
@@ -212,6 +222,32 @@ impl PlaneSource for UreqPlane {
             Err(PlaneError::NotFound) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// The one agent configuration both transports share: status-as-error OFF (every status comes back as an
+/// inspectable response; only a genuine transport/timeout/TLS fault surfaces as `Err`) + the three
+/// timeouts, so neither a dead plane (connect), a silent head (recv-response), nor a stalled/trickling
+/// body (recv-body) can hang the session-start hook.
+fn agent_config() -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .timeout_recv_response(Some(Duration::from_secs(RECV_RESPONSE_TIMEOUT_SECS)))
+        .timeout_recv_body(Some(Duration::from_secs(RECV_BODY_TIMEOUT_SECS)))
+        .build()
+}
+
+/// Refuse a skill/workspace id that is not URL-path-safe before splicing it into a request path (the
+/// same lowercase charset [`crate::id`] enforces at the load boundaries — this is the last-line guard).
+/// The fixed message never echoes the hostile bytes.
+fn ensure_url_safe_ids(skill_id: &str, workspace_id: &str) -> Result<(), PlaneError> {
+    if crate::id::is_valid_id(skill_id) && crate::id::is_valid_id(workspace_id) {
+        Ok(())
+    } else {
+        Err(PlaneError::Malformed(
+            "a skill/workspace id is not a safe path segment".into(),
+        ))
     }
 }
 
@@ -347,17 +383,12 @@ impl std::fmt::Debug for UreqEnroll {
 }
 
 impl UreqEnroll {
-    /// Build the transport against `base_url` (trailing slash trimmed). Status-as-error is OFF so every
-    /// status comes back as an inspectable response, mirroring [`UreqPlane`].
+    /// Build the transport against `base_url` (trailing slash trimmed), over the same agent
+    /// configuration as [`UreqPlane`] (status-as-error OFF + the connect/recv/body timeouts).
     pub(crate) fn new(base_url: String) -> Self {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
-            .timeout_recv_response(Some(Duration::from_secs(RECV_RESPONSE_TIMEOUT_SECS)))
-            .build();
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            agent: ureq::Agent::new_with_config(config),
+            agent: ureq::Agent::new_with_config(agent_config()),
         }
     }
 
@@ -423,10 +454,7 @@ impl EnrollSource for UreqEnroll {
         match classify(status) {
             HttpClass::Ok => {
                 let bytes = read_body(resp).map_err(plane_err)?;
-                // A non-Ed25519 `alg` is a CLOSED-enum deserialize failure here — fail closed (Corrupt).
-                serde_json::from_slice(&bytes).map_err(|e| {
-                    ClientError::Corrupt(format!("invite bootstrap is malformed: {e}"))
-                })
+                parse_bootstrap(&bytes)
             }
             HttpClass::NotFound => Err(ClientError::Plane(
                 "the invite link is invalid or has expired".into(),
@@ -505,6 +533,9 @@ impl EnrollSource for UreqEnroll {
         device_public_key: [u8; 32],
         enroll_sig: [u8; 64],
     ) -> Result<Redeem, ClientError> {
+        // The workspace id is spliced into the URL path below — validate before building the request
+        // (it entered via the bootstrap, which already validated; this is the last-line guard).
+        crate::id::validate_workspace_id(workspace_id)?;
         let body = serde_json::to_value(RedeemRequest {
             workspace_id: workspace_id.to_owned(),
             grant: grant.to_owned(),
@@ -514,36 +545,62 @@ impl EnrollSource for UreqEnroll {
         let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
         let sig = b64(&enroll_sig);
         let (status, bytes) = self.post_json(&url, &body, Some(&sig), "redeem")?;
-        // The redeem is an all-outcome 200 envelope; a non-2xx is a transport/auth/integrity fault.
-        if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
-        }
-        let env: JsonEnvelope = serde_json::from_slice(&bytes)
-            .map_err(|e| ClientError::Corrupt(format!("redeem envelope is malformed: {e}")))?;
-        if !env.ok {
-            // A DENIED redeem (e.g. a device-key mismatch) — surface the code, never any secret.
-            let code = env
-                .error
-                .map(|e| e.code)
-                .unwrap_or_else(|| "DENIED".to_owned());
-            return Err(ClientError::Plane(format!("redeem refused ({code})")));
-        }
-        let resp: RedeemResponse = serde_json::from_value(env.data)
-            .map_err(|e| ClientError::Corrupt(format!("redeem data is malformed: {e}")))?;
-        Ok(Redeem {
-            workspace_id: resp.workspace_id,
-            device_key_id: resp.device_key_id,
-            read_creds: resp
-                .read_creds
-                .into_iter()
-                .map(|c| RedeemedCred {
-                    skill_id: c.skill_id,
-                    read_token: c.read_token,
-                    expires_at: c.expires_at,
-                })
-                .collect(),
-        })
+        map_redeem_envelope(status, &bytes)
     }
+}
+
+/// Map a redeem response — the all-outcome **200 envelope** — to the typed [`Redeem`], validating every
+/// id the plane minted (the per-cred skill ids become path components under `~/.topos/` and the harness
+/// skills dir; the workspace id becomes a URL segment) — a traversal-shaped id fails the whole redeem as
+/// malformed. **Pure** (status + bytes in), so the ok / denied / hostile-id arms are unit-tested without
+/// a socket (mirrors [`map_invite_envelope`]).
+fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError> {
+    // The redeem is an all-outcome 200 envelope; a non-2xx is a transport/auth/integrity fault.
+    if classify(status) != HttpClass::Ok {
+        return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
+    }
+    let env: JsonEnvelope = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::Corrupt(format!("redeem envelope is malformed: {e}")))?;
+    if !env.ok {
+        // A DENIED redeem (e.g. a device-key mismatch) — surface the code, never any secret.
+        let code = env
+            .error
+            .map(|e| e.code)
+            .unwrap_or_else(|| "DENIED".to_owned());
+        return Err(ClientError::Plane(format!("redeem refused ({code})")));
+    }
+    let resp: RedeemResponse = serde_json::from_value(env.data)
+        .map_err(|e| ClientError::Corrupt(format!("redeem data is malformed: {e}")))?;
+    crate::id::validate_workspace_id(&resp.workspace_id)?;
+    let mut read_creds = Vec::with_capacity(resp.read_creds.len());
+    for c in resp.read_creds {
+        // The wire boundary: the minted skill id must be a safe path component (it keys the sidecar +
+        // the harness placement). Parse-don't-validate — the failure is the corrupt family, no new code.
+        crate::id::SkillId::parse(&c.skill_id)?;
+        read_creds.push(RedeemedCred {
+            skill_id: c.skill_id,
+            read_token: c.read_token,
+            expires_at: c.expires_at,
+        });
+    }
+    Ok(Redeem {
+        workspace_id: resp.workspace_id,
+        device_key_id: resp.device_key_id,
+        read_creds,
+    })
+}
+
+/// Parse + validate the `/i/` bootstrap body: the serde decode (a non-Ed25519 `alg` fails the CLOSED
+/// enum), then the id boundary — the workspace id and every offered skill id must be safe path/URL
+/// segments (they persist into the WAL and later key path joins). **Pure**, unit-tested with canned JSON.
+fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
+    let bootstrap: BootstrapData = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::Corrupt(format!("invite bootstrap is malformed: {e}")))?;
+    crate::id::validate_workspace_id(&bootstrap.workspace.workspace_id)?;
+    for s in &bootstrap.offered_skills {
+        crate::id::SkillId::parse(&s.skill_id)?;
+    }
+    Ok(bootstrap)
 }
 
 // =================================================================================================
@@ -670,7 +727,9 @@ fn b64(bytes: &[u8]) -> String {
 fn plane_err(e: PlaneError) -> ClientError {
     match e {
         PlaneError::NotFound => ClientError::Plane("not found".into()),
-        PlaneError::Unavailable(m) | PlaneError::Malformed(m) => ClientError::Plane(m),
+        PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
+            ClientError::Plane(m)
+        }
     }
 }
 
@@ -996,5 +1055,106 @@ mod tests {
         });
         let err = map_write_envelope(200, &bytes).unwrap_err();
         assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+    }
+
+    // ---- The id boundary: hostile plane-supplied ids are refused at the wire parse. ----
+
+    fn redeem_env(skill_id: &str, workspace_id: &str) -> Vec<u8> {
+        envelope_bytes(&JsonEnvelope {
+            schema_version: 1,
+            command: "redeem".to_owned(),
+            ok: true,
+            data: serde_json::json!({
+                "workspace_id": workspace_id,
+                "device_key_id": "dk_abc",
+                "read_creds": [
+                    { "skill_id": skill_id, "read_token": "rt_secret" }
+                ]
+            }),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: None,
+        })
+    }
+
+    #[test]
+    fn map_redeem_envelope_refuses_a_hostile_skill_id() {
+        // The redeem's skill ids become path components (~/.topos/skills/<id>, the harness skills dir),
+        // so every traversal/separator/case shape must fail the WHOLE redeem as the corrupt family.
+        for bad in ["../../x", "a/b", "A", "", ".", ".."] {
+            let err = map_redeem_envelope(200, &redeem_env(bad, "w_acme")).unwrap_err();
+            assert!(
+                matches!(err, ClientError::Corrupt(_)),
+                "skill id {bad:?} must be refused as Corrupt, got {err:?}"
+            );
+            assert_eq!(err.code(), "CORRUPT_STATE", "no new wire code");
+        }
+        // A clean redeem still parses.
+        let ok = map_redeem_envelope(200, &redeem_env("s_deploy", "w_acme")).unwrap();
+        assert_eq!(ok.read_creds.len(), 1);
+    }
+
+    #[test]
+    fn map_redeem_envelope_refuses_a_hostile_workspace_id() {
+        // The workspace id is spliced into request URL paths — same charset rule.
+        for bad in ["../../x", "a/b", "A", ""] {
+            let err = map_redeem_envelope(200, &redeem_env("s_deploy", bad)).unwrap_err();
+            assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+        }
+    }
+
+    fn bootstrap_json(skill_id: &str, workspace_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "invite": {
+                "token_id": "tok_1",
+                "consent": "direct_human_first_receive",
+                "first_receive_auto_land": false
+            },
+            "plane": {
+                "base_url": "https://acme.topos.test",
+                "deployment_mode": "self_host",
+                "enrollment_method": "device_code",
+                "signing_key": { "alg": "Ed25519", "key_id": "pk_1", "value": "A".repeat(43) }
+            },
+            "workspace": {
+                "workspace_id": workspace_id,
+                "display_name": "Acme",
+                "verified_domain_status": "unverified"
+            },
+            "offered_skills": [ { "skill_id": skill_id } ]
+        }))
+        .expect("serialize bootstrap")
+    }
+
+    #[test]
+    fn parse_bootstrap_refuses_hostile_ids_but_accepts_clean_ones() {
+        // The bootstrap's ids persist into the enrollment WAL and later key path joins / URL splices.
+        for bad in ["../../x", "a/b", "A", "", ".", ".."] {
+            let err = parse_bootstrap(&bootstrap_json(bad, "w_acme")).unwrap_err();
+            assert!(
+                matches!(err, ClientError::Corrupt(_)),
+                "offered skill id {bad:?} must be refused, got {err:?}"
+            );
+            let err = parse_bootstrap(&bootstrap_json("s_deploy", bad)).unwrap_err();
+            assert!(
+                matches!(err, ClientError::Corrupt(_)),
+                "workspace id {bad:?} must be refused, got {err:?}"
+            );
+        }
+        let ok = parse_bootstrap(&bootstrap_json("s_deploy", "w_acme")).expect("clean bootstrap");
+        assert_eq!(ok.workspace.workspace_id, "w_acme");
+        assert_eq!(ok.offered_skills[0].skill_id, "s_deploy");
+    }
+
+    #[test]
+    fn url_splice_guard_refuses_an_invalid_id() {
+        // The last-line guard before an id reaches a URL path.
+        assert!(ensure_url_safe_ids("s_deploy", "w_acme").is_ok());
+        for (skill, ws) in [("../x", "w_acme"), ("s_deploy", "../w"), ("A", "w_acme")] {
+            let err = ensure_url_safe_ids(skill, ws).unwrap_err();
+            assert!(matches!(err, PlaneError::Malformed(_)), "got {err:?}");
+        }
     }
 }

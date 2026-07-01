@@ -42,12 +42,11 @@ pub(crate) fn read_doc<T: DeserializeOwned>(
 }
 
 /// Serialize a **SECRET** document (pretty + trailing newline — the committed on-disk shape) and write it
-/// atomically at **0600** ([`atomic_write_private`]). Use for any sidecar doc that carries a secret (e.g.
-/// `follows.json`'s read tokens); ordinary, non-secret docs use [`write_doc`].
+/// atomically at **0600** ([`atomic_write_private`]). Used for every sidecar doc that carries a secret
+/// (`follows.json`'s read tokens, the enrollment WAL); ordinary, non-secret docs use [`write_doc`].
 ///
 /// # Errors
 /// [`ClientError::Corrupt`] if serialization fails; otherwise the [`FsOps`] failure.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_doc_private<T: Serialize>(
     fs: &dyn FsOps,
     target: &Path,
@@ -67,7 +66,6 @@ pub(crate) fn write_doc_private<T: Serialize>(
 /// # Errors
 /// [`ClientError::Corrupt`] if the secret is group/other-accessible; as [`load_versioned`] otherwise; plus
 /// the [`FsOps`] read failure.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_doc_private<T: DeserializeOwned>(
     fs: &dyn FsOps,
     path: &Path,

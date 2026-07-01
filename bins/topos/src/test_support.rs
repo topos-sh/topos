@@ -255,9 +255,10 @@ impl PullHarness {
         );
 
         // Record the placement EXACTLY as map.json holds it (canonicalized) — what materialize writes to.
-        let map: PlacementMap = doc::read_doc(&self.fs, &self.layout().published(skill_id).map)
-            .expect("read map.json")
-            .expect("map.json exists after add");
+        let map: PlacementMap =
+            doc::read_doc(&self.fs, &self.layout().published(&sid(skill_id)).map)
+                .expect("read map.json")
+                .expect("map.json exists after add");
         let placement = map
             .placements
             .first()
@@ -341,7 +342,9 @@ impl PullHarness {
                 }
             }
         };
-        ops::pull(&ctx, internal).unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
+        ops::pull(&ctx, internal)
+            .unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
+            .data
     }
 
     /// The placement directory's files for `skill_id`: `(bundle-relative path, unix mode bits & 0o777, raw
@@ -365,10 +368,15 @@ impl PullHarness {
     /// If `sync.json` is missing or unreadable.
     #[must_use]
     pub fn sync_state(&self, skill_id: &str) -> SyncState {
-        doc::read_doc(&self.fs, &self.layout().published(skill_id).sync)
+        doc::read_doc(&self.fs, &self.layout().published(&sid(skill_id)).sync)
             .expect("read sync.json")
             .expect("sync.json exists for a followed skill")
     }
+}
+
+/// Parse a test skill id through the validated newtype (a rig id is always charset-clean).
+fn sid(skill_id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(skill_id).expect("test skill id is charset-clean")
 }
 
 /// A harness adapter whose placement is an ABSOLUTE directory under a test work root — so a followed skill's
@@ -752,7 +760,7 @@ impl FollowHarness {
     /// If `sync.json` is missing or unreadable.
     #[must_use]
     pub fn sync_state(&self, skill_id: &str) -> SyncState {
-        doc::read_doc(&self.fs, &self.layout().published(skill_id).sync)
+        doc::read_doc(&self.fs, &self.layout().published(&sid(skill_id)).sync)
             .expect("read sync.json")
             .expect("sync.json exists for a followed skill")
     }
@@ -805,7 +813,9 @@ impl FollowHarness {
                 plane_key,
                 follow: &follow,
             };
-            ops::pull(&ctx, internal).unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
+            ops::pull(&ctx, internal)
+                .unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
+                .data
         })
     }
 }
@@ -1019,6 +1029,7 @@ impl ContributeHarness {
         };
         ops::pull(&ctx, ops::PullScope::AllFollowed)
             .unwrap_or_else(|e| panic!("contribute: pull: {e}"))
+            .data
     }
 
     /// Overwrite the placement with `files` (a fresh draft ahead of `current`).
@@ -1162,9 +1173,12 @@ impl ContributeHarness {
     /// This skill's `sync.json` (the floor/applied state).
     #[must_use]
     pub fn sync_state(&self) -> SyncState {
-        doc::read_doc(&self.fs, &self.layout().published(&self.skill_id).sync)
-            .expect("read sync.json")
-            .expect("sync.json exists")
+        doc::read_doc(
+            &self.fs,
+            &self.layout().published(&sid(&self.skill_id)).sync,
+        )
+        .expect("read sync.json")
+        .expect("sync.json exists")
     }
 
     /// The placement bundle: `(relative path, mode & 0o777, bytes)`, sorted — for a byte-exact assert.

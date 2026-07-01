@@ -42,6 +42,19 @@ const WS: &str = "w_acme";
 const BASE_URL: &str = "https://acme.topos.test";
 const PLANE_SEED: [u8; 32] = [9u8; 32];
 
+/// Parse a fixture skill id through the validated newtype (always charset-clean here).
+fn sid(id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(id).expect("fixture skill id is charset-clean")
+}
+
+/// The test shim over [`ops::pull`]: project the schema payload (warnings have dedicated tests).
+fn pull_data(
+    ctx: &Ctx<'_>,
+    scope: ops::PullScope,
+) -> Result<topos_types::results::PullData, ClientError> {
+    ops::pull(ctx, scope).map(|o| o.data)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Scratch + the plane key.
 // ---------------------------------------------------------------------------------------------
@@ -971,7 +984,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
     // and a map carrying the harness placement target.
     let layout = rig.layout();
     // Find the laid skill dir (the baseline is keyed by the plane's skill id).
-    let sp = layout.published("s_deploy");
+    let sp = layout.published(&sid("s_deploy"));
     let sync: SyncState = doc::read_doc(&rig.fs, &sp.sync)
         .unwrap()
         .expect("baseline sync.json");
@@ -996,7 +1009,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         )],
     };
     let ctx = rig.ctx(&plane, &follow);
-    let swept = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let swept = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(swept.skills.len(), 1);
     assert_eq!(
         swept.skills[0].action,
@@ -1011,7 +1024,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
     // A SECOND bare sweep (the I-TOFU regression guard): the first sweep raised the floor + recorded the
     // tuple, but the still-unapproved first-receive baseline is STILL offered, NEVER auto-landed — even for
     // the default Auto follower.
-    let swept2 = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let swept2 = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(
         swept2.skills[0].action,
         PullAction::Offered,
@@ -1023,7 +1036,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
     );
 
     // An EXPLICIT accept places the first bytes.
-    let accepted = ops::pull(
+    let accepted = pull_data(
         &ctx,
         ops::PullScope::One {
             name: "deploy".to_owned(),

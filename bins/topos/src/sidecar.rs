@@ -9,6 +9,7 @@ use crate::atomic::TMP_SUFFIX;
 use crate::doc;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, LockGuard};
+use crate::id::SkillId;
 
 /// The prefix marking a transient staging directory (`skills/.staging-<id>/`) being assembled by `add`.
 const STAGING_PREFIX: &str = ".staging-";
@@ -58,17 +59,19 @@ impl Layout {
         self.home.join("skills")
     }
 
-    pub(crate) fn skill_dir(&self, id: &str) -> PathBuf {
-        self.skills_dir().join(id)
+    /// `skills/<id>/` — a path join, so the id is the VALIDATED newtype (parse-don't-validate: a raw
+    /// plane/document string can never reach this join). Same for every id-keyed builder below.
+    pub(crate) fn skill_dir(&self, id: &SkillId) -> PathBuf {
+        self.skills_dir().join(id.as_str())
     }
 
     /// The paths of a published skill (`skills/<id>/…`).
-    pub(crate) fn published(&self, id: &str) -> SkillPaths {
+    pub(crate) fn published(&self, id: &SkillId) -> SkillPaths {
         SkillPaths::under(&self.skill_dir(id))
     }
 
     /// The paths of a skill being staged (`skills/.staging-<id>/…`), published with one directory rename.
-    pub(crate) fn staging(&self, id: &str) -> (PathBuf, SkillPaths) {
+    pub(crate) fn staging(&self, id: &SkillId) -> (PathBuf, SkillPaths) {
         let base = self.skills_dir().join(format!("{STAGING_PREFIX}{id}"));
         let paths = SkillPaths::under(&base);
         (base, paths)
@@ -78,8 +81,14 @@ impl Layout {
         self.home.join("locks")
     }
 
-    pub(crate) fn lock_file(&self, id: &str) -> PathBuf {
+    pub(crate) fn lock_file(&self, id: &SkillId) -> PathBuf {
         self.locks_dir().join(format!("{id}.lock"))
+    }
+
+    /// `locks/identity.lock` — the identity/enrollment writer lock (a fixed name, not an id join; the
+    /// device-id mint, the device-key mint, and every `follows.json` read-merge-write serialize on it).
+    pub(crate) fn identity_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("identity.lock")
     }
 
     pub(crate) fn log_path(&self) -> PathBuf {
@@ -97,7 +106,6 @@ impl Layout {
     /// `identity/device.key` — the raw 32-byte Ed25519 seed (the device signing key), a `0600` secret.
     /// NEVER in JSON; `host.json` carries only the PUBLIC key + a [`crate::identity::DeviceKeyRef`] that
     /// points here.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn device_key_path(&self) -> PathBuf {
         self.identity_dir().join("device.key")
     }
@@ -147,7 +155,7 @@ impl Layout {
 pub(crate) fn lock_skill(
     fs: &dyn FsOps,
     layout: &Layout,
-    id: &str,
+    id: &SkillId,
 ) -> Result<LockGuard, ClientError> {
     Ok(fs.lock_exclusive(&layout.lock_file(id))?)
 }
@@ -215,12 +223,21 @@ pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Resul
             continue;
         };
         if let Some(id) = name.strip_prefix(STAGING_PREFIX) {
+            // A name outside the validated id charset was never minted by topos — leave it alone (the
+            // sweep must never lock/delete by a name it can't have created).
+            let Ok(id) = SkillId::parse(id) else {
+                continue;
+            };
             // Incomplete `add`: claim the id; if a live writer holds it, leave it be.
-            if let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(id))? {
+            if let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(&id))? {
                 fs.remove_dir_all(&entry)?;
             }
         } else if entry.is_dir() {
-            recover_published(fs, layout, name, &entry)?;
+            // Same rule: a dir whose name fails the id parse is not a topos skill dir — never touched.
+            let Ok(id) = SkillId::parse(name) else {
+                continue;
+            };
+            recover_published(fs, layout, &id, &entry)?;
         }
     }
     Ok(())
@@ -229,7 +246,7 @@ pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Resul
 fn recover_published(
     fs: &dyn FsOps,
     layout: &Layout,
-    id: &str,
+    id: &SkillId,
     skill_dir: &Path,
 ) -> Result<(), ClientError> {
     // Claim the id; a held lock means a concurrent writer is mid-publish — leave it.
@@ -264,7 +281,7 @@ fn recover_published(
     if let Some(map) = doc::read_doc::<PlacementMap>(fs, &paths.map)? {
         for placement in &map.placements {
             if let Some(parent) = Path::new(placement).parent() {
-                for litter in crate::materialize::litter_siblings(parent, id) {
+                for litter in crate::materialize::litter_siblings(parent, id.as_str()) {
                     fs.remove_dir_all(&litter)?;
                 }
             }

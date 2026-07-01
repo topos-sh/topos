@@ -14,11 +14,6 @@
 //! caller's — here — over the same `ed25519-dalek` crate. This file never re-implements a preimage: it
 //! signs exactly the bytes `topos_core::sign` framed.
 
-// Built + unit-tested now; wired by the follow / contribute flow that lands next. The file-level allow
-// keeps the not-yet-called surface from tripping `-D warnings` in a non-test build (the established
-// built-not-wired idiom), while every item is exercised under `#[cfg(test)]`.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -112,8 +107,8 @@ impl DeviceSigner {
         Ok(self.signing_key.sign(&preimage).to_bytes())
     }
 
-    /// Sign a device op (publish / revert / review) over `topos_core::sign::device_op_preimage`. Built now
-    /// for the contribute verbs that land next; deterministic (no RNG).
+    /// Sign a device op (publish / revert / review) over `topos_core::sign::device_op_preimage` — the
+    /// contribute verbs' signature. Deterministic (no RNG).
     ///
     /// # Errors
     /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
@@ -159,7 +154,7 @@ fn load_or_generate_seed(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Zeroizing<[u8; SEED_LEN]>, ClientError> {
-    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let path = layout.device_key_path();
 
     if let Some(seed) = read_seed(fs, &path)? {

@@ -402,8 +402,11 @@ fn promote(
     )?;
 
     // 5) Lay the first-receive baseline for each followed skill (so the pull engine treats it as state-②).
+    // The minted skill id is parsed at this boundary too (the redeem transport already validated it; a
+    // WAL-resumed promote revalidates) — only the validated newtype reaches the path joins below.
     for cred in read_creds {
-        lay_first_receive_baseline(ctx, &cred.skill_id, display_name(context, &cred.skill_id))?;
+        let skill_id = crate::id::SkillId::parse(&cred.skill_id)?;
+        lay_first_receive_baseline(ctx, &skill_id, display_name(context, &cred.skill_id))?;
     }
 
     // 6) Delete the WAL — enrollment is complete.
@@ -440,7 +443,7 @@ fn promote(
 /// already exists (already baselined, or received) is left untouched — `follow` never clobbers bytes.
 fn lay_first_receive_baseline(
     ctx: &Ctx<'_>,
-    skill_id: &str,
+    skill_id: &crate::id::SkillId,
     name: String,
 ) -> Result<(), ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
@@ -463,7 +466,9 @@ fn lay_first_receive_baseline(
         ctx.fs.fsync_dir(d)?;
     }
 
-    let placement = ctx.harness.placement_for(skill_id, None).dir;
+    // The adapter keeps a `&str` seam; the id here is the validated newtype, honoring its "callers pass
+    // an already-validated id" contract.
+    let placement = ctx.harness.placement_for(skill_id.as_str(), None).dir;
     doc::write_doc(
         ctx.fs,
         &sp.sync,
@@ -497,7 +502,7 @@ fn lay_first_receive_baseline(
         &sp.lock,
         &Lock {
             schema_version: SCHEMA_VERSION,
-            skill_id: skill_id.to_owned(),
+            skill_id: skill_id.to_string(),
             name,
             base_commit: ZERO_HEX.to_owned(),
             bundle_digest: ZERO_HEX.to_owned(),
@@ -610,7 +615,7 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError>
         // Strip an optional `@<digest>` (the disclosed-offer reference) and resolve by skill name.
         let name = strip_digest(target);
         let (skill_id, lock) = super::resolve_skill(ctx, name)?;
-        if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| *id == skill_id)
+        if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| id == skill_id.as_str())
             && follow_ctx.following
         {
             // The explicit accept IS the I-TOFU first-receive yes (places the bytes).
@@ -620,7 +625,7 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError>
         let updated =
             doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&skill_id).lock)?.unwrap_or(lock);
         skills.push(FollowOffer {
-            skill_id,
+            skill_id: skill_id.into_string(),
             name: updated.name.clone(),
             offer: Offer {
                 version_id: updated.base_commit.clone(),

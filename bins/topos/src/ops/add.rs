@@ -50,15 +50,17 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
     let recognized = recognize(ctx, &source_abs);
 
     // Mint identity. A recognized harness skill is keyed by its DIRECTORY name (the command name the
-    // harness invokes); a plain dir keeps the frontmatter-first-then-basename order.
-    let skill_id = ctx.ids.new_skill_id();
+    // harness invokes); a plain dir keeps the frontmatter-first-then-basename order. The minted id is
+    // parsed through the validated newtype like any other (the id source mints `topos_<hex>`, which
+    // always fits — the parse is the type-level proof the path joins below demand).
+    let skill_id = crate::id::SkillId::parse(&ctx.ids.new_skill_id())?;
     let name = match &recognized {
-        Some(placement) => dir_basename(&placement.path).unwrap_or_else(|| skill_id.clone()),
+        Some(placement) => dir_basename(&placement.path).unwrap_or_else(|| skill_id.to_string()),
         None => bundle
             .name_hint
             .clone()
             .or_else(|| dir_basename(&source_abs))
-            .unwrap_or_else(|| skill_id.clone()),
+            .unwrap_or_else(|| skill_id.to_string()),
     };
 
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
@@ -156,7 +158,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         &sp.lock,
         &Lock {
             schema_version: SCHEMA_VERSION,
-            skill_id: skill_id.clone(),
+            skill_id: skill_id.to_string(),
             name: name.clone(),
             base_commit: version_hex.clone(),
             bundle_digest: digest_hex.clone(),
@@ -181,7 +183,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         &ctx.layout.log_path(),
         &serde_json::json!({
             "action": "add",
-            "skill_id": skill_id,
+            "skill_id": skill_id.as_str(),
             "name": name,
             "version_id": version_hex,
             "at": ctx.clock.now_unix_millis(),
@@ -196,7 +198,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         .map(|_| ctx.harness.install_currency_trigger());
 
     Ok(AddData {
-        skill_id,
+        skill_id: skill_id.into_string(),
         name,
         version_id: version_hex,
         bundle_digest: digest_hex,
@@ -238,7 +240,10 @@ fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), 
         if id.starts_with('.') || !entry.is_dir() {
             continue;
         }
-        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(id).map)?
+        let Ok(id) = crate::id::SkillId::parse(id) else {
+            continue; // not a topos-minted dir name
+        };
+        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(&id).map)?
         else {
             continue;
         };
@@ -250,7 +255,7 @@ fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), 
                 .is_ok_and(|c| c == *canonical_source)
         }) {
             return Err(ClientError::AlreadyTracked {
-                skill_id: id.to_owned(),
+                skill_id: id.into_string(),
             });
         }
     }

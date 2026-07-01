@@ -26,10 +26,10 @@ pub(crate) fn unfollow(ctx: &Ctx<'_>, name: &str) -> Result<UnfollowData, Client
     // a concurrent enrollment writer's fresh row is never clobbered by a stale snapshot. A tracked skill
     // with no follow entry at all (e.g. adopted locally via `add`) is already not followed — the same
     // clean success, nothing written.
-    enroll::set_following(ctx.fs, &ctx.layout, &skill_id, false)?;
+    enroll::set_following(ctx.fs, &ctx.layout, skill_id.as_str(), false)?;
 
     Ok(UnfollowData {
-        skill_id,
+        skill_id: skill_id.into_string(),
         following: false,
         bytes_kept: true,
     })

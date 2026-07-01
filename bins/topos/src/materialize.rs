@@ -509,7 +509,8 @@ mod tests {
         _home: PathBuf,
     }
     fn docs_under(home: &Path, id: &str) -> Docs {
-        let sp = crate::sidecar::Layout::new(home).published(id);
+        let id = crate::id::SkillId::parse(id).expect("fixture skill id is charset-clean");
+        let sp = crate::sidecar::Layout::new(home).published(&id);
         std::fs::create_dir_all(sp.lock.parent().unwrap()).unwrap();
         Docs {
             sp,

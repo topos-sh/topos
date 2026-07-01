@@ -25,7 +25,6 @@ struct HostIdentity {
 /// pointer to the sibling `0600` seed file that holds the private key. `host.json` stays secret-free — the
 /// raw seed is NEVER serialized here. (The `device_key_id` is DISTINCT from `device_id`: the former binds
 /// the signed frames and is server-re-derivable from the public key; the latter is the commit-author token.)
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DeviceKeyRef {
     /// The signature algorithm — `"Ed25519"`.
@@ -52,7 +51,7 @@ pub(crate) fn load_or_create_device_id(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<String, ClientError> {
-    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let path = layout.host_path();
 
     if let Some(bytes) = fs.read_opt(&path)? {
@@ -88,13 +87,12 @@ pub(crate) fn load_or_create_device_id(
 /// # Errors
 /// [`ClientError::Corrupt`] if `host.json` is absent or unparseable; the schema-version errors for an
 /// unsupported identity; otherwise an io failure.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_device_key(
     fs: &dyn FsOps,
     layout: &Layout,
     device_key: &DeviceKeyRef,
 ) -> Result<(), ClientError> {
-    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let path = layout.host_path();
     let bytes = fs.read_opt(&path)?.ok_or_else(|| {
         ClientError::Corrupt(

@@ -80,8 +80,13 @@ pub(crate) fn revert(
     let transport = connect(&instance.base_url);
 
     let kinds = [OpKind::Revert];
-    let rec = match op_wal::find_pending_for_skill(ctx.fs, &ctx.layout, &workspace_id, &id, &kinds)?
-    {
+    let rec = match op_wal::find_pending_for_skill(
+        ctx.fs,
+        &ctx.layout,
+        &workspace_id,
+        id.as_str(),
+        &kinds,
+    )? {
         // Replay a crashed prior revert ONLY if it targets the SAME good version as this command; a
         // different `--to` must settle the in-flight revert first.
         Some(pending) => {
@@ -100,14 +105,15 @@ pub(crate) fn revert(
             let good_commit = parse_hex32(to)?;
             // The forward commit parents on (and `expected` targets) the FRESH live current — the server
             // builds + signature-checks the forward commit against its live parent before the CAS.
-            let (current_commit, expected) = contribute::fresh_current(ctx, &id, &workspace_id)?;
+            let (current_commit, expected) =
+                contribute::fresh_current(ctx, id.as_str(), &workspace_id)?;
             if good_commit == current_commit && !confirm {
                 return Err(ClientError::ConfirmRequired {
                     reason: "the --to version is already current; reverting is a no-op".to_owned(),
                 });
             }
             // The good version's tree digest = the forward commit's tree (re-derived from bytes + verified).
-            let good_digest = contribute::verified_version_digest(ctx, &id, good_commit)?;
+            let good_digest = contribute::verified_version_digest(ctx, id.as_str(), good_commit)?;
             let forward = sign::commit_id(&Commit {
                 parents: &[current_commit],
                 tree: good_digest,
@@ -119,7 +125,7 @@ pub(crate) fn revert(
                 schema_version: SCHEMA_VERSION,
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
-                skill_id: id.clone(),
+                skill_id: id.to_string(),
                 op: OpKind::Revert,
                 candidate_commit: to_hex(&forward),
                 bundle_digest: to_hex(&good_digest),

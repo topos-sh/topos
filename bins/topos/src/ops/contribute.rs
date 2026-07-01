@@ -70,7 +70,9 @@ fn content_b64(bytes: &[u8]) -> String {
 fn plane_err(e: PlaneError) -> ClientError {
     match e {
         PlaneError::NotFound => ClientError::Plane("not served here".to_owned()),
-        PlaneError::Unavailable(m) | PlaneError::Malformed(m) => ClientError::Plane(m),
+        PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
+            ClientError::Plane(m)
+        }
     }
 }
 
@@ -822,7 +824,7 @@ mod tests {
             plane_key: [0u8; 32],
             follow: &inert_f,
         };
-        let sp = layout.published("s_deploy");
+        let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());
         let op_id = "c0000000-0000-4000-8000-000000000001".to_owned();
         // A review op needs no candidate render (send_op builds ReviewRequest from the record's fields).
         let rec = OpRecord {

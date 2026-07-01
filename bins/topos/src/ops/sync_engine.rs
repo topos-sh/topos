@@ -73,13 +73,14 @@ impl Invocation {
 /// committing the author's bytes on `current`).
 pub(crate) fn sync_one(
     ctx: &Ctx<'_>,
-    skill_id: &str,
+    skill_id: &crate::id::SkillId,
     follow: &FollowContext,
     inv: Invocation,
 ) -> Result<PullSkill, ClientError> {
     let explicit = inv.is_explicit();
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
+    let skill_id = skill_id.as_str();
     let mut sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
@@ -164,7 +165,7 @@ pub(crate) fn sync_one(
             }
         }
         Err(PlaneError::NotFound) => return Ok(state_row(&name, &sync, PullAction::UpToDate)),
-        Err(PlaneError::Unavailable(m)) => {
+        Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m)) => {
             // Targeted accept: surface the failure. Bare sweep + the escape: fall through to drive `applied`
             // toward `observed` from the LOCAL store — a pending apply (or an escape) whose target is
             // already local still completes when the plane is unreachable (the escape is the offline-capable
@@ -308,11 +309,12 @@ pub(crate) fn sync_one(
 /// is known — never a fabricated floor).
 pub(crate) fn go_back(
     ctx: &Ctx<'_>,
-    skill_id: &str,
+    skill_id: &crate::id::SkillId,
     target: [u8; 32],
 ) -> Result<PullSkill, ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
+    let skill_id = skill_id.as_str();
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
@@ -410,7 +412,10 @@ pub(crate) fn go_back(
 
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a
 /// targeted pull names a tracked-but-unfollowed skill (there is no `current` to pull).
-pub(crate) fn current_state(ctx: &Ctx<'_>, skill_id: &str) -> Result<PullSkill, ClientError> {
+pub(crate) fn current_state(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+) -> Result<PullSkill, ClientError> {
     let sp = ctx.layout.published(skill_id);
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
@@ -802,7 +807,9 @@ fn served_current_is_alarm(
         Ok(PointerFetch::NotModified) => Ok(false),
         Err(PlaneError::Malformed(_)) => Ok(true),
         // Not served / unreachable: no alarm — the conflict stands and is re-disclosed by the caller.
-        Err(PlaneError::NotFound) | Err(PlaneError::Unavailable(_)) => Ok(false),
+        Err(PlaneError::NotFound | PlaneError::Unavailable(_) | PlaneError::Unreachable(_)) => {
+            Ok(false)
+        }
     }
 }
 
@@ -877,7 +884,9 @@ fn fetch(
             PlaneError::NotFound => {
                 ClientError::Plane(format!("version {} not served", to_hex(&version_id)))
             }
-            PlaneError::Unavailable(m) | PlaneError::Malformed(m) => ClientError::Plane(m),
+            PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
+                ClientError::Plane(m)
+            }
         })
 }
 

@@ -98,8 +98,13 @@ pub(crate) fn publish(
     // Resume a crashed prior publish/propose for this skill (replay the SAME op_id) before minting a new
     // one — the plane returns the byte-identical receipt, so there is no double-advance / duplicate commit.
     let kinds = [OpKind::PublishDirect, OpKind::PublishPropose];
-    let rec = match op_wal::find_pending_for_skill(ctx.fs, &ctx.layout, &workspace_id, &id, &kinds)?
-    {
+    let rec = match op_wal::find_pending_for_skill(
+        ctx.fs,
+        &ctx.layout,
+        &workspace_id,
+        id.as_str(),
+        &kinds,
+    )? {
         // A crashed prior publish is still in-flight: replay it ONLY if it matches THIS command (same
         // approved digest + same direct/propose mode) — otherwise refuse, so a new intent never silently
         // rides the old op's mode/bytes (the consent gate covers the replay path too).
@@ -124,7 +129,7 @@ pub(crate) fn publish(
         None => build_publish_op(
             ctx,
             &sp,
-            &id,
+            id.as_str(),
             &lock,
             &map,
             &workspace_id,

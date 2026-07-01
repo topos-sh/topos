@@ -1,16 +1,14 @@
-//! The plane-response source seam — the client's read side of `current`, behind a port so the engine is
-//! exercised in-process against fixtures with **no HTTP and no network** this increment.
+//! The plane seams — the client's read side of `current` ([`PlaneSource`]), the durable follow-state
+//! ([`FollowSource`]), and the creds-free enrollment / governance / contribute write ports.
 //!
-//! This mirrors the [`crate::fs_seam::FsOps`] / `ConfigStore` precedent: a narrow trait the engine
-//! consumes, an inert production impl, and a fixture test double. The conditional-GET / 304 **state
-//! logic** (does the pointer name a newer generation than the client's `observed`?) is built and tested
-//! NOW; the real HTTP transport (a thin `reqwest`/ETag round-trip) is a later leaf. There is deliberately
+//! Each mirrors the [`crate::fs_seam::FsOps`] / `ConfigStore` precedent: a narrow trait the engine
+//! consumes, a real production impl, and a fixture test double. The production impls live in
+//! [`crate::plane_http`] — the blocking `ureq` transports (`UreqPlane` for the read side, `UreqEnroll`
+//! for the creds-free writes) — and are wired by the composition root whenever enrollment exists on disk
+//! (`instance.json`; the follow-state comes from `follows.json`, written by `follow`). Before enrollment
+//! the inert impls at the bottom of this file keep every verb honest (nothing followed, nothing served).
+//! The engine tests drive the same traits over in-process fixtures with no HTTP. There is deliberately
 //! **no `Transport` trait** — that abstraction would be premature.
-//!
-//! The follow-state (which skills are followed, in which mode, in which workspace, with which read
-//! credential) is the enrollment subsystem's, which lands later. This increment **consumes** it through
-//! [`FollowSource`], fixture-supplied; the inert production impl follows nothing, so production `pull`
-//! stays the honest no-op it is today while the engine, floor, materializer, and crash-safety are real.
 
 use topos_core::digest::FileMode;
 use topos_core::sync::Generation as KernelGen;
@@ -21,10 +19,6 @@ use crate::error::ClientError;
 
 /// The response to a conditional `get_current`: either the pointer is unchanged (a 304), or the signed
 /// record (which the caller authenticates before trusting).
-///
-/// Constructed by the fixture test double + the future HTTP transport; the inert production source never
-/// serves a record (it errors), so these variants are not built in the current non-test path.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum PointerFetch {
     /// The pointer has not moved past the client's known generation. The engine still drives `applied`
     /// toward `observed` (a prior apply may be pending).
@@ -57,14 +51,18 @@ pub(crate) struct FetchedFile {
 }
 
 /// Why a plane read could not be satisfied. The engine maps each to a per-skill outcome (skip / retry /
-/// alarm) so one skill's failure never aborts the whole pull. The inert production source only ever
-/// reports `Unavailable`; `NotFound`/`Malformed` are produced by the fixture + the future HTTP transport.
+/// alarm) so one skill's failure never aborts the whole pull.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum PlaneError {
     /// The skill or version is not served here (not followed, or unknown) — skip the skill.
     NotFound,
-    /// The plane is transiently unreachable — keep state, retry later (a retryable warning).
+    /// A connect-level transport fault (dial / TLS / timeout, before any HTTP status): the PLANE ITSELF
+    /// is unreachable, not just one resource — so a sweep's circuit breaker trips on the first one and
+    /// short-circuits every remaining network call this invocation. Handled like [`Self::Unavailable`]
+    /// everywhere else (keep state, retry later).
+    Unreachable(String),
+    /// The plane answered but this read failed transiently (a 5xx / unexpected status / a truncated
+    /// body) — keep state, retry later (a retryable warning). Never trips the sweep breaker.
     Unavailable(String),
     /// The served response was structurally malformed (a corrupt/forged record or bytes) — surface it.
     Malformed(String),
@@ -76,14 +74,14 @@ pub(crate) enum PlaneError {
 /// as a reused-tuple ALARM) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
 /// commit-sensitive, not just `<epoch>.<seq>`.)
 #[derive(Clone, Copy)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct KnownCurrent {
     pub generation: Generation,
     pub version_id: [u8; 32],
 }
 
-/// The client's read side of `current` + the version bytes. No write side (the client never moves the
-/// pointer). No network this increment (fixtures); the HTTP wire is a later leaf.
+/// The client's read side of `current` + the version bytes. No write side (a pointer move rides the
+/// device-signed [`ContributeSource`], never this read seam). The production impl is the `ureq`
+/// [`crate::plane_http::UreqPlane`]; the engine tests feed fixtures.
 pub(crate) trait PlaneSource {
     /// Conditional GET of a skill's signed `current` pointer. `known` is what the client already holds
     /// (its `observed` generation AND the commit recorded there): the source returns
@@ -111,11 +109,9 @@ pub(crate) trait PlaneSource {
     }
 }
 
-/// How a skill is followed — the engine consults this to choose the consent situation. Fixture-supplied
-/// this increment (no real `follow` verb yet); persisted by the enrollment subsystem when it lands. The
-/// inert production source follows nothing, so neither mode is constructed in the current non-test path.
+/// How a skill is followed — the engine consults this to choose the consent situation. Persisted by
+/// enrollment in `follows.json` (as [`crate::enroll::FollowModeDoc`], mapped 1:1 at load).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum FollowMode {
     /// Auto-apply a new `current` (the standing-follow pre-authorization).
     Auto,
@@ -125,8 +121,8 @@ pub(crate) enum FollowMode {
 
 /// The per-skill follow-state the engine needs. The `workspace_id` is the EXPECTED scope — a signed
 /// pointer whose scope names a different workspace (even with the same skill id and plane key) is a
-/// cross-workspace replay and is refused. (The read credential the HTTP transport will need lands with
-/// that leaf — it has no consumer yet, so it is not carried prematurely.)
+/// cross-workspace replay and is refused. (The read credential lives with the TRANSPORT — a
+/// [`crate::plane_http::SkillCred`] — never here: creds in the transport, consent in the follow seam.)
 #[derive(Debug, Clone)]
 pub(crate) struct FollowContext {
     /// The workspace this skill is followed in — the expected pointer scope.
@@ -139,8 +135,8 @@ pub(crate) struct FollowContext {
     pub following: bool,
 }
 
-/// The durable follow-state source. Fixture-supplied this increment; the inert production impl follows
-/// nothing, so production `pull` reports an honestly empty state.
+/// The durable follow-state source. The production impl is [`crate::plane_http::FileFollow`] over the
+/// `follows.json` enrollment doc; [`InertFollow`] (nothing enrolled) and the fixtures follow nothing.
 pub(crate) trait FollowSource {
     /// The followed skills, each with its follow-state, keyed by stable skill id.
     fn followed(&self) -> Vec<(String, FollowContext)>;
@@ -415,13 +411,14 @@ pub(crate) fn gen_cmp(a: Generation, b: Generation) -> core::cmp::Ordering {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Inert production impls — no plane is wired yet (no enrollment, no HTTP). They keep `pull` a
-// truthful no-op: nothing is followed, so the engine's followed-skills loop is empty.
+// Inert impls — what the composition root wires when NO enrollment exists on disk (a fresh install,
+// or one that never ran `follow`). They keep `pull` a truthful no-op: nothing is followed, so the
+// engine's followed-skills loop is empty. Once `instance.json` exists, the real `ureq` transports
+// replace them.
 // ---------------------------------------------------------------------------------------------
 
-/// The production plane source until the HTTP transport lands: it serves nothing (every call is a
-/// not-found / unreachable). It is never reached in production today because [`InertFollow`] follows
-/// nothing, so the engine never calls it — but it fails closed if it ever were.
+/// The not-enrolled plane source: it serves nothing (every call is a fail-closed unavailable). It is
+/// never reached in practice because [`InertFollow`] follows nothing, so the engine never calls it.
 #[derive(Debug, Default)]
 pub(crate) struct InertPlane;
 
@@ -432,7 +429,7 @@ impl PlaneSource for InertPlane {
         _known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
         Err(PlaneError::Unavailable(
-            "no plane transport is wired yet".into(),
+            "not enrolled with a plane; run `topos follow <link>` first".into(),
         ))
     }
     fn fetch_version(
@@ -441,12 +438,12 @@ impl PlaneSource for InertPlane {
         _version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
         Err(PlaneError::Unavailable(
-            "no plane transport is wired yet".into(),
+            "not enrolled with a plane; run `topos follow <link>` first".into(),
         ))
     }
 }
 
-/// The production follow source: nothing is followed yet (no `follow` verb), so `pull` is a no-op.
+/// The not-enrolled follow source: nothing is followed, so `pull` is a no-op.
 #[derive(Debug, Default)]
 pub(crate) struct InertFollow;
 

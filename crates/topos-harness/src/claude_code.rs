@@ -40,8 +40,12 @@ const MARKER_ID: &str = "topos:claude-code:currency:1";
 const HOOK_COMMAND: &str =
     "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
 
-/// The default per-hook timeout (seconds) — Claude Code's own default; the no-op pull returns instantly.
-const HOOK_TIMEOUT_SECS: u64 = 600;
+/// The per-hook timeout (seconds). A real sweep makes network calls (one conditional GET per followed
+/// skill, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a dead
+/// or stalling one must never hold the session start hostage: the client bounds its own connect/response
+/// /body timeouts and trips a plane-down circuit breaker on the first connect failure, so one minute is
+/// generous headroom, not the expected cost.
+const HOOK_TIMEOUT_SECS: u64 = 60;
 
 /// The reference [`HarnessAdapter`] for Claude Code. Holds the resolved config home (injected, so tests
 /// point it at a temp dir) and the [`ConfigStore`] port that performs the durable config write.
@@ -181,9 +185,10 @@ impl HarnessAdapter for ClaudeCode<'_> {
             Some(d) => PlacementTarget {
                 dir: d.path.clone(),
             },
-            // No-discovered default: global `<home>/skills/<skill_id>`. v0 only ever calls the `Some`
-            // branch (adopt-in-place reuses the discovered dir); this leaf is the documented default the
-            // later `pull` write path will refine once it owns the no-discovery case.
+            // No-discovered default: global `<home>/skills/<skill_id>` (a pure follower's first-receive
+            // baseline records this target). The id is joined as a single path component — per the trait
+            // contract the caller passes an already-validated id (the CLI parses every wire/persisted id
+            // before it reaches an adapter).
             None => PlacementTarget {
                 dir: self.skills_dir().join(skill_id),
             },
@@ -515,7 +520,7 @@ mod tests {
         \"hooks\": [
           {
             \"command\": \"command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency\",
-            \"timeout\": 600,
+            \"timeout\": 60,
             \"type\": \"command\"
           }
         ],

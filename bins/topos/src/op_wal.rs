@@ -26,21 +26,32 @@ pub(crate) fn device_op(kind: OpKind) -> DeviceOp {
     }
 }
 
-/// Parse a canonical hyphenated `op_id` back to the raw 16 bytes the device-op frame binds.
+/// Parse a canonical hyphenated `op_id` back to the raw 16 bytes the device-op frame binds. Also the
+/// path boundary for this module: a canonical hyphenated lowercase UUID is trivially a safe
+/// `ops/<op_id>.json` file name, so every join below runs this gate first (a persisted record's `op_id`
+/// is a doc value, never trusted raw — the same rule as the skill/workspace ids).
 ///
 /// # Errors
-/// [`ClientError::Corrupt`] if the stored `op_id` is not a canonical UUID.
+/// [`ClientError::Corrupt`] if the stored `op_id` is not the canonical hyphenated UUID form.
 pub(crate) fn op_id_bytes(op_id: &str) -> Result<[u8; 16], ClientError> {
-    Ok(uuid::Uuid::parse_str(op_id)
-        .map_err(|_| ClientError::Corrupt("op_id is not a canonical UUID".to_owned()))?
-        .into_bytes())
+    let parsed = uuid::Uuid::parse_str(op_id)
+        .map_err(|_| ClientError::Corrupt("op_id is not a canonical UUID".to_owned()))?;
+    // `parse_str` accepts several spellings (braced / URN / simple / uppercase); require the CANONICAL
+    // hyphenated lowercase form byte-for-byte, so the id IS exactly the file name it will be joined as.
+    if parsed.as_hyphenated().to_string() != op_id {
+        return Err(ClientError::Corrupt(
+            "op_id is not the canonical hyphenated UUID form".to_owned(),
+        ));
+    }
+    Ok(parsed.into_bytes())
 }
 
 /// Write an op record `0600` (BEFORE the first send). Creates `ops/` if absent.
 ///
 /// # Errors
-/// An [`FsOps`] write failure.
+/// An [`FsOps`] write failure; [`ClientError::Corrupt`] for a non-canonical `op_id`.
 pub(crate) fn write(fs: &dyn FsOps, layout: &Layout, rec: &OpRecord) -> Result<(), ClientError> {
+    op_id_bytes(&rec.op_id)?; // the path gate, before the join
     fs.create_dir_all(&layout.ops_dir())?;
     doc::write_doc_private(fs, &layout.op_path(&rec.op_id), rec)
 }
@@ -48,20 +59,23 @@ pub(crate) fn write(fs: &dyn FsOps, layout: &Layout, rec: &OpRecord) -> Result<(
 /// Read an op record by id, or `None` if absent. Fail-closed on a permissive secret-file mode.
 ///
 /// # Errors
-/// As [`doc::read_doc_private`].
+/// As [`doc::read_doc_private`]; [`ClientError::Corrupt`] for a non-canonical `op_id`.
 pub(crate) fn read(
     fs: &dyn FsOps,
     layout: &Layout,
     op_id: &str,
 ) -> Result<Option<OpRecord>, ClientError> {
+    op_id_bytes(op_id)?;
     doc::read_doc_private(fs, &layout.op_path(op_id))
 }
 
 /// Delete an op record once its outcome is reconciled. NotFound-tolerant (a double-delete is a no-op).
 ///
 /// # Errors
-/// An [`FsOps`] failure other than not-found.
+/// An [`FsOps`] failure other than not-found; [`ClientError::Corrupt`] for a non-canonical `op_id` (a
+/// tampered record must never steer the remove outside `ops/`).
 pub(crate) fn delete(fs: &dyn FsOps, layout: &Layout, op_id: &str) -> Result<(), ClientError> {
+    op_id_bytes(op_id)?;
     match fs.remove_file(&layout.op_path(op_id)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

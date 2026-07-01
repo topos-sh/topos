@@ -19,14 +19,14 @@ pub(crate) struct Ctx<'a> {
     /// The harness adapter (Claude Code today): discovery, placement targeting, and the content-blind
     /// currency-trigger (un)install. Content-blind — it never sees a skill's bytes.
     pub harness: &'a dyn HarnessAdapter,
-    /// The plane's read side (the signed `current` pointer + version bytes). Fixture-driven in tests; an
-    /// inert no-op in production until the HTTP transport lands.
+    /// The plane's read side (the signed `current` pointer + version bytes). The real `ureq` transport
+    /// when enrolled; the inert no-op before any enrollment; fixture-driven in tests.
     pub plane: &'a dyn PlaneSource,
-    /// The pinned plane public key the signed `current` pointer is verified against. Fixture-supplied
-    /// this increment (TOFU key pinning lands with enrollment); the inert production plane never serves a
-    /// record, so the placeholder key is never the integrity authority.
+    /// The pinned plane public key the signed `current` pointer is verified against — TOFU-pinned by
+    /// `follow` into `instance.json` and loaded from there when enrolled (all-zero with the inert plane,
+    /// which never serves a record, so the placeholder is never the integrity authority).
     pub plane_key: [u8; 32],
-    /// The durable follow-state (which skills are followed, in which mode/workspace). Fixture-driven in
-    /// tests; the inert production source follows nothing, so production `pull` is a no-op.
+    /// The durable follow-state (which skills are followed, in which mode/workspace) — `follows.json`
+    /// when enrolled; the inert source (nothing followed) before that; fixture-driven in tests.
     pub follow: &'a dyn FollowSource,
 }

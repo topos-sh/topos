@@ -43,11 +43,11 @@ pub fn run() -> ExitCode {
         return emit_err(json, cmd_name, &e);
     }
 
-    // The plane + follow-state sources. When enrollment has been written (`instance.json` present AND
-    // `follows.json` has at least one followed skill), wire the REAL `ureq` transport + the on-disk follow
-    // state + the pinned plane key; otherwise keep the INERT pair (production stays a truthful no-op until
-    // enrollment writes those docs — nothing writes them yet). The inert ZSTs and the loaded enrollment are
-    // both stack locals so the `&dyn` trait objects below borrow correctly for the rest of `run`.
+    // The plane + follow-state sources. When enrollment has been written (`instance.json` present —
+    // `follow` writes it), wire the REAL `ureq` transport + the on-disk follow state + the pinned plane
+    // key; otherwise keep the INERT pair (a never-enrolled install stays a truthful no-op). The inert
+    // ZSTs and the loaded enrollment are both stack locals so the `&dyn` trait objects below borrow
+    // correctly for the rest of `run`.
     let inert_plane = crate::plane::InertPlane;
     let inert_follow = crate::plane::InertFollow;
     let enrollment = match load_enrollment(&fs, &layout) {
@@ -252,7 +252,8 @@ pub fn run() -> ExitCode {
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
-                // stdout, even under `--json` (which `--quiet` overrides for the hook path).
+                // stdout, even under `--json` (which `--quiet` overrides for the hook path). Isolated
+                // per-skill failures already reached stderr inside the sweep; the exit stays 0 (isolation).
                 match result {
                     Ok(_) => ExitCode::SUCCESS,
                     Err(e) => {
@@ -261,7 +262,7 @@ pub fn run() -> ExitCode {
                     }
                 }
             } else {
-                finish(json, cmd_name, result, render::pull_tty)
+                finish_pull(json, cmd_name, result)
             }
         }
         Command::Uninstall { footprint } => {
@@ -289,6 +290,31 @@ fn finish<T: Serialize>(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e),
+    }
+}
+
+/// `pull`'s finisher — like [`finish`], but a bare sweep's isolated per-skill failures ride the
+/// envelope's `warnings` (one stable-shape line per failed skill), so an agent driving `pull --json`
+/// sees a wedged skill machine-visibly. Isolation semantics hold: `ok` stays `true`, exit stays 0 (each
+/// failure also reached stderr inside the sweep, which covers the TTY presentation).
+fn finish_pull(
+    json: bool,
+    command: &str,
+    result: Result<ops::PullOutcome, ClientError>,
+) -> ExitCode {
+    match result {
+        Ok(out) => {
+            if json {
+                let value = serde_json::to_value(&out.data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = out.warnings;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::pull_tty(&out.data));
             }
             ExitCode::SUCCESS
         }

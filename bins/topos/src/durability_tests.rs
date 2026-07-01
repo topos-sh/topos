@@ -19,6 +19,11 @@ use crate::error::ClientError;
 use crate::fs_seam::{FaultFs, FsOps, RealFs};
 use crate::sidecar::{Layout, footprint, recover};
 
+/// Parse a fixture skill id through the validated newtype (always charset-clean here).
+fn sid(id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(id).expect("fixture skill id is charset-clean")
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new(tag: &str) -> Self {
@@ -167,10 +172,10 @@ fn recover_sweeps_tmp_repairs_log_and_is_idempotent() {
     let real = RealFs;
     let layout = Layout::new(&scratch.0);
     let id = "topos_keepme";
-    let paths = layout.published(id);
+    let paths = layout.published(&sid(id));
 
     // A valid, complete skill (the lock marker is present).
-    real.create_dir_all(&layout.skill_dir(id)).unwrap();
+    real.create_dir_all(&layout.skill_dir(&sid(id))).unwrap();
     atomic_write(&real, &paths.lock, &doc_bytes(&sample_lock(7))).unwrap();
     atomic_write(&real, &paths.map, &doc_bytes(&sample_map(7))).unwrap();
     atomic_write(&real, &paths.sync, &doc_bytes(&sample_sync(7))).unwrap();
@@ -239,14 +244,14 @@ fn recover_removes_unlocked_staging_keeps_locked() {
     let real = RealFs;
     let layout = Layout::new(&scratch.0);
 
-    let (dead_base, _) = layout.staging("topos_dead");
-    let (live_base, _) = layout.staging("topos_live");
+    let (dead_base, _) = layout.staging(&sid("topos_dead"));
+    let (live_base, _) = layout.staging(&sid("topos_live"));
     real.create_dir_all(&dead_base).unwrap();
     real.create_dir_all(&live_base).unwrap();
 
     // Hold the live staging's lock for the duration of recovery.
     let _held = real
-        .lock_exclusive(&layout.lock_file("topos_live"))
+        .lock_exclusive(&layout.lock_file(&sid("topos_live")))
         .unwrap();
     recover(&real, &layout, 0).unwrap();
 
@@ -268,8 +273,8 @@ fn recover_never_deletes_on_unknown_schema() {
     let real = RealFs;
     let layout = Layout::new(&scratch.0);
     let id = "topos_future";
-    let paths = layout.published(id);
-    real.create_dir_all(&layout.skill_dir(id)).unwrap();
+    let paths = layout.published(&sid(id));
+    real.create_dir_all(&layout.skill_dir(&sid(id))).unwrap();
 
     // A lock.json from a newer client (schema_version = 2).
     let mut v = serde_json::to_value(sample_lock(3)).unwrap();

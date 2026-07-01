@@ -64,10 +64,15 @@ pub trait ConfigStore {
 /// contacts the plane; it answers only **where** (`discover` / `placement_for`) and **when**
 /// (`currency_kind`), and edits its own harness *config* (never a skill dir) to (un)install currency.
 ///
-/// `skill_id` is a `&str` placeholder for `topos-core`'s `SkillId` domain newtype.
+/// `skill_id` stays a plain `&str` at this seam (this crate holds no id type), but it is joined as a
+/// **single path component** into the harness skills dir — so callers MUST pass an already-validated id.
+/// The CLI enforces that with its validated-id newtype, parsed at every wire/persisted boundary an id
+/// enters (a plane-supplied `"../../x"` never reaches this trait).
 pub trait HarnessAdapter {
     fn id(&self) -> HarnessId;
     fn discover(&self) -> Vec<DiscoveredPlacement>;
+    /// Where this harness places `skill_id`'s bytes. `skill_id` becomes a single path component of the
+    /// default target — callers must pass a validated id (see the trait-level contract).
     fn placement_for(
         &self,
         skill_id: &str,

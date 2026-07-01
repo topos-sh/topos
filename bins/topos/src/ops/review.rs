@@ -57,8 +57,13 @@ pub(crate) fn review(
 
     // Resume a crashed prior review for this skill before minting a new op.
     let kinds = [OpKind::ReviewApprove, OpKind::ReviewReject];
-    let rec = match op_wal::find_pending_for_skill(ctx.fs, &ctx.layout, &workspace_id, &id, &kinds)?
-    {
+    let rec = match op_wal::find_pending_for_skill(
+        ctx.fs,
+        &ctx.layout,
+        &workspace_id,
+        id.as_str(),
+        &kinds,
+    )? {
         // Replay a crashed prior review ONLY if it matches THIS command (same proposal + same
         // approve/reject verdict); a different intent must settle the in-flight op first.
         Some(pending) => {
@@ -82,15 +87,16 @@ pub(crate) fn review(
         None => {
             // The proposal's base == `current` (it is reviewable only while open ∧ base == current), so the
             // FRESH current generation is the correct `expected` even for a reviewer who has not pulled.
-            let (_current, expected) = contribute::fresh_current(ctx, &id, &workspace_id)?;
+            let (_current, expected) = contribute::fresh_current(ctx, id.as_str(), &workspace_id)?;
             // Bind the proposal's RECORDED bundle digest — re-derived from the fetched bytes + asserted to
             // reproduce the named `@hash` (consent re-derivation).
-            let bundle_digest = contribute::verified_version_digest(ctx, &id, proposal_commit)?;
+            let bundle_digest =
+                contribute::verified_version_digest(ctx, id.as_str(), proposal_commit)?;
             OpRecord {
                 schema_version: SCHEMA_VERSION,
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
-                skill_id: id.clone(),
+                skill_id: id.to_string(),
                 op: if approve {
                     OpKind::ReviewApprove
                 } else {

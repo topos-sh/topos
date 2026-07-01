@@ -50,12 +50,11 @@ pub(crate) fn atomic_write(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> Resul
 /// [`atomic_write_at`], but the temp is created **0600 from creation** ([`FsOps::write_private`]), so the
 /// secret never has a world-readable window at any instant — not even mid-write or post-fault (the temp,
 /// if a fault leaves one, is itself 0600). The rename carries that 0600 mode onto `target`. Temp =
-/// `target` + [`TMP_SUFFIX`], same directory (a same-filesystem rename). Use for the device seed and (later)
-/// `follows.json` / the WAL; ordinary, non-secret docs use [`atomic_write`].
+/// `target` + [`TMP_SUFFIX`], same directory (a same-filesystem rename). Used for the device seed,
+/// `follows.json`, and the enrollment WAL; ordinary, non-secret docs use [`atomic_write`].
 ///
 /// # Errors
 /// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn atomic_write_private(
     fs: &dyn FsOps,
     target: &Path,

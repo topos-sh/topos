@@ -57,8 +57,8 @@ pub(crate) fn diff(
         None => ("current".to_owned(), reference.to_owned()),
     };
 
-    let base = resolve_endpoint(ctx, &id, &from)?;
-    let target = resolve_endpoint(ctx, &id, &to)?;
+    let base = resolve_endpoint(ctx, id.as_str(), &from)?;
+    let target = resolve_endpoint(ctx, id.as_str(), &to)?;
 
     let diff = unified_diff(&diff_files(&base.files), &diff_files(&target.files));
     Ok(DiffData {

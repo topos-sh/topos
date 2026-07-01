@@ -1,21 +1,27 @@
-//! The on-disk enrollment state the plane transport reads: `instance.json` (which plane + the pinned
-//! plane key) and `follows.json` (which skills are followed, in which mode/workspace, with which read
-//! credential).
+//! The on-disk enrollment state — the documents `follow` writes and the plane transport reads:
+//! `instance.json` (which plane + the pinned plane key), `follows.json` (which skills are followed, in
+//! which mode/workspace, with which read credential), `identity/user.json` (the enrolled principal's
+//! non-secret metadata), and the enrollment WAL (`identity/enrollment.json`, the two-call resume's
+//! durable state). Both the writers (the `follow` promote path) and the readers live here.
 //!
 //! **These are client-only transport/enrollment documents — they are deliberately NOT in
 //! `topos-types::persisted`.** That crate is the cross-language wire/contract leaf whose shapes are
-//! schema-generated into `contracts/`; these two documents are local sidecar state owned by the (future)
-//! enrollment subsystem, exactly like `identity/host.json` ([`crate::identity`]). They follow the same
-//! idiom — a `schema_version` field read through [`crate::doc::read_doc`], which dispatches the **fail-closed
+//! schema-generated into `contracts/`; these documents are local sidecar state owned by the enrollment
+//! subsystem, exactly like `identity/host.json` ([`crate::identity`]). They follow the same idiom — a
+//! `schema_version` field read through [`crate::doc::read_doc`], which dispatches the **fail-closed
 //! migration** (an unknown/newer `schema_version` is an upgrade error, never silently parsed or deleted) —
 //! but they own their own shape rather than freezing it in the public contract on a guess. `follows.json`
 //! additionally carries a **secret** (`read_token`), which is another reason it stays out of the public
 //! contract.
 //!
-//! **`read_token` is a `0600` secret.** This increment only READS `follows.json` (production is inert — no
-//! enrollment writer exists yet; the tests inject state directly). When the enrollment writer lands it MUST
-//! write `follows.json` with `0600` permissions, because `read_token` grants read access to a workspace's
-//! skills. Do not add a production writer here; if any future write path is added it must apply `0600`.
+//! **`read_token` is a `0600` secret.** `follows.json` and the WAL are written through the `0600`
+//! private-doc primitives ([`crate::doc::write_doc_private`]) and refused-on-permissive at read, because
+//! a read token grants read access to a workspace's skills; `instance.json`/`user.json` carry no secret.
+//!
+//! **Ids are validated at load.** A skill/workspace id read out of `follows.json` or the WAL later keys
+//! path joins (`~/.topos/skills/<id>`, the harness skills dir) and URL splices, so the loaders parse
+//! every id through [`crate::id`] — a hand-edited (or maliciously written) traversal id fails the load
+//! closed as a corrupt document, mirroring the wire-boundary checks in [`crate::plane_http`].
 
 use std::collections::HashMap;
 
@@ -139,12 +145,20 @@ pub(crate) fn read_instance(
 
 /// Read `follows.json`, or `None` if absent. `follows.json` carries the **secret** read tokens, so it is
 /// read through [`doc::read_doc_private`] — a group/other-accessible file is refused BEFORE parsing.
-/// Fail-closed on an unknown/newer `schema_version`.
+/// Fail-closed on an unknown/newer `schema_version` AND on any entry whose skill/workspace id is not a
+/// safe path component (the id boundary: a traversal id must never reach a join downstream).
 pub(crate) fn read_follows(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<Follows>, ClientError> {
-    doc::read_doc_private(fs, &layout.follows_path())
+    let follows: Option<Follows> = doc::read_doc_private(fs, &layout.follows_path())?;
+    if let Some(f) = &follows {
+        for entry in &f.follows {
+            crate::id::SkillId::parse(&entry.skill_id)?;
+            crate::id::validate_workspace_id(&entry.workspace_id)?;
+        }
+    }
+    Ok(follows)
 }
 
 /// Read `identity/user.json`, or `None` if absent. Metadata only (no secret) → ordinary `read_doc`.
@@ -365,7 +379,7 @@ pub(crate) fn write_follows_merged(
     layout: &Layout,
     additions: &[FollowEntry],
 ) -> Result<(), ClientError> {
-    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let mut merged = doc::read_doc_private::<Follows>(fs, &layout.follows_path())?
         .map(|f| f.follows)
         .unwrap_or_default();
@@ -397,7 +411,7 @@ pub(crate) fn set_following(
     skill_id: &str,
     following: bool,
 ) -> Result<(), ClientError> {
-    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
         return Ok(());
     };
@@ -438,12 +452,34 @@ pub(crate) fn write_wal(
     doc::write_doc_private(fs, &layout.enrollment_path(), wal)
 }
 
-/// Read the enrollment WAL (a `0600` secret), or `None` if absent. Fail-closed on a permissive secret.
+/// Read the enrollment WAL (a `0600` secret), or `None` if absent. Fail-closed on a permissive secret
+/// AND on any persisted skill/workspace id outside the validated charset (the WAL is a durable copy of
+/// wire data whose ids later key path joins — the same boundary rule as `follows.json`).
 pub(crate) fn read_wal(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<PendingEnrollment>, ClientError> {
-    doc::read_doc_private(fs, &layout.enrollment_path())
+    let wal: Option<PendingEnrollment> = doc::read_doc_private(fs, &layout.enrollment_path())?;
+    if let Some(w) = &wal {
+        let context = match &w.state {
+            EnrollPhase::Authorizing { context, .. } => context,
+            EnrollPhase::Redeemed {
+                context,
+                read_creds,
+                ..
+            } => {
+                for cred in read_creds {
+                    crate::id::SkillId::parse(&cred.skill_id)?;
+                }
+                context
+            }
+        };
+        crate::id::validate_workspace_id(&context.workspace_id)?;
+        for s in &context.offered_skills {
+            crate::id::SkillId::parse(&s.skill_id)?;
+        }
+    }
+    Ok(wal)
 }
 
 /// Delete the enrollment WAL (on a completed promotion, or a swept abandon). NotFound-tolerant.
@@ -586,5 +622,86 @@ mod tests {
         assert_eq!(creds.len(), 2);
         assert_eq!(creds["s_deploy"].workspace_id, "w_acme");
         assert_eq!(creds["s_deploy"].read_token, "rt_secret");
+    }
+
+    /// A throwaway home for the load-boundary tests (mirrors the doc-module scratch pattern).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("topos-enr-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_follows_refuses_a_traversal_id_on_load() {
+        // The persisted boundary: a follows.json naming a traversal skill/workspace id (hand-edited, or
+        // written by a compromised prior run) must fail the LOAD closed — the id would otherwise reach
+        // `~/.topos/skills/<id>` joins and request URL paths.
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("hostile"));
+        for (skill_id, workspace_id) in [
+            ("../../x", "w_acme"),
+            ("a/b", "w_acme"),
+            ("A", "w_acme"),
+            ("", "w_acme"),
+            (".", "w_acme"),
+            ("..", "w_acme"),
+            ("s_deploy", "../../w"),
+        ] {
+            let mut f = sample_follows();
+            f.follows[0].skill_id = skill_id.to_owned();
+            f.follows[0].workspace_id = workspace_id.to_owned();
+            doc::write_doc_private(&fs, &layout.follows_path(), &f).unwrap();
+            let err = read_follows(&fs, &layout).unwrap_err();
+            assert!(
+                matches!(err, ClientError::Corrupt(_)),
+                "({skill_id:?}, {workspace_id:?}) must fail the load as Corrupt, got {err:?}"
+            );
+        }
+        // A clean document still loads.
+        doc::write_doc_private(&fs, &layout.follows_path(), &sample_follows()).unwrap();
+        assert!(read_follows(&fs, &layout).unwrap().is_some());
+    }
+
+    #[test]
+    fn read_wal_refuses_a_traversal_id_on_load() {
+        // The WAL is a durable copy of wire data — same boundary rule as follows.json.
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("hostile-wal"));
+        std::fs::create_dir_all(layout.identity_dir()).unwrap();
+        let wal = PendingEnrollment {
+            schema_version: SCHEMA_VERSION,
+            state: EnrollPhase::Redeemed {
+                context: EnrollContext {
+                    base_url: "https://acme.topos.test".to_owned(),
+                    pinned_plane_key: "a".repeat(64),
+                    plane_key_id: "pk".to_owned(),
+                    deployment_mode: DeploymentMode::SelfHost,
+                    enrollment_method: "device_code".to_owned(),
+                    workspace_id: "w_acme".to_owned(),
+                    workspace_display_name: "Acme".to_owned(),
+                    verified_domain: None,
+                    verified_domain_status: VerifiedDomainStatus::Unverified,
+                    offered_skills: vec![OfferedSkill {
+                        skill_id: "../../x".to_owned(),
+                        name: None,
+                    }],
+                    mode: FollowModeDoc::Auto,
+                },
+                read_creds: vec![RedeemedCredDoc {
+                    skill_id: "../../x".to_owned(),
+                    read_token: "rt".to_owned(),
+                    expires_at: None,
+                }],
+                device_key_id: "dk_abc".to_owned(),
+                enrolled_at_millis: 1,
+            },
+        };
+        write_wal(&fs, &layout, &wal).unwrap();
+        let err = read_wal(&fs, &layout).unwrap_err();
+        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
     }
 }

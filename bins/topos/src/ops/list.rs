@@ -35,13 +35,17 @@ pub(crate) fn list(
         if id.starts_with('.') || !entry.is_dir() {
             continue;
         }
-        let paths = ctx.layout.published(id);
+        // A dir name outside the validated id charset was never minted by topos — not a tracked skill.
+        let Ok(id) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let paths = ctx.layout.published(&id);
         let Some(lock): Option<Lock> = doc::read_doc(ctx.fs, &paths.lock)? else {
             continue;
         };
         let draft = is_draft(ctx, &paths.map, &lock)?;
         tracked.push((
-            id.to_owned(),
+            id.into_string(),
             SkillEntry {
                 skill: lock.name,
                 version_id: lock.base_commit,

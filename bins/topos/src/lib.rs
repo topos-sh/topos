@@ -23,6 +23,7 @@ pub(crate) mod doc;
 pub(crate) mod enroll;
 pub(crate) mod error;
 pub(crate) mod fs_seam;
+pub(crate) mod id;
 pub(crate) mod identity;
 pub(crate) mod ids;
 pub(crate) mod logfile;

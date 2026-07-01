@@ -300,27 +300,38 @@ impl Rig {
         self.work.0.join("pr-describe")
     }
     fn read_sync(&self, id: &str) -> SyncState {
-        doc::read_doc(&self.fs, &self.layout().published(id).sync)
+        doc::read_doc(&self.fs, &self.layout().published(&sid(id)).sync)
             .unwrap()
             .unwrap()
     }
     fn patch_sync(&self, id: &str, f: impl FnOnce(&mut SyncState)) {
         let mut s = self.read_sync(id);
         f(&mut s);
-        doc::write_doc(&self.fs, &self.layout().published(id).sync, &s).unwrap();
+        doc::write_doc(&self.fs, &self.layout().published(&sid(id)).sync, &s).unwrap();
     }
     fn patch_lock(&self, id: &str, f: impl FnOnce(&mut topos_types::persisted::Lock)) {
-        let p = self.layout().published(id).lock;
+        let p = self.layout().published(&sid(id)).lock;
         let mut l: topos_types::persisted::Lock = doc::read_doc(&self.fs, &p).unwrap().unwrap();
         f(&mut l);
         doc::write_doc(&self.fs, &p, &l).unwrap();
     }
     fn open_store(&self, id: &str) -> topos_gitstore::Store {
-        topos_gitstore::Store::open(&self.layout().published(id).store).unwrap()
+        topos_gitstore::Store::open(&self.layout().published(&sid(id)).store).unwrap()
     }
     fn conflict_exists(&self, id: &str) -> bool {
-        self.layout().published(id).conflict.exists()
+        self.layout().published(&sid(id)).conflict.exists()
     }
+}
+
+/// Parse a rig-minted skill id through the validated newtype (always charset-clean here).
+fn sid(id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(id).expect("rig skill id is charset-clean")
+}
+
+/// The test shim over [`ops::pull`]: project the schema payload (the envelope warnings have their own
+/// dedicated tests below).
+fn pull_data(ctx: &Ctx<'_>, scope: ops::PullScope) -> Result<PullData, crate::error::ClientError> {
+    ops::pull(ctx, scope).map(|o| o.data)
 }
 
 fn follow(skill_id: &str, mode: FollowMode) -> FixtureFollow {
@@ -417,7 +428,7 @@ fn clean_follower_auto_fast_forwards() {
     let foll = follow(&id, FollowMode::Auto);
 
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
 
     let row = only(&data);
     assert_eq!(row.action, PullAction::FastForwarded);
@@ -451,7 +462,7 @@ fn confirm_each_offers_then_explicit_pull_accepts() {
 
     // The bare sweep OFFERS (raises the floor) but does not apply.
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Offered);
     assert!(row.offer.is_some());
@@ -469,7 +480,7 @@ fn confirm_each_offers_then_explicit_pull_accepts() {
 
     // The explicit `pull <skill>` accepts the pending update (APPLY_WAITING_UPDATE).
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(
+    let data = pull_data(
         &ctx,
         ops::PullScope::One {
             name,
@@ -505,7 +516,7 @@ fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
     let foll = follow(&id, FollowMode::Auto);
 
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
 
     // Resolved (not merely surfaced): a conflict, with a merge report listing the conflicting path.
@@ -534,14 +545,14 @@ fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
 
     // Never clobbered: the pre-merge draft is snapshotted into the sidecar store (recoverable).
     let draft = mk_version(&[genesis], edited, DEVICE, "topos: draft snapshot");
-    let store = topos_gitstore::Store::open(&rig.layout().published(&id).store).unwrap();
+    let store = topos_gitstore::Store::open(&rig.layout().published(&sid(&id)).store).unwrap();
     assert!(
         store.list_versions().unwrap().contains(&draft.id),
         "the diverged draft must be snapshotted before the merge overwrites the placement"
     );
 
     // A durable conflict record blocks publish; the pending update is consumed into the (blocked) draft.
-    assert!(rig.layout().published(&id).conflict.exists());
+    assert!(rig.layout().published(&sid(&id)).conflict.exists());
     assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 1, seq: 1 });
 }
 
@@ -557,12 +568,12 @@ fn go_back_then_resume() {
 
     // Fast-forward to v1.
     let ctx = rig.ctx(&plane, &foll);
-    ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
 
     // Go back to genesis: old bytes installed, `held` set, the floor (`observed`) untouched.
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(
+    let data = pull_data(
         &ctx,
         ops::PullScope::One {
             name: name.clone(),
@@ -591,7 +602,7 @@ fn go_back_then_resume() {
 
     // A held skill is NOT auto-fast-forwarded by the sweep.
     let ctx = rig.ctx(&plane, &foll);
-    ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(
         snapshot(&rig.placement()),
         Some(expect(BASE)),
@@ -600,7 +611,7 @@ fn go_back_then_resume() {
 
     // A bare explicit `pull <skill>` resumes (clears the hold) and fast-forwards back to v1.
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(
+    let data = pull_data(
         &ctx,
         ops::PullScope::One {
             name,
@@ -656,7 +667,7 @@ fn downgrade_floor_holds_and_drives_to_observed() {
 
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     // The served v1 is a no-op (no downgrade); the client reaches the floor target v2.
     assert_eq!(row.action, PullAction::FastForwarded);
@@ -716,7 +727,7 @@ fn reused_tuple_raises_alarm() {
 
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&data).action, PullAction::Alarm);
     assert_eq!(
         snapshot(&rig.placement()),
@@ -740,7 +751,7 @@ fn cross_workspace_pointer_is_rejected() {
 
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&data).action, PullAction::Alarm);
     assert_eq!(snapshot(&rig.placement()), Some(expect(BASE)), "untouched");
     assert_eq!(
@@ -776,7 +787,7 @@ fn crash_after_swap_heals_without_false_divergence() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(
         row.action,
@@ -808,14 +819,14 @@ fn at_floor_tuple_reuse_is_an_alarm() {
     // Fast-forward to v1 @ (1,1).
     {
         let ctx = rig.ctx(&plane, &foll);
-        ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+        pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     }
     assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
     // Now re-serve (1,1) but pointing at `evil` (a different commit at the same tuple).
     plane.set_current(&id, signed(WS, &id, evil.id, 1, 1));
     let before = snapshot(&rig.placement());
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(
         only(&data).action,
         PullAction::Alarm,
@@ -841,13 +852,13 @@ fn confirm_each_accept_reoffers_a_version_that_moved() {
     // The sweep offers v1 (raises the floor, does not apply).
     {
         let ctx = rig.ctx(&plane, &foll);
-        let d = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+        let d = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
         assert_eq!(only(&d).action, PullAction::Offered);
     }
     // The plane moves to v2 before the user accepts.
     plane.set_current(&id, signed(WS, &id, v2.id, 1, 2));
     let ctx = rig.ctx(&plane, &foll);
-    let d = ops::pull(
+    let d = pull_data(
         &ctx,
         ops::PullScope::One {
             name,
@@ -883,7 +894,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
     // Fast-forward to v1 (so v1 is in the store + recorded; the placement is clean at v1).
     {
         let ctx = rig.ctx(&plane, &foll);
-        ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+        pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     }
     // Edit the placement → an unsaved local draft on top of v1.
     let edited: &[(&str, FileMode, &[u8])] = &[
@@ -897,7 +908,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
 
     // Go back to genesis.
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(
+    let data = pull_data(
         &ctx,
         ops::PullScope::One {
             name,
@@ -912,7 +923,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
         "old bytes installed"
     );
     // CRITICAL: the unsaved draft was snapshotted into the store BEFORE the overwrite — it is recoverable.
-    let store = topos_gitstore::Store::open(&rig.layout().published(&id).store).unwrap();
+    let store = topos_gitstore::Store::open(&rig.layout().published(&sid(&id)).store).unwrap();
     assert!(
         store.list_versions().unwrap().contains(&draft.id),
         "the unsaved draft must be snapshotted before a go-back overwrites it"
@@ -941,7 +952,7 @@ fn malformed_plane_response_is_an_alarm() {
     let plane = MalformedPlane;
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&data).action, PullAction::Alarm);
     assert_eq!(
         snapshot(&rig.placement()),
@@ -964,7 +975,7 @@ fn bad_signature_is_an_alarm() {
 
     let foll = follow(&id, FollowMode::Auto);
     let ctx = rig.ctx(&plane, &foll);
-    let data = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&data).action, PullAction::Alarm);
     assert_eq!(snapshot(&rig.placement()), Some(expect(BASE)));
     assert_eq!(rig.read_sync(&id).observed, Generation { epoch: 0, seq: 0 });
@@ -1003,7 +1014,7 @@ fn auto_sweep_clean_merge_lands_draft_on_current() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Merged);
     let mr = row.merge.as_ref().expect("a merge report");
@@ -1042,12 +1053,12 @@ fn clean_merge_is_a_stable_fixpoint_with_no_lost_update() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Merged
     );
 
     // (1) Re-pull, `current` unchanged → UpToDate (the draft is not nagged, not re-merged, not clobbered).
-    let again = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let again = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&again).action, PullAction::UpToDate);
     assert_eq!(
         std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
@@ -1064,7 +1075,7 @@ fn clean_merge_is_a_stable_fixpoint_with_no_lost_update() {
     plane2.add_version(&id, &v2);
     plane2.set_current(&id, signed(WS, &id, v2.id, 1, 2));
     let row =
-        only(&ops::pull(&rig.ctx(&plane2, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+        only(&pull_data(&rig.ctx(&plane2, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
     assert_ne!(
         row.action,
         PullAction::FastForwarded,
@@ -1094,7 +1105,7 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::ConfirmEach);
 
-    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Diverged);
     assert!(
@@ -1110,7 +1121,7 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
     assert_eq!(rig.read_sync(&id).applied, Generation { epoch: 0, seq: 0 });
 
     // The explicit accept (the one-tap) then runs the merge.
-    let accepted = ops::pull(
+    let accepted = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1141,7 +1152,7 @@ fn escape_commits_mine_on_current_and_is_publishable() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    let data = ops::pull(
+    let data = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1187,14 +1198,14 @@ fn conflict_blocks_and_persists_until_escaped() {
 
     // Auto sweep → conflict (overlapping SKILL.md) → blocked.
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
     assert!(rig.conflict_exists(&id));
 
     // A bare re-sweep keeps reporting the block (does not silently clear or advance).
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
     assert!(rig.conflict_exists(&id));
@@ -1209,7 +1220,7 @@ fn conflict_blocks_and_persists_until_escaped() {
         ],
     );
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
     assert!(
@@ -1218,7 +1229,7 @@ fn conflict_blocks_and_persists_until_escaped() {
     );
 
     // The escape resolves it: the block clears + a publishable draft-on-current results.
-    let escaped = ops::pull(
+    let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1253,7 +1264,7 @@ fn no_base_falls_back_to_two_way_never_silent() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Conflicted);
     let mr = row.merge.as_ref().expect("a merge report");
@@ -1279,7 +1290,7 @@ fn merge_unreachable_from_clean_follower_states() {
         plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
         let foll = follow(&id, FollowMode::Auto);
         let row =
-            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+            only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert_eq!(row.action, PullAction::FastForwarded);
         assert!(row.merge.is_none());
         assert!(!rig.conflict_exists(&id));
@@ -1299,7 +1310,7 @@ fn merge_unreachable_from_clean_follower_states() {
         plane.set_current(&id, signed(WS, &id, genesis, 0, 0));
         let foll = follow(&id, FollowMode::Auto);
         let row =
-            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+            only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert!(
             matches!(row.action, PullAction::UpToDate),
             "a draft with no pending update is a no-op, got {:?}",
@@ -1329,7 +1340,7 @@ fn binary_conflict_keeps_both_sides_via_sidecar() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Conflicted);
     // theirs kept at the path, mine in the sidecar.
@@ -1343,7 +1354,7 @@ fn binary_conflict_keeps_both_sides_via_sidecar() {
     );
     // The on-disk tree scans back to the recorded conflict digest (sidecars survive the scanner).
     let cs: topos_types::persisted::ConflictState =
-        doc::read_doc(&rig.fs, &rig.layout().published(&id).conflict)
+        doc::read_doc(&rig.fs, &rig.layout().published(&sid(&id)).conflict)
             .unwrap()
             .unwrap();
     let scanned = crate::scan::scan(&rig.placement()).unwrap();
@@ -1371,7 +1382,7 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
         plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
         let foll = follow(&id, FollowMode::Auto);
         let fs = FaultFs::new(0);
-        ops::pull(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
+        pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
         (snapshot(&rig.placement()), fs.ops_attempted())
     };
     assert!(n_ops > 4, "expected several durable ops, got {n_ops}");
@@ -1388,7 +1399,7 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
 
         // Fault the Nth op (may error mid-resolve).
         let fs = FaultFs::new(fail_at);
-        let _ = ops::pull(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed);
+        let _ = pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed);
 
         // SAFETY: if the completed conflict tree is on disk, its guard record MUST be present (a marker
         // tree is never publishable). It is written + fsynced before the swap, so this holds at every fault.
@@ -1401,7 +1412,7 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
 
         // A clean re-run converges: blocked conflict, complete conflict tree on disk, applied == observed.
         let row =
-            only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+            only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert_eq!(
             row.action,
             PullAction::Conflicted,
@@ -1441,7 +1452,7 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
 
     // Auto sweep → conflict (overlapping SKILL.md) → the placement holds markers.
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
     assert!(
@@ -1451,7 +1462,7 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     );
 
     // Escape WITHOUT editing → commits MINE (the original draft), not the markers; clears the block.
-    let escaped = ops::pull(
+    let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1486,7 +1497,7 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     plane.add_version(&id, &v1);
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
-    ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
     // The author hand-resolves (removes markers) and then escapes.
     let resolved: FileSet = &[
@@ -1495,7 +1506,7 @@ fn escape_of_edited_conflict_commits_the_resolution() {
         ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
     ];
     write_tree(&rig.placement(), resolved);
-    let escaped = ops::pull(
+    let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1531,7 +1542,7 @@ fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
     p1.add_version(&id, &v1);
     p1.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&p1, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&p1, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Diverged
     );
     assert_eq!(rig.read_sync(&id).observed, Generation { epoch: 1, seq: 1 });
@@ -1547,7 +1558,7 @@ fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
     p2.add_version(&id, &v1);
     p2.add_version(&id, &v2);
     p2.set_current(&id, signed(WS, &id, v2.id, 1, 2));
-    let row = ops::pull(
+    let row = pull_data(
         &rig.ctx(&p2, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
@@ -1589,7 +1600,7 @@ fn sidecar_avoids_case_fold_collision_with_a_real_path() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    let data = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(
         row.action,
@@ -1609,7 +1620,7 @@ fn sidecar_avoids_case_fold_collision_with_a_real_path() {
     );
     // The materialized tree scans back to the recorded conflict digest (no kernel rejection).
     let cs: topos_types::persisted::ConflictState =
-        doc::read_doc(&rig.fs, &rig.layout().published(&id).conflict)
+        doc::read_doc(&rig.fs, &rig.layout().published(&sid(&id)).conflict)
             .unwrap()
             .unwrap();
     let scanned = crate::scan::scan(&rig.placement()).unwrap();
@@ -1633,7 +1644,7 @@ fn recorded_conflict_does_not_hide_the_reused_tuple_alarm() {
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
     assert_eq!(
-        only(&ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
     assert!(rig.conflict_exists(&id));
@@ -1644,7 +1655,7 @@ fn recorded_conflict_does_not_hide_the_reused_tuple_alarm() {
     let mut compromised = FixturePlane::default();
     compromised.add_version(&id, &v2);
     compromised.set_current(&id, signed(WS, &id, v2.id, 1, 1)); // same generation, different commit
-    let row = ops::pull(&rig.ctx(&compromised, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = pull_data(&rig.ctx(&compromised, &foll), ops::PullScope::AllFollowed).unwrap();
     assert_eq!(
         only(&row).action,
         PullAction::Alarm,
@@ -1653,5 +1664,219 @@ fn recorded_conflict_does_not_hide_the_reused_tuple_alarm() {
     assert!(
         rig.conflict_exists(&id),
         "the alarm does not clear the conflict record"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The sweep's plane-down circuit breaker + the machine-visible per-skill warnings.
+// ---------------------------------------------------------------------------------------------
+
+/// A counting transport whose `get_current` always fails at the given level — the breaker's oracle
+/// (every network call the sweep makes is a counter tick).
+#[derive(Default)]
+struct CountingDownPlane {
+    /// `true` ⇒ connect-level (`Unreachable`, trips the breaker); `false` ⇒ HTTP-level (`Unavailable`).
+    connect_level: bool,
+    gets: std::cell::Cell<u32>,
+    lists: std::cell::Cell<u32>,
+}
+impl PlaneSource for CountingDownPlane {
+    fn get_current(
+        &self,
+        _skill_id: &str,
+        _known: Option<KnownCurrent>,
+    ) -> Result<PointerFetch, PlaneError> {
+        self.gets.set(self.gets.get() + 1);
+        Err(if self.connect_level {
+            PlaneError::Unreachable("connect refused".into())
+        } else {
+            PlaneError::Unavailable("HTTP 500".into())
+        })
+    }
+    fn fetch_version(
+        &self,
+        _skill_id: &str,
+        _version_id: [u8; 32],
+    ) -> Result<crate::plane::FetchedVersion, PlaneError> {
+        Err(PlaneError::Unavailable("HTTP 500".into()))
+    }
+    fn list_open_proposals(&self, _skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
+        self.lists.set(self.lists.get() + 1);
+        Ok(Vec::new())
+    }
+}
+
+/// A follow source listing the SAME skill N times — the cheapest way to drive an N-skill sweep against
+/// one adopted sidecar (each pass takes and releases the per-skill lock sequentially).
+fn follow_n(skill_id: &str, n: usize) -> FixtureFollow {
+    FixtureFollow {
+        entries: (0..n)
+            .map(|_| {
+                (
+                    skill_id.to_owned(),
+                    FollowContext {
+                        workspace_id: WS.to_owned(),
+                        mode: FollowMode::Auto,
+                        review_required: false,
+                        following: true,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn sweep_breaker_trips_on_first_connect_failure_and_skips_all_remaining_network_calls() {
+    let rig = Rig::new("breaker");
+    let (id, _name, _genesis) = rig.adopt(BASE);
+    let plane = CountingDownPlane {
+        connect_level: true,
+        ..Default::default()
+    };
+    let foll = follow_n(&id, 3);
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // Every skill still gets a local-state row (the engine falls through to the local drive)...
+    assert_eq!(out.data.skills.len(), 3);
+    // ...but the plane was dialed exactly ONCE: the first connect-level failure tripped the breaker,
+    // and the remaining sweep passes + the proposals count made ZERO further network calls.
+    assert_eq!(
+        plane.gets.get(),
+        1,
+        "one connect timeout, not one per skill"
+    );
+    assert_eq!(
+        plane.lists.get(),
+        0,
+        "the proposals count is skipped once the breaker tripped"
+    );
+    assert_eq!(out.data.proposals_awaiting, 0);
+}
+
+#[test]
+fn sweep_breaker_never_trips_on_an_http_level_failure() {
+    let rig = Rig::new("nobreak");
+    let (id, _name, _genesis) = rig.adopt(BASE);
+    let plane = CountingDownPlane {
+        connect_level: false,
+        ..Default::default()
+    };
+    let foll = follow_n(&id, 3);
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // An HTTP 500 means the plane ANSWERED — per-skill isolation, no breaker: all three are dialed,
+    // and the proposals count still runs.
+    assert_eq!(out.data.skills.len(), 3);
+    assert_eq!(plane.gets.get(), 3);
+    assert_eq!(plane.lists.get(), 3);
+}
+
+#[test]
+fn go_back_is_plane_independent_and_spends_no_network_call() {
+    let rig = Rig::new("gbnonet");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let plane = CountingDownPlane {
+        connect_level: true,
+        ..Default::default()
+    };
+    let foll = follow(&id, FollowMode::Auto);
+
+    // A go-back to the adopted genesis (recorded locally) must complete with the plane fully down —
+    // and make ZERO network calls (including the proposals count, which is documented plane-independent).
+    let out = ops::pull(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            name,
+            mode: ops::TargetMode::GoBack(genesis),
+        },
+    )
+    .unwrap();
+    assert_eq!(out.data.skills.len(), 1);
+    assert_eq!(plane.gets.get(), 0, "go-back never dials the plane");
+    assert_eq!(plane.lists.get(), 0, "no proposals GET on the go-back path");
+    assert_eq!(out.data.proposals_awaiting, 0);
+}
+
+#[test]
+fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
+    let rig = Rig::new("warn");
+    let (id, _name, _genesis) = rig.adopt(BASE);
+    let plane = FixturePlane::default(); // serves nothing → the healthy skill reads NotFound → UpToDate
+    let foll = FixtureFollow {
+        entries: vec![
+            // A followed id with NO sidecar docs — the sweep must isolate it, not abort.
+            (
+                "topos_missing".to_owned(),
+                FollowContext {
+                    workspace_id: WS.to_owned(),
+                    mode: FollowMode::Auto,
+                    review_required: false,
+                    following: true,
+                },
+            ),
+            (
+                id.clone(),
+                FollowContext {
+                    workspace_id: WS.to_owned(),
+                    mode: FollowMode::Auto,
+                    review_required: false,
+                    following: true,
+                },
+            ),
+        ],
+    };
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // The healthy skill still produced its row (isolation)...
+    assert_eq!(out.data.skills.len(), 1);
+    assert_eq!(out.data.skills[0].action, PullAction::UpToDate);
+    // ...and the failed one is machine-visible: one stable-shape warning naming the code + the skill.
+    assert_eq!(out.warnings.len(), 1);
+    let w = &out.warnings[0];
+    assert!(
+        w.contains("topos_missing"),
+        "the warning names the failed skill: {w}"
+    );
+    assert!(
+        w.starts_with(char::is_uppercase) && w.contains(' '),
+        "the warning leads with the stable error code: {w}"
+    );
+}
+
+#[test]
+fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
+    let rig = Rig::new("hostileid");
+    let (_id, _name, _genesis) = rig.adopt(BASE);
+    let plane = FixturePlane::default();
+    let foll = FixtureFollow {
+        entries: vec![(
+            "../../evil".to_owned(),
+            FollowContext {
+                workspace_id: WS.to_owned(),
+                mode: FollowMode::Auto,
+                review_required: false,
+                following: true,
+            },
+        )],
+    };
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // The hostile id never reaches a path join: no row, one warning, and nothing appears at the
+    // would-be escape target beside the home.
+    assert!(out.data.skills.is_empty());
+    assert_eq!(out.warnings.len(), 1);
+    assert!(
+        out.warnings[0].contains("CORRUPT_STATE"),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        !rig.home.0.parent().unwrap().join("evil").exists(),
+        "no directory materialized outside the home"
     );
 }

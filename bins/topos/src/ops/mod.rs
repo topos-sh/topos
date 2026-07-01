@@ -23,7 +23,7 @@ pub(crate) use invite::invite;
 pub(crate) use list::list;
 pub(crate) use log::log;
 pub(crate) use publish::{PublishOutcome, publish};
-pub(crate) use pull::{PullScope, TargetMode, pull};
+pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull};
 pub(crate) use revert::revert;
 pub(crate) use review::review;
 pub(crate) use unfollow::unfollow;
@@ -34,11 +34,14 @@ use topos_types::persisted::Lock;
 use crate::ctx::Ctx;
 use crate::doc;
 use crate::error::ClientError;
+use crate::id::SkillId;
 
 /// Resolve a skill name to its `(id, lock)` across the tracked skills. A name is the user-facing handle;
-/// two same-name skills are distinct, so an ambiguous name is a typed error carrying the count.
-fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(String, Lock), ClientError> {
-    let mut matches: Vec<(String, Lock)> = Vec::new();
+/// two same-name skills are distinct, so an ambiguous name is a typed error carrying the count. The
+/// returned id is the VALIDATED newtype (parsed from the directory name), so every downstream path join
+/// is charset-proven; a dir whose name fails the parse was never minted by topos and is skipped.
+fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(SkillId, Lock), ClientError> {
+    let mut matches: Vec<(SkillId, Lock)> = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -46,14 +49,17 @@ fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(String, Lock), ClientErro
         if id.starts_with('.') || !entry.is_dir() {
             continue;
         }
-        if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(id).lock)?
+        let Ok(id) = SkillId::parse(id) else {
+            continue;
+        };
+        if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&id).lock)?
             && lock.name == name
         {
-            matches.push((id.to_owned(), lock));
+            matches.push((id, lock));
         }
     }
     // Deterministic across same-name skills.
-    matches.sort_by(|a, b| a.0.cmp(&b.0));
+    matches.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     match matches.len() {
         0 => Err(ClientError::NoSuchSkill {
             name: name.to_owned(),

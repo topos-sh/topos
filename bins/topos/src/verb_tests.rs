@@ -20,6 +20,19 @@ use crate::{ops, render};
 const DEVICE_ID: &str = "d_test";
 const FIXED_MILLIS: u64 = 1_700_000_000_000;
 
+/// Parse a minted skill id through the validated newtype (always charset-clean in these rigs).
+fn sid(id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(id).expect("rig skill id is charset-clean")
+}
+
+/// The test shim over [`ops::pull`]: project the schema payload (warnings have dedicated tests).
+fn pull_data(
+    ctx: &Ctx<'_>,
+    scope: ops::PullScope,
+) -> Result<topos_types::results::PullData, crate::error::ClientError> {
+    ops::pull(ctx, scope).map(|o| o.data)
+}
+
 /// A borrow-free no-op harness for the tests that don't exercise harness recognition: it discovers
 /// nothing (so `add` never tags a plain temp source as a harness skill) and installs/removes nothing.
 /// The Claude Code adapter itself is tested directly (its own crate tests + the dedicated tests below).
@@ -213,9 +226,12 @@ fn add_then_list_finds_tracked_and_pins_lock_shape() {
     );
 
     // The lock.json on-disk instance shape (sorted files: path, mode, sha256, size + base_commit).
-    let lock: Lock = doc::read_doc(h.ctx().fs, &h.ctx().layout.published(&add.skill_id).lock)
-        .unwrap()
-        .unwrap();
+    let lock: Lock = doc::read_doc(
+        h.ctx().fs,
+        &h.ctx().layout.published(&sid(&add.skill_id)).lock,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(lock.schema_version, 1);
     assert_eq!(lock.name, "pr-describe");
     assert_eq!(lock.base_commit, add.version_id);
@@ -786,7 +802,7 @@ fn install_currency_trigger_is_crash_safe_across_the_fault_table() {
 fn pull_is_an_honest_empty_no_op() {
     // The inert follow source (production) follows nothing, so the bare sweep is an honest empty no-op.
     let h = Harness::new("pull");
-    let data = ops::pull(&h.ctx(), ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&h.ctx(), ops::PullScope::AllFollowed).unwrap();
     assert!(data.skills.is_empty(), "nothing is followed yet");
     assert_eq!(data.proposals_awaiting, 0);
 }
@@ -922,7 +938,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         follow: &file_follow,
         ..h.ctx()
     };
-    let data = ops::pull(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();
+    let data = pull_data(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();
     assert!(
         data.skills.is_empty(),
         "an unfollowed skill must not be swept: {:?}",
