@@ -214,7 +214,9 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > marker-carrying bootstrap-inject plugin file registered in `openclaw.json`'s `bootstrap-extra-files`
 > array (a fresh-array immutable-replace edit; the entry is the sole commit point), whose last-refreshed
 > content surfaces updates on the **first `topos` touch**, never at bare session open (`session_start` is
-> observer-only; cron is never a currency path). Every failure mode — a disabled inject flag, a blown char
+> observer-only; cron is never a currency path). The per-touch refresh of the inject content itself is
+> the sync engine's follow-on and is **not yet wired** — the installed surface honestly claims no update
+> information and points at `topos pull` until it lands. Every failure mode — a disabled inject flag, a blown char
 > budget, a malformed/wrong-typed config, a foreign file squatting on the plugin path — degrades plainly to
 > `Degraded` + the `ExplicitPullOnly` floor with no write and no clobber; remove scrubs the registration
 > first and unlinks only the marker-confirmed file; the TTY currency copy now branches on the report's

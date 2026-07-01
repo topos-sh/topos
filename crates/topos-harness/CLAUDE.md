@@ -15,7 +15,9 @@ The **OpenClaw** adapter (`openclaw`) is implemented too, mirroring the referenc
 artifacts: `discover` probes `~/.openclaw/skills/*/SKILL.md` the same way; `currency_kind` =
 `FirstToposTouch` (honestly weaker — the topos-owned bootstrap-inject plugin file shows its
 last-refreshed state, so updates surface on the first `topos` touch, never at bare session open;
-`session_start` is observer-only and cron is never a currency path); install registers the plugin's path
+`session_start` is observer-only and cron is never a currency path; the per-touch refresh of the inject
+CONTENT is the sync engine's follow-on, not yet wired — the installed surface claims no update and
+points at `topos pull` until it lands); install registers the plugin's path
 in `openclaw.json`'s `bootstrap-extra-files` via a fresh-array (immutable-replace) edit + writes the
 inert marker-carrying plugin file; every capacity failure (disabled inject flag, blown char budget,
 malformed/wrong-typed config, a foreign file squatting on the plugin path) degrades to

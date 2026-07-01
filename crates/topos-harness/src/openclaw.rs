@@ -76,8 +76,10 @@ const INJECT_FLAG_KEY: &str = "bootstrap-inject";
 const INJECT_CHAR_BUDGET: usize = 4096;
 
 /// The inert inject plugin topos installs — a pure data default-export with zero side effects
-/// whether or not a gateway loads it. The pull engine refreshes this surface's contents on each
-/// `topos` touch (that refresh is the sync engine's job, not this adapter's); install checks only
+/// whether or not a gateway loads it. The per-`topos`-touch refresh of this surface's CONTENTS is
+/// the sync engine's job, not this adapter's, and is **not yet wired** — until it lands, the
+/// installed surface keeps exactly these bytes, which claim no update (`lastRefreshed: null`) and
+/// point at `topos pull`, so it never announces an update it has not seen. Install checks only
 /// marker-ownership, never byte-equality, so a refreshed file is still a true no-op re-install.
 const PLUGIN_CONTENT: &str = "\
 // topos:openclaw:currency:1 — the topos-managed bootstrap-inject surface.
@@ -452,9 +454,12 @@ fn plan_install(
         Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
         Classification::Absent => {
             if plugin == PluginFile::Foreign {
-                // A foreign file on our path: registering it would inject unknown bytes into LLM
-                // context, and overwriting it would clobber someone's file. Leave both.
-                return EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged);
+                // A foreign file squats on our path with NOTHING registered: registering it would
+                // inject unknown bytes into LLM context, and overwriting it would clobber someone's
+                // file — but no equivalent trigger exists either, so `AlreadyPresentUnmanaged`
+                // would be a false claim. A path collision is a Degraded install: nothing armed,
+                // nothing written, the explicit-pull floor advertised.
+                return EditPlan::Leave(TriggerState::Degraded);
             }
             // The openclaw#51789-safe fresh-array form: build a brand-new array and assign it
             // wholesale — never push into the live one.
@@ -781,22 +786,77 @@ mod tests {
 
     #[test]
     fn install_never_registers_or_overwrites_a_foreign_file_on_our_path() {
-        // A file without our marker squats on the plugin path: registering it would inject unknown
-        // bytes into LLM context; overwriting it would clobber someone's file. Leave both.
+        // A file without our marker squats on the plugin path and NOTHING is registered: a path
+        // collision — no trigger exists, so the install degrades (never `AlreadyPresentUnmanaged`,
+        // which would falsely claim an equivalent trigger); neither file is written.
         let cfg = MemConfig::default();
         cfg.seed(PLUGIN, b"export default { evil: true };\n");
         let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
+        assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(cfg.writes(), 0, "neither file is written");
         assert!(cfg.text(CONFIG).is_none(), "no registration was created");
 
-        // Same when OUR registration exists but the file's bytes lost the marker (a hand-edit).
+        // When OUR registration exists but the file's bytes lost the marker (a hand-edit), a live
+        // inject surface really is present without our marker — adopt-or-leave, never clobber.
         let cfg = MemConfig::with_config(FRESH_INSTALL);
         cfg.seed(PLUGIN, b"export default { edited: true };\n");
         let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0, "never vouch, never clobber");
+    }
+
+    #[test]
+    fn non_string_sibling_entries_survive_install_and_remove_untouched() {
+        // The fresh-array clone must carry every sibling VERBATIM — including entries that are not
+        // strings (a number, an object) — on both the append and the scrub.
+        let cfg = MemConfig::with_config(
+            "{\"bootstrap-extra-files\": [42, {\"path\": \"x\"}, \"/h/notes.md\"]}",
+        );
+        let home = Path::new("/h");
+        let report = adapter(home, &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(
+            root[EXTRA_FILES_KEY],
+            serde_json::json!([42, {"path": "x"}, "/h/notes.md", PLUGIN]),
+            "non-string siblings survive in order; ours is appended once"
+        );
+
+        let report = adapter(home, &cfg).remove_currency_trigger();
+        assert_eq!(report.state, TriggerState::Inactive);
+        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(
+            root[EXTRA_FILES_KEY],
+            serde_json::json!([42, {"path": "x"}, "/h/notes.md"]),
+            "the scrub removes only ours, keeping every non-string sibling"
+        );
+    }
+
+    #[test]
+    fn a_double_listed_canonical_entry_is_a_no_op_install_and_a_full_scrub() {
+        // Managed wins on the first exact match, so install never appends a third copy; the scrub
+        // filter drops EVERY copy of the exact canonical entry and prunes the emptied key.
+        let cfg = MemConfig::with_config(
+            "{\"bootstrap-extra-files\": [\"/h/topos-currency.mjs\", \"/h/topos-currency.mjs\"]}",
+        );
+        cfg.seed(PLUGIN, PLUGIN_CONTENT.as_bytes());
+        let home = Path::new("/h");
+        let report = adapter(home, &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(
+            cfg.writes(),
+            0,
+            "a double-listed managed entry is still a no-op install"
+        );
+
+        let report = adapter(home, &cfg).remove_currency_trigger();
+        assert_eq!(report.state, TriggerState::Inactive);
+        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert!(
+            root.get(EXTRA_FILES_KEY).is_none(),
+            "both copies are scrubbed and the emptied key pruned"
+        );
     }
 
     #[test]
