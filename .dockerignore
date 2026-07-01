@@ -1,0 +1,3 @@
+# Keep the build context small + reproducible: the compiled artifacts and VCS metadata never belong in it.
+target/
+.git/

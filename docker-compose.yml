@@ -1,0 +1,48 @@
+# Self-host the Topos plane: the stateless plane container + a pinned Postgres, in one command.
+#
+#   docker compose up --build      # plane on http://localhost:8787, Postgres beside it
+#
+# Bring-your-own Postgres: set DATABASE_URL to your managed/external database (a `.env` file or the shell)
+# and start just the plane — `docker compose up --build plane` — leaving the bundled `db` service unused.
+# Postgres is a SEPARATE service (never baked into the plane image); the plane migrates the schema on start.
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-topos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topos}
+      POSTGRES_DB: ${POSTGRES_DB:-topos}
+    volumes:
+      # The metadata database — back this up with `pg_dump` or a volume snapshot (see the README).
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # BYO override: point this at a managed Postgres instead (and you can drop the `db` service).
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-topos}:${POSTGRES_PASSWORD:-topos}@db:5432/${POSTGRES_DB:-topos}}
+      # The public base URL the invite + verification links are built on — set it to your externally
+      # reachable address behind a reverse proxy (which also terminates TLS).
+      TOPOS_PLANE_BASE_URL: ${TOPOS_PLANE_BASE_URL:-http://localhost:8787}
+      TOPOS_PLANE_MODE: self_host
+    ports:
+      - "8787:8787"
+    volumes:
+      # The git-object + large-object stores and the 0600 signing key / enrollment secret (generated on
+      # first boot). Snapshot these BEFORE the database (see the README's backup order).
+      - plane-data:/data
+
+volumes:
+  pg-data:
+  plane-data:
