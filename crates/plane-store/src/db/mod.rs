@@ -521,6 +521,59 @@ where
     Ok(row.is_some())
 }
 
+/// A CONFIRMED `workspace_member` row exists for this principal — the genesis-standup trust gate (the
+/// workspace-level RBAC roster, distinct from the per-skill read `roster`). The query text is byte-identical
+/// to `enroll::read_member_status`, so the committed `.sqlx` cache already covers it.
+async fn workspace_member_confirmed<'e, E>(
+    executor: E,
+    ws: &WorkspaceId,
+    principal: &Principal,
+) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ws_s = ws.as_str();
+    let principal = principal.as_str();
+    let row = sqlx::query!(
+        r#"SELECT status AS "status!" FROM workspace_member WHERE workspace_id = $1 AND principal = $2"#,
+        ws_s,
+        principal,
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(matches!(row, Some(r) if r.status == "confirmed"))
+}
+
+/// Self-insert a per-skill roster row — the genesis standup's one write (a first publish rosters its own
+/// author for the skill it creates, inside the same transaction as the pointer). The INSERT text is
+/// byte-identical to `enroll::redeem_run`'s roster grant, so the committed `.sqlx` cache already covers it;
+/// `ON CONFLICT DO NOTHING` keeps a concurrent standup / governance roster mutation convergent.
+async fn insert_roster<'e, E>(
+    executor: E,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    principal: &Principal,
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ws_s = ws.as_str();
+    let sk = skill.as_str();
+    let prin = principal.as_str();
+    sqlx::query!(
+        "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ($1, $2, $3) \
+         ON CONFLICT (workspace_id, skill_id, principal) DO NOTHING",
+        ws_s,
+        sk,
+        prin,
+    )
+    .execute(executor)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
+}
+
 /// Convert a stored 32-byte BLOB into a [`CommitId`], or an integrity fault if the width is wrong (the
 /// schema's length CHECK should prevent it; a violation means store corruption).
 fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {

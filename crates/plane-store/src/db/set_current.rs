@@ -428,13 +428,37 @@ async fn run(
     if !verify_device_op(&fields, input.signature, &device.public_key) {
         return denied(tx, input, &bound, "device signature invalid").await;
     }
-    if !super::roster_exists(&mut **tx, input.ws, input.skill, &device.principal).await? {
-        return denied(tx, input, &bound, "principal not rostered for the skill").await;
-    }
+    // (3b) The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
+    // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish) by a
+    // CONFIRMED workspace member — a fresh skill has no roster yet, so its first publisher must be seated
+    // by workspace membership, then self-rostered. The self-INSERT is DEFERRED to just before the op tail:
+    // every terminal writer below (denied/conflict/retryable) COMMITS its receipt, so an inline insert here
+    // would commit an orphan roster row alongside a later availability/lineage DENIED.
+    let current = read_current(tx, input.ws, input.skill).await?;
+    let genesis_standup =
+        if super::roster_exists(&mut **tx, input.ws, input.skill, &device.principal).await? {
+            false
+        } else {
+            let genesis_shaped = current.is_none()
+                && matches!(input.op, DeviceOp::PublishDirect)
+                && input.parents.is_empty();
+            if !genesis_shaped {
+                return denied(tx, input, &bound, "principal not rostered for the skill").await;
+            }
+            if !super::workspace_member_confirmed(&mut **tx, input.ws, &device.principal).await? {
+                return denied(
+                    tx,
+                    input,
+                    &bound,
+                    "principal is not a confirmed workspace member",
+                )
+                .await;
+            }
+            true
+        };
 
     // (4) Compare-and-set on the WHOLE (epoch, seq). Absent pointer ⇒ the genesis branch (a zero-parent
     // create-at-(1,1)); a present pointer whose generation differs ⇒ CONFLICT carrying the LIVE generation.
-    let current = read_current(tx, input.ws, input.skill).await?;
     let new_gen = match &current {
         None => {
             // Only a DIRECT publish may create the genesis pointer. A propose needs an existing base (a
@@ -558,6 +582,15 @@ async fn run(
         if matches!(input.op, DeviceOp::PublishDirect) && review_required {
             return approval_required(tx, input, &bound).await;
         }
+    }
+
+    // (6b) The genesis standup — every deny-returning gate above has passed, and for a genesis (`current`
+    // absent) the only outcomes past this point are the promote's OK or a rolling-back `Err`, so the
+    // self-inserted roster row and the pointer land in ONE transaction, never an orphan. This insert must
+    // stay the LAST statement before the op tail — a future receipted-terminal between here and the promote
+    // would re-open the orphan-row window.
+    if genesis_standup {
+        super::insert_roster(&mut **tx, input.ws, input.skill, &device.principal).await?;
     }
 
     // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,

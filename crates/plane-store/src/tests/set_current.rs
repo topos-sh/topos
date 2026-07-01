@@ -1311,3 +1311,170 @@ async fn a_non_canonical_uuid_op_id_is_rejected(pool: PgPool) {
             .is_none()
     );
 }
+
+/// The genesis standup: a CONFIRMED workspace member with NO per-skill roster row genesis-publishes a
+/// brand-new skill — the publish succeeds at (1,1) and self-rosters the author in the same transaction.
+/// The roster row is proven behaviorally: a follow-up NON-genesis publish (which passes the roster gate
+/// only when the row exists) succeeds.
+#[sqlx::test]
+async fn genesis_by_a_confirmed_member_stands_up_the_roster(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-standup").await;
+    let (w, s) = (ws("w_acme"), skill("s_new"));
+    let key = dev_key(31);
+    let p = prin("p_author");
+    fx.authority
+        .db()
+        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .await
+        .unwrap();
+    fx.authority
+        .db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
+        .await
+        .unwrap();
+    // Deliberately NO seed_roster — the standup must create the row itself.
+
+    let g = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "eeeeeeee-0000-4000-8000-000000000000",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert!(g.is_ok());
+    assert_eq!(g.current, Some(gn(1, 1)));
+
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    let n = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "eeeeeeee-0000-4000-8000-000000000001",
+        child(c0, vec![file("SKILL.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    assert!(n.is_ok());
+    assert_eq!(n.current, Some(gn(1, 2)));
+}
+
+/// An INVITED-but-unconfirmed member cannot stand up a skill: the genesis-eligible shape alone is not
+/// enough — the standup requires a CONFIRMED workspace membership, and nothing is created on the DENIED.
+/// (No member row at all is the same DENIED, proven by
+/// `a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable`.)
+#[sqlx::test]
+async fn genesis_by_an_invited_unconfirmed_member_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-standup-invited").await;
+    let (w, s) = (ws("w_acme"), skill("s_new"));
+    let key = dev_key(32);
+    let p = prin("p_invitee");
+    fx.authority
+        .db()
+        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .await
+        .unwrap();
+    fx.authority
+        .db()
+        .seed_workspace_member(&w, &p, "member", "invited")
+        .await
+        .unwrap();
+
+    let r = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "eeeeeeee-0000-4000-8000-000000000002",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    assert!(
+        fx.authority
+            .db()
+            .read_current_commit(&w, &s)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Two concurrent GENESIS publishes of the same brand-new skill (a confirmed member, no roster row):
+/// exactly one creates (1,1) and self-rosters the author; the loser's serialization retry re-reads the
+/// now-present pointer and returns a clean CONFLICT carrying the live generation — never a double standup.
+#[sqlx::test]
+async fn concurrent_genesis_standups_one_ok_one_conflict(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-standup-concurrent").await;
+    let (w, s) = (ws("w_acme"), skill("s_new"));
+    let key = dev_key(33);
+    let p = prin("p_author");
+    fx.authority
+        .db()
+        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .await
+        .unwrap();
+    fx.authority
+        .db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
+        .await
+        .unwrap();
+
+    let (sa, da) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "eeeeeeee-0000-4000-8000-000000000003",
+        genesis(vec![file("a", b"A")]),
+        gn(0, 0),
+    )
+    .await;
+    let (sb, db) = prepare(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "eeeeeeee-0000-4000-8000-000000000004",
+        genesis(vec![file("a", b"B")]),
+        gn(0, 0),
+    )
+    .await;
+    let (ra, rb) = tokio::join!(
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW),
+    );
+    let (ra, rb) = (ra.unwrap(), rb.unwrap());
+    let outcomes = [ra.outcome, rb.outcome];
+    assert!(
+        outcomes.contains(&TerminalOutcome::Ok),
+        "one must be OK: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&TerminalOutcome::Conflict),
+        "one must CONFLICT: {outcomes:?}"
+    );
+    let conflict = if ra.outcome == TerminalOutcome::Conflict {
+        &ra
+    } else {
+        &rb
+    };
+    assert_eq!(conflict.current, Some(gn(1, 1)));
+}
