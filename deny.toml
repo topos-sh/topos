@@ -19,16 +19,12 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    "0BSD",                # lettre → quoted_printable
+    "CDLA-Permissive-2.0", # ureq → webpki-roots (the bundled Mozilla root set)
 ]
 confidence-threshold = 0.9
 # All workspace crates are publish = false; don't license-check our own unpublished members.
 private = { ignore = true }
-# Forward-stage: the client's rustls→ring TLS stack (lands with the client transport) ships a
-# BoringSSL-derived license blend that cargo-deny can't map to one SPDX id. Allow OpenSSL *only*
-# for ring, scoped — so the first commit that wires TLS doesn't red-light the license check.
-[[licenses.exceptions]]
-crate = "ring"
-allow = ["OpenSSL"]
 
 # The WebPKI trust-store data (pulled in by the rustls stack via ureq + lettre) ships under the
 # Community Data License Agreement — permissive, data-only, scoped to this one crate.
