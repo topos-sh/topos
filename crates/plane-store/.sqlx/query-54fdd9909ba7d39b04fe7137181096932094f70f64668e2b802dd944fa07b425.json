@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT workspace_id AS \"workspace_id!\", principal AS \"principal!\",\n                  device_pubkey AS \"device_pubkey!: Vec<u8>\", device_key_id AS \"device_key_id!\",\n                  device_auth_id AS \"device_auth_id!\", expires_at AS \"expires_at!: i64\"\n           FROM enrollment_grants WHERE grant_sha256 = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workspace_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "principal!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "device_pubkey!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "device_key_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "device_auth_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_at!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "54fdd9909ba7d39b04fe7137181096932094f70f64668e2b802dd944fa07b425"
+}

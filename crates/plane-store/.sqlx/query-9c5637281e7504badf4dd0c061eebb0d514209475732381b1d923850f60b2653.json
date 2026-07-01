@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS \"one!: i64\" FROM object_presence\n               WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "one!: i64",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c5637281e7504badf4dd0c061eebb0d514209475732381b1d923850f60b2653"
+}

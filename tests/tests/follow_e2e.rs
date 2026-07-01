@@ -11,6 +11,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+mod common;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -150,19 +152,21 @@ fn start_plane(tag: &str) -> Plane {
     let base_url = format!("http://{addr}");
 
     let (authority, genesis, plane_key, invite_link) = rt.block_on(async {
-        let authority =
-            Authority::open_sqlite(&dir.0.join("db"), &dir.0.join("git"), &dir.0.join("large"))
-                .await
-                .expect("open authority")
-                .with_plane_key(&dir.0.join("plane.key"))
-                .expect("load plane key")
-                .with_enrollment_config(EnrollmentConfig {
-                    secret_path: dir.0.join("enroll.key"),
-                    base_url: base_url.clone(),
-                    deployment_mode: DeploymentMode::Cloud,
-                    enrollment_method: "device_code".to_owned(),
-                })
-                .expect("load enrollment secret");
+        let authority = Authority::from_pool(
+            common::provision_pg().await,
+            &dir.0.join("git"),
+            &dir.0.join("large"),
+        )
+        .expect("open authority")
+        .with_plane_key(&dir.0.join("plane.key"))
+        .expect("load plane key")
+        .with_enrollment_config(EnrollmentConfig {
+            secret_path: dir.0.join("enroll.key"),
+            base_url: base_url.clone(),
+            deployment_mode: DeploymentMode::Cloud,
+            enrollment_method: "device_code".to_owned(),
+        })
+        .expect("load enrollment secret");
 
         let ws = WorkspaceId::parse(WS).unwrap();
         let skill = SkillId::parse(SKILL).unwrap();

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE object_presence SET status = 'absent', status_updated_at = $4 WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "365aed3a377dbd03dc9a454b3a146ee9e999c0dec49b970db7ffe1397725ba0c"
+}

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT epoch AS \"epoch!: i64\", seq AS \"seq!: i64\" FROM current\n               WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "seq!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "fe0948b5ad8849a5ad7ebda82a5df8559bbd2110917241eea8bee1b458a7c19d"
+}

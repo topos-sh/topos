@@ -8,7 +8,7 @@
 //! (so a lost-ack retry re-derives the IDENTICAL credential) and stored ONLY as its sha256 (so a database
 //! read can never recover a live credential and a revoke is an instant row flip). This module does the work
 //! OUTSIDE the one write transaction (derive the credentials, build the kernel possession/governance frames);
-//! the raw SQL — and the single `BEGIN IMMEDIATE` redeem/governance transactions — live in [`crate::sqlite`].
+//! the raw SQL — and the single `BEGIN IMMEDIATE` redeem/governance transactions — live in [`crate::db`].
 
 use std::path::PathBuf;
 
@@ -496,7 +496,7 @@ pub(crate) fn device_fingerprint(device_public_key: &[u8; 32]) -> String {
 }
 
 /// The server-trusted inputs to the one redeem transaction (built in orchestration, consumed in
-/// [`crate::sqlite`]). Every identity field is the SERVER's value — the rehashed grant, the re-derived device
+/// [`crate::db`]). Every identity field is the SERVER's value — the rehashed grant, the re-derived device
 /// key id — never a client claim.
 pub(crate) struct RedeemInput<'a> {
     /// `sha256(grant_token)` — the grant row's PK and the enroll frame's `grant_hash`.

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT op_id AS \"op_id!\" FROM upload_quarantine WHERE workspace_id = $1 AND expires_at <= $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "op_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9ec3d2b474a4ab0c4d9f4156ca92ee2c750a48f6f029d2cdf9512f08fae76221"
+}

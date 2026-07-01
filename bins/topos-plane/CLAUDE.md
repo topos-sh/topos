@@ -5,8 +5,8 @@
 **Implemented** — the HTTP surface over the built `plane-store::Authority`:
 
 - **The leak-free construction surface (what a downstream plane composes without naming `plane-store`):**
-  `pub struct PlaneConfig` (plain/owned fields only — `mode: String`, paths, `Option<SmtpConfig>`) +
-  `pub async fn PlaneState::open_sqlite(cfg: PlaneConfig) -> anyhow::Result<PlaneState>`, which builds the
+  `pub struct PlaneConfig` (plain/owned fields only — `mode: String`, `database_url: String`, paths, `Option<SmtpConfig>`) +
+  `pub async fn PlaneState::open(cfg: PlaneConfig) -> anyhow::Result<PlaneState>`, which builds the
   `Authority` + the (now crate-private) enrollment config **internally**. The **bin dogfoods it** (one
   construction path — `main.rs` names no `plane_store` type). A `no_run` doc-test + a runtime parity test pin
   it. `PlaneState::new(Arc<Authority>)` stays the explicit test/advanced path that does name `Authority`.
@@ -72,7 +72,7 @@ issuance decision (every credential/identity decision is `plane-store::Authority
 - **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>` (+ a feature-gated
   `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the **crate-private** `with_enroll_config` builds the
   mailer INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring `with_rate_limit` + the internal
-  Limiter — `PlaneState::open_sqlite` calls it from a leak-free `PlaneConfig` (`EnrollConfig` is now `pub(crate)`,
+  Limiter — `PlaneState::open` calls it from a leak-free `PlaneConfig` (`EnrollConfig` is now `pub(crate)`,
   so it never crosses the public API). The feature-gated `with_oidc_config` loads the connector. A test-gated
   `with_mailer` shim injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in
   production).
@@ -86,10 +86,10 @@ reverse proxy).
 
 ## bin
 
-A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / db / git-root /
+A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / database URL / git-root /
 large-root / plane-key / enrollment secret / base URL / mode / SMTP relay), resolves its two bin-local
 marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
-**single leak-free constructor** `PlaneState::open_sqlite(PlaneConfig { .. })` — which opens the `Authority`,
+**single leak-free constructor** `PlaneState::open(PlaneConfig { .. })` — which opens the `Authority`,
 loads the plane key + enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
 `plane-store` type, dogfooding the same path a downstream plane uses) — and serves `router(state)`. Under
 `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto `PlaneState` (`with_oidc_config`) so

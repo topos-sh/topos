@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM promotion_lease_object WHERE workspace_id = $1 AND op_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d80c99e261436807c5be4e3a19d928d83852afcd066b35207c155ae6ce9d7821"
+}

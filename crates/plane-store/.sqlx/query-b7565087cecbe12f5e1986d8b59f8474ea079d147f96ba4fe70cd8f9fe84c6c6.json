@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT op_id AS \"op_id!\" FROM promotion_lease\n               WHERE workspace_id = $1 AND op_id = $2 AND expires_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "op_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7565087cecbe12f5e1986d8b59f8474ea079d147f96ba4fe70cd8f9fe84c6c6"
+}

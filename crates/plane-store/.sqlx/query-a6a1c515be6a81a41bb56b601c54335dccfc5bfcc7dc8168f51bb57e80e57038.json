@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (workspace_id, skill_id) DO UPDATE SET commit_id = excluded.commit_id, epoch = excluded.epoch, seq = excluded.seq, signed_record = excluded.signed_record, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6a1c515be6a81a41bb56b601c54335dccfc5bfcc7dc8168f51bb57e80e57038"
+}

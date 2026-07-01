@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE current SET updated_at = updated_at + 1 WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "33b22a20e07167645db93ff6967d130733cba186339337ce2e99927d2ac07bbf"
+}

@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO object_presence (workspace_id, object_id, status, location, size, git_oid, status_updated_at)\n            VALUES ($1, $2, 'present', $6, $3, $4, $5)\n            ON CONFLICT (workspace_id, object_id) DO UPDATE SET\n                status            = 'present',\n                location          = excluded.location,\n                size              = excluded.size,\n                git_oid           = excluded.git_oid,\n                status_updated_at = excluded.status_updated_at\n            WHERE object_presence.status = 'absent'\n            RETURNING object_id AS \"object_id!: Vec<u8>\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_id!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8",
+        "Bytea",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e103c6db7af9cf24de83aea2a8034313d283c6edea544e7bb4fe0a071f176e29"
+}

@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn ingest_rejects_an_empty_or_malformed_bundle() {
-    let fx = Fixture::new("ingest-reject").await;
+#[sqlx::test]
+async fn ingest_rejects_an_empty_or_malformed_bundle(pool: PgPool) {
+    let fx = Fixture::new(pool, "ingest-reject").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     // Empty: the authority rejects a zero-file bundle itself (the git store would happily snapshot a
@@ -26,9 +26,9 @@ async fn ingest_rejects_an_empty_or_malformed_bundle() {
     ));
 }
 
-#[tokio::test]
-async fn foreign_key_is_enforced_a_dangling_pointer_insert_is_rejected() {
-    let fx = Fixture::new("fk").await;
+#[sqlx::test]
+async fn foreign_key_is_enforced_a_dangling_pointer_insert_is_rejected(pool: PgPool) {
+    let fx = Fixture::new(pool, "fk").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     // Seeding `current` for a commit with no provenance violates the foreign key (proving foreign_keys

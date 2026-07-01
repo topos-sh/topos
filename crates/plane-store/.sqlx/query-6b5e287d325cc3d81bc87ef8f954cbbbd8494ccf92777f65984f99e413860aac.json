@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO enrollment_grant_skill (grant_sha256, skill_id) VALUES ($1, $2) ON CONFLICT (grant_sha256, skill_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b5e287d325cc3d81bc87ef8f954cbbbd8494ccf92777f65984f99e413860aac"
+}

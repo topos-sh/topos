@@ -1,6 +1,6 @@
 //! `topos-plane` (lib) — the composable `plane-core`.
 //!
-//! The public API a downstream plane composes: a leak-free [`PlaneConfig`] + [`PlaneState::open_sqlite`]
+//! The public API a downstream plane composes: a leak-free [`PlaneConfig`] + [`PlaneState::open`]
 //! constructor, the authority operations (over `plane-store`, re-exported through the typed routes), a
 //! [`router`] builder, the [`PlaneState::set_review_required`] policy toggle, and the generated
 //! [`openapi()`] document. **The private cloud plane IMPORTS this lib and COMPOSES it** — it does NOT fork
@@ -9,14 +9,14 @@
 //! billing / SSO middleware sit *in front* of it. The OSS repo is the sole, auditable implementation of the
 //! trust algorithm; the hosted binary is a trusted composition of it.
 //!
-//! **Leak-free by construction.** Every composer-facing surface — [`PlaneConfig`], [`PlaneState::open_sqlite`],
+//! **Leak-free by construction.** Every composer-facing surface — [`PlaneConfig`], [`PlaneState::open`],
 //! [`PlaneState::set_review_required`] — names only plain/owned or `topos-plane`-owned types, so a composing
 //! plane builds + serves without ever naming a `plane_store` type. (The advanced [`PlaneState::new`] still
 //! takes an `Arc<plane_store::Authority>` — the explicit test / by-hand path the bin no longer uses.)
 //!
 //! ## Shape
 //!
-//! - [`PlaneConfig`] + [`PlaneState::open_sqlite`] — the one construction path: plain/owned config in, a
+//! - [`PlaneConfig`] + [`PlaneState::open`] — the one construction path: plain/owned config in, a
 //!   serving [`PlaneState`] out, the authority + enrollment config built internally.
 //! - [`PlaneState`] — the shared, cheap-to-clone handle (`Arc<Authority>` + the in-process rate limiter).
 //! - [`router`] — wires the seven routes (4 device-signed writes + 3 token-scoped reads) with the

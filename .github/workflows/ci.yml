@@ -15,8 +15,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # plane-store's compile-time-checked queries read the committed `crates/plane-store/.sqlx` metadata
-  # instead of opening a live database. The dedicated `sqlx-drift` job below regenerates that metadata
-  # and fails if it has drifted from the schema.
+  # instead of opening a live database. The `test` job below provisions per-test databases at RUNTIME (via
+  # `#[sqlx::test]`), and the `sqlx-drift` job regenerates the metadata and fails if it has drifted.
   SQLX_OFFLINE: "true"
 
 jobs:
@@ -34,6 +34,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: format
         run: cargo fmt --all --check
+      # Compiles every target (incl. the test binaries' `query!`s) against the committed `.sqlx` — no
+      # database needed on either OS.
       - name: clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Doc-comments are load-bearing: topos-types `///`s become the committed JSON-Schema field
@@ -42,14 +44,40 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: test
-        run: cargo test --workspace --locked
       - name: contract drift gate (schemas)
         run: cargo run -p xtask --locked -- gen-schema --check
       - name: contract drift gate (fixtures)
         run: cargo run -p xtask --locked -- gen-fixtures --check
       - name: architectural layering
         run: cargo run -p xtask --locked -- check-arch
+
+  # The suite is split from the matrix `gate` because `#[sqlx::test]` provisions a fresh database per test at
+  # runtime — that needs a live Postgres, and a service container is Linux-only. Compilation stays offline
+  # (the committed `.sqlx`); the service is purely the runtime target the per-test databases are created on.
+  test:
+    name: test (ubuntu, postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: topos
+          POSTGRES_PASSWORD: topos
+          POSTGRES_DB: topos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: "postgres://topos:topos@localhost:5432/topos"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: test
+        run: cargo test --workspace --locked
 
   deny:
     name: cargo-deny (advisories + licenses)
@@ -61,23 +89,35 @@ jobs:
   sqlx-drift:
     name: sqlx offline-metadata drift gate
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: topos
+          POSTGRES_PASSWORD: topos
+          POSTGRES_DB: topos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # This job regenerates the query metadata against a live database, so it must NOT read the
       # committed `.sqlx` — override the workspace-wide offline flag.
       SQLX_OFFLINE: "false"
-      DATABASE_URL: "sqlite://${{ github.workspace }}/plane-store-ci.db"
+      DATABASE_URL: "postgres://topos:topos@localhost:5432/topos"
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       # Pin the CLI to the EXACT library version. A bare `cargo install sqlx-cli` resolves to a newer
       # major whose generated metadata format differs from the pinned library's, which would silently
       # turn this drift gate into a no-op.
-      - name: install sqlx-cli (pinned to the library version)
-        run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features sqlite
-      - name: create + migrate a scratch database
-        run: |
-          sqlx database create
-          sqlx migrate run --source crates/plane-store/migrations
+      - name: install sqlx-cli (pinned to the library version, postgres driver)
+        run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
+      - name: migrate the database (the service created it empty)
+        run: sqlx migrate run --source crates/plane-store/migrations
       # `-- --tests --features test-fixtures` matches the scope the committed metadata was generated with:
       # the seed/shim queries are gated `#[cfg(any(test, feature = "test-fixtures"))]`, so both `--tests`
       # (the `test` cfg) and `--features test-fixtures` activate them. Covering the feature here keeps the

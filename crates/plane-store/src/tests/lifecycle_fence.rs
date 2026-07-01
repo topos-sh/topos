@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn install_absent_to_present_is_idempotent_reuse() {
-    let fx = Fixture::new("t-install").await;
+#[sqlx::test]
+async fn install_absent_to_present_is_idempotent_reuse(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-install").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"obj");
@@ -29,9 +29,9 @@ async fn install_absent_to_present_is_idempotent_reuse() {
     );
 }
 
-#[tokio::test]
-async fn claim_unreferenced_present_then_finalize_to_absent() {
-    let fx = Fixture::new("t-claim").await;
+#[sqlx::test]
+async fn claim_unreferenced_present_then_finalize_to_absent(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-claim").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"lonely");
@@ -56,9 +56,9 @@ async fn claim_unreferenced_present_then_finalize_to_absent() {
     );
 }
 
-#[tokio::test]
-async fn claim_spares_a_commit_object_referenced_object() {
-    let fx = Fixture::new("t-claim-co").await;
+#[sqlx::test]
+async fn claim_spares_a_commit_object_referenced_object(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-claim-co").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let o = object_id(b"reachable");
@@ -81,9 +81,9 @@ async fn claim_spares_a_commit_object_referenced_object() {
     );
 }
 
-#[tokio::test]
-async fn claim_spares_a_live_lease_and_reclaims_after_release() {
-    let fx = Fixture::new("t-claim-lease").await;
+#[sqlx::test]
+async fn claim_spares_a_live_lease_and_reclaims_after_release(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-claim-lease").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"leased");
@@ -108,9 +108,9 @@ async fn claim_spares_a_live_lease_and_reclaims_after_release() {
     ));
 }
 
-#[tokio::test]
-async fn expired_lease_does_not_spare_but_committed_lease_always_does() {
-    let fx = Fixture::new("t-lease-exp").await;
+#[sqlx::test]
+async fn expired_lease_does_not_spare_but_committed_lease_always_does(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-lease-exp").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (o1, o2) = (object_id(b"exp"), object_id(b"perm"));
@@ -148,9 +148,9 @@ async fn expired_lease_does_not_spare_but_committed_lease_always_does() {
     ));
 }
 
-#[tokio::test]
-async fn deleting_is_non_resurrectable() {
-    let fx = Fixture::new("t-noresurrect").await;
+#[sqlx::test]
+async fn deleting_is_non_resurrectable(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-noresurrect").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"dying");
@@ -177,9 +177,9 @@ async fn deleting_is_non_resurrectable() {
     ));
 }
 
-#[tokio::test]
-async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable() {
-    let fx = Fixture::new("t-tomb").await;
+#[sqlx::test]
+async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-tomb").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (fresh, existing) = (object_id(b"deny-fresh"), object_id(b"deny-existing"));
@@ -215,9 +215,9 @@ async fn tombstoned_blob_is_rejected_and_existing_row_goes_unavailable() {
     assert!(a.db().is_tombstoned(&w, existing).await.unwrap());
 }
 
-#[tokio::test]
-async fn recovery_sweep_finalizes_only_stale_deleting() {
-    let fx = Fixture::new("t-recover").await;
+#[sqlx::test]
+async fn recovery_sweep_finalizes_only_stale_deleting(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-recover").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (old, fresh) = (object_id(b"crashed"), object_id(b"in-flight"));
@@ -259,11 +259,11 @@ async fn recovery_sweep_finalizes_only_stale_deleting() {
     );
 }
 
-#[tokio::test]
-async fn lease_rebuilds_its_object_set_on_op_id_reuse() {
+#[sqlx::test]
+async fn lease_rebuilds_its_object_set_on_op_id_reuse(pool: PgPool) {
     // op-id reuse with a different candidate must REPLACE the lease's object set, not merge — else a stale
     // object would be pinned non-expiring after commit_lease.
-    let fx = Fixture::new("t-lease-reuse").await;
+    let fx = Fixture::new(pool, "t-lease-reuse").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (x, y) = (object_id(b"first-cand"), object_id(b"second-cand"));
@@ -295,11 +295,11 @@ async fn lease_rebuilds_its_object_set_on_op_id_reuse() {
     ));
 }
 
-#[tokio::test]
-async fn committed_lease_is_not_clobbered_by_op_id_reuse() {
+#[sqlx::test]
+async fn committed_lease_is_not_clobbered_by_op_id_reuse(pool: PgPool) {
     // After a migrate commits its lease (non-expiring root of a good version), reusing the same op id must
     // be a no-op — never rewriting the lease or its object set, which would unroot the version.
-    let fx = Fixture::new("t-committed-lease").await;
+    let fx = Fixture::new(pool, "t-committed-lease").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (x, y) = (object_id(b"rooted"), object_id(b"other"));
@@ -333,9 +333,9 @@ async fn committed_lease_is_not_clobbered_by_op_id_reuse() {
     ));
 }
 
-#[tokio::test]
-async fn commit_lease_fails_on_a_stale_or_mismatched_lease() {
-    let fx = Fixture::new("t-commit-stale").await;
+#[sqlx::test]
+async fn commit_lease_fails_on_a_stale_or_mismatched_lease(pool: PgPool) {
+    let fx = Fixture::new(pool, "t-commit-stale").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let c = CommitId([0xC; 32]);

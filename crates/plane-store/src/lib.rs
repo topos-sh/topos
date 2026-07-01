@@ -11,7 +11,7 @@
 //! ## What this layer does today
 //!
 //! - **Per-workspace storage, hard tenant binding.** One git object store per workspace under a
-//!   confined root, plus a SQLite database whose every row carries `workspace_id` and whose every query
+//!   confined root, plus a Postgres database whose every row carries `workspace_id` and whose every query
 //!   binds it. Cross-company is physically separate; isolation is the database binding, never the
 //!   directory.
 //! - **The skill-scoped object read** ([`Authority::read_object`]). One join authorizes on two
@@ -23,7 +23,7 @@
 //!   writes** ([`Authority::propose`] / [`Authority::review_approve`] / [`Authority::review_reject`]). A
 //!   candidate is always ingested + migrated (full-tree upload, server rehash — no client id is trusted, no
 //!   reference-by-id — the canonical rules, a GC-excluded quarantine, lease-before-migrate, server-side
-//!   dedup, durable install), then one `BEGIN IMMEDIATE` pure-DB transaction advances `current` under a
+//!   dedup, durable install), then one serializable pure-DB transaction advances `current` under a
 //!   whole-`(epoch, seq)` compare-and-set (publish/revert/approve) or opens a gated proposal (propose),
 //!   signs the new pointer, and writes a durable all-outcome receipt. `commit_object` is written ONLY by the
 //!   accepted-trunk path (publish/revert/approve); a proposal roots its bytes through `proposal_object`,
@@ -49,9 +49,10 @@
 //!
 //! The large-object store's S3-compatible remote backend + online backfill (additive, client-invisible), the
 //! HTTP surface (these writes are exercised in-process only), real identity/roster/device issuance (the
-//! registry is fixture-seeded), at-rest key encryption, the `purge` verb, and Postgres are later work.
+//! registry is fixture-seeded), at-rest key encryption, and the `purge` verb are later work.
 
 mod authority;
+mod db;
 mod enroll;
 mod error;
 mod id;
@@ -59,7 +60,6 @@ mod lineage;
 mod read;
 mod set_current;
 mod signer;
-mod sqlite;
 mod upload;
 
 // The object-lifecycle fence: `ingest`/`migrate` now drive the publish/propose writes, but the GC pass,
@@ -87,6 +87,14 @@ pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
 pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
+
+/// The embedded Postgres migration set, exposed for out-of-crate test harnesses (the loopback e2e crates)
+/// that provision their own per-test database and migrate it before [`Authority::from_pool`] — so they use
+/// the SAME migrations as production without a brittle relative path. **Test-fixtures only** (this is the one
+/// place, besides [`Authority::from_pool`], where a `sqlx` type is public, and it is compiled out of every
+/// production build).
+#[cfg(feature = "test-fixtures")]
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Re-exported for constructing [`UploadedFile`]s — the two regular-file modes the kernel allows.
 pub use topos_core::digest::FileMode;

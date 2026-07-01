@@ -1,10 +1,11 @@
--- The per-workspace storage-authority schema (SQLite-first).
+-- The per-workspace storage-authority schema (Postgres).
 --
 -- Every row carries `workspace_id` (the hard tenant scope) and every query binds it — isolation is
--- this database binding, never the directory the git store happens to live in. Tables are STRICT (the
--- column types are enforced) and WITHOUT ROWID (the natural composite key is the row's identity). The
--- two content ids are stored as the raw 32-byte sha256 BLOB the kernel/git layer already pass; a
--- length CHECK pins the width. A future Postgres backend mirrors this schema in its own module.
+-- this database binding, never the directory the git store happens to live in. The two content ids are
+-- stored as the raw 32-byte sha256 BYTEA the kernel/git layer already pass; an `octet_length` CHECK pins
+-- the width. Integer columns are BIGINT (the counters/timestamps are 64-bit); booleans are modelled as a
+-- BIGINT 0/1 with a CHECK (the Rust reads `i64 != 0`), and every key is a content hash or composite — no
+-- generated numeric ids, so no column is a serial.
 
 -- PROVENANCE — which commit belongs to which skill.
 -- PRIMARY KEY (workspace_id, commit_id) is the load-bearing constraint: a content-derived commit id
@@ -12,11 +13,11 @@
 -- yields the SAME commit id) conflicts at INSERT. The read-authorization join trusts this table
 -- directly, so this single-ownership guarantee is what keeps that trust sound.
 CREATE TABLE skill_commit (
-    workspace_id TEXT NOT NULL,
-    commit_id    BLOB NOT NULL CHECK (length(commit_id) = 32),
-    skill_id     TEXT NOT NULL,
+    workspace_id TEXT  NOT NULL,
+    commit_id    BYTEA NOT NULL CHECK (octet_length(commit_id) = 32),
+    skill_id     TEXT  NOT NULL,
     PRIMARY KEY (workspace_id, commit_id)
-) STRICT, WITHOUT ROWID;
+);
 
 -- Forward-looking skill enumeration (the read join does not need it; the access path is the inverse
 -- index on commit_object below).
@@ -25,12 +26,12 @@ CREATE INDEX skill_commit_by_skill ON skill_commit (workspace_id, skill_id);
 -- REACHABILITY — the objects each commit references (one row per distinct object; a blob at two paths
 -- is one edge). The foreign key guarantees every reachability edge has provenance.
 CREATE TABLE commit_object (
-    workspace_id TEXT NOT NULL,
-    commit_id    BLOB NOT NULL CHECK (length(commit_id) = 32),
-    object_id    BLOB NOT NULL CHECK (length(object_id) = 32),
+    workspace_id TEXT  NOT NULL,
+    commit_id    BYTEA NOT NULL CHECK (octet_length(commit_id) = 32),
+    object_id    BYTEA NOT NULL CHECK (octet_length(object_id) = 32),
     PRIMARY KEY (workspace_id, commit_id, object_id),
     FOREIGN KEY (workspace_id, commit_id) REFERENCES skill_commit (workspace_id, commit_id)
-) STRICT, WITHOUT ROWID;
+);
 
 -- The access-join index: the inverse (object -> commits), covering, so read authorization is an
 -- index-only probe of `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)`.
@@ -44,20 +45,20 @@ CREATE TABLE roster (
     skill_id     TEXT NOT NULL,
     principal    TEXT NOT NULL,
     PRIMARY KEY (workspace_id, skill_id, principal)
-) STRICT, WITHOUT ROWID;
+);
 
 -- POINTER — the one movable per-skill pointer. CREATED + seedable here but NEVER moved this increment:
 -- there is no compare-and-set, no signer, and no receipt yet, so `signed_record` stays NULL until the
 -- signer lands. The read path NEVER consults this table — that decoupling is exactly what lets a
 -- rostered member read a proposed-but-unpromoted version's bytes.
 CREATE TABLE current (
-    workspace_id  TEXT    NOT NULL,
-    skill_id      TEXT    NOT NULL,
-    commit_id     BLOB    NOT NULL CHECK (length(commit_id) = 32),
-    epoch         INTEGER NOT NULL,
-    seq           INTEGER NOT NULL,
-    signed_record BLOB,
-    updated_at    INTEGER NOT NULL,
+    workspace_id  TEXT   NOT NULL,
+    skill_id      TEXT   NOT NULL,
+    commit_id     BYTEA  NOT NULL CHECK (octet_length(commit_id) = 32),
+    epoch         BIGINT NOT NULL,
+    seq           BIGINT NOT NULL,
+    signed_record BYTEA,
+    updated_at    BIGINT NOT NULL,
     PRIMARY KEY (workspace_id, skill_id),
     FOREIGN KEY (workspace_id, commit_id) REFERENCES skill_commit (workspace_id, commit_id)
-) STRICT, WITHOUT ROWID;
+);

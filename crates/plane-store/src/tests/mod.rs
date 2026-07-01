@@ -1,15 +1,17 @@
 //! In-crate authority tests (the `pub(crate)` seed helper is only visible here, never to an external
 //! integration crate). They exercise the access rule, cross-workspace and cross-skill isolation, the
-//! upload/rehash guard, dedup-obliviousness, and the transaction discipline against a real SQLite
-//! database + a real per-workspace git store.
+//! upload/rehash guard, dedup-obliviousness, and the transaction discipline against a real Postgres
+//! database (a fresh per-test one, provisioned + migrated by `#[sqlx::test]` and injected as a `PgPool`)
+//! + a real per-workspace git store.
 
 use std::path::PathBuf;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use sqlx::PgPool;
 use topos_core::digest;
 
-use crate::sqlite::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
+use crate::db::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 
 use crate::{
     Authority, AuthorityError, CandidateUpload, CommitId, DeploymentMode, EnrollmentConfig,
@@ -25,43 +27,40 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new(tag: &str) -> Self {
-        Self::build(tag, None).await
+    /// Build a fixture over the injected per-test `PgPool` (each `#[sqlx::test]` provisions + migrates its
+    /// own database). The git/large stores stay filesystem — one temp dir per fixture.
+    async fn new(pool: PgPool, tag: &str) -> Self {
+        Self::build(pool, tag, None).await
     }
 
     /// A fixture with an overridden size-routing threshold + reject cap — for the offload tests, which
     /// force placement (a tiny threshold routes ordinary test bytes to the large store) and exercise the
     /// reject cap with small payloads.
-    async fn with_large_limits(tag: &str, threshold: u64, reject_cap: u64) -> Self {
-        Self::build(tag, Some((threshold, reject_cap))).await
+    async fn with_large_limits(pool: PgPool, tag: &str, threshold: u64, reject_cap: u64) -> Self {
+        Self::build(pool, tag, Some((threshold, reject_cap))).await
     }
 
-    async fn build(tag: &str, limits: Option<(u64, u64)>) -> Self {
+    async fn build(pool: PgPool, tag: &str, limits: Option<(u64, u64)>) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("topos-ps-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let mut authority = Authority::open_sqlite(
-            &dir.join("plane.db"),
-            &dir.join("stores"),
-            &dir.join("large"),
-        )
-        .await
-        .expect("open authority")
-        // Every fixture gets a plane signing key (load-or-generate, 0600) — the pointer-move tests need it;
-        // it is simply unused by the read/upload/lifecycle tests.
-        .with_plane_key(&dir.join("plane.key"))
-        .expect("load plane key")
-        // ...and an enrollment config (load-or-generate the 0600 HMAC secret) — the enrollment/governance
-        // tests need it; every other test simply never touches it.
-        .with_enrollment_config(EnrollmentConfig {
-            secret_path: dir.join("enroll.key"),
-            base_url: "https://plane.test".to_owned(),
-            deployment_mode: DeploymentMode::Cloud,
-            enrollment_method: "device_code".to_owned(),
-        })
-        .expect("load enrollment secret");
+        let mut authority = Authority::from_pool(pool, &dir.join("stores"), &dir.join("large"))
+            .expect("open authority")
+            // Every fixture gets a plane signing key (load-or-generate, 0600) — the pointer-move tests need it;
+            // it is simply unused by the read/upload/lifecycle tests.
+            .with_plane_key(&dir.join("plane.key"))
+            .expect("load plane key")
+            // ...and an enrollment config (load-or-generate the 0600 HMAC secret) — the enrollment/governance
+            // tests need it; every other test simply never touches it.
+            .with_enrollment_config(EnrollmentConfig {
+                secret_path: dir.join("enroll.key"),
+                base_url: "https://plane.test".to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                enrollment_method: "device_code".to_owned(),
+            })
+            .expect("load enrollment secret");
         if let Some((threshold, reject_cap)) = limits {
             authority = authority.with_large_limits(threshold, reject_cap);
         }

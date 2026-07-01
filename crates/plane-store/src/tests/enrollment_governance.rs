@@ -226,9 +226,9 @@ async fn redeem(
         .unwrap()
 }
 
-#[tokio::test]
-async fn verification_context_discloses_the_session_device_and_offered_skills() {
-    let fx = Fixture::new("enr-verify-ctx").await;
+#[sqlx::test]
+async fn verification_context_discloses_the_session_device_and_offered_skills(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-verify-ctx").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -273,9 +273,9 @@ async fn verification_context_discloses_the_session_device_and_offered_skills() 
     ));
 }
 
-#[tokio::test]
-async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants() {
-    let fx = Fixture::new("enr-oidc-confirm").await;
+#[sqlx::test]
+async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-oidc-confirm").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -334,9 +334,9 @@ async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(
     ));
 }
 
-#[tokio::test]
-async fn cloud_device_flow_to_redeem_mints_a_resolvable_read_token() {
-    let fx = Fixture::new("enr-happy").await;
+#[sqlx::test]
+async fn cloud_device_flow_to_redeem_mints_a_resolvable_read_token(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-happy").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _owner, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -372,9 +372,9 @@ async fn cloud_device_flow_to_redeem_mints_a_resolvable_read_token() {
     assert_eq!(scope.skill().as_str(), "s_deploy");
 }
 
-#[tokio::test]
-async fn a_leaked_grant_redeemed_by_a_different_device_is_denied() {
-    let fx = Fixture::new("enr-leak").await;
+#[sqlx::test]
+async fn a_leaked_grant_redeemed_by_a_different_device_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-leak").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -413,9 +413,9 @@ async fn a_leaked_grant_redeemed_by_a_different_device_is_denied() {
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
 }
 
-#[tokio::test]
-async fn redeem_replay_re_derives_identical_read_tokens() {
-    let fx = Fixture::new("enr-replay").await;
+#[sqlx::test]
+async fn redeem_replay_re_derives_identical_read_tokens(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-replay").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -450,9 +450,9 @@ async fn redeem_replay_re_derives_identical_read_tokens() {
     );
 }
 
-#[tokio::test]
-async fn cloud_redeem_of_a_non_rostered_principal_is_denied() {
-    let fx = Fixture::new("enr-gate").await;
+#[sqlx::test]
+async fn cloud_redeem_of_a_non_rostered_principal_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-gate").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -475,9 +475,9 @@ async fn cloud_redeem_of_a_non_rostered_principal_is_denied() {
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
 }
 
-#[tokio::test]
-async fn self_host_redeem_grants_membership_without_smtp() {
-    let fx = Fixture::new("enr-selfhost").await;
+#[sqlx::test]
+async fn self_host_redeem_grants_membership_without_smtp(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-selfhost").await;
     let a = &fx.authority;
     let w = ws("w_local");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "self_host").await;
@@ -522,9 +522,9 @@ async fn self_host_redeem_grants_membership_without_smtp() {
     );
 }
 
-#[tokio::test]
-async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops() {
-    let fx = Fixture::new("enr-revoke").await;
+#[sqlx::test]
+async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-revoke").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -619,9 +619,9 @@ async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops() {
     );
 }
 
-#[tokio::test]
-async fn roster_remove_revokes_the_members_reads() {
-    let fx = Fixture::new("enr-rosterremove").await;
+#[sqlx::test]
+async fn roster_remove_revokes_the_members_reads(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-rosterremove").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -672,9 +672,77 @@ async fn roster_remove_revokes_the_members_reads() {
     );
 }
 
-#[tokio::test]
-async fn a_members_governance_op_is_denied() {
-    let fx = Fixture::new("enr-rolematrix").await;
+/// The last-owner guard is a WRITE-SKEW, not a single-row race: two concurrent removals of DIFFERENT
+/// owners each read the owner set `{owner1, owner2}` (count 2), each conclude they are not removing the
+/// last owner, and each delete their target — zero owners, an orphaned workspace. A single-row `SELECT …
+/// FOR UPDATE` on the target cannot catch it (the two targets are different rows); only `SERIALIZABLE`
+/// (via the `run_serializable!` macro on every governance mutation) detects the mutual rw-antidependency,
+/// aborts one with a serialization failure, and re-counts on the retry — where `would_orphan_owner` DENIES
+/// it. So exactly one removal survives and one owner remains.
+#[sqlx::test]
+async fn concurrent_last_two_owner_removals_keep_one_owner(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-two-owner-race").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    // owner1 (seeded by seat_owner) + a second confirmed owner with its own device.
+    let (owner1_seed, owner1, owner1_dk) = seat_owner(a, &w, "cloud").await;
+    let owner2_seed = [9u8; 32];
+    let owner2_pub = device_pub(&owner2_seed);
+    let owner2_dk = device_key_id_for(&owner2_pub);
+    let owner2 = prin("owner2@acme.com");
+    a.db()
+        .seed_workspace_member(&w, &owner2, "owner", "confirmed")
+        .await
+        .unwrap();
+    a.db()
+        .seed_device(&w, &owner2_dk, &owner2_pub, &owner2, false)
+        .await
+        .unwrap();
+
+    // Each owner signs a removal of the OTHER — the write-skew.
+    let remove_owner2 = sign_governance(
+        &owner1_seed,
+        w.as_str(),
+        &op_id(2),
+        &owner1_dk,
+        GovernanceOp::RosterRemove {
+            target: owner2.clone(),
+        },
+    );
+    let remove_owner1 = sign_governance(
+        &owner2_seed,
+        w.as_str(),
+        &op_id(3),
+        &owner2_dk,
+        GovernanceOp::RosterRemove {
+            target: owner1.clone(),
+        },
+    );
+    let (op2, op3) = (op_id(2), op_id(3));
+    let (ra, rb) = tokio::join!(
+        a.roster_remove(&w, &op2, remove_owner2, "t0"),
+        a.roster_remove(&w, &op3, remove_owner1, "t0"),
+    );
+    let outcomes = [ra.unwrap(), rb.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| **o == GovernanceOutcome::Ok)
+            .count(),
+        1,
+        "exactly one removal may succeed: {outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, GovernanceOutcome::Denied(_))),
+        "the other removal must be DENIED (it would orphan the workspace): {outcomes:?}"
+    );
+}
+
+#[sqlx::test]
+async fn a_members_governance_op_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-rolematrix").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (_owner_seed, _o, _owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -711,9 +779,11 @@ async fn a_members_governance_op_is_denied() {
     );
 }
 
-#[tokio::test]
-async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_the_op_id() {
-    let fx = Fixture::new("enr-noforge").await;
+#[sqlx::test]
+async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_the_op_id(
+    pool: PgPool,
+) {
+    let fx = Fixture::new(pool, "enr-noforge").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -763,9 +833,9 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
     );
 }
 
-#[tokio::test]
-async fn create_invite_is_op_id_idempotent_with_an_identical_link() {
-    let fx = Fixture::new("enr-idem").await;
+#[sqlx::test]
+async fn create_invite_is_op_id_idempotent_with_an_identical_link(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-idem").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -798,9 +868,9 @@ async fn create_invite_is_op_id_idempotent_with_an_identical_link() {
     );
 }
 
-#[tokio::test]
-async fn passcode_locks_after_the_attempt_cap() {
-    let fx = Fixture::new("enr-brute").await;
+#[sqlx::test]
+async fn passcode_locks_after_the_attempt_cap(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-brute").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -846,9 +916,9 @@ async fn passcode_locks_after_the_attempt_cap() {
     );
 }
 
-#[tokio::test]
-async fn device_key_id_is_server_derived_not_client_asserted() {
-    let fx = Fixture::new("enr-dk").await;
+#[sqlx::test]
+async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-dk").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
@@ -893,9 +963,9 @@ async fn device_key_id_is_server_derived_not_client_asserted() {
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
 }
 
-#[tokio::test]
-async fn admin_claim_stands_up_a_self_host_workspace_once() {
-    let fx = Fixture::new("enr-admin").await;
+#[sqlx::test]
+async fn admin_claim_stands_up_a_self_host_workspace_once(pool: PgPool) {
+    let fx = Fixture::new(pool, "enr-admin").await;
     let a = &fx.authority;
     let w = ws("w_local");
     a.db().seed_admin_claim(&w, "claim-secret").await.unwrap();

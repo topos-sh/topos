@@ -14,6 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
+use sqlx::PgPool;
 use tower::ServiceExt as _;
 
 use plane_store::{
@@ -86,10 +87,35 @@ fn dev_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
-async fn setup(tag: &str) -> Ctx {
-    let dir = unique_dir(tag);
-    let authority = Authority::open_sqlite(&dir.join("db"), &dir.join("git"), &dir.join("large"))
+/// Create a uniquely-named empty database on the `$DATABASE_URL` server and return a connection URL to it
+/// — for the one test that exercises the production `PlaneState::open(database_url)` path (which connects +
+/// migrates itself). The route tests instead take an already-migrated pool from `#[sqlx::test(migrator = "plane_store::MIGRATOR")]`.
+async fn unique_database_url(tag: &str) -> String {
+    use sqlx::{Connection, Executor};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let base = std::env::var("DATABASE_URL").expect("DATABASE_URL must point at a Postgres");
+    let name = format!(
+        "topos_plane_{tag}_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut admin = sqlx::PgConnection::connect(&base)
         .await
+        .expect("connect to the base Postgres database");
+    admin
+        .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
+        .await
+        .expect("create the per-test database");
+    admin.close().await.ok();
+    let (prefix, _db) = base
+        .rsplit_once('/')
+        .expect("DATABASE_URL ends in /<database>");
+    format!("{prefix}/{name}")
+}
+
+async fn setup(pool: PgPool, tag: &str) -> Ctx {
+    let dir = unique_dir(tag);
+    let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
         .with_plane_key(&dir.join("plane.key"))
         .expect("plane key");
@@ -296,11 +322,11 @@ fn envelope(bytes: &[u8]) -> JsonEnvelope {
 
 // ── enrollment wiring: with_enroll_config / with_mailer / the accessors ───────────────────────────────
 
-#[tokio::test]
-async fn enroll_config_and_injected_mailer_are_readable() {
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
     use crate::enroll::mailer::{FakeMailer, MailContext, Passcode};
 
-    let ctx = setup("state-enroll").await;
+    let ctx = setup(pool, "state-enroll").await;
     let fake = Arc::new(FakeMailer::default());
     // with_enroll_config sets the static config (no SMTP ⇒ a NoopMailer); with_mailer overrides it for the
     // test so we can assert the handler sends through exactly the injected mailer.
@@ -341,17 +367,19 @@ async fn enroll_config_and_injected_mailer_are_readable() {
     assert_eq!(sent[0].code, "424242");
 }
 
-/// The runtime parity guard for the **single construction path**: `PlaneState::open_sqlite` (the leak-free
-/// constructor the bin + a downstream plane use) runs against a real tempdir and yields a SERVING state. It
-/// is the only test that EXECUTES the constructor (the bin isn't run in CI; the `open_sqlite` doc-test is
-/// `no_run`), so it pins that the internal resolution matches the bin's (mode `"cloud"` ⇒ `Cloud`; no SMTP ⇒
+/// The runtime parity guard for the **single construction path**: `PlaneState::open` (the leak-free
+/// constructor the bin + a downstream plane use) runs against a real `database_url` (a freshly-provisioned
+/// Postgres database, its git/large stores in a tempdir) and yields a SERVING state. It is the only test
+/// that EXECUTES the production constructor (the bin isn't run in CI; the `open` doc-test is `no_run`), so
+/// it pins that the internal resolution matches the bin's (mode `"cloud"` ⇒ `Cloud`; no SMTP ⇒
 /// `device_code`) and that the composed `router(state)` answers — an unknown read token is the
-/// indistinguishable 404, never a panic/500.
+/// indistinguishable 404, never a panic/500. It provisions its own database (so it can pass a URL, not a
+/// pool), so it is a plain `#[tokio::test]`, not `#[sqlx::test(migrator = "plane_store::MIGRATOR")]`.
 #[tokio::test]
-async fn open_sqlite_builds_a_serving_state() {
-    let dir = unique_dir("open-sqlite");
-    let state = PlaneState::open_sqlite(crate::PlaneConfig {
-        db_path: dir.join("db"),
+async fn open_builds_a_serving_state() {
+    let dir = unique_dir("open");
+    let state = PlaneState::open(crate::PlaneConfig {
+        database_url: unique_database_url("open").await,
         git_root: dir.join("git"),
         large_root: dir.join("large"),
         plane_key_path: dir.join("plane.key"),
@@ -362,7 +390,7 @@ async fn open_sqlite_builds_a_serving_state() {
         smtp: None,
     })
     .await
-    .expect("open_sqlite builds a serving state");
+    .expect("open builds a serving state");
 
     // The constructor's internal resolution matches the bin's: the mode `String` parsed to `Cloud`, and the
     // enrollment method defaulted to `device_code` (no SMTP relay).
@@ -380,9 +408,9 @@ async fn open_sqlite_builds_a_serving_state() {
 
 // ── publish ─────────────────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt() {
-    let ctx = setup("publish-ok").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt(pool: PgPool) {
+    let ctx = setup(pool, "publish-ok").await;
     let (g_vid, _g_digest) = seed_genesis(&ctx, "00000000-0000-4000-8000-000000000000").await;
 
     let op = "00000000-0000-4000-8000-000000000001";
@@ -414,13 +442,13 @@ async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt() {
     assert_eq!(record.scope.skill_id, SKILL);
 }
 
-#[tokio::test]
-async fn a_write_with_a_non_uuid_op_id_is_rejected_before_ingest() {
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_write_with_a_non_uuid_op_id_is_rejected_before_ingest(pool: PgPool) {
     // A path-safe op_id that is NOT a canonical UUID: `OpId::parse` accepts it, but the authority binds op_id
     // as 16 bytes only AFTER it ingests + leases the candidate, so without an edge guard a malformed
     // unauthenticated request would pin the uploaded objects on the later parse failure. The edge must reject
     // it with a 400 BEFORE reaching the authority (so the candidate is never ingested).
-    let ctx = setup("publish-bad-opid").await;
+    let ctx = setup(pool, "publish-bad-opid").await;
     let (g_vid, _) = seed_genesis(&ctx, "20000000-0000-4000-8000-000000000000").await;
 
     let op = "not-a-canonical-uuid"; // lowercase + hyphens → path-safe, but not a UUID
@@ -449,9 +477,9 @@ async fn a_write_with_a_non_uuid_op_id_is_rejected_before_ingest() {
     );
 }
 
-#[tokio::test]
-async fn an_idempotent_retry_replays_a_byte_identical_response() {
-    let ctx = setup("publish-retry").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn an_idempotent_retry_replays_a_byte_identical_response(pool: PgPool) {
+    let ctx = setup(pool, "publish-retry").await;
     let (g_vid, _) = seed_genesis(&ctx, "10000000-0000-4000-8000-000000000000").await;
 
     let op = "10000000-0000-4000-8000-000000000001";
@@ -487,9 +515,9 @@ async fn an_idempotent_retry_replays_a_byte_identical_response() {
     );
 }
 
-#[tokio::test]
-async fn a_stale_publish_is_a_200_conflict_with_a_rebase_next_action() {
-    let ctx = setup("publish-conflict").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_stale_publish_is_a_200_conflict_with_a_rebase_next_action(pool: PgPool) {
+    let ctx = setup(pool, "publish-conflict").await;
     let (g_vid, _) = seed_genesis(&ctx, "20000000-0000-4000-8000-000000000000").await;
 
     // First child wins → (1,2).
@@ -561,9 +589,9 @@ async fn a_stale_publish_is_a_200_conflict_with_a_rebase_next_action() {
 
 // ── propose ───────────────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn propose_opens_a_proposal_needs_review_without_moving_current() {
-    let ctx = setup("propose-ok").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn propose_opens_a_proposal_needs_review_without_moving_current(pool: PgPool) {
+    let ctx = setup(pool, "propose-ok").await;
     let (g_vid, _) = seed_genesis(&ctx, "30000000-0000-4000-8000-000000000000").await;
 
     let op = "30000000-0000-4000-8000-000000000001";
@@ -603,9 +631,9 @@ async fn propose_opens_a_proposal_needs_review_without_moving_current() {
 
 // ── revert ────────────────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn revert_is_a_forward_commit_that_advances_seq() {
-    let ctx = setup("revert-ok").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn revert_is_a_forward_commit_that_advances_seq(pool: PgPool) {
+    let ctx = setup(pool, "revert-ok").await;
     let (g_vid, g_digest) = seed_genesis(&ctx, "40000000-0000-4000-8000-000000000000").await;
 
     // Publish a child → (1,2); current commit = child.
@@ -671,9 +699,9 @@ async fn revert_is_a_forward_commit_that_advances_seq() {
 
 // ── review ────────────────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn review_approve_promotes_an_open_proposal() {
-    let ctx = setup("review-ok").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn review_approve_promotes_an_open_proposal(pool: PgPool) {
+    let ctx = setup(pool, "review-ok").await;
     let (g_vid, _) = seed_genesis(&ctx, "50000000-0000-4000-8000-000000000000").await;
 
     // Open a proposal at base (1,1).
@@ -732,9 +760,9 @@ async fn review_approve_promotes_an_open_proposal() {
 
 // ── reads: 404-not-403 ──────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn a_bundle_read_with_no_or_bad_credential_is_404_never_403() {
-    let ctx = setup("read-404").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_bundle_read_with_no_or_bad_credential_is_404_never_403(pool: PgPool) {
+    let ctx = setup(pool, "read-404").await;
     let obj = "0".repeat(64);
     let uri = format!("/v1/workspaces/{WS}/skills/{SKILL}/bundles/{obj}");
 
@@ -751,9 +779,9 @@ async fn a_bundle_read_with_no_or_bad_credential_is_404_never_403() {
     assert_eq!(s_bad, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn a_scope_path_mismatch_read_is_404_never_403() {
-    let ctx = setup("read-mismatch").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_scope_path_mismatch_read_is_404_never_403(pool: PgPool) {
+    let ctx = setup(pool, "read-mismatch").await;
     // A valid token scoped to (WS, SKILL); ask for a DIFFERENT skill in the path → the indistinguishable 404.
     let obj = "0".repeat(64);
     let uri = format!("/v1/workspaces/{WS}/skills/s_other/bundles/{obj}");
@@ -773,12 +801,12 @@ async fn a_scope_path_mismatch_read_is_404_never_403() {
 
 // ── proposals listing: 200 + the open proposals, 404 on a bad token / scope mismatch ──────────────────
 
-#[tokio::test]
-async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token() {
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token(pool: PgPool) {
     // The proposals-listing read over `router(state)`: open a proposal via the HTTP propose route, then GET
     // the list with the read token → 200 + the proposal's @hash + base; a bad/absent token or a scope/path
     // mismatch → the indistinguishable 404 (never 401/403).
-    let ctx = setup("list-proposals").await;
+    let ctx = setup(pool, "list-proposals").await;
     let (g_vid, _) = seed_genesis(&ctx, "70000000-0000-4000-8000-000000000000").await;
 
     // Open a proposal (a child of genesis) via `POST /v1/proposals`.
@@ -852,9 +880,9 @@ async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token() {
 
 // ── current: 200 + the commit-sensitive 304 ──────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn current_serves_the_signed_record_and_a_commit_sensitive_304() {
-    let ctx = setup("current").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn current_serves_the_signed_record_and_a_commit_sensitive_304(pool: PgPool) {
+    let ctx = setup(pool, "current").await;
     let (g_vid, _) = seed_genesis(&ctx, "60000000-0000-4000-8000-000000000000").await;
     let uri = format!("/v1/current/{READ_TOKEN}");
     let known_version = hex::encode(g_vid);
@@ -910,9 +938,9 @@ async fn current_serves_the_signed_record_and_a_commit_sensitive_304() {
 
 // ── transport: a malformed body is an envelope-shaped 400 ─────────────────────────────────────────────
 
-#[tokio::test]
-async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text() {
-    let ctx = setup("bad-body").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text(pool: PgPool) {
+    let ctx = setup(pool, "bad-body").await;
     // A valid signature header but a non-JSON body.
     let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
     let (status, _, bytes) = run(&ctx, post("/v1/publish", &sig, b"not json".to_vec())).await;
@@ -925,9 +953,9 @@ async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text() {
     );
 }
 
-#[tokio::test]
-async fn a_missing_device_signature_header_is_a_400() {
-    let ctx = setup("no-sig").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_missing_device_signature_header_is_a_400(pool: PgPool) {
+    let ctx = setup(pool, "no-sig").await;
     let (g_vid, _) = seed_genesis(&ctx, "70000000-0000-4000-8000-000000000000").await;
     let op = "70000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"unsigned\n")];
@@ -987,10 +1015,9 @@ impl EnrollCtx {
     }
 }
 
-async fn enroll_setup(tag: &str) -> EnrollCtx {
+async fn enroll_setup(pool: PgPool, tag: &str) -> EnrollCtx {
     let dir = unique_dir(tag);
-    let authority = Authority::open_sqlite(&dir.join("db"), &dir.join("git"), &dir.join("large"))
-        .await
+    let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
         .with_plane_key(&dir.join("plane.key"))
         .expect("plane key")
@@ -1253,9 +1280,9 @@ async fn enroll_to_grant(
     (grant, auth.user_code, device_pk, device)
 }
 
-#[tokio::test]
-async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_false() {
-    let ctx = enroll_setup("enroll-bootstrap").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_false(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-bootstrap").await;
     let env = create_invite(
         &ctx,
         "aaaaaaaa-0000-4000-8000-000000000001",
@@ -1290,9 +1317,9 @@ async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_fal
     assert_eq!(s404, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn full_device_flow_enrolls_and_redeems_read_creds() {
-    let ctx = enroll_setup("enroll-redeem").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-redeem").await;
     let (grant, user_code, device_pk, device_key) = enroll_to_grant(
         &ctx,
         "bbbbbbbb-0000-4000-8000-000000000001",
@@ -1337,9 +1364,9 @@ async fn full_device_flow_enrolls_and_redeems_read_creds() {
     );
 }
 
-#[tokio::test]
-async fn a_redeem_with_a_wrong_device_key_is_denied() {
-    let ctx = enroll_setup("enroll-wrongkey").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_redeem_with_a_wrong_device_key_is_denied(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-wrongkey").await;
     let (grant, user_code, _device_pk, _device_key) = enroll_to_grant(
         &ctx,
         "cccccccc-0000-4000-8000-000000000001",
@@ -1383,9 +1410,9 @@ async fn a_redeem_with_a_wrong_device_key_is_denied() {
     );
 }
 
-#[tokio::test]
-async fn an_owner_signed_invite_returns_invite_data() {
-    let ctx = enroll_setup("enroll-invite-ok").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn an_owner_signed_invite_returns_invite_data(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-invite-ok").await;
     let env = create_invite(
         &ctx,
         "dddddddd-0000-4000-8000-000000000001",
@@ -1417,9 +1444,9 @@ async fn an_owner_signed_invite_returns_invite_data() {
     );
 }
 
-#[tokio::test]
-async fn a_member_signed_invite_is_denied() {
-    let ctx = enroll_setup("enroll-invite-denied").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_member_signed_invite_is_denied(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-invite-denied").await;
     // A non-owner member device (governance requires the owner role for invite).
     let ws = WorkspaceId::parse(WS).unwrap();
     let member = dev_key(MEMBER_SEED);
@@ -1473,9 +1500,9 @@ async fn a_member_signed_invite_is_denied() {
     );
 }
 
-#[tokio::test]
-async fn an_owner_revoke_of_a_device_is_ok() {
-    let ctx = enroll_setup("enroll-revoke").await;
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-revoke").await;
     // A target device for the owner to revoke.
     let ws = WorkspaceId::parse(WS).unwrap();
     let target = dev_key(TARGET_SEED);

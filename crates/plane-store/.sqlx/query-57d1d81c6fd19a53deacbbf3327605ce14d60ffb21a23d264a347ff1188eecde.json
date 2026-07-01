@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO invite_skill (token_sha256, skill_id, name) VALUES ($1, $2, $3) ON CONFLICT (token_sha256, skill_id) DO UPDATE SET name = excluded.name",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57d1d81c6fd19a53deacbbf3327605ce14d60ffb21a23d264a347ff1188eecde"
+}

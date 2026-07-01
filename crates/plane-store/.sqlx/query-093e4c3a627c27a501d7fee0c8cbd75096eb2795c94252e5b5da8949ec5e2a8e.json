@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proposals SET status = $3, resolved_by = $4 WHERE workspace_id = $1 AND id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "093e4c3a627c27a501d7fee0c8cbd75096eb2795c94252e5b5da8949ec5e2a8e"
+}

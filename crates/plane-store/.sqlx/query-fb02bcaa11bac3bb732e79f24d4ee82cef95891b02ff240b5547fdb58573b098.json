@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE object_presence SET status_updated_at = status_updated_at WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fb02bcaa11bac3bb732e79f24d4ee82cef95891b02ff240b5547fdb58573b098"
+}

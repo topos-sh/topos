@@ -1,19 +1,25 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn placement_independent_identity_same_bytes_either_store() {
+#[sqlx::test]
+async fn placement_independent_identity_same_bytes_either_store(pool: PgPool) {
     // THE load-bearing property: the SAME bytes yield the SAME version_id AND bundle_digest whether routed
     // to git or to large-local (every id is precomputed over real-byte sha256s, before any store write). We
     // force the placement by varying the configurable threshold across two runs of an identical bundle.
     let big = blob(4096, 0xA1);
-    let w = ws("w_acme");
+    // DISTINCT workspaces: the two fixtures now share ONE injected per-test database, so the same bytes
+    // under the same workspace would dedup on the second migrate (honoring the first run's recorded
+    // location) and make the placement contrast vacuous. `version_id`/`bundle_digest` are content-addressed
+    // (workspace-independent), so identity still holds across the two workspaces while each lands the blob
+    // in its own store. (Under SQLite each fixture owned a separate database, so `w_acme` never collided.)
+    let w_git = ws("w_git");
+    let w_large = ws("w_large");
 
     // Run 1: a huge threshold keeps the 4 KiB blob in the git store.
-    let fx_git = Fixture::with_large_limits("id-git", 1 << 30, 1 << 30).await;
+    let fx_git = Fixture::with_large_limits(pool.clone(), "id-git", 1 << 30, 1 << 30).await;
     let s_git = ingest_migrate(
         &fx_git.authority,
-        &w,
+        &w_git,
         "op1",
         vec![file("model.bin", &big)],
         100,
@@ -21,10 +27,10 @@ async fn placement_independent_identity_same_bytes_either_store() {
     .await;
 
     // Run 2: a tiny threshold routes the SAME blob to the large-object store.
-    let fx_large = Fixture::with_large_limits("id-large", 1, 1 << 30).await;
+    let fx_large = Fixture::with_large_limits(pool, "id-large", 1, 1 << 30).await;
     let s_large = ingest_migrate(
         &fx_large.authority,
-        &w,
+        &w_large,
         "op1",
         vec![file("model.bin", &big)],
         100,
@@ -46,7 +52,7 @@ async fn placement_independent_identity_same_bytes_either_store() {
         fx_git
             .authority
             .db()
-            .object_location(&w, obj)
+            .object_location(&w_git, obj)
             .await
             .unwrap(),
         Some(Location::Git)
@@ -55,20 +61,26 @@ async fn placement_independent_identity_same_bytes_either_store() {
         fx_large
             .authority
             .db()
-            .object_location(&w, obj)
+            .object_location(&w_large, obj)
             .await
             .unwrap(),
         Some(Location::LargeLocal)
     );
     // The large run physically holds the bytes in the side store; the git run does not.
-    assert!(fx_large.authority.large_store(&w).exists(obj.0).unwrap());
-    assert!(!fx_git.authority.large_store(&w).exists(obj.0).unwrap());
+    assert!(
+        fx_large
+            .authority
+            .large_store(&w_large)
+            .exists(obj.0)
+            .unwrap()
+    );
+    assert!(!fx_git.authority.large_store(&w_git).exists(obj.0).unwrap());
 }
 
-#[tokio::test]
-async fn routes_by_size_keeps_small_in_git_and_rejects_oversize_at_ingest() {
+#[sqlx::test]
+async fn routes_by_size_keeps_small_in_git_and_rejects_oversize_at_ingest(pool: PgPool) {
     // threshold 1 KiB, hard cap 4 KiB.
-    let fx = Fixture::with_large_limits("route", 1024, 4096).await;
+    let fx = Fixture::with_large_limits(pool, "route", 1024, 4096).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let small: &[u8] = b"a small prose file well under the threshold";
@@ -126,9 +138,9 @@ async fn routes_by_size_keeps_small_in_git_and_rejects_oversize_at_ingest() {
     );
 }
 
-#[tokio::test]
-async fn renders_a_mixed_offloaded_and_git_bundle_byte_exact() {
-    let fx = Fixture::with_large_limits("render-mix", 1024, 1 << 30).await;
+#[sqlx::test]
+async fn renders_a_mixed_offloaded_and_git_bundle_byte_exact(pool: PgPool) {
+    let fx = Fixture::with_large_limits(pool, "render-mix", 1024, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let prose: &[u8] = b"# SKILL\nrun the thing\n";
@@ -178,9 +190,9 @@ async fn renders_a_mixed_offloaded_and_git_bundle_byte_exact() {
     ));
 }
 
-#[tokio::test]
-async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash() {
-    let fx = Fixture::with_large_limits("r1-offload", 1, 1 << 30).await;
+#[sqlx::test]
+async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash(pool: PgPool) {
+    let fx = Fixture::with_large_limits(pool, "r1-offload", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (s, other) = (skill("s_pr"), skill("s_other"));
@@ -216,9 +228,9 @@ async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash() {
     ));
 }
 
-#[tokio::test]
-async fn cross_workspace_offload_has_no_dedup_and_stays_isolated() {
-    let fx = Fixture::with_large_limits("xws-offload", 1, 1 << 30).await;
+#[sqlx::test]
+async fn cross_workspace_offload_has_no_dedup_and_stays_isolated(pool: PgPool) {
+    let fx = Fixture::with_large_limits(pool, "xws-offload", 1, 1 << 30).await;
     let a = &fx.authority;
     let (wa, wb) = (ws("w_acme"), ws("w_globex"));
     let s = skill("s_pr");
@@ -260,9 +272,9 @@ async fn cross_workspace_offload_has_no_dedup_and_stays_isolated() {
     assert_eq!(a.read_object(&p, &wa, &s, obj).await.unwrap(), body);
 }
 
-#[tokio::test]
-async fn gc_reclaims_an_offloaded_object_by_the_same_fence() {
-    let fx = Fixture::with_large_limits("gc-offload", 1, 1 << 30).await;
+#[sqlx::test]
+async fn gc_reclaims_an_offloaded_object_by_the_same_fence(pool: PgPool) {
+    let fx = Fixture::with_large_limits(pool, "gc-offload", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x5A);
@@ -288,9 +300,9 @@ async fn gc_reclaims_an_offloaded_object_by_the_same_fence() {
     );
 }
 
-#[tokio::test]
-async fn a_live_lease_spares_an_offloaded_object_from_gc() {
-    let fx = Fixture::with_large_limits("gc-lease", 1, 1 << 30).await;
+#[sqlx::test]
+async fn a_live_lease_spares_an_offloaded_object_from_gc(pool: PgPool) {
+    let fx = Fixture::with_large_limits(pool, "gc-lease", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x33);
@@ -306,12 +318,12 @@ async fn a_live_lease_spares_an_offloaded_object_from_gc() {
     assert!(a.large_store(&w).exists(obj.0).unwrap());
 }
 
-#[tokio::test]
-async fn a_reclaimed_large_local_object_reports_no_live_location() {
+#[sqlx::test]
+async fn a_reclaimed_large_local_object_reports_no_live_location(pool: PgPool) {
     // A reclaimed large-local object leaves an `absent` row that STILL records `location = large-local`, but
     // `object_location` honors only a `present` row — so a stale location can never mis-route a later read to
     // the deleted side-store object (it reports None; reads dispatch on the live presence row, never a stale one).
-    let fx = Fixture::with_large_limits("stale-loc", 1, 1 << 30).await;
+    let fx = Fixture::with_large_limits(pool, "stale-loc", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x7E);
@@ -329,11 +341,11 @@ async fn a_reclaimed_large_local_object_reports_no_live_location() {
     assert_eq!(a.db().object_location(&w, obj).await.unwrap(), None);
 }
 
-#[tokio::test]
-async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound() {
+#[sqlx::test]
+async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound(pool: PgPool) {
     // The skill-scoped-read invariant: a post-authz fetch failure on the LARGE surface is an Integrity fault,
     // never NotFound — so the indistinguishable 404 still only ever comes from the access join, not a miss.
-    let fx = Fixture::with_large_limits("auth-integrity", 1, 1 << 30).await;
+    let fx = Fixture::with_large_limits(pool, "auth-integrity", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let s = skill("s_pr");
@@ -358,12 +370,12 @@ async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound
     );
 }
 
-#[tokio::test]
-async fn offloaded_dedup_reuse_and_the_re_materialize_belt() {
+#[sqlx::test]
+async fn offloaded_dedup_reuse_and_the_re_materialize_belt(pool: PgPool) {
     // The migrate Present branch for a large-local object: a second migrate of the same bytes dedup-reuses
     // the existing row, and — if a crash lost the large bytes — the belt re-materializes them from the
     // candidate's quarantine into the RECORDED store (large-local), never re-routing by size.
-    let fx = Fixture::with_large_limits("dedup-belt", 1, 1 << 30).await;
+    let fx = Fixture::with_large_limits(pool, "dedup-belt", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x2B);
@@ -386,14 +398,14 @@ async fn offloaded_dedup_reuse_and_the_re_materialize_belt() {
     );
 }
 
-#[tokio::test]
-async fn dedup_reuse_honors_the_recorded_location_when_the_threshold_diverges() {
+#[sqlx::test]
+async fn dedup_reuse_honors_the_recorded_location_when_the_threshold_diverges(pool: PgPool) {
     // The load-bearing Present-branch rule: a dedup-reuse re-materializes into the object's RECORDED store,
     // it NEVER re-routes by the new candidate's size. Construct a genuine divergence: migrate under a HUGE
     // threshold (the blob lands in git), then — simulating an operator lowering the threshold — migrate the
     // SAME bytes via a SECOND authority over the same stores with a tiny threshold (whose size-route would
     // now pick large-local). The object must stay in git; the large store must never receive it.
-    let fx = Fixture::with_large_limits("recorded-loc", 1 << 30, 1 << 30).await; // huge → routes to git
+    let fx = Fixture::with_large_limits(pool.clone(), "recorded-loc", 1 << 30, 1 << 30).await; // huge → routes to git
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x1D);
@@ -405,15 +417,11 @@ async fn dedup_reuse_honors_the_recorded_location_when_the_threshold_diverges() 
     );
     assert!(!a.large_store(&w).exists(obj.0).unwrap());
 
-    // A second authority over the SAME stores, now with a tiny threshold (its size-route would say large).
-    let a2 = Authority::open_sqlite(
-        &fx.dir.join("plane.db"),
-        &fx.dir.join("stores"),
-        &fx.dir.join("large"),
-    )
-    .await
-    .expect("open a second authority over the same stores")
-    .with_large_limits(1, 1 << 30);
+    // A second authority over the SAME stores (the same per-test database via a pool clone, plus fx's git +
+    // large dirs), now with a tiny threshold (its size-route would say large).
+    let a2 = Authority::from_pool(pool, &fx.dir.join("stores"), &fx.dir.join("large"))
+        .expect("open a second authority over the same stores")
+        .with_large_limits(1, 1 << 30);
     ingest_migrate(&a2, &w, "op2", vec![file("model.bin", &body)], 200).await;
 
     // The recorded location is still git, and the large store never received the bytes — the belt honored
@@ -428,12 +436,12 @@ async fn dedup_reuse_honors_the_recorded_location_when_the_threshold_diverges() 
     );
 }
 
-#[tokio::test]
-async fn recovery_sweep_reclaims_a_crashed_offloaded_deleting_object() {
+#[sqlx::test]
+async fn recovery_sweep_reclaims_a_crashed_offloaded_deleting_object(pool: PgPool) {
     // "a crashed deleting must still recover" — for an OFFLOADED object: a GC claim that crashed before
     // finalizing leaves a stale `deleting` large-local row; the recovery sweep re-claims it and the unlink
     // dispatches to the LARGE store, then finalizes it absent.
-    let fx = Fixture::with_large_limits("recover-offload", 1, 1 << 30).await;
+    let fx = Fixture::with_large_limits(pool, "recover-offload", 1, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x6C);
@@ -462,10 +470,10 @@ async fn recovery_sweep_reclaims_a_crashed_offloaded_deleting_object() {
     );
 }
 
-#[tokio::test]
-async fn routing_boundaries_at_threshold_and_cap_are_exact() {
+#[sqlx::test]
+async fn routing_boundaries_at_threshold_and_cap_are_exact(pool: PgPool) {
     // threshold 1024 (offload at/above), cap 2048 (reject above).
-    let fx = Fixture::with_large_limits("boundary", 1024, 2048).await;
+    let fx = Fixture::with_large_limits(pool, "boundary", 1024, 2048).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let at = blob(1024, 0x01); // == threshold → large
@@ -516,13 +524,13 @@ async fn routing_boundaries_at_threshold_and_cap_are_exact() {
     );
 }
 
-#[tokio::test]
-async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds() {
+#[sqlx::test]
+async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds(pool: PgPool) {
     // Regression: a git-resident object in a version that ALSO contains an offloaded blob must read fine. The
     // git arm reads the loose object directly by its locator, NOT by walking the whole version tree — which
     // would fault on the offloaded sibling's intentionally-absent git object before reaching the requested
     // blob (and return a spurious Integrity for a perfectly valid read).
-    let fx = Fixture::with_large_limits("mixed-read", 1024, 1 << 30).await;
+    let fx = Fixture::with_large_limits(pool, "mixed-read", 1024, 1 << 30).await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let s = skill("s_pr");
@@ -558,13 +566,13 @@ async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds() {
     assert_eq!(a.read_object(&p, &w, &s, big_id).await.unwrap(), big);
 }
 
-#[tokio::test]
-async fn fenced_migrate_rejects_a_dotgit_path() {
+#[sqlx::test]
+async fn fenced_migrate_rejects_a_dotgit_path(pool: PgPool) {
     // The fenced migrate must reject a `.git` path exactly as the client write path does — the kernel
     // check_path allows `.git` (it only bars `.`/`..`/NUL/absolute), so ingest stages it, but the migrate's
     // tree build (the plumbing editor + restored component validation) refuses it, so no `.git` bundle is
     // ever recorded.
-    let fx = Fixture::new("dotgit").await;
+    let fx = Fixture::new(pool, "dotgit").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let staged = lifecycle::ingest(
@@ -585,12 +593,12 @@ async fn fenced_migrate_rejects_a_dotgit_path() {
     );
 }
 
-#[tokio::test]
-async fn gc_reclaims_large_objects_when_no_git_repo_exists() {
+#[sqlx::test]
+async fn gc_reclaims_large_objects_when_no_git_repo_exists(pool: PgPool) {
     // A workspace whose FIRST migrate routed every blob to the large store, then crashed before
     // migrate_finish created the git repo: the large-local rows must still be reclaimable. GC opens the git
     // store lazily (only for a git unlink), so it does not abort on the missing repo.
-    let fx = Fixture::with_large_limits("no-git-gc", 1, 1 << 30).await; // tiny threshold → all blobs offload
+    let fx = Fixture::with_large_limits(pool, "no-git-gc", 1, 1 << 30).await; // tiny threshold → all blobs offload
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = blob(2048, 0x4F);

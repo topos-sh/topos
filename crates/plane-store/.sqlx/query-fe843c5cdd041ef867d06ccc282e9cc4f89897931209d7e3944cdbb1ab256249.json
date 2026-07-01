@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM read_token WHERE workspace_id = $1 AND principal = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fe843c5cdd041ef867d06ccc282e9cc4f89897931209d7e3944cdbb1ab256249"
+}

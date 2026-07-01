@@ -40,7 +40,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > floor). Consent stays the kernel's one `decide()` policy. The plane response + follow-state are
 > **fixture-fed** in-process this increment (no HTTP, no `plane-store` edge — `check-arch` holds the line;
 > production follows nothing, so the bare `pull` is an honest no-op). The **plane's storage + read authority**
-> (`plane-store`) is now built behind its privacy boundary: per-workspace SQLite + git-object storage; the
+> (`plane-store`) is now built behind its privacy boundary: per-workspace Postgres + git-object storage; the
 > skill-scoped object-read access rule (rostered ∧ reachable, one indistinguishable not-found, never served by
 > bare hash); full-tree upload with server rehash that records provenance + reachability only after an
 > authoritative roster check; and the cross-skill lineage predicate — all directly tested against a real
@@ -62,7 +62,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > skill-scoped access rule (404-not-403, never by bare hash); and there is **no cross-workspace dedup**. The
 > database leads and the filesystem trails throughout. The **pointer-move write** (`set-current`: publish ·
 > genesis · revert) that *moves* the `current` pointer this layer only created is now built too: **one
-> `BEGIN IMMEDIATE` pure-DB transaction** (no filesystem op inside it) does receipt-replay → in-transaction
+> serializable pure-DB transaction** (no filesystem op inside it) does receipt-replay → in-transaction
 > authoritative device authz (a device-op signature against a **non-revoked** registered key bound to a
 > **rostered** principal — a revoke committed first blocks the move) → a **compare-and-set on the whole
 > `(epoch,seq)` pair** (CONFLICT carries the live generation; a restore that bumps `epoch` while reusing `seq`
@@ -131,7 +131,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > — one `/i/` invite, the RFC-8628 device-flow grant, per-(device,skill) read tokens — **deterministically
 > HMAC-derived over a `0600` enrollment secret and stored only as its sha256** (so a lost-ack retry re-derives
 > the identical credential, and a consumed grant re-derives the same read tokens — naturally idempotent redeem,
-> instant revoke). The central **`redeem_enrollment`** runs ONE `BEGIN IMMEDIATE` txn (a possession proof via the
+> instant revoke). The central **`redeem_enrollment`** runs ONE serializable txn (a possession proof via the
 > kernel's `verify_enroll` against the grant's bound device key → the deployment-mode roster gate [cloud requires
 > a confirmed, already-rostered identity; self-host grants membership from the bearer] → device register with
 > anti-squat → per-skill read scope + minted read tokens — **never a user token**). The device key id is
@@ -174,7 +174,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > edge-clean.
 >
 > **The plane is now composable leak-free — the seam a downstream plane builds on.** The OSS `topos-plane`
-> lib gained a **leak-free construction surface**: a plain/owned `PlaneConfig` + `PlaneState::open_sqlite(cfg)`
+> lib gained a **leak-free construction surface**: a plain/owned `PlaneConfig` + `PlaneState::open(cfg)`
 > that builds the `Authority` + enrollment config **internally** (so a composer never names a `plane_store`
 > type), the **bin dogfoods it** (one construction path, no drift), and a public **`PlaneState::set_review_required(ws:
 > &str, bool)`** sets the `review_required` policy through the public API (a leak-free wrapper over a new
@@ -194,7 +194,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
 > workspace standup** (`admin-claim` stands up self-host today); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
-> the enrollment secret are plaintext `0600` seeds for now); the OpenClaw/Hermes adapters; and Postgres. `sqlx`
+> the enrollment secret are plaintext `0600` seeds for now); and the OpenClaw/Hermes adapters. `sqlx`
 > is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
 > powers the OSS plane's HTTP server, `ureq` the client transport, and `lettre` the passcode mailer.
 >
@@ -242,7 +242,7 @@ topos-core   the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns dig
 plane-store  ──► topos-core, topos-types, topos-gitstore   (the server authority: private SQL + authz + txn)
 topos-plane  ──► plane-store, topos-core, topos-types      (the OSS plane: lib + thin bin)
 topos        ──► topos-core, topos-types, topos-gitstore, topos-harness   (the CLI)
-              └── NO edge to plane-store / sqlx / libsqlite3-sys   ◄── architectural layering
+              └── NO edge to plane-store / sqlx   ◄── architectural layering
 ```
 
 ## Principles that constrain this code

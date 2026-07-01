@@ -1,5 +1,5 @@
 //! The object-lifecycle orchestration — quarantine ingest + lease-before-migrate-into-git, built over the
-//! DB transitions (`mod sqlite`) and the dumb git fence primitives (`topos-gitstore`). `ingest` + `migrate`
+//! DB transitions (`mod db`) and the dumb git fence primitives (`topos-gitstore`). `ingest` + `migrate`
 //! are the entry the publish/propose/revert writes share; every object that reaches the main store does so
 //! through this path, so it carries an `object_presence` row (the sole presence authority GC acts over).
 //!
@@ -17,9 +17,9 @@ use topos_core::sign::{self, Commit};
 use topos_gitstore::{GitstoreError, ImportFile, LargeObjectStore, StagedEntry, Store};
 
 use crate::authority::Authority;
+use crate::db::{InstallOutcome, Location, ObjectStatus};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
-use crate::sqlite::{InstallOutcome, Location, ObjectStatus};
 use crate::upload::CandidateUpload;
 
 /// How long an in-flight quarantine lives before the janitor may sweep it. Generous: in-process

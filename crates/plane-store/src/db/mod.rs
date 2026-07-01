@@ -1,0 +1,483 @@
+//! The Postgres backend — **the only place raw `sqlx` lives.**
+//!
+//! The pool, every transaction, and every `query!` are private to this module; no `sqlx` type appears
+//! in any signature crossing the module boundary. Every operation takes the validated id newtypes plus
+//! the data it needs and returns plain domain values (`CommitId`, small enums, `bool`) — so a caller
+//! outside this module can never run an unbound query, hold a transaction, or read a bare object. That
+//! privacy boundary is the access-rule enforcement mechanism.
+//!
+//! **The write-transaction discipline is the trust spine.** SQLite's `BEGIN IMMEDIATE` took a global
+//! writer lock, so every read-then-write inside a write transaction was automatically safe against a
+//! concurrent writer. Postgres does not serialize writers, so the `run_serializable!` macro re-establishes it
+//! with `SERIALIZABLE` isolation + a bounded retry on a serialization failure — the one and only write
+//! entrypoint (there is no `begin`-returns-a-`Transaction` form to misuse).
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres};
+
+use crate::error::{AuthorityError, Result};
+use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+
+/// The bounded number of times the `run_serializable!` macro re-runs a write closure that hit a
+/// serialization failure (SQLSTATE `40001`) or deadlock (`40P01`). Contention on one team's skill is
+/// low, so a small cap suffices; exceeding it is a transient-infra fault (a 500), never a receipted
+/// terminal (which would poison replay).
+pub(in crate::db) const MAX_TXN_RETRIES: u32 = 10;
+
+/// The Postgres-backed authority database: one connection pool. Reads run autocommit at the pool's
+/// default `READ COMMITTED`; every write goes through [`run_serializable`](Self::run_serializable),
+/// which opens `SERIALIZABLE` per-transaction (it reverts on commit — no connection-global default).
+#[derive(Debug)]
+pub(crate) struct Db {
+    pool: PgPool,
+    /// Test-observable count of serialization-failure retries the runner has performed — lets a
+    /// concurrency test PROVE the MVCC re-proof actually fired (an outcome assertion alone passes even a
+    /// fully-serialized schedule that never raised `40001`). Never read in production.
+    #[cfg(test)]
+    retry_count: std::sync::atomic::AtomicU64,
+}
+
+/// The one write-transaction entrypoint — run `$body` (which uses the bound `$tx`, e.g.
+/// `foo_txn(&mut $tx, …).await`) as ONE `SERIALIZABLE` transaction, retrying on a serialization failure
+/// (SQLSTATE `40001`) or deadlock (`40P01`) — raised by a statement OR by `COMMIT` (Postgres's deferred SSI
+/// checks can fire only at commit) — up to [`MAX_TXN_RETRIES`].
+///
+/// This replaces SQLite's global-writer-lock `BEGIN IMMEDIATE`: Postgres does not serialize writers, so
+/// every read-then-write invariant SQLite got for free — the whole-`(epoch,seq)` CAS, the last-owner
+/// write-skew guard, the object-presence fence, op-id idempotency — is re-proven here by SSI + retry.
+///
+/// It is a **macro, not a generic `fn`**, so the retry loop inlines into each method and that method's
+/// future stays a concrete `async fn` future whose `Send` is auto-derived: a generic `run_serializable<F:
+/// AsyncFnMut…>` cannot bound the closure future `Send` on stable (the `CallRefFuture` GAT is unstable),
+/// and axum's `Handler` requires `Send`.
+///
+/// `$body` MUST be re-runnable: it borrows its inputs and performs no non-DB side effect (all filesystem
+/// work — ingest, migrate, the deleting-wait, the GC unlink — stays OUTSIDE), so an aborted attempt rolls
+/// back with no durable trace and the retry re-runs against fresh committed state (`now`/`created_at` are
+/// captured by the caller before the loop, so a retried receipt is byte-stable — signing/HMAC are
+/// deterministic). Cap-exceeded is [`AuthorityError::Internal`] (a 500), never a receipted terminal (which
+/// would replay forever); the caller's `op_id` retry re-drives under lower contention.
+macro_rules! run_serializable {
+    ($self:expr, $tx:ident, $body:expr) => {{
+        let mut __attempt: u32 = 0;
+        loop {
+            #[allow(unused_mut)]
+            let mut $tx = $self
+                .pool
+                .begin_with("BEGIN ISOLATION LEVEL SERIALIZABLE")
+                .await
+                .map_err($crate::error::AuthorityError::internal)?;
+            match $body {
+                ::core::result::Result::Ok(__value) => match $tx.commit().await {
+                    ::core::result::Result::Ok(()) => break ::core::result::Result::Ok(__value),
+                    ::core::result::Result::Err(__e) => {
+                        if $crate::db::is_serialization_failure_sqlx(&__e)
+                            && __attempt < $crate::db::MAX_TXN_RETRIES
+                        {
+                            __attempt += 1;
+                            $self.note_retry();
+                        } else {
+                            break ::core::result::Result::Err(
+                                $crate::error::AuthorityError::internal(__e),
+                            );
+                        }
+                    }
+                },
+                ::core::result::Result::Err(__e) => {
+                    let _ = $tx.rollback().await;
+                    if $crate::db::is_serialization_failure(&__e)
+                        && __attempt < $crate::db::MAX_TXN_RETRIES
+                    {
+                        __attempt += 1;
+                        $self.note_retry();
+                    } else {
+                        break ::core::result::Result::Err(__e);
+                    }
+                }
+            }
+        }
+    }};
+}
+
+impl Db {
+    /// Open a pool for `database_url` and apply the embedded migrations. sqlx's `Migrator` takes a
+    /// `pg_advisory_lock` for the duration of the run, so this is multi-replica-safe with no hand-rolled
+    /// lock (session-level, so a session-mode pool is required — a plain pooled connection is one).
+    pub(crate) async fn connect(database_url: &str) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .connect(database_url)
+            .await
+            .map_err(AuthorityError::internal)?;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(AuthorityError::internal)?;
+        Ok(Self::wrap(pool))
+    }
+
+    /// Wrap an already-open pool WITHOUT migrating — the injection seam for `#[sqlx::test]`, which
+    /// provisions a fresh per-test database, runs `./migrations` on it, and hands us the pool. Test /
+    /// `test-fixtures` only (an external e2e harness provisions its own per-test database the same way).
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub(crate) fn from_pool(pool: PgPool) -> Self {
+        Self::wrap(pool)
+    }
+
+    fn wrap(pool: PgPool) -> Self {
+        Self {
+            pool,
+            #[cfg(test)]
+            retry_count: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The connection pool — PRIVATE to `mod db`, so the child `lifecycle`/`seed` submodules reach it
+    /// for their autocommit pool reads while it stays unreachable elsewhere in the crate (no `sqlx`
+    /// handle ever crosses the module boundary).
+    fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Bump the test-visible retry counter (a no-op in production). Called by the
+    /// [`run_serializable!`](crate::db::run_serializable) macro on each retry.
+    #[inline]
+    fn note_retry(&self) {
+        #[cfg(test)]
+        self.retry_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The number of serialization-failure retries the runner has performed since open — the concurrency
+    /// tests read it to prove a `40001` actually occurred and was retried (not merely that the outcome
+    /// matched). Test / `test-fixtures` only.
+    #[cfg(test)]
+    pub(crate) fn retry_count(&self) -> u64 {
+        self.retry_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-only: DETERMINISTICALLY force the `run_serializable!` macro to retry exactly one Postgres
+    /// serialization failure, so a test can assert [`retry_count`](Self::retry_count) advanced by one
+    /// (a live-concurrency assertion is scheduler-dependent — an accidentally-serialized schedule reaches
+    /// the same outcome without ever raising `40001`). On the FIRST attempt the body commits a conflicting
+    /// bump to the same `current` row via a SEPARATE autocommit connection, so this transaction's own
+    /// UPDATE serialization-fails (SQLSTATE `40001`); the macro rolls back and re-runs with the injector
+    /// cleared, and the second attempt commits. Requires a `current` row for `(ws, skill)`.
+    #[cfg(test)]
+    pub(crate) async fn test_force_one_serialization_retry(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+    ) -> Result<()> {
+        let inject = std::sync::atomic::AtomicBool::new(true);
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        run_serializable!(
+            self,
+            tx,
+            async {
+                // Read the row inside the serializable snapshot.
+                sqlx::query!(
+                    "SELECT seq FROM current WHERE workspace_id = $1 AND skill_id = $2",
+                    ws_s,
+                    skill_s
+                )
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(AuthorityError::internal)?;
+                if inject.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    // A concurrent COMMITTED writer bumps the SAME row on another connection, so our
+                    // pending write below serialization-fails.
+                    sqlx::query!(
+                        "UPDATE current SET updated_at = updated_at + 1 \
+                         WHERE workspace_id = $1 AND skill_id = $2",
+                        ws_s,
+                        skill_s
+                    )
+                    .execute(self.pool())
+                    .await
+                    .map_err(AuthorityError::internal)?;
+                }
+                // Our own write to the same row — conflicts with the injected bump on the first attempt.
+                sqlx::query!(
+                    "UPDATE current SET updated_at = updated_at + 1 \
+                     WHERE workspace_id = $1 AND skill_id = $2",
+                    ws_s,
+                    skill_s
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(AuthorityError::internal)?;
+                Ok(())
+            }
+            .await
+        )
+    }
+
+    /// The read-authorization join: return the **witness** commit id iff the principal is rostered for
+    /// the skill AND that skill makes the object readable — through EITHER the accepted trunk OR a pending
+    /// proposal. An empty result is the single not-entitled/not-found signal (not-rostered, skill-doesn't-
+    /// reach, and object-nonexistent are indistinguishable). Every table is bound on `workspace_id`, so no
+    /// fact can cross a tenant.
+    ///
+    /// Two disjoint arms over the SAME `(rostered, workspace-bound, skill-scoped)` envelope:
+    /// - **trunk** (unchanged): `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)` — any accepted
+    ///   version of the skill reaches the object.
+    /// - **proposal**: `∃ p: proposal_object(w,p,object_id) ∧ p.skill=s ∧ p.status='open' ∧ p.base ==
+    ///   current(w,s)` — an OPEN, NON-STALE proposal of the skill roots the object. This arm shares its
+    ///   `open ∧ non-stale` predicate **verbatim** with the two GC keep-checks
+    ///   ([`claim_for_delete`](Self::claim_for_delete) / [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)),
+    ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
+    ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
+    ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
+    ///   and the bind-parameter numbering differs per call site); there are now **FIVE** verbatim copies of
+    ///   `open ∧ base == current` — this object-read arm, [`Self::authorize_version_read`]'s proposal arm,
+    ///   the two GC keep-checks ([`claim_for_delete`](Self::claim_for_delete) /
+    ///   [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)), and the proposals-listing read
+    ///   ([`list_open_proposals`](Self::list_open_proposals)) — and a dedicated equivalence test pins the three
+    ///   object-keyed copies (this arm + the two GC keep-checks) together against drift, while behavioral
+    ///   tests pin the version-read and the listing copies to the same staleness semantics. A reclaimed object
+    ///   that briefly outlives this check on a concurrent read is handled by
+    ///   [`crate::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
+    pub(crate) async fn authorize_object_read(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+        object_id: ObjectId,
+    ) -> Result<Option<CommitId>> {
+        let ws = ws.as_str();
+        let skill = skill.as_str();
+        let principal = principal.as_str();
+        let object = object_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"
+            SELECT w.commit_id AS "commit_id!: Vec<u8>" FROM (
+                SELECT sc.commit_id AS commit_id
+                FROM roster r
+                JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id
+                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
+                WHERE r.workspace_id = $1 AND r.skill_id = $2 AND r.principal = $3 AND co.object_id = $4
+              UNION ALL
+                SELECT p.commit_id AS commit_id
+                FROM proposal_object po
+                JOIN proposals p  ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
+                JOIN current    c  ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                JOIN roster     r2 ON r2.workspace_id = p.workspace_id AND r2.skill_id = p.skill_id AND r2.principal = $3
+                WHERE po.workspace_id = $1 AND po.object_id = $4 AND p.skill_id = $2
+                  AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+            ) w
+            LIMIT 1
+            "#,
+            ws,
+            skill,
+            principal,
+            object,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        row.map(|r| commit_id_from_row(&r.commit_id)).transpose()
+    }
+
+    /// Gather the owning skill of each given commit id that has provenance in this workspace (absent
+    /// ids — no provenance in any skill — are simply not returned). The cross-skill lineage predicate
+    /// turns this into its membership facts; keeping the read here keeps `sqlx` out of that pure logic.
+    pub(crate) async fn commit_owners(
+        &self,
+        ws: &WorkspaceId,
+        commit_ids: &[CommitId],
+    ) -> Result<Vec<(CommitId, SkillId)>> {
+        let ws_s = ws.as_str();
+        let mut out = Vec::new();
+        // One bound lookup per id (the candidate-and-parents set is tiny). A per-id `query!` keeps
+        // compile-time checking and the offline metadata; a dynamic `IN (..)` list would forfeit both.
+        for &id in commit_ids {
+            let cid = id.0.as_slice();
+            let row = sqlx::query!(
+                r#"SELECT skill_id AS "skill_id!" FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2"#,
+                ws_s,
+                cid,
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(AuthorityError::internal)?;
+            if let Some(row) = row {
+                // A stored skill_id is always pre-validated on the way in, so a re-parse failure here is
+                // store corruption — map it to an integrity fault, not the boundary `InvalidId` (mirroring
+                // `commit_id_from_row`'s handling of a bad-width BLOB).
+                let skill = SkillId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
+                out.push((id, skill));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve a read token's sha256 to its `(workspace, skill, principal)` scope — the read-credential
+    /// resolver. **The one lookup NOT bound on `workspace_id`:** the token IS what resolves the workspace,
+    /// so this probes the globally-unique `token_sha256` primary key (O(1)) and ESTABLISHES the binding
+    /// every subsequent query carries. Only the hash is stored, never the plaintext. The row's strings were
+    /// validated when the token was minted, so a re-parse failure is store corruption (an integrity fault),
+    /// not a client error — mirroring `commit_owners` / `resolve_device`. `None` ⇒ no such token.
+    pub(crate) async fn lookup_read_token(
+        &self,
+        token_sha256: &[u8; 32],
+        now: i64,
+    ) -> Result<Option<(WorkspaceId, SkillId, Principal)>> {
+        let key = token_sha256.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT workspace_id AS "workspace_id!", skill_id AS "skill_id!", principal AS "principal!"
+               FROM read_token WHERE token_sha256 = $1 AND (expires_at IS NULL OR expires_at > $2)"#,
+            key,
+            now,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some((
+                WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity)?,
+                SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
+                Principal::parse(&r.principal).map_err(AuthorityError::integrity)?,
+            ))),
+        }
+    }
+
+    /// The version-read authorization — the R1 gate the version-metadata route runs, mirroring
+    /// [`Self::authorize_object_read`] but anchored on a VERSION (`commit_id`) rather than an object. `true`
+    /// iff `principal` is rostered for `skill` AND the version is readable through EITHER:
+    /// - **trunk**: the version is owned by the skill (`skill_commit`) AND has ≥1 `commit_object` edge — the
+    ///   accepted-trunk test (every accepted version roots ≥1 object, so a non-empty edge set is exact), OR
+    /// - **proposal**: an OPEN, NON-STALE proposal of the skill whose `commit_id` is this version. This arm
+    ///   reuses the SAME `status='open' ∧ (base_epoch, base_seq) == current.(epoch, seq)` staleness predicate
+    ///   the object read arm ([`Self::authorize_object_read`]) and the two GC keep-checks
+    ///   ([`Self::claim_for_delete`] / [`Self::claim_stale_for_recovery`]) use — here anchored on
+    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is the 4th copy
+    ///   of the literal — the proposals-listing read [`Self::list_open_proposals`] is the 5th — not a shared
+    ///   string; the behavioral proposal-version tests pin it to the same
+    ///   staleness semantics). It deliberately does NOT authorize on bare `skill_commit`, which also names
+    ///   unaccepted/rejected proposal candidates — that would leak a never-accepted version's metadata.
+    ///
+    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
+    pub(crate) async fn authorize_version_read(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        principal: &Principal,
+        version_id: CommitId,
+    ) -> Result<bool> {
+        let ws = ws.as_str();
+        let skill = skill.as_str();
+        let principal = principal.as_str();
+        let cid = version_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!: i64" FROM (
+                SELECT 1 AS ok
+                FROM roster r
+                JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id AND sc.commit_id = $4
+                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
+                WHERE r.workspace_id = $1 AND r.skill_id = $2 AND r.principal = $3
+              UNION ALL
+                SELECT 1 AS ok
+                FROM roster   r2
+                JOIN proposals p ON p.workspace_id = r2.workspace_id AND p.skill_id = r2.skill_id
+                JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                WHERE r2.workspace_id = $1 AND r2.skill_id = $2 AND r2.principal = $3
+                  AND p.commit_id = $4 AND p.status = 'open'
+                  AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+            ) w
+            LIMIT 1
+            "#,
+            ws,
+            skill,
+            principal,
+            cid,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.is_some())
+    }
+}
+
+/// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a Postgres serialization failure
+/// (`40001`) or deadlock (`40P01`) — the transient, retryable classes the SERIALIZABLE runner retries.
+pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|c| c == "40001" || c == "40P01")
+}
+
+/// True if `e` is an [`AuthorityError::Internal`] wrapping such a serialization failure. The query
+/// helpers box `sqlx::Error` into `Internal` (`error.rs`), so the runner must downcast the boxed source
+/// to recover the SQLSTATE — a raw string match on the `Display` would be brittle.
+pub(in crate::db) fn is_serialization_failure(e: &AuthorityError) -> bool {
+    let AuthorityError::Internal(src) = e else {
+        return false;
+    };
+    src.downcast_ref::<sqlx::Error>()
+        .is_some_and(is_serialization_failure_sqlx)
+}
+
+/// Shared roster-existence probe (used by both the cheap pre-read on the pool and the authoritative
+/// check inside the transaction). Generic over the executor so the identical query serves both.
+async fn roster_exists<'e, E>(
+    executor: E,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    principal: &Principal,
+) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ws = ws.as_str();
+    let skill = skill.as_str();
+    let principal = principal.as_str();
+    let row = sqlx::query!(
+        "SELECT principal FROM roster WHERE workspace_id = $1 AND skill_id = $2 AND principal = $3 LIMIT 1",
+        ws,
+        skill,
+        principal,
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(row.is_some())
+}
+
+/// Convert a stored 32-byte BLOB into a [`CommitId`], or an integrity fault if the width is wrong (the
+/// schema's length CHECK should prevent it; a violation means store corruption).
+fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| AuthorityError::integrity(BadBlobWidth))?;
+    Ok(CommitId(arr))
+}
+
+/// A stored commit-id BLOB was not exactly 32 bytes (the schema CHECK should forbid this).
+#[derive(Debug, thiserror::Error)]
+#[error("stored content id is not 32 bytes")]
+struct BadBlobWidth;
+
+// The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). Driven
+// by the not-yet-wired orchestration + the tests; unreferenced in a non-test production build.
+#[cfg_attr(not(test), allow(dead_code))]
+mod lifecycle;
+
+pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
+
+// The pointer-move transaction (the `set-current` write) + its receipt/policy/device-registry helpers.
+mod set_current;
+
+// The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
+mod proposals;
+
+// The enrollment + governance issuance SQL (invites / device-auth / passcodes / grants / redeem / governance).
+mod enroll;
+
+// Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
+// `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them
+// to the feature-gated `Authority` shims a downstream test crate drives.
+#[cfg(any(test, feature = "test-fixtures"))]
+mod seed;

@@ -15,10 +15,12 @@ same-process code.) The error type holds this line too: internal faults carry a 
 ## Implemented (each behind a test in `src/tests.rs` + the module unit tests)
 
 - **Per-workspace storage + hard tenant binding.** One `topos-gitstore` repo per workspace under a
-  confined root, plus a SQLite database whose every row carries `workspace_id` and whose every query
+  confined root, plus a Postgres database whose every row carries `workspace_id` and whose every query
   binds it. `WorkspaceId` is a validated, path-safe id, so the per-workspace store directory can never
   escape the root. Isolation is the database binding, never the directory.
-- **The schema** (`migrations/0001`–`0004`, SQLite STRICT / WITHOUT ROWID; content ids as 32-byte BLOBs):
+- **The schema** (`migrations/0001`–`0004`, Postgres: content ids 32-byte **BYTEA** width-checked
+  `octet_length=32`, integer/time/seq/epoch/size columns **BIGINT**, booleans a `BIGINT` 0/1 with
+  `CHECK (x IN (0,1))`, no `STRICT`/`WITHOUT ROWID`):
   `skill_commit` (provenance — **PK `(workspace_id, commit_id)`** makes a content-derived commit belong to
   exactly one skill), `commit_object` (accepted-trunk reachability + access, with the inverse index), `roster`
   (membership = a row exists), `current` (the one movable pointer); the object-lifecycle + pointer-move tables
@@ -65,17 +67,26 @@ same-process code.) The error type holds this line too: internal faults carry a 
   construction).
 - **`Authority::check_lineage`** — the cross-skill lineage predicate (a tiny database gather + a pure
   decision function), read-only; the pointer-move/contribute writes enforce the same rule transactionally.
-- **Transaction discipline.** WAL + `synchronous = NORMAL` + a busy timeout + foreign keys on, set on the
-  connect options; one private `begin_with("BEGIN IMMEDIATE")` entrypoint (a plain `begin()` or a bare
-  `execute("BEGIN IMMEDIATE")` on the pool are unreachable). Compile-time-checked `query!` against the
-  committed `.sqlx`; `cargo sqlx prepare --check -- --tests` is the CI drift gate (the `--tests` scope
-  matches how the metadata is generated — the seed + lifecycle helpers include `#[cfg(test)]`-only queries —
-  and the CLI is pinned to the library version).
+- **Transaction discipline.** Every write runs through the private `run_serializable!` macro
+  (`src/db/mod.rs`): a `SERIALIZABLE`-isolation transaction with a bounded retry on a serialization failure
+  (SQLSTATE `40001`) or deadlock (`40P01`), whether raised by a statement or by `COMMIT`. It is a **macro**,
+  not a generic runner fn, so each caller's future stays `Send` (an `AsyncFnMut` runner can't bound the
+  closure future `Send` on stable). Because Postgres does not serialize writers, every read-then-write
+  invariant is re-proven by SSI + retry — the whole-`(epoch, seq)` CAS, the last-owner write-skew guard, the
+  object-presence fence, and op-id idempotency. Two targeted touches harden that under MVCC: the
+  proposal-resolution reads take `SELECT … FOR UPDATE`, and `insert_lease` writes the leased `present`
+  `object_presence` rows so a concurrent GC claim conflicts (closing a claim-vs-lease race). All governance
+  mutations route through the runner (the last-owner guard is a write-skew only `SERIALIZABLE` catches);
+  `workspace_events` idempotency is a hard `INSERT`, so a concurrent same-`op_id` governance dup aborts
+  rather than double-applies. Compile-time-checked `query!` against the committed `.sqlx`;
+  `cargo sqlx prepare --check -- --tests` is the CI drift gate (the `--tests` scope matches how the metadata
+  is generated — the seed + lifecycle helpers include `#[cfg(test)]`-only queries — and the CLI is pinned to
+  the library version).
 - **The DB-authoritative object-lifecycle / garbage-collection fence.** Migration `0002` adds the
   fenced `object_presence` (`present`/`deleting`/`absent`/`unavailable` + the `git_oid` locator/bridge key +
   `size` + the `location` column — now exercised by the offload below), the GC-excluded `upload_quarantine`,
   the `promotion_lease` (+ object child table), and `tombstones`. The transitions are guarded compare-and-swaps
-  in `mod sqlite` (a `deleting` object is **non-resurrectable** — the `present`-writer's `WHERE status='absent'`
+  in `mod db` (a `deleting` object is **non-resurrectable** — the `present`-writer's `WHERE status='absent'`
   cannot fire on it); the orchestration (`lifecycle.rs`/`gc.rs`) builds **ingest** (quarantine + rehash +
   denylist), **migrate** (lease the full object set *before* migrating, server-side dedup, durable install,
   then record a real version + make the lease non-expiring on success), the **three-step mark-then-claim GC**
@@ -106,7 +117,7 @@ same-process code.) The error type holds this line too: internal faults carry a 
   write routes through this migrate (the standalone all-git upload path was retired). Backend is the **local FS
   only** — the S3-compatible remote backend + the online backfill are the named next steps.
 - **The pointer-move write (`set-current`) — publish · genesis · revert.** The `current` row this layer only
-  created now **moves**, **signed**, in **one `BEGIN IMMEDIATE` pure-DB transaction** (no filesystem op
+  created now **moves**, **signed**, in **one `run_serializable!` (`SERIALIZABLE` + retry) pure-DB transaction** (no filesystem op
   inside it): receipt-replay → in-transaction authoritative authz (a device-op signature verified against the
   registry's **non-revoked** public key bound to a **rostered** principal — a revoke committed before the
   promotion blocks it) → **compare-and-set on the whole `(epoch, seq)` pair** (CONFLICT carries the live
@@ -154,7 +165,7 @@ same-process code.) The error type holds this line too: internal faults carry a 
   (deployment posture), the workspace-level RBAC `workspace_member` roster (DISTINCT from the per-skill
   `roster`), the opaque `invites` (+ `invite_skill`), `enrollment_grants` (+ `enrollment_grant_skill`),
   `device_auth_sessions`, `passcodes`, `admin_claim`, and the `workspace_events` governance audit + op_id
-  idempotency store — all STRICT + WITHOUT ROWID, ws-scoped, 32-byte BLOBs width-checked, with NO foreign key
+  idempotency store — all ws-scoped, 32-byte BYTEA width-checked, with NO foreign key
   onto the standalone `workspace` (so the existing publish/read tests, which seed no workspace, stay green);
   it also adds nullable `device_key_id` + `expires_at` to `read_token`. **Every opaque credential is
   deterministically HMAC-derived** (`hmac`/`sha2` over a `0600` enrollment secret loaded with the plane key's
@@ -168,7 +179,7 @@ same-process code.) The error type holds this line too: internal faults carry a 
   self-host born `confirmed` device-rooted), **`poll_device_auth`** (pending/slow-down/denied/expired/granted;
   the grant is deterministic so a re-poll re-issues the SAME one), **`start_passcode`**/**`complete_passcode`**
   (the email parsed INSIDE the op, a constant-shaped ack, brute-force locked after a cap), the central
-  **`redeem_enrollment`** (ONE `BEGIN IMMEDIATE`: a possession proof via `topos_core::sign::verify_enroll`
+  **`redeem_enrollment`** (ONE `run_serializable!` txn: a possession proof via `topos_core::sign::verify_enroll`
   against the GRANT's bound key → the deployment-mode roster gate [cloud requires a confirmed, already-rostered
   identity; self-host grants membership from the bearer] → device registry register with anti-squat → per-skill
   roster + **minted read tokens, NEVER a user token**), and **`admin_claim`** (self-host first-boot standup).
@@ -191,14 +202,12 @@ same-process code.) The error type holds this line too: internal faults carry a 
   OIDC/magic-link transport + the mailer, and active read-token rotation land in `topos-plane`). Test-fixture
   shims gain `seed_workspace` / `seed_workspace_member`.
 
-## Backend shape (concrete now; a second backend is a mechanical add)
+## Backend shape (Postgres-only)
 
-`Authority` holds a concrete `sqlite::Db` directly — no trait, no `sqlx::Any`, and no single-arm enum yet
-(concrete-first, per the workspace's governing posture; only one backend ships). The load-bearing invariant
-is that **no `sqlx` type ever crosses the `sqlite` module boundary**: every method there takes the id
-newtypes + data and returns plain domain values. A future Postgres backend is a sibling module with its own
-`query!` invocations and its own `.sqlx`, behind an `enum Db { Sqlite, Pg }` that wraps that same
-domain-typed boundary with no change to callers.
+`Authority` holds a concrete `db::Db` directly — no trait, no `sqlx::Any`, no dialect enum: SQLite was
+removed, and Postgres is the single backend. The load-bearing invariant is that **no `sqlx` type ever
+crosses the `db` module boundary**: every method there takes the id newtypes + data and returns plain domain
+values, so the authority code above it is storage-shaped, never SQL-shaped.
 
 ## Planned (lands later)
 
@@ -215,21 +224,22 @@ rotation** (redeem
 mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
 revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest key encryption / KMS** (the plane signing key + the enrollment secret are plaintext `0600` seeds for
-now); the `purge` verb + force-unlink (the tombstones table + denylist check already exist); Postgres
-(SQLite-first — the interleaving tests assert on outcome/invariant, never an error code, so the Postgres arm
-is a pure later extension); two-parent author merges; per-skill encryption-at-rest.
+now); the `purge` verb + force-unlink (the tombstones table + denylist check already exist); two-parent
+author merges; per-skill encryption-at-rest.
 
 ## Build note
 
-Adding `sqlx` pulls the bundled SQLite C library into this crate (and the plane binary), so building the
-server crate now needs a C toolchain (CI runners have one). The **client never gets this edge** —
-`cargo run -p xtask -- check-arch` asserts `topos` depends on no `plane-store` / `sqlx` / `libsqlite3-sys`.
+`sqlx`-postgres is **pure Rust** — no bundled C library — so building the server crate (and the plane
+binary) needs **no C toolchain**; the old `libsqlite3-sys` build edge is gone from the tree entirely. The
+**client never gets a `plane-store` / `sqlx` edge** — `cargo run -p xtask -- check-arch` asserts `topos`
+depends on neither.
 
-Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `thiserror`, raw `sqlx` (sqlite,
-runtime-tokio, macros, migrate — no TLS); `tokio` with only the `time` feature is a **normal** dependency
-(the migrate deleting-wait uses a bounded-backoff sleep while it polls outside any write transaction) —
-arch-clean because the client takes no edge to `plane-store`; `tokio`'s `rt` + `macros` are dev-only (to
-drive `#[tokio::test]`). The async runtime itself is still the caller's, via sqlx's `runtime-tokio` feature.
+Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `thiserror`, raw `sqlx` (postgres,
+runtime-tokio, macros, migrate, tls-rustls-ring-native-roots); `tokio` with only the `time` feature is a
+**normal** dependency (the migrate deleting-wait uses a bounded-backoff sleep while it polls outside any
+write transaction) — arch-clean because the client takes no edge to `plane-store`; `tokio`'s `rt` +
+`macros` are dev-only (to drive `#[tokio::test]`). The async runtime itself is still the caller's, via
+sqlx's `runtime-tokio` feature.
 
 The **pointer-move signer** adds, to **this crate only** (never the client — `check-arch` forbids the
 `topos → plane-store` edge, so none of these reach the CLI): `ed25519-dalek` with `std` + `zeroize` (the
@@ -238,7 +248,7 @@ shared workspace pin stays `default-features = false` so `topos-core` keeps its 
 (wiping the raw seed buffer around `from_bytes`), `getrandom` (the OS CSPRNG for first-run key generation),
 `base64` (base64url-unpadded for the signed pointer's signature value), `uuid` (parsing the canonical op id
 into the 16 bytes the device-op signature binds), and `serde_json` (serializing the signed-`current` record
-DTO into the stored BLOB). The plane private key lives **only** here; `topos-core` stays no-key verify-only.
+DTO into the stored `BYTEA`). The plane private key lives **only** here; `topos-core` stays no-key verify-only.
 
 The **enrollment issuance core** adds, to **this crate only** (likewise client-unreachable): `hmac` + `sha2`
 (HMAC-SHA256 — the deterministic opaque-credential derivation over the `0600` enrollment secret, which reuses

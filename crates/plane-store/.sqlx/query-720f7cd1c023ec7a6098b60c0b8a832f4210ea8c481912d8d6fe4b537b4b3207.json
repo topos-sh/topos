@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT workspace_id AS \"workspace_id!\", skill_id AS \"skill_id!\", principal AS \"principal!\"\n               FROM read_token WHERE token_sha256 = $1 AND (expires_at IS NULL OR expires_at > $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workspace_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "skill_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "principal!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "720f7cd1c023ec7a6098b60c0b8a832f4210ea8c481912d8d6fe4b537b4b3207"
+}

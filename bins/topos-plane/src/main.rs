@@ -17,9 +17,10 @@ struct Config {
     /// The address to bind (host:port).
     #[arg(long, env = "TOPOS_PLANE_BIND", default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
-    /// The SQLite database file (created if absent).
-    #[arg(long, env = "TOPOS_PLANE_DB")]
-    db: PathBuf,
+    /// The Postgres connection URL (e.g. `postgres://user:pass@host:5432/db`; append `?sslmode=require`
+    /// for a managed / BYO database over the network). The schema is migrated on startup.
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
     /// The per-workspace git-object store root (created if absent).
     #[arg(long, env = "TOPOS_PLANE_GIT_ROOT")]
     git_root: PathBuf,
@@ -102,8 +103,8 @@ async fn main() -> Result<()> {
     // The single construction path (dogfooding the library's leak-free constructor — the same one a downstream
     // plane uses): build the serving state from a `PlaneConfig`. It opens the authority, loads/generates the
     // `0600` plane key + enrollment secret, and builds the enrollment config internally.
-    let state = PlaneState::open_sqlite(PlaneConfig {
-        db_path: cfg.db,
+    let state = PlaneState::open(PlaneConfig {
+        database_url: cfg.database_url,
         git_root: cfg.git_root,
         large_root: cfg.large_root,
         plane_key_path: cfg.plane_key,

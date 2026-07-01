@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn propose_opens_a_proposal_without_moving_current() {
-    let fx = Fixture::new("pr-open").await;
+#[sqlx::test]
+async fn propose_opens_a_proposal_without_moving_current(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-open").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(20);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -56,9 +56,9 @@ async fn propose_opens_a_proposal_without_moving_current() {
     assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 0);
 }
 
-#[tokio::test]
-async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing() {
-    let fx = Fixture::new("pr-genesis").await;
+#[sqlx::test]
+async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-genesis").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(20);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -93,11 +93,13 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing() {
     );
 }
 
-#[tokio::test]
-async fn a_proposal_staled_by_a_publish_then_gc_reclaims_its_unique_object_and_reads_404() {
+#[sqlx::test]
+async fn a_proposal_staled_by_a_publish_then_gc_reclaims_its_unique_object_and_reads_404(
+    pool: PgPool,
+) {
     // The keep-set == read-surface crux through the REAL write paths: propose roots a unique object (kept +
     // readable); a direct publish stales the proposal; GC reclaims the unique object; a read is 404, never Integrity.
-    let fx = Fixture::new("pr-stale-gc").await;
+    let fx = Fixture::new(pool, "pr-stale-gc").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(21);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -163,9 +165,9 @@ async fn a_proposal_staled_by_a_publish_then_gc_reclaims_its_unique_object_and_r
     ));
 }
 
-#[tokio::test]
-async fn propose_then_approve_promotes_sideways_and_replays_idempotently() {
-    let fx = Fixture::new("pr-approve").await;
+#[sqlx::test]
+async fn propose_then_approve_promotes_sideways_and_replays_idempotently(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-approve").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(22);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -239,9 +241,9 @@ async fn propose_then_approve_promotes_sideways_and_replays_idempotently() {
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 }
 
-#[tokio::test]
-async fn interleaving_b_a_stale_approve_conflicts_then_rebase_and_approve_succeeds() {
-    let fx = Fixture::new("pr-interleave-b").await;
+#[sqlx::test]
+async fn interleaving_b_a_stale_approve_conflicts_then_rebase_and_approve_succeeds(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-interleave-b").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(23);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -328,12 +330,14 @@ async fn interleaving_b_a_stale_approve_conflicts_then_rebase_and_approve_succee
     assert_eq!(current_commit(&fx, &w, &s).await, p2);
 }
 
-#[tokio::test]
-async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_matches_the_base() {
+#[sqlx::test]
+async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_matches_the_base(
+    pool: PgPool,
+) {
     // …X(beta)->Y(gamma); revert --to X makes current.tree == X.tree == the proposal's base tree, yet the
     // generation advanced. A late approve at the stale base must CONFLICT — a digest-only CAS would wrongly
     // accept (current.tree == base.tree); the whole-(epoch,seq) CAS catches it.
-    let fx = Fixture::new("pr-interleave-c").await;
+    let fx = Fixture::new(pool, "pr-interleave-c").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(24);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -417,9 +421,9 @@ async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_ma
     assert_eq!(conflict.current, Some(gn(1, 3)));
 }
 
-#[tokio::test]
-async fn approving_an_already_accepted_proposal_conflicts_and_never_promotes_twice() {
-    let fx = Fixture::new("pr-double-approve").await;
+#[sqlx::test]
+async fn approving_an_already_accepted_proposal_conflicts_and_never_promotes_twice(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-double-approve").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(25);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -476,9 +480,9 @@ async fn approving_an_already_accepted_proposal_conflicts_and_never_promotes_twi
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 }
 
-#[tokio::test]
-async fn four_eyes_blocks_self_approve_only_under_review_required() {
-    let fx = Fixture::new("pr-4eyes-on").await;
+#[sqlx::test]
+async fn four_eyes_blocks_self_approve_only_under_review_required(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-4eyes-on").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(26);
     let reviewer = dev_key(27);
@@ -544,9 +548,9 @@ async fn four_eyes_blocks_self_approve_only_under_review_required() {
     assert!(ok.is_ok());
 }
 
-#[tokio::test]
-async fn a_solo_author_may_self_approve_when_review_required_is_off() {
-    let fx = Fixture::new("pr-4eyes-off").await;
+#[sqlx::test]
+async fn a_solo_author_may_self_approve_when_review_required_is_off(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-4eyes-off").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(28);
     register(&fx, &w, &s, "dk", &author, "p_author").await;
@@ -593,11 +597,11 @@ async fn a_solo_author_may_self_approve_when_review_required_is_off() {
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 }
 
-#[tokio::test]
-async fn a_staled_then_gc_reclaimed_proposal_approve_conflicts_not_integrity() {
+#[sqlx::test]
+async fn a_staled_then_gc_reclaimed_proposal_approve_conflicts_not_integrity(pool: PgPool) {
     // After a proposal stales AND GC reclaims its unique bytes, a late approve must be a clean CONFLICT — the
     // pre-transaction render fault is classified as stale (current moved), never surfaced as a corruption alarm.
-    let fx = Fixture::new("pr-stale-approve").await;
+    let fx = Fixture::new(pool, "pr-stale-approve").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(29);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -656,9 +660,9 @@ async fn a_staled_then_gc_reclaimed_proposal_approve_conflicts_not_integrity() {
     assert_eq!(conflict.outcome, TerminalOutcome::Conflict);
 }
 
-#[tokio::test]
-async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims() {
-    let fx = Fixture::new("pr-reject").await;
+#[sqlx::test]
+async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-reject").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(40);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -723,9 +727,11 @@ async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims() {
     );
 }
 
-#[tokio::test]
-async fn rejecting_an_already_rejected_proposal_is_idempotent_and_approve_after_reject_is_typed() {
-    let fx = Fixture::new("pr-reject-idem").await;
+#[sqlx::test]
+async fn rejecting_an_already_rejected_proposal_is_idempotent_and_approve_after_reject_is_typed(
+    pool: PgPool,
+) {
+    let fx = Fixture::new(pool, "pr-reject-idem").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(41);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -795,9 +801,9 @@ async fn rejecting_an_already_rejected_proposal_is_idempotent_and_approve_after_
     assert_eq!(current_commit(&fx, &w, &s).await, g);
 }
 
-#[tokio::test]
-async fn an_unrostered_principal_cannot_reject() {
-    let fx = Fixture::new("pr-reject-authz").await;
+#[sqlx::test]
+async fn an_unrostered_principal_cannot_reject(pool: PgPool) {
+    let fx = Fixture::new(pool, "pr-reject-authz").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(42);
     let stranger = dev_key(43);
@@ -867,11 +873,13 @@ async fn an_unrostered_principal_cannot_reject() {
     assert!(ok.is_ok());
 }
 
-#[tokio::test]
-async fn the_review_required_loop_direct_is_approval_required_propose_needs_review_approve_ok() {
+#[sqlx::test]
+async fn the_review_required_loop_direct_is_approval_required_propose_needs_review_approve_ok(
+    pool: PgPool,
+) {
     // Under review_required a DIRECT publish is APPROVAL_REQUIRED (the dead-end), an explicit --propose is
     // NEEDS_REVIEW (the remedy), and a second-actor approve promotes — never confusing the two outcomes.
-    let fx = Fixture::new("pr-rr-loop").await;
+    let fx = Fixture::new(pool, "pr-rr-loop").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(44);
     let reviewer = dev_key(45);
@@ -944,10 +952,10 @@ async fn the_review_required_loop_direct_is_approval_required_propose_needs_revi
     assert_eq!(ok.current, Some(gn(1, 2)));
 }
 
-#[tokio::test]
-async fn the_proposals_table_rejects_out_of_range_generations() {
+#[sqlx::test]
+async fn the_proposals_table_rejects_out_of_range_generations(pool: PgPool) {
     // SF-4: the safe-integer CHECK pins every stored (epoch, seq) to the JCS ceiling a follower could verify.
-    let fx = Fixture::new("pr-safeint").await;
+    let fx = Fixture::new(pool, "pr-safeint").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let over = fx
         .authority
@@ -970,12 +978,12 @@ async fn the_proposals_table_rejects_out_of_range_generations() {
     );
 }
 
-#[tokio::test]
-async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable() {
+#[sqlx::test]
+async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable(pool: PgPool) {
     // The pointer-move's in-transaction authorization (the roster check) replaces the retired upload's
     // roster gate: a registered-but-unrostered device migrates its candidate but cannot promote it, and
     // records no commit_object — so the object is unreadable.
-    let fx = Fixture::new("authz-unrostered").await;
+    let fx = Fixture::new(pool, "authz-unrostered").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(50);
     fx.authority
@@ -1019,12 +1027,12 @@ async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_read
     ));
 }
 
-#[tokio::test]
-async fn a_publish_cannot_adopt_another_skills_commit() {
+#[sqlx::test]
+async fn a_publish_cannot_adopt_another_skills_commit(pool: PgPool) {
     // The cross-skill adoption guard, in the SHARED write body (so it covers publish / propose / approve
     // alike): a content-addressed commit belongs to exactly one skill, so re-creating its identical bytes
     // under another skill is refused — even by a principal rostered for both.
-    let fx = Fixture::new("authz-xskill").await;
+    let fx = Fixture::new(pool, "authz-xskill").await;
     let (w, x, y) = (ws("w_acme"), skill("s_x"), skill("s_y"));
     let key = dev_key(51);
     register(&fx, &w, &x, "dk", &key, "p_dev").await;
@@ -1060,13 +1068,13 @@ async fn a_publish_cannot_adopt_another_skills_commit() {
     assert_eq!(r.outcome, TerminalOutcome::Denied);
 }
 
-#[tokio::test]
-async fn approve_after_reject_then_gc_is_denied_not_integrity() {
+#[sqlx::test]
+async fn approve_after_reject_then_gc_is_denied_not_integrity(pool: PgPool) {
     // After a proposal is rejected AND a GC reclaims its now-unrooted unique bytes — while `current` is still
     // at the base (reject moves no pointer) — an approve's pre-transaction render faults over the missing
     // bytes. It must NOT surface as Integrity (a 500 / no receipt): the proposal is no longer open, so the
     // bytes were LEGITIMATELY reclaimed, and the transaction must produce a typed, receipted DENIED.
-    let fx = Fixture::new("pr-reject-gc-approve").await;
+    let fx = Fixture::new(pool, "pr-reject-gc-approve").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(46);
     register(&fx, &w, &s, "dk", &key, "p_author").await;
@@ -1125,13 +1133,13 @@ async fn approve_after_reject_then_gc_is_denied_not_integrity() {
     assert_eq!(current_commit(&fx, &w, &s).await, g);
 }
 
-#[tokio::test]
-async fn revert_to_a_proposal_commit_is_refused_so_it_cannot_bypass_review() {
+#[sqlx::test]
+async fn revert_to_a_proposal_commit_is_refused_so_it_cannot_bypass_review(pool: PgPool) {
     // A proposal commit carries a `skill_commit` provenance row (so its digest resolves) but NO `commit_object`
     // root — it is not an accepted version. Reverting to it would forward-promote its un-reviewed tree past the
     // review gate + four-eyes (revert bypasses both). The accepted-trunk gate must refuse it, leaving `current`
     // unmoved and never serving the proposal's bytes.
-    let fx = Fixture::new("pr-revert-proposal").await;
+    let fx = Fixture::new(pool, "pr-revert-proposal").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(52);
     register(&fx, &w, &s, "dk", &key, "p_author").await;

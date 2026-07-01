@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT git_oid AS \"git_oid: Vec<u8>\", object_id AS \"object_id!: Vec<u8>\"\n               FROM object_presence\n               WHERE workspace_id = $1 AND status = 'present' AND location = 'large-local'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_oid: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "11bcc0c3f41710d344e3e3a0c161346f47da0c4c2a3a4a0c07c45f78ce5786f7"
+}

@@ -1,7 +1,7 @@
 //! The cross-skill lineage predicate — read-only this increment, enforced transactionally later.
 //!
 //! Two layers: a tiny database gather (which committed ids already have provenance, and under which
-//! skill) lives in `mod sqlite`; the real logic is the **pure** decision function here, over the
+//! skill) lives in `mod db`; the real logic is the **pure** decision function here, over the
 //! gathered facts. The candidate's parents are a projection of the server rehash (the id is derived
 //! from exactly those parents), never a free-standing client `(id, parents)` pair — that binding is the
 //! confused-deputy guard extended to lineage.

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) VALUES ($1, $2, $3, $4, 0) ON CONFLICT (workspace_id, device_key_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fa4279e6de7073372cb9a0042e7bf3c30e9f5f842c0323a02fd104eaf0391187"
+}

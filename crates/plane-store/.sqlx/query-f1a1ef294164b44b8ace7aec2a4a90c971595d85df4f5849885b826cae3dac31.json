@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT commit_id AS \"commit_id!: Vec<u8>\", epoch AS \"epoch!: i64\", seq AS \"seq!: i64\"\n           FROM current WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "commit_id!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "epoch!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "seq!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f1a1ef294164b44b8ace7aec2a4a90c971595d85df4f5849885b826cae3dac31"
+}

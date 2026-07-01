@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn migrate_installs_durably_and_committed_lease_protects_from_gc() {
-    let fx = Fixture::new("e-migrate").await;
+#[sqlx::test]
+async fn migrate_installs_durably_and_committed_lease_protects_from_gc(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-migrate").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"# skill\nrun it\n";
@@ -31,9 +31,9 @@ async fn migrate_installs_durably_and_committed_lease_protects_from_gc() {
     assert!(!a.workspace_quarantine_dir(&w, &op("op1")).exists());
 }
 
-#[tokio::test]
-async fn gc_reclaims_an_abandoned_migrated_object_physically() {
-    let fx = Fixture::new("e-abandon").await;
+#[sqlx::test]
+async fn gc_reclaims_an_abandoned_migrated_object_physically(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-abandon").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"abandon me";
@@ -57,9 +57,9 @@ async fn gc_reclaims_an_abandoned_migrated_object_physically() {
     );
 }
 
-#[tokio::test]
-async fn gc_retention_is_exactly_reachability() {
-    let fx = Fixture::new("e-retain").await;
+#[sqlx::test]
+async fn gc_retention_is_exactly_reachability(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-retain").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     // Two migrated objects, both abandoned (leases released) so only commit_object can root them.
@@ -86,10 +86,10 @@ async fn gc_retention_is_exactly_reachability() {
     );
 }
 
-#[tokio::test]
-async fn dedup_race_lease_protects_the_full_closure_under_a_slow_migrate() {
+#[sqlx::test]
+async fn dedup_race_lease_protects_the_full_closure_under_a_slow_migrate(pool: PgPool) {
     // The release-blocker dedup race, exercised through the REAL migrate op (lease step), deterministically.
-    let fx = Fixture::new("e-dedup").await;
+    let fx = Fixture::new(pool, "e-dedup").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let a_bytes = b"shared object A";
@@ -138,9 +138,9 @@ async fn dedup_race_lease_protects_the_full_closure_under_a_slow_migrate() {
     );
 }
 
-#[tokio::test]
-async fn two_concurrent_migrations_of_one_object_do_not_corrupt() {
-    let fx = Fixture::new("e-concurrent").await;
+#[sqlx::test]
+async fn two_concurrent_migrations_of_one_object_do_not_corrupt(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-concurrent").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"identical content";
@@ -172,9 +172,9 @@ async fn two_concurrent_migrations_of_one_object_do_not_corrupt() {
     }
 }
 
-#[tokio::test]
-async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired_one() {
-    let fx = Fixture::new("e-quarantine").await;
+#[sqlx::test]
+async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired_one(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-quarantine").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     // Ingest WITHOUT migrating → bytes sit in the GC-excluded quarantine, not the main store.
@@ -205,9 +205,9 @@ async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired
     );
 }
 
-#[tokio::test]
-async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end() {
-    let fx = Fixture::new("e-recovery").await;
+#[sqlx::test]
+async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-recovery").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"half-unlinked";
@@ -244,9 +244,9 @@ async fn recovery_sweep_finalizes_a_crashed_unlink_end_to_end() {
     assert_eq!(gc::recovery_sweep(a, 1_000_001).await.unwrap(), 0);
 }
 
-#[tokio::test]
-async fn ingest_rejects_a_denylisted_blob() {
-    let fx = Fixture::new("e-deny").await;
+#[sqlx::test]
+async fn ingest_rejects_a_denylisted_blob(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-deny").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"a leaked secret";
@@ -263,9 +263,9 @@ async fn ingest_rejects_a_denylisted_blob() {
     );
 }
 
-#[tokio::test]
-async fn gc_for_one_workspace_never_touches_another_with_identical_content() {
-    let fx = Fixture::new("e-xws-gc").await;
+#[sqlx::test]
+async fn gc_for_one_workspace_never_touches_another_with_identical_content(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-xws-gc").await;
     let a = &fx.authority;
     let (wa, wb) = (ws("w_a"), ws("w_b"));
     let body = b"identical bytes across tenants";
@@ -297,9 +297,9 @@ async fn gc_for_one_workspace_never_touches_another_with_identical_content() {
     );
 }
 
-#[tokio::test]
-async fn quarantines_are_per_workspace_and_the_janitor_is_scoped() {
-    let fx = Fixture::new("e-xws-q").await;
+#[sqlx::test]
+async fn quarantines_are_per_workspace_and_the_janitor_is_scoped(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-xws-q").await;
     let a = &fx.authority;
     let (wa, wb) = (ws("w_a"), ws("w_b"));
     // Same op id in two workspaces → distinct quarantine dirs.
@@ -323,14 +323,14 @@ async fn quarantines_are_per_workspace_and_the_janitor_is_scoped() {
     assert!(qb.exists(), "B's quarantine spared (its TTL is far off)");
 }
 
-#[tokio::test]
-async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge() {
+#[sqlx::test]
+async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge(pool: PgPool) {
     // The recovery byte-loss guard for the RECOVERY path, where the keep-set root arrives AFTER the claim. A
     // crashed GC leaves a stale `deleting` row; before recovery runs, a `commit_object` edge over the same
     // object appears (making it read-authorized). recovery_sweep must re-verify the keep-set at delete time
     // and SPARE it, never unlink a now-readable, committed object's bytes. Fails (Integrity on the final read)
     // if `claim_stale_for_recovery` drops its `commit_object` re-check.
-    let fx = Fixture::new("e-recover-reroot").await;
+    let fx = Fixture::new(pool, "e-recover-reroot").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let p = prin("dev_p");
@@ -376,15 +376,15 @@ async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge() {
     );
 }
 
-#[tokio::test]
-async fn recovery_finalizes_a_leased_deleting_row_to_unblock_a_waiting_migrate() {
+#[sqlx::test]
+async fn recovery_finalizes_a_leased_deleting_row_to_unblock_a_waiting_migrate(pool: PgPool) {
     // A migrate that hits a crashed-GC's stale `deleting` row leases its full object set (including this
     // object) BEFORE `install_one` waits for `absent`. Recovery MUST still finalize the stale row to unblock
     // that waiter — a lease over a `deleting` object means "waiting to re-install", not "readable" (only a
     // `commit_object` edge spares; see `recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge`).
     // Regression: a recovery guard that also checked the lease would strand the migrate until the lease TTL
     // lapsed.
-    let fx = Fixture::new("e-recover-leased").await;
+    let fx = Fixture::new(pool, "e-recover-leased").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"crashed then re-leased by a waiting migrate";
@@ -411,13 +411,13 @@ async fn recovery_finalizes_a_leased_deleting_row_to_unblock_a_waiting_migrate()
     );
 }
 
-#[tokio::test]
-async fn migrate_install_waits_out_deleting_then_recopies() {
+#[sqlx::test]
+async fn migrate_install_waits_out_deleting_then_recopies(pool: PgPool) {
     // Exercises install_one's deleting-wait branch (the sole justification for the normal `tokio` time dep):
     // an object mid-GC (`deleting`) is NEVER resurrected by a concurrent migrate — the install waits for
     // `absent`, then re-copies the bytes. A regression that treated `deleting` as a dedup reuse (e.g.
     // `return Ok(())`) would leave the row `deleting` and fail the final `Present` assertion.
-    let fx = Fixture::new("e-deleting-wait").await;
+    let fx = Fixture::new(pool, "e-deleting-wait").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"installed only after the unlink finishes";
@@ -449,12 +449,12 @@ async fn migrate_install_waits_out_deleting_then_recopies() {
     );
 }
 
-#[tokio::test]
-async fn tombstone_does_not_interrupt_an_in_flight_deletion() {
+#[sqlx::test]
+async fn tombstone_does_not_interrupt_an_in_flight_deletion(pool: PgPool) {
     // `insert_tombstone`'s `WHERE status IN ('present','absent')` deliberately leaves a `deleting` row alone
     // (flipping it to `unavailable` would strand the unlink — `finalize_delete` only fires on `deleting`).
     // The blob is still denylisted, and the in-flight unlink still completes to `absent`.
-    let fx = Fixture::new("t-tomb-deleting").await;
+    let fx = Fixture::new(pool, "t-tomb-deleting").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"dying-but-denylisted");
@@ -477,13 +477,13 @@ async fn tombstone_does_not_interrupt_an_in_flight_deletion() {
     );
 }
 
-#[tokio::test]
-async fn claim_expired_quarantine_spares_a_refreshed_reused_op() {
+#[sqlx::test]
+async fn claim_expired_quarantine_spares_a_refreshed_reused_op(pool: PgPool) {
     // The janitor's claim-before-rm guard: a quarantine row whose expiry was refreshed into the future (op-id
     // reuse by a retry) must NOT be claimed for sweeping at a `now` past the OLD expiry — only a still-expired
     // row is. This is what stops the janitor from rm'ing an active, re-staged quarantine out from under an
     // in-flight migrate.
-    let fx = Fixture::new("t-q-claim").await;
+    let fx = Fixture::new(pool, "t-q-claim").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let dir = a.workspace_quarantine_dir(&w, &op("k"));
@@ -525,8 +525,8 @@ async fn claim_expired_quarantine_spares_a_refreshed_reused_op() {
     );
 }
 
-#[tokio::test]
-async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
+#[sqlx::test]
+async fn recovery_reclaim_fences_off_the_superseded_gc_claimant(pool: PgPool) {
     // A pre-merge review finding: a recovery sweep that re-claims a `deleting` row a live GC claimed (because a
     // long/frozen pass let it look stale) must FENCE OFF that original claimant — only one actor may unlink +
     // finalize, or a re-migrate's freshly re-installed bytes could be deleted out from under it (a
@@ -534,7 +534,7 @@ async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
     // `confirm_deleting_owner` (gating the unlink) and the token-gated `finalize_delete` reject a superseded
     // claimant. Driven at the SQL layer with explicit timestamps (no real clock) so the interleaving is
     // deterministic.
-    let fx = Fixture::new("t-claim-fence").await;
+    let fx = Fixture::new(pool, "t-claim-fence").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let o = object_id(b"contended");
@@ -580,13 +580,13 @@ async fn recovery_reclaim_fences_off_the_superseded_gc_claimant() {
     );
 }
 
-#[tokio::test]
-async fn migrate_re_materializes_a_present_row_whose_bytes_a_crash_removed() {
+#[sqlx::test]
+async fn migrate_re_materializes_a_present_row_whose_bytes_a_crash_removed(pool: PgPool) {
     // A pre-merge review finding: a `present` row whose loose object a past crash silently removed (the
     // WAL power-loss residual) must NOT be blindly dedup-reused — `migrate_finish`'s non-expiring lease would
     // then root a version over gone bytes (a permanent, dedup-poisoning byte loss). install_one's belt stats
     // the loose object and re-materializes it from the candidate's quarantine instead of dedup-skipping.
-    let fx = Fixture::new("e-belt").await;
+    let fx = Fixture::new(pool, "e-belt").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let body = b"resurrect me from quarantine";

@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies() {
-    let fx = Fixture::new("sc-genesis").await;
+#[sqlx::test]
+async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-genesis").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(11);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -50,9 +50,9 @@ async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies() {
     assert!(!verify_record(&record, "w_OTHER", "s_deploy", &pubkey));
 }
 
-#[tokio::test]
-async fn publish_advances_seq_within_the_epoch() {
-    let fx = Fixture::new("sc-advance").await;
+#[sqlx::test]
+async fn publish_advances_seq_within_the_epoch(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-advance").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(12);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -93,9 +93,9 @@ async fn publish_advances_seq_within_the_epoch() {
 
 /// Interleaving A — two publishes based on the same generation: exactly one OK, the other a stable CONFLICT
 /// carrying the live generation; the pointer advances exactly once.
-#[tokio::test]
-async fn concurrent_publishes_one_ok_one_conflict() {
-    let fx = Fixture::new("sc-concurrent").await;
+#[sqlx::test]
+async fn concurrent_publishes_one_ok_one_conflict(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-concurrent").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(13);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -166,13 +166,52 @@ async fn concurrent_publishes_one_ok_one_conflict() {
         &rb
     };
     assert_eq!(conflict.current, Some(gn(1, 2)));
+    // (That the CONFLICT above can arise via a serialization-failure retry under real MVCC — not only a
+    // serialized schedule — is proven deterministically by `the_serializable_runner_retries_a_forced_
+    // serialization_failure`; here we assert only the outcome, which every valid schedule satisfies.)
+}
+
+/// The teeth of the MVCC re-proof, made deterministic: force exactly one Postgres serialization failure
+/// (SQLSTATE 40001) inside the `run_serializable!` macro and assert it rolled back and retried. A
+/// live-concurrency assertion on `retry_count` is scheduler-dependent (an accidentally-serialized `join!`
+/// reaches the same outcome without ever raising 40001); this pins the retry *mechanism* — the thing that
+/// re-establishes SQLite's old single-writer safety on Postgres — to a single, repeatable observation.
+#[sqlx::test]
+async fn the_serializable_runner_retries_a_forced_serialization_failure(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-retry-proof").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(21);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+    // A genesis publish creates the `current` row the forcing method contends on.
+    publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        "aaaaaaaa-0000-4000-8000-00000000000a",
+        genesis(vec![file("a", b"0")]),
+        gn(0, 0),
+    )
+    .await;
+    assert_eq!(fx.authority.db().retry_count(), 0);
+    fx.authority
+        .db()
+        .test_force_one_serialization_retry(&w, &s)
+        .await
+        .expect("the runner re-runs the closure and the second attempt commits");
+    assert_eq!(
+        fx.authority.db().retry_count(),
+        1,
+        "the runner must roll back and retry exactly one forced serialization failure"
+    );
 }
 
 /// Interleaving C — a revert advances `seq` across a byte round-trip, so a stale move at the pre-revert
 /// generation CONFLICTs (a digest-only CAS would wrongly accept it; the whole-(epoch,seq) CAS catches it).
-#[tokio::test]
-async fn revert_advances_seq_and_a_stale_publish_conflicts() {
-    let fx = Fixture::new("sc-revert").await;
+#[sqlx::test]
+async fn revert_advances_seq_and_a_stale_publish_conflicts(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-revert").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(14);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -260,9 +299,9 @@ async fn revert_advances_seq_and_a_stale_publish_conflicts() {
 
 /// The restore-ABA: a backup/restore that bumps `epoch` while reusing `seq`. A stale op at the OLD
 /// generation (matching `seq`, lower `epoch`) CONFLICTs — a seq-only CAS would wrongly accept it.
-#[tokio::test]
-async fn restore_aba_matching_seq_bumped_epoch_conflicts() {
-    let fx = Fixture::new("sc-aba").await;
+#[sqlx::test]
+async fn restore_aba_matching_seq_bumped_epoch_conflicts(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-aba").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(15);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -333,9 +372,9 @@ async fn restore_aba_matching_seq_bumped_epoch_conflicts() {
 
 /// Interleaving E — a lost-ack retry: the original op committed (seq=2), the team moved on (seq=3), and the
 /// retry returns the BYTE-IDENTICAL original receipt (the original signed record), not a spurious conflict.
-#[tokio::test]
-async fn lost_ack_retry_replays_the_identical_receipt() {
-    let fx = Fixture::new("sc-lostack").await;
+#[sqlx::test]
+async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-lostack").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(16);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -407,9 +446,9 @@ async fn lost_ack_retry_replays_the_identical_receipt() {
 }
 
 /// A device revoked BEFORE the promotion (committed ahead of the pointer-move txn) blocks the move.
-#[tokio::test]
-async fn a_revoke_before_promotion_blocks_the_move() {
-    let fx = Fixture::new("sc-revoke").await;
+#[sqlx::test]
+async fn a_revoke_before_promotion_blocks_the_move(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-revoke").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(17);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -460,9 +499,9 @@ async fn a_revoke_before_promotion_blocks_the_move() {
 
 /// After a successful promote + lease-release, a GC pass does NOT reclaim the new `current`'s objects (the
 /// `skill_commit` + `commit_object` edges root them) — the re-rooting handoff has no reclaim window.
-#[tokio::test]
-async fn post_promote_gc_does_not_reclaim_current_objects() {
-    let fx = Fixture::new("sc-gcreach").await;
+#[sqlx::test]
+async fn post_promote_gc_does_not_reclaim_current_objects(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-gcreach").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(18);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -498,9 +537,9 @@ async fn post_promote_gc_does_not_reclaim_current_objects() {
 
 /// A first-parent mismatch (the candidate's first parent is an in-skill ancestor that is NOT current) is
 /// DENIED even when the CAS matches — the parent assert is orthogonal to the generation compare.
-#[tokio::test]
-async fn first_parent_mismatch_is_denied_even_when_the_cas_matches() {
-    let fx = Fixture::new("sc-firstparent").await;
+#[sqlx::test]
+async fn first_parent_mismatch_is_denied_even_when_the_cas_matches(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-firstparent").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(19);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -571,9 +610,9 @@ async fn first_parent_mismatch_is_denied_even_when_the_cas_matches() {
 }
 
 /// A two-parent author-merge candidate is rejected wholesale in the backbone (merges are a later increment).
-#[tokio::test]
-async fn a_two_parent_merge_is_denied() {
-    let fx = Fixture::new("sc-merge").await;
+#[sqlx::test]
+async fn a_two_parent_merge_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-merge").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(20);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -642,9 +681,9 @@ async fn a_two_parent_merge_is_denied() {
 
 /// The review-required gate: a direct publish preflight short-circuits to APPROVAL_REQUIRED having ingested
 /// nothing; and the in-transaction read is authoritative if a migrate somehow happened first.
-#[tokio::test]
-async fn review_required_gates_a_direct_publish() {
-    let fx = Fixture::new("sc-gate").await;
+#[sqlx::test]
+async fn review_required_gates_a_direct_publish(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-gate").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(21);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -723,9 +762,9 @@ async fn review_required_gates_a_direct_publish() {
 /// retry. The preflight gate binds `commit = None`, so without the pre-txn replay the retry would fall
 /// through to the promote path, whose commit-comparison replay would burn it as `OP_ID_REUSED`. The pointer
 /// never moves, and a FRESH op under the now-off policy is NOT gated (the replay is op-scoped).
-#[tokio::test]
-async fn a_gated_publish_replays_approval_required_across_a_policy_flip() {
-    let fx = Fixture::new("sc-gate-flip").await;
+#[sqlx::test]
+async fn a_gated_publish_replays_approval_required_across_a_policy_flip(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-gate-flip").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(23);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -823,9 +862,9 @@ async fn a_gated_publish_replays_approval_required_across_a_policy_flip() {
 /// skips the gate so the promote path's in-txn replay (which runs BEFORE the in-txn gate) returns the
 /// original OK, rather than recording a `commit = None` gate receipt that mismatches the stored one and burns
 /// the op as `OP_ID_REUSED`. A FRESH op is still gated under the now-on policy.
-#[tokio::test]
-async fn a_successful_publish_replays_ok_even_after_review_required_flips_on() {
-    let fx = Fixture::new("sc-ok-flip-on").await;
+#[sqlx::test]
+async fn a_successful_publish_replays_ok_even_after_review_required_flips_on(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-ok-flip-on").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(24);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -939,9 +978,9 @@ async fn a_successful_publish_replays_ok_even_after_review_required_flips_on() {
 
 /// A revert may only target a version of the SAME skill — reverting to another skill's commit (same
 /// workspace) is refused, so the forward commit can never graft a foreign tree under this skill's edges.
-#[tokio::test]
-async fn revert_to_another_skills_commit_is_refused() {
-    let fx = Fixture::new("sc-xskill-revert").await;
+#[sqlx::test]
+async fn revert_to_another_skills_commit_is_refused(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-xskill-revert").await;
     let w = ws("w_acme");
     let (s1, s2) = (skill("s_one"), skill("s_two"));
     let key = dev_key(30);
@@ -1023,9 +1062,9 @@ async fn revert_to_another_skills_commit_is_refused() {
 
 /// A candidate of new bytes submitted to the PUBLISH entry signed as a non-direct op (e.g. `Revert`) is
 /// rejected before ingest — otherwise it would skip the review gate while reaching the promote path.
-#[tokio::test]
-async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest() {
-    let fx = Fixture::new("sc-opbypass").await;
+#[sqlx::test]
+async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-opbypass").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(31);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -1069,9 +1108,9 @@ async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest() {
 
 /// A CONFLICTed publish releases its (non-expiring) promotion lease, so the abandoned candidate's unique
 /// objects become GC-reclaimable rather than rooted forever.
-#[tokio::test]
-async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable() {
-    let fx = Fixture::new("sc-conflict-lease").await;
+#[sqlx::test]
+async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-conflict-lease").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(32);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -1154,9 +1193,9 @@ async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable() {
 
 /// A revert's lost-ack retry replays the ORIGINAL OK — not OP_ID_REUSED — even though `current` has
 /// advanced and a fresh forward commit would re-parent on it (the op id replays on its stable identity).
-#[tokio::test]
-async fn a_revert_lost_ack_retry_replays_the_original_ok() {
-    let fx = Fixture::new("sc-revert-replay").await;
+#[sqlx::test]
+async fn a_revert_lost_ack_retry_replays_the_original_ok(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-revert-replay").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(33);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -1242,9 +1281,9 @@ async fn a_revert_lost_ack_retry_replays_the_original_ok() {
 /// A non-canonical UUID op id (the valid-but-unhyphenated 32-hex form) is rejected — its string is a
 /// distinct receipt key that decodes to the SAME 16 signed bytes, so accepting it would split the
 /// idempotency slot. Requiring the canonical hyphenated form keeps the key 1:1 with the signed identity.
-#[tokio::test]
-async fn a_non_canonical_uuid_op_id_is_rejected() {
-    let fx = Fixture::new("sc-opid-canon").await;
+#[sqlx::test]
+async fn a_non_canonical_uuid_op_id_is_rejected(pool: PgPool) {
+    let fx = Fixture::new(pool, "sc-opid-canon").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(34);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;

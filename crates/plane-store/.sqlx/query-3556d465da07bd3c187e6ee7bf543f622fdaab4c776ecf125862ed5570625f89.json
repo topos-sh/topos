@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT signed_record AS \"signed_record?: Vec<u8>\" FROM current\n               WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "signed_record?: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "3556d465da07bd3c187e6ee7bf543f622fdaab4c776ecf125862ed5570625f89"
+}

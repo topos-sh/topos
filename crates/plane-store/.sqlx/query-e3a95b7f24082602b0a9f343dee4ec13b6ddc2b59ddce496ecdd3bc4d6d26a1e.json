@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO commit_object (workspace_id, commit_id, object_id) VALUES ($1, $2, $3) ON CONFLICT (workspace_id, commit_id, object_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e3a95b7f24082602b0a9f343dee4ec13b6ddc2b59ddce496ecdd3bc4d6d26a1e"
+}

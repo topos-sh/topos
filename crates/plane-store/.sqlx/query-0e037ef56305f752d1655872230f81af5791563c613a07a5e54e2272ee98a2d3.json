@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT location AS \"location!\" FROM object_presence\n               WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "location!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e037ef56305f752d1655872230f81af5791563c613a07a5e54e2272ee98a2d3"
+}

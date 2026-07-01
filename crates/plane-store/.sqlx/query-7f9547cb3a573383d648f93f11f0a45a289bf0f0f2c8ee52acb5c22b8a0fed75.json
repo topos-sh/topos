@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, commit_id) DO UPDATE SET bundle_digest = COALESCE(skill_commit.bundle_digest, excluded.bundle_digest)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7f9547cb3a573383d648f93f11f0a45a289bf0f0f2c8ee52acb5c22b8a0fed75"
+}

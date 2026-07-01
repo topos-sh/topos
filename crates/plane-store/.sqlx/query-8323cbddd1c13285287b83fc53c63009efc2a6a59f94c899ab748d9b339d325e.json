@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO passcodes (device_code_sha256, principal, passcode_sha256, expires_at, attempts, created_at) VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT (device_code_sha256, principal) DO UPDATE SET passcode_sha256 = excluded.passcode_sha256, expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Bytea",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8323cbddd1c13285287b83fc53c63009efc2a6a59f94c899ab748d9b339d325e"
+}

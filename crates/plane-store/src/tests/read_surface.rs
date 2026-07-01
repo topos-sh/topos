@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn resolve_read_token_resolves_a_scope_and_a_miss_is_notfound() {
-    let fx = Fixture::new("rt-token").await;
+#[sqlx::test]
+async fn resolve_read_token_resolves_a_scope_and_a_miss_is_notfound(pool: PgPool) {
+    let fx = Fixture::new(pool, "rt-token").await;
     let a = &fx.authority;
     let (w, s, p) = (ws("w_acme"), skill("s_pr"), prin("dev_read"));
     a.db()
@@ -24,11 +24,11 @@ async fn resolve_read_token_resolves_a_scope_and_a_miss_is_notfound() {
     ));
 }
 
-#[tokio::test]
-async fn list_open_proposals_lists_open_then_a_staled_one_vanishes() {
+#[sqlx::test]
+async fn list_open_proposals_lists_open_then_a_staled_one_vanishes(pool: PgPool) {
     // keep == read == LIST: an OPEN, non-stale proposal is listed (its @hash + base, no bytes/proposer); the
     // instant a publish stales it, it VANISHES from the list on the shared predicate — no event, no reaper.
-    let fx = Fixture::new("prop-list").await;
+    let fx = Fixture::new(pool, "prop-list").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
@@ -82,12 +82,12 @@ async fn list_open_proposals_lists_open_then_a_staled_one_vanishes() {
     );
 }
 
-#[tokio::test]
-async fn list_open_proposals_non_rostered_token_is_empty_not_notfound() {
+#[sqlx::test]
+async fn list_open_proposals_non_rostered_token_is_empty_not_notfound(pool: PgPool) {
     // The roster JOIN IS the authorization: a VALID token whose principal is NOT on the skill's roster yields
     // an EMPTY list (silent membership), never a not-found — there is no per-row probe. (A scope/path mismatch
     // is the only 404 this op raises; membership is invisible.)
-    let fx = Fixture::new("prop-list-noroster").await;
+    let fx = Fixture::new(pool, "prop-list-noroster").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let outsider = prin("p_outsider");
@@ -115,12 +115,12 @@ async fn list_open_proposals_non_rostered_token_is_empty_not_notfound() {
     );
 }
 
-#[tokio::test]
-async fn list_open_proposals_rejects_a_scope_or_path_mismatch() {
+#[sqlx::test]
+async fn list_open_proposals_rejects_a_scope_or_path_mismatch(pool: PgPool) {
     // The FIRST line of the op is the scope/path assert (the cross-skill/workspace leak guard): a token scoped
     // to (w_acme, s_x) used against another skill — or another workspace — is the indistinguishable not-found,
     // BEFORE any roster/proposal fact is read.
-    let fx = Fixture::new("prop-list-scope").await;
+    let fx = Fixture::new(pool, "prop-list-scope").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
@@ -150,9 +150,9 @@ async fn list_open_proposals_rejects_a_scope_or_path_mismatch() {
     ));
 }
 
-#[tokio::test]
-async fn read_current_present_absent_and_corrupt_blob() {
-    let fx = Fixture::new("rt-readcur").await;
+#[sqlx::test]
+async fn read_current_present_absent_and_corrupt_blob(pool: PgPool) {
+    let fx = Fixture::new(pool, "rt-readcur").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(40);
     register(&fx, &w, &s, "dk", &key, "p_dev").await;
@@ -207,9 +207,9 @@ async fn read_current_present_absent_and_corrupt_blob() {
     ));
 }
 
-#[tokio::test]
-async fn serve_object_serves_in_scope_and_rejects_a_scope_or_path_mismatch() {
-    let fx = Fixture::new("rt-serve").await;
+#[sqlx::test]
+async fn serve_object_serves_in_scope_and_rejects_a_scope_or_path_mismatch(pool: PgPool) {
+    let fx = Fixture::new(pool, "rt-serve").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let p = prin("dev_read");
@@ -248,9 +248,9 @@ async fn serve_object_serves_in_scope_and_rejects_a_scope_or_path_mismatch() {
     ));
 }
 
-#[tokio::test]
-async fn read_version_metadata_accepted_proposal_arm_and_unauthorized() {
-    let fx = Fixture::new("rt-vmeta").await;
+#[sqlx::test]
+async fn read_version_metadata_accepted_proposal_arm_and_unauthorized(pool: PgPool) {
+    let fx = Fixture::new(pool, "rt-vmeta").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(41);
     register(&fx, &w, &s, "dk", &key, "p_author").await;

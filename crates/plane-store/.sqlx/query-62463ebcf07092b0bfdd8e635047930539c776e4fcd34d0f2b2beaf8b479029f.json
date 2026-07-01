@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT device_code_sha256 AS \"device_code_sha256!: Vec<u8>\" FROM device_auth_sessions\n           WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "device_code_sha256!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62463ebcf07092b0bfdd8e635047930539c776e4fcd34d0f2b2beaf8b479029f"
+}

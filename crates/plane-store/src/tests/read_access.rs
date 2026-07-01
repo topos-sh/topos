@@ -1,9 +1,9 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn a_rostered_member_reads_the_bytes_of_a_version() {
-    let fx = Fixture::new("read-ok").await;
+#[sqlx::test]
+async fn a_rostered_member_reads_the_bytes_of_a_version(pool: PgPool) {
+    let fx = Fixture::new(pool, "read-ok").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let reader = prin("dev_read");
@@ -35,9 +35,9 @@ async fn a_rostered_member_reads_the_bytes_of_a_version() {
     );
 }
 
-#[tokio::test]
-async fn unrostered_reader_gets_notfound_for_a_real_object() {
-    let fx = Fixture::new("read-unrostered").await;
+#[sqlx::test]
+async fn unrostered_reader_gets_notfound_for_a_real_object(pool: PgPool) {
+    let fx = Fixture::new(pool, "read-unrostered").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let uploader = prin("dev_up");
@@ -53,9 +53,9 @@ async fn unrostered_reader_gets_notfound_for_a_real_object() {
     ));
 }
 
-#[tokio::test]
-async fn revocation_by_roster_deletion_stops_reads() {
-    let fx = Fixture::new("revoke").await;
+#[sqlx::test]
+async fn revocation_by_roster_deletion_stops_reads(pool: PgPool) {
+    let fx = Fixture::new(pool, "revoke").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let p = prin("dev_x");
@@ -75,9 +75,9 @@ async fn revocation_by_roster_deletion_stops_reads() {
     ));
 }
 
-#[tokio::test]
-async fn cross_workspace_object_is_unreadable_under_another_scope() {
-    let fx = Fixture::new("xws").await;
+#[sqlx::test]
+async fn cross_workspace_object_is_unreadable_under_another_scope(pool: PgPool) {
+    let fx = Fixture::new(pool, "xws").await;
     let a = &fx.authority;
     let (wa, wb, s) = (ws("w_a"), ws("w_b"), skill("s_pr"));
     let p = prin("dev_p");
@@ -96,9 +96,9 @@ async fn cross_workspace_object_is_unreadable_under_another_scope() {
     ));
 }
 
-#[tokio::test]
-async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent() {
-    let fx = Fixture::new("xskill").await;
+#[sqlx::test]
+async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent(pool: PgPool) {
+    let fx = Fixture::new(pool, "xskill").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (x, y) = (skill("s_x"), skill("s_y"));
@@ -123,9 +123,9 @@ async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent() {
 /// Exercise the access join + the pointer table directly from staged rows (no upload), isolating the
 /// authorization logic. The witness resolves only on the full rostered ∧ reachable match; every
 /// mismatch — wrong principal, skill, workspace, or object — collapses to no witness.
-#[tokio::test]
-async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis() {
-    let fx = Fixture::new("seed-join").await;
+#[sqlx::test]
+async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis(pool: PgPool) {
+    let fx = Fixture::new(pool, "seed-join").await;
     let a = &fx.authority;
     let (w, s, p) = (ws("w_acme"), skill("s_pr"), prin("dev_p"));
     let commit = CommitId([0x33; 32]);
@@ -161,10 +161,10 @@ async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis() {
 
 /// Drive the cross-skill lineage predicate through the database gather (not just the pure decision):
 /// a candidate whose parent is in this skill passes; one whose parent is only in another skill denies.
-#[tokio::test]
-async fn check_lineage_uses_seeded_provenance() {
+#[sqlx::test]
+async fn check_lineage_uses_seeded_provenance(pool: PgPool) {
     use crate::{CandidateCommit, LineageDecision};
-    let fx = Fixture::new("lineage-db").await;
+    let fx = Fixture::new(pool, "lineage-db").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (x, y) = (skill("s_x"), skill("s_y"));

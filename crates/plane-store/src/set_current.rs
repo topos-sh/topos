@@ -5,7 +5,7 @@
 //! pointer and re-rooting the migrated bytes — all in one serializable, pure-DB transaction. This module
 //! does the work that happens **outside** that transaction (no filesystem op may run inside it): it
 //! re-verifies the migrated candidate is renderable, derives the candidate's object set, and — for a revert
-//! — constructs the forward commit. Then it drives the one transaction in [`crate::sqlite`].
+//! — constructs the forward commit. Then it drives the one transaction in [`crate::db`].
 //!
 //! Scope here is the **backbone**: genesis + direct publish + revert + the review-required typed-fail gate.
 //! The propose -> review-approve promotion, two-parent author merges, the client pull engine, and the HTTP
@@ -79,7 +79,7 @@ impl SetCurrentReceipt {
 }
 
 /// The fully-resolved, server-trusted inputs to the one transaction — built here, consumed in
-/// [`crate::sqlite`]. Every identity field is the **server's** value (the rehashed candidate, the request
+/// [`crate::db`]. Every identity field is the **server's** value (the rehashed candidate, the request
 /// scope), never a client claim.
 pub(crate) struct PromoteInput<'a> {
     pub ws: &'a WorkspaceId,
@@ -353,7 +353,7 @@ pub(crate) async fn revert(
     .await
 }
 
-/// The server-trusted inputs to the reject transaction (built here, consumed in [`crate::sqlite`]). The
+/// The server-trusted inputs to the reject transaction (built here, consumed in [`crate::db`]). The
 /// identity fields are the device-signed values the plane reconstructs (the proposal's commit + its recorded
 /// digest + the request scope), never a client claim.
 pub(crate) struct RejectInput<'a> {

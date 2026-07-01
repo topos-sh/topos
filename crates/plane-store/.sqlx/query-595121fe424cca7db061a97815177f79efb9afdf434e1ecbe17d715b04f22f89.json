@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM upload_quarantine\n               WHERE workspace_id = $1 AND op_id = $2 AND expires_at <= $3\n               RETURNING op_id AS \"op_id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "op_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "595121fe424cca7db061a97815177f79efb9afdf434e1ecbe17d715b04f22f89"
+}

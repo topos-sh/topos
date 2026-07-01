@@ -48,9 +48,9 @@
 use topos_gitstore::{LargeObjectStore, Store};
 
 use crate::authority::Authority;
+use crate::db::{ClaimOutcome, Location};
 use crate::error::Result;
 use crate::id::{ObjectId, WorkspaceId};
-use crate::sqlite::{ClaimOutcome, Location};
 
 /// How long a `deleting` row must sit before the recovery sweep treats it as a crashed GC's leftover. A live
 /// `run_gc` stamps every claim with an accurate wall-clock (it advances `now` by the pass's real elapsed), so

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) VALUES ($1, $2, NULL, 'unverified', 'self_host', $3) ON CONFLICT (workspace_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "406afe9bb92a543fe4772e41040d2bf552beba580df0e8d86b7a3f6255a6209a"
+}

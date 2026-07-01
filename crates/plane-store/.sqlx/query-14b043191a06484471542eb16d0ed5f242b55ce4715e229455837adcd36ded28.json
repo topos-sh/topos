@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE current SET epoch = $3, seq = $4 WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14b043191a06484471542eb16d0ed5f242b55ce4715e229455837adcd36ded28"
+}

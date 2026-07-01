@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT machine_name AS \"machine_name!\", device_pubkey AS \"device_pubkey!: Vec<u8>\",\n                      workspace_id AS \"workspace_id!\", invite_sha256 AS \"invite_sha256?: Vec<u8>\"\n               FROM device_auth_sessions\n               WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "machine_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_pubkey!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 2,
+        "name": "workspace_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "invite_sha256?: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "747dadb447e1701d206e248491afffea5b2d557a3d9d90b08f9d7081702f0247"
+}

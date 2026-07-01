@@ -20,12 +20,14 @@ topos-core.workspace = true
 topos-types.workspace = true
 topos-gitstore.workspace = true
 thiserror.workspace = true
-# Raw sqlx, NO ORM (held at 0.8.6 for the offline-metadata drift gate). SQLite-first: a local file needs
-# no TLS feature. `runtime-tokio` provides the async hookup (the runtime itself is the caller's); `macros`
-# = compile-time-checked `query!` against committed `.sqlx`; `migrate` = embedded migrations. NEVER
-# `sqlx::Any` (it forfeits compile-time query checking). A future Postgres backend adds `postgres` + a TLS
-# feature behind its own module; the SQLite features stay split so that bump is a no-op here.
-sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "sqlite"] }
+# Raw sqlx, NO ORM (held at 0.8.6 for the offline-metadata drift gate). Postgres-only: `postgres` is the
+# sole backend (pure-Rust — no `libsqlite3-sys`, so the plane no longer needs a C toolchain), and
+# `tls-rustls-ring-native-roots` gives a BYO/managed Postgres `sslmode=require` over rustls (a compose'd
+# localhost Postgres stays plaintext). `runtime-tokio` provides the async hookup (the runtime itself is
+# the caller's); `macros` = compile-time-checked `query!` against committed `.sqlx`; `migrate` = embedded
+# migrations (its Migrator takes a free `pg_advisory_lock`). NEVER `sqlx::Any` (it forfeits compile-time
+# query checking, and would erase the per-backend SERIALIZABLE txn semantics the pointer-move needs).
+sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "postgres", "tls-rustls-ring-native-roots"] }
 # Only `tokio::time` — the bounded-backoff sleep the migrate deleting-wait uses while it polls OUTSIDE any
 # write transaction (holding it inside one would deadlock GC's finalize on SQLite's single writer). sqlx
 # already pulls tokio into this crate's tree via `runtime-tokio`, and the client takes NO edge to

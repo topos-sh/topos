@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO promotion_lease (workspace_id, op_id, commit_id, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, op_id) DO UPDATE SET commit_id = excluded.commit_id, expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f4bee1bb50e2d94869ad78e3a59b522df1c6a23f0e97ec0c9c4b190bef44797e"
+}

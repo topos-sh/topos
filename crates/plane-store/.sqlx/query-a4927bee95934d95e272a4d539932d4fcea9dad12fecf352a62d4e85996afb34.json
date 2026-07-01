@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_auth_sessions SET last_polled_at = $2 WHERE device_code_sha256 = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4927bee95934d95e272a4d539932d4fcea9dad12fecf352a62d4e85996afb34"
+}

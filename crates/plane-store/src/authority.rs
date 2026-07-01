@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use topos_gitstore::{LocalLargeStore, Store};
 
+use crate::db::Db;
 use crate::enroll::{
     ConfirmOutcome, CreateInviteOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
     EnrollmentState, GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteBootstrap,
@@ -15,7 +16,6 @@ use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
-use crate::sqlite::Db;
 use crate::upload::CandidateUpload;
 
 /// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
@@ -60,20 +60,43 @@ pub struct Authority {
 }
 
 impl Authority {
-    /// Open the authority over a SQLite database file, a git-store root, and a large-object-store root (all
-    /// created if absent, with the schema migrated). The size-routing threshold + reject cap default to
-    /// the crate's `DEFAULT_LARGE_THRESHOLD` / `DEFAULT_LARGE_REJECT_CAP`; override with
-    /// [`with_large_limits`](Self::with_large_limits).
+    /// Open the authority over a Postgres `database_url`, a git-store root, and a large-object-store root
+    /// (the roots created if absent; the schema migrated on the database). The size-routing threshold +
+    /// reject cap default to the crate's `DEFAULT_LARGE_THRESHOLD` / `DEFAULT_LARGE_REJECT_CAP`; override
+    /// with [`with_large_limits`](Self::with_large_limits).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
     /// migrated.
-    pub async fn open_sqlite(db_path: &Path, git_root: &Path, large_root: &Path) -> Result<Self> {
+    pub async fn open(database_url: &str, git_root: &Path, large_root: &Path) -> Result<Self> {
         std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
         std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
-        let db = Db::open(db_path).await?;
+        let db = Db::connect(database_url).await?;
         Ok(Self {
             db,
+            git_root: git_root.to_path_buf(),
+            large_root: large_root.to_path_buf(),
+            large_threshold: DEFAULT_LARGE_THRESHOLD,
+            large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
+            signer: None,
+            enrollment: None,
+        })
+    }
+
+    /// Build the authority over an **already-open** `PgPool` (the schema assumed already migrated) plus the
+    /// two store roots. The injection seam for `#[sqlx::test]` — which provisions a fresh per-test database,
+    /// runs the migrations, and hands over the pool — and for an out-of-crate e2e harness that provisions its
+    /// own per-test database the same way. Test / `test-fixtures` only: it is the sole place a `sqlx` type
+    /// (`PgPool`) crosses this boundary, and it is compiled out of the production build.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if a store root cannot be created.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn from_pool(pool: sqlx::PgPool, git_root: &Path, large_root: &Path) -> Result<Self> {
+        std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
+        std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
+        Ok(Self {
+            db: Db::from_pool(pool),
             git_root: git_root.to_path_buf(),
             large_root: large_root.to_path_buf(),
             large_threshold: DEFAULT_LARGE_THRESHOLD,
@@ -752,7 +775,7 @@ impl Authority {
 
     // ── pub(crate) internals the port modules drive ──────────────────────────────────────────────
 
-    /// The SQLite backend handle (raw SQL stays inside `mod sqlite`).
+    /// The SQLite backend handle (raw SQL stays inside `mod db`).
     pub(crate) fn db(&self) -> &Db {
         &self.db
     }
@@ -1133,7 +1156,7 @@ impl Authority {
     /// Corrupt the skill's stored signed `current` record so its signature no longer verifies, leaving the
     /// `(epoch, seq)` generation AND the named `version_id` UNCHANGED. Reads the live record, flips ONE byte
     /// of its base64url signature value to a different (still well-formed) character, and writes it back via
-    /// [`force_signed_record`](crate::sqlite::Db::force_signed_record). A follower then fetches a record whose
+    /// [`force_signed_record`](crate::db::Db::force_signed_record). A follower then fetches a record whose
     /// version/generation look advanced but whose signature fails the pinned-key check → a refuse/ALARM that
     /// retains last-known-good. Test-only.
     ///

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS \"ok!: i64\" FROM object_presence\n           WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'\n             AND NOT EXISTS (SELECT 1 FROM tombstones WHERE workspace_id = $1 AND blob_id = $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!: i64",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "390fa846b8a992d8e70cc9fcdfe8aa9fc1d5db58957ff4506f5388eead5c9142"
+}

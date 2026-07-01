@@ -13,9 +13,9 @@ use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile};
 use topos_types::{Generation, SignedCurrentRecord};
 
 use crate::authority::Authority;
+use crate::db::Location;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
-use crate::sqlite::Location;
 
 pub(crate) async fn read_object(
     authority: &Authority,
@@ -181,7 +181,7 @@ pub struct OpenProposalSummary {
 /// follower, never recoverable from a database read) and does one indexed lookup on the hash. A miss is the
 /// single indistinguishable [`AuthorityError::NotFound`], so a caller can never probe which tokens,
 /// workspaces, or skills exist; a stored row that fails to re-parse is store corruption (handled in
-/// [`crate::sqlite`], not surfaced as not-found).
+/// [`crate::db`], not surfaced as not-found).
 ///
 /// # Errors
 /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
@@ -274,7 +274,7 @@ pub(crate) async fn serve_object(
 /// scope/path match, parses the version id (a bad hex is the uniform not-found), R1-authorizes the version
 /// read, then assembles the metadata WITHOUT reading any blob bytes.
 ///
-/// Authorization is [`crate::sqlite::Db::authorize_version_read`] (rostered ∧ accepted-trunk-or-open-non-
+/// Authorization is [`crate::db::Db::authorize_version_read`] (rostered ∧ accepted-trunk-or-open-non-
 /// stale-proposal); an empty/unauthorized result is the single indistinguishable [`AuthorityError::NotFound`]
 /// (never a `403`, never a probe). Every fault in the assembly below is reachable ONLY after authz, so an
 /// [`AuthorityError::Integrity`] there discloses nothing about existence (mirroring [`read_object`]).

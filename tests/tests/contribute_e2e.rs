@@ -12,6 +12,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+mod common;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ed25519_dalek::SigningKey;
@@ -165,12 +167,14 @@ fn start_plane(tag: &str) -> Plane {
         .expect("tokio runtime");
 
     let (authority, genesis, plane_key) = rt.block_on(async {
-        let authority =
-            Authority::open_sqlite(&dir.0.join("db"), &dir.0.join("git"), &dir.0.join("large"))
-                .await
-                .expect("open authority")
-                .with_plane_key(&dir.0.join("plane.key"))
-                .expect("plane key");
+        let authority = Authority::from_pool(
+            common::provision_pg().await,
+            &dir.0.join("git"),
+            &dir.0.join("large"),
+        )
+        .expect("open authority")
+        .with_plane_key(&dir.0.join("plane.key"))
+        .expect("plane key");
         let ws = WorkspaceId::parse(WS).unwrap();
         let skill = SkillId::parse(SKILL).unwrap();
         let principal = Principal::parse(PRINCIPAL).unwrap();

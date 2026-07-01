@@ -16,6 +16,11 @@ description = "Workspace-level end-to-end integration tests — the HERO loopbac
 [dev-dependencies]
 topos = { workspace = true, features = ["test-fixtures"] }
 plane-store = { workspace = true, features = ["test-fixtures"] }
+# Provision a fresh, migrated per-test Postgres database for each loopback e2e (these harnesses run a
+# blocking `ureq` client alongside a live axum server on a self-owned multi-thread runtime, so they cannot
+# use `#[sqlx::test]`'s current-thread runtime without deadlocking — see `tests/common/mod.rs`). A dev-dep
+# of this test-only crate, so it never reaches a production artifact.
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 topos-plane.workspace = true
 topos-types.workspace = true
 # Build the governance-op signing preimage for the in-process invite mint (the owner signs the SAME frame the

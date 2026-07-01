@@ -35,13 +35,13 @@ pub struct PlaneState {
 /// the silent [`NoopMailer`], and the bootstrap won't advertise the passcode method).
 ///
 /// **Crate-private** — it names a `plane_store` type (`deployment_mode`), so it is built **internally** by
-/// [`PlaneState::open_sqlite`] from the leak-free [`PlaneConfig`]; a downstream plane never constructs it.
+/// [`PlaneState::open`] from the leak-free [`PlaneConfig`]; a downstream plane never constructs it.
 #[derive(Debug, Clone)]
 pub(crate) struct EnrollConfig {
     /// The plane's public base URL (the verification + invite links are built on it).
     pub base_url: String,
     /// This plane's deployment posture. The **authority** holds the authoritative copy the bootstrap serves;
-    /// this is the construction record (built by [`PlaneState::open_sqlite`], asserted by tests). Production
+    /// this is the construction record (built by [`PlaneState::open`], asserted by tests). Production
     /// reads only `base_url` + `smtp` from here — hence `allow(dead_code)` off-test (mirrors the [`enroll`]
     /// accessor idiom), while parity with the original construction is preserved.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -54,14 +54,15 @@ pub(crate) struct EnrollConfig {
     pub smtp: Option<SmtpConfig>,
 }
 
-/// The leak-free construction config for [`PlaneState::open_sqlite`] — the one a downstream plane (or the OSS
+/// The leak-free construction config for [`PlaneState::open`] — the one a downstream plane (or the OSS
 /// bin) fills in. Every field is plain/owned or `topos-plane`-owned: **no `plane_store` type crosses it** (the
 /// deployment posture is a `String`, parsed internally), so a composer constructs a serving plane without ever
 /// naming the authority crate.
 #[derive(Debug, Clone)]
 pub struct PlaneConfig {
-    /// The SQLite database file (created if absent).
-    pub db_path: PathBuf,
+    /// The Postgres connection URL (e.g. `postgres://user:pass@host:5432/db`; append `?sslmode=require`
+    /// for a managed / BYO database reached over the network). The schema is migrated on open.
+    pub database_url: String,
     /// The per-workspace git-object store root (created if absent).
     pub git_root: PathBuf,
     /// The per-workspace large-object store root (created if absent).
@@ -99,10 +100,10 @@ impl Default for EnrollConfig {
 impl PlaneState {
     /// Construct from an already-built [`Authority`] with the **default** rate limits (read from the
     /// environment — `TOPOS_PLANE_RATELIMIT=off` disables enforcement; otherwise a generous in-process token
-    /// bucket), a silent [`NoopMailer`], and the default enrollment config. Override the limits with
+    /// bucket), a silent `NoopMailer`, and the default enrollment config. Override the limits with
     /// [`with_rate_limit`](Self::with_rate_limit). This names the `plane_store` [`Authority`] in its signature
     /// — it is the explicit test / advanced construction path; a downstream plane builds through the leak-free
-    /// [`open_sqlite`](Self::open_sqlite) ([`PlaneConfig`]) instead.
+    /// [`open`](Self::open) ([`PlaneConfig`]) instead.
     #[must_use]
     pub fn new(authority: Arc<Authority>) -> Self {
         Self {
@@ -132,8 +133,8 @@ impl PlaneState {
     /// # async fn main() -> anyhow::Result<()> {
     /// use topos_plane::{PlaneConfig, PlaneState, router};
     ///
-    /// let state = PlaneState::open_sqlite(PlaneConfig {
-    ///     db_path: "plane.db".into(),
+    /// let state = PlaneState::open(PlaneConfig {
+    ///     database_url: "postgres://plane:secret@db:5432/plane".to_owned(),
     ///     git_root: "git".into(),
     ///     large_root: "large".into(),
     ///     plane_key_path: "plane.key".into(),
@@ -160,7 +161,7 @@ impl PlaneState {
     /// # Errors
     /// Returns an [`anyhow::Error`] if a store root cannot be created, the database cannot be opened or
     /// migrated, or the plane signing key / enrollment secret cannot be loaded or generated.
-    pub async fn open_sqlite(cfg: PlaneConfig) -> anyhow::Result<PlaneState> {
+    pub async fn open(cfg: PlaneConfig) -> anyhow::Result<PlaneState> {
         // The deployment posture crosses the boundary as a String; parse it here (an unknown value warns +
         // falls back to self_host, exactly as the bin did), so no `plane_store::DeploymentMode` is named by a
         // caller. Mirrors the previous main.rs construction verbatim (the one home, no drift).
@@ -178,7 +179,7 @@ impl PlaneState {
             }
             .to_owned()
         });
-        let authority = Authority::open_sqlite(&cfg.db_path, &cfg.git_root, &cfg.large_root)
+        let authority = Authority::open(&cfg.database_url, &cfg.git_root, &cfg.large_root)
             .await
             .context("opening the storage authority")?
             .with_plane_key(&cfg.plane_key_path)
@@ -214,7 +215,7 @@ impl PlaneState {
     /// internal `Limiter`: the `Mailer` trait stays crate-private; only the config crosses. An invalid SMTP
     /// config falls back to the no-op mailer (passcode email disabled) rather than failing the build, so the
     /// construction stays infallible. **Crate-private** (it takes the crate-private [`EnrollConfig`]) —
-    /// [`open_sqlite`](Self::open_sqlite) calls it from a leak-free [`PlaneConfig`].
+    /// [`open`](Self::open) calls it from a leak-free [`PlaneConfig`].
     #[must_use]
     pub(crate) fn with_enroll_config(mut self, config: EnrollConfig) -> Self {
         self.mailer = match &config.smtp {
@@ -235,7 +236,7 @@ impl PlaneState {
     /// Set the OIDC connector config (the bin reads `TOPOS_PLANE_OIDC_*` and calls this). Feature-gated —
     /// `enroll-oidc` is default-off, so a default build never resolves the connector. Mirrors
     /// [`with_rate_limit`](Self::with_rate_limit): a builder that the composition root calls once, after
-    /// [`open_sqlite`](Self::open_sqlite).
+    /// [`open`](Self::open).
     #[cfg(feature = "enroll-oidc")]
     #[must_use]
     pub fn with_oidc_config(mut self, config: crate::enroll::oidc::OidcConfig) -> Self {

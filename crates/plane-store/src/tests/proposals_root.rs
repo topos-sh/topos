@@ -1,13 +1,15 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-#[tokio::test]
-async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_and_404s() {
+#[sqlx::test]
+async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_and_404s(
+    pool: PgPool,
+) {
     // The keep-set == read-surface crux: an open, non-stale proposal's unique object is kept + readable; the
     // instant a publish stales the proposal the SAME object drops out of read AND retention together (no
     // event, no reaper), and
     // a read of the reclaimed object is 404 — never an Integrity corruption alarm.
-    let fx = Fixture::new("prop-crux").await;
+    let fx = Fixture::new(pool, "prop-crux").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
@@ -61,11 +63,11 @@ async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_an
     ));
 }
 
-#[tokio::test]
-async fn recovery_claim_spares_an_open_proposals_object_and_reclaims_a_staled_one() {
+#[sqlx::test]
+async fn recovery_claim_spares_an_open_proposals_object_and_reclaims_a_staled_one(pool: PgPool) {
     // The third copy of the predicate: `claim_stale_for_recovery` must spare a stale `deleting` row an open,
     // non-stale proposal roots, then reclaim it once the proposal goes stale — tracking the read gate exactly.
-    let fx = Fixture::new("prop-recovery").await;
+    let fx = Fixture::new(pool, "prop-recovery").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let cb = CommitId([0xB0; 32]);
@@ -104,10 +106,10 @@ async fn recovery_claim_spares_an_open_proposals_object_and_reclaims_a_staled_on
     );
 }
 
-#[tokio::test]
-async fn a_rejected_proposals_unique_object_reclaims_and_reads_404() {
+#[sqlx::test]
+async fn a_rejected_proposals_unique_object_reclaims_and_reads_404(pool: PgPool) {
     // A non-`open` proposal never roots or authorizes — even at a matching base — so its unique bytes reclaim.
-    let fx = Fixture::new("prop-reject").await;
+    let fx = Fixture::new(pool, "prop-reject").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
@@ -135,11 +137,11 @@ async fn a_rejected_proposals_unique_object_reclaims_and_reads_404() {
     );
 }
 
-#[tokio::test]
-async fn a_trunk_shared_object_stays_kept_and_readable_after_its_proposal_stales() {
+#[sqlx::test]
+async fn a_trunk_shared_object_stays_kept_and_readable_after_its_proposal_stales(pool: PgPool) {
     // An object reachable from BOTH the trunk (a `commit_object` edge) and a proposal stays kept + readable
     // when the proposal stales — the trunk arm is untouched; only the proposal's UNIQUE objects reclaim.
-    let fx = Fixture::new("prop-shared").await;
+    let fx = Fixture::new(pool, "prop-shared").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
@@ -172,15 +174,15 @@ async fn a_trunk_shared_object_stays_kept_and_readable_after_its_proposal_stales
     );
 }
 
-#[tokio::test]
-async fn genuine_corruption_under_an_open_proposal_is_integrity_not_masked_as_404() {
+#[sqlx::test]
+async fn genuine_corruption_under_an_open_proposal_is_integrity_not_masked_as_404(pool: PgPool) {
     // The read-time TOCTOU guard re-authorizes on a fetch miss and downgrades to 404 ONLY when the object is
     // no longer authorized (a legitimately reclaimed proposal object). An object STILL rooted by an open,
     // non-stale proposal whose bytes are gone is genuine corruption — the guard's re-authorize returns Some,
     // so the Integrity alarm must STAND, never be masked. (The guard's converse — the concurrent
     // authorize→stale→reclaim→fetch race that downgrades to 404 — is a window the single-threaded harness
     // cannot interleave; its outcome equals the reclaimed-object 404 the crux test asserts.)
-    let fx = Fixture::new("prop-corrupt").await;
+    let fx = Fixture::new(pool, "prop-corrupt").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");

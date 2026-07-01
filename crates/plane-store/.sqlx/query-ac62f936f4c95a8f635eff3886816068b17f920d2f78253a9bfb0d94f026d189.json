@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT display_name AS \"display_name!\", verified_domain AS \"verified_domain?\",\n                      verified_domain_status AS \"verified_domain_status!\", deployment_mode AS \"deployment_mode!\"\n               FROM workspace WHERE workspace_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "verified_domain?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "verified_domain_status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "deployment_mode!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ac62f936f4c95a8f635eff3886816068b17f920d2f78253a9bfb0d94f026d189"
+}

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT public_key AS \"public_key!: Vec<u8>\", principal AS \"principal!\", revoked AS \"revoked!\"\n           FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_key!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "principal!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "revoked!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b4e7866f3c125b8477d5c4577f15d70fd7f61e9fb52ef6bee8497f40b6331f9a"
+}
