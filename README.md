@@ -26,13 +26,18 @@ test, so `cargo test` needs a reachable Postgres and a `DATABASE_URL`:
 
 ```sh
 export DATABASE_URL="postgres://topos:topos@localhost:5432/topos"
+export SQLX_OFFLINE=true
 # e.g. a throwaway one:  docker run --rm -e POSTGRES_USER=topos -e POSTGRES_PASSWORD=topos \
-#                          -e POSTGRES_DB=topos -p 5432:5432 postgres:17
+#                          -e POSTGRES_DB=topos -p 5432:5432 postgres:18
 cargo test
 ```
 
 Compilation itself is offline — the compile-time-checked queries read the committed `crates/plane-store/.sqlx`
-metadata — so `cargo build`, `clippy`, and `doc` need no database; only running the tests does.
+metadata — so `cargo build`, `clippy`, and `doc` need no database; only running the tests does. Keep
+`SQLX_OFFLINE=true` exported alongside `DATABASE_URL` (as above, and as CI does): with `DATABASE_URL` set but
+the flag unset, sqlx's `query!` macros compile *live* against that database, so a fresh or unmigrated one
+fails the build with confusing errors. The flag only affects compilation — the runtime `#[sqlx::test]` still
+provisions a fresh database per test against `DATABASE_URL`.
 
 ## Self-hosting the plane
 
@@ -87,6 +92,13 @@ docker run --rm -v <project>_plane-data:/data -v "$PWD":/backup alpine \
 # 2. the metadata database
 docker compose exec db pg_dump -U topos topos > topos-db.sql
 ```
+
+**Upgrading Postgres across a major version (e.g. an existing deployment to `postgres:18`) is a dump/restore,
+not just a tag bump.** The official image changed its data directory and declared volume at v18 (PGDATA is now
+`/var/lib/postgresql/<major>/docker`; the volume is the parent `/var/lib/postgresql`), so an existing pre-18
+`pg-data` volume must be `pg_dump`ed on the old image and restored into the new layout — pointing `postgres:18`
+at the old `/var/lib/postgresql/data` mount will refuse to start. (The bundled compose file already mounts the
+new path, so fresh deployments need nothing extra.)
 
 **Restoring an *older* snapshot needs care — prefer rolling forward.** Restoring a backup can move a skill's
 `current` pointer backward relative to what followers already observed, and followers reject a pointer at or

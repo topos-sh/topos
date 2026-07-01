@@ -9,14 +9,20 @@
 
 services:
   db:
-    image: postgres:17
+    image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-topos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topos}
       POSTGRES_DB: ${POSTGRES_DB:-topos}
     volumes:
       # The metadata database — back this up with `pg_dump` or a volume snapshot (see the README).
-      - pg-data:/var/lib/postgresql/data
+      # Mount at the image's PARENT data path, not `/var/lib/postgresql/data`: at v18 the official postgres
+      # image moved its declared VOLUME to `/var/lib/postgresql` and its default PGDATA to
+      # `/var/lib/postgresql/18/docker`. Mounting the old `/var/lib/postgresql/data` path makes postgres:18
+      # refuse to start. Upgrading an EXISTING pre-18 `pg-data` volume is a `pg_dump`/restore into this new
+      # layout (see the README's backups section) — an in-place tag bump against the old mount will not start.
+      - pg-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos}"]
       interval: 5s
@@ -27,11 +33,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      # BYO override: point this at a managed Postgres instead (and you can drop the `db` service).
+      # BYO override: point this at a managed Postgres instead (and you can drop the `db` service). A
+      # managed/networked Postgres should append `?sslmode=require` — the plane speaks TLS to Postgres over rustls.
       DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-topos}:${POSTGRES_PASSWORD:-topos}@db:5432/${POSTGRES_DB:-topos}}
       # The public base URL the invite + verification links are built on — set it to your externally
       # reachable address behind a reverse proxy (which also terminates TLS).

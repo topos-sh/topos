@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: topos
           POSTGRES_PASSWORD: topos
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: topos
           POSTGRES_PASSWORD: topos

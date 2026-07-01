@@ -221,11 +221,16 @@ enter the folder:
 
 ```sh
 cargo build
-cargo test
+cargo test           # requires a Postgres via DATABASE_URL (see below)
 cargo run -p xtask -- gen-schema --check   # the schema drift gate (regenerate → assert no diff)
 cargo fmt --all
 cargo clippy --all-targets
 ```
+
+`cargo test` requires a Postgres reachable via `DATABASE_URL` — the suite provisions a fresh database per test
+(`#[sqlx::test]`). Compilation itself is offline: with `SQLX_OFFLINE=true` the compile-time-checked queries
+read the committed `crates/plane-store/.sqlx`, so `cargo build`, `clippy`, and `doc` need no database — only
+running the tests does.
 
 Toolchain is pinned in `rust-toolchain.toml` (stable 1.96, edition 2024). `unsafe_code` is forbidden
 workspace-wide; clippy `all` = warn.

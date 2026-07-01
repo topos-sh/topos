@@ -35,6 +35,13 @@ ENV TOPOS_PLANE_BIND=0.0.0.0:8787 \
     TOPOS_PLANE_ENROLL_SECRET=/data/enroll.key \
     TOPOS_PLANE_MODE=self_host
 # DATABASE_URL is intentionally unset — it is BYO (the compose file or the operator supplies it).
+
+# Run as an unprivileged user. /data is created + owned here so the named volume (compose) inherits that
+# ownership on first mount; the plane writes its 0600 key/secret directly under /data on first boot. This
+# RUN must precede VOLUME — a directory modified after its VOLUME declaration would be discarded.
+RUN useradd --system --uid 10001 topos \
+    && mkdir -p /data && chown topos:topos /data
+USER topos
 VOLUME ["/data"]
 EXPOSE 8787
 ENTRYPOINT ["topos-plane"]
