@@ -194,7 +194,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > currency arms at `follow`** (the promote step installs the session-start hook best-effort + idempotent,
 > mirroring `add` — a pure follower's machine now self-updates; disclosed on the result's additive `currency`
 > field); the app's harness wiring is an **`adapter_for(HarnessId)` dispatch** (one match arm per harness —
-> the OpenClaw/Hermes increments each add theirs); and the self-host **admin-token policy route** (`PUT
+> the OpenClaw arm is now added below; the Hermes increment adds its own); and the self-host **admin-token policy route** (`PUT
 > /v1/workspaces/{ws}/policy/review-required`, 404-invisible unless `--admin-token` is set, 401 on a wrong
 > token, 204 on the idempotent set) toggles the review gate a self-hoster already had enforcement for. The
 > whole loop is proven by a **real-adapter hero e2e** over loopback HTTP: an author (a plain member)
@@ -208,6 +208,23 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > live Claude session's SessionStart stdout reaches model context before skill resolution is a documented
 > manual MUST-VERIFY, never a headless assertion.
 >
+> **The OpenClaw adapter is built — the second `HarnessAdapter` impl, build-first behind the frozen
+> trait.** Same shape as the reference, pointed at a different app: `discover`/`placement_for` over
+> `~/.openclaw/skills/*/SKILL.md`, and an honestly **weaker** currency trigger — a topos-owned, inert,
+> marker-carrying bootstrap-inject plugin file registered in `openclaw.json`'s `bootstrap-extra-files`
+> array (a fresh-array immutable-replace edit; the entry is the sole commit point), whose last-refreshed
+> content surfaces updates on the **first `topos` touch**, never at bare session open (`session_start` is
+> observer-only; cron is never a currency path). Every failure mode — a disabled inject flag, a blown char
+> budget, a malformed/wrong-typed config, a foreign file squatting on the plugin path — degrades plainly to
+> `Degraded` + the `ExplicitPullOnly` floor with no write and no clobber; remove scrubs the registration
+> first and unlinks only the marker-confirmed file; the TTY currency copy now branches on the report's
+> `CurrencyKind` so no surface overstates the update moment. Proven by the same table-driven hero e2e (one
+> new case row + one test: enrollment arms the real `openclaw.json` + plugin over a temp stand-in home;
+> updates/reverts land byte-exact; a draft is never clobbered). Honest ceiling: the concrete config bytes
+> (key names, plugin format, char budget, gateway auto-watch) are **provisional until a readiness probe
+> against the pilot's exact OpenClaw build** — the checklist lives in the `openclaw` module doc; the CLI's
+> production selection stays Claude-Code-only until that probe pins them.
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
 > client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
@@ -220,7 +237,8 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > workspace standup** (`admin-claim` stands up self-host today; the per-skill roster standup at a genesis
 > publish is now built — what remains is the cloud seating a signup's owner); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
-> the enrollment secret are plaintext `0600` seeds for now); and the OpenClaw/Hermes adapters. `sqlx`
+> the enrollment secret are plaintext `0600` seeds for now); the OpenClaw **pilot-build readiness probe**
+> (the adapter is built; its concrete config bytes stay provisional until then); and the Hermes adapter. `sqlx`
 > is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
 > powers the OSS plane's HTTP server, `ureq` the client transport, and `lettre` the passcode mailer.
 >

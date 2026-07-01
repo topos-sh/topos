@@ -7,7 +7,8 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
   Ed25519 sign-preimage + verify. No I/O. Depends on nothing else in the workspace (not even `topos-types`).
 - **`topos-gitstore/`** — the `gix` object mechanics + the content-addressed large-object store
   (verify-on-read). Depends on `topos-core` + `topos-types`.
-- **`topos-harness/`** — the `HarnessAdapter` port + its three impls (Claude Code / OpenClaw / Hermes). The
+- **`topos-harness/`** — the `HarnessAdapter` port + its three impls (Claude Code + OpenClaw built —
+  OpenClaw's concrete config bytes provisional behind a pilot readiness probe; Hermes lands later). The
   one client-side port. Depends on `topos-core` + `topos-types`.
 - **`plane-store/`** — the server authority boundary: private SQL + skill-scoped authorization + the atomic
   publish transaction. Depends on `topos-core` + `topos-types` + `topos-gitstore`.

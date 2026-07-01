@@ -1,7 +1,7 @@
 # `topos-harness` — the `HarnessAdapter` port
 
 The `HarnessAdapter` trait + the `ConfigStore` port + the harness impls. The one real client-side port.
-Does discovery + byte-exact placement targeting + the session-start currency-trigger (un)install.
+Does discovery + byte-exact placement targeting + the currency-trigger (un)install.
 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
 `~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for`,
@@ -11,16 +11,31 @@ sentinel; fail-closed on a malformed/wrong-typed config; `uninstall_footprint` d
 only when our entry is present, and never as a delete target). `$CLAUDE_CONFIG_DIR` (else `$HOME/.claude`)
 is honored and **injected** so tests never touch the real config.
 
-**Planned:** the **OpenClaw** and **Hermes** concrete config bytes stay build-first behind the trait until
-the pilot's real builds are probed; the byte-writing materialization (atomic dir-swap) lives in the CLI's
-update path, not here.
+The **OpenClaw** adapter (`openclaw`) is implemented too, mirroring the reference over its two config
+artifacts: `discover` probes `~/.openclaw/skills/*/SKILL.md` the same way; `currency_kind` =
+`FirstToposTouch` (honestly weaker — the topos-owned bootstrap-inject plugin file shows its
+last-refreshed state, so updates surface on the first `topos` touch, never at bare session open;
+`session_start` is observer-only and cron is never a currency path); install registers the plugin's path
+in `openclaw.json`'s `bootstrap-extra-files` via a fresh-array (immutable-replace) edit + writes the
+inert marker-carrying plugin file; every capacity failure (disabled inject flag, blown char budget,
+malformed/wrong-typed config, a foreign file squatting on the plugin path) degrades to
+`TriggerState::Degraded` with the `ExplicitPullOnly` floor and NO write; remove scrubs the entry first
+and unlinks only the marker-confirmed file. **Build-first behind the trait:** its concrete config bytes
+(key names, plugin format, char budget, gateway auto-watch) stay PROVISIONAL until a readiness probe
+against the pilot's exact OpenClaw build — the checklist is in the `openclaw` module doc, and the CLI
+never selects this adapter in production until then.
+
+**Planned:** the **Hermes** concrete config bytes stay build-first behind the trait until the pilot's
+real build is probed; the byte-writing materialization (atomic dir-swap) lives in the CLI's update path,
+not here.
 
 **ALL platform / harness-version dependencies live here** — the rest of the workspace stays
 platform-agnostic.
 
 **Content-blind.** The adapter answers only **where** (`discover` / `placement_for`) and **when**
 (`currency_kind`); it never receives a skill's bytes, never hashes a bundle, never moves a skill file. The
-only file it writes is its **own harness config** (`settings.json`) — never a skill dir. v0 places a
+only files it writes are its **own harness config surface** (`settings.json`; `openclaw.json` + the
+topos-owned inject plugin file) — never a skill dir. v0 places a
 skill's **exact bytes** with no frontmatter rewrite, no dialect translation between harnesses, so adding a
 harness is a new impl (a directory mapping + a currency trigger), not a refactor anywhere else.
 

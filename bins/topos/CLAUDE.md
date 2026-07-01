@@ -181,10 +181,12 @@ are asserted byte-equal in tests.
 Signing-at-rest lands later; **multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
-setting) + `log --team`'s plane half; the OpenClaw/Hermes harness adapters (Claude Code is the reference —
-only it guarantees the swap completes before skills resolve; the others leave a named, bounded
-multi-file-read residual). The passcode / magic-link / OIDC identity steps run on the plane's verification
-page (the agent only polls), so the client needs no UI for them.
+setting) + `log --team`'s plane half; the Hermes harness adapter (Claude Code is the reference — only it
+guarantees the swap completes before skills resolve; a sibling adapter leaves a named, bounded
+multi-file-read residual. The OpenClaw adapter is now built + wired into `adapter_for` — its concrete
+config bytes stay provisional behind the pilot readiness probe, and the CLI's production selection stays
+Claude-Code-only until then). The passcode / magic-link / OIDC identity steps run on the plane's
+verification page (the agent only polls), so the client needs no UI for them.
 
 ## Architectural layering (enforced at the dependency graph)
 
