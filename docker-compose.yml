@@ -3,7 +3,8 @@
 #   docker compose up --build      # plane on http://localhost:8787, Postgres beside it
 #
 # Bring-your-own Postgres: set DATABASE_URL to your managed/external database (a `.env` file or the shell)
-# and start just the plane — `docker compose up --build plane` — leaving the bundled `db` service unused.
+# and start just the plane — `docker compose up --build --no-deps plane` — so the bundled `db` service stays
+# down (`--no-deps`, since the plane declares it as a dependency).
 # Postgres is a SEPARATE service (never baked into the plane image); the plane migrates the schema on start.
 
 services:

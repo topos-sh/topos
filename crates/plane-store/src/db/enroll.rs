@@ -1,6 +1,6 @@
 //! The enrollment + governance issuance SQL — the raw-`sqlx` half (every `query!` for the issuance core).
 //!
-//! Mirrors [`super::set_current`]: the `BEGIN IMMEDIATE` redeem/governance/claim transactions live here, the
+//! Mirrors [`super::set_current`]: the `SERIALIZABLE` (`run_serializable!`) redeem/governance/claim transactions live here, the
 //! orchestration ([`crate::enroll`]) hands in server-trusted values (the rehashed grant, the re-derived
 //! device key id, the parsed op id) plus the enrollment secret and gets back domain outcomes. No `sqlx` type
 //! crosses the module boundary. Every row is `workspace_id`-scoped; every opaque credential is matched only
@@ -175,7 +175,7 @@ impl Db {
 
 impl Db {
     /// Poll a device-auth session: classify its status and either touch `last_polled_at` (pending) or issue
-    /// the single-use grant (confirmed/issued). One `BEGIN IMMEDIATE`. The grant is HMAC-derived from
+    /// the single-use grant (confirmed/issued). One `SERIALIZABLE` (`run_serializable!`) txn. The grant is HMAC-derived from
     /// `(device_code_sha256, ws)` so a re-poll re-derives the SAME grant (idempotent issue). An unknown
     /// device code is the indistinguishable `NotFound`.
     pub(crate) async fn poll_txn(
@@ -439,7 +439,7 @@ impl Db {
     }
 
     /// Confirm a live session's identity from an externally-proven principal (the OIDC callback's write half).
-    /// One `BEGIN IMMEDIATE`. Mirrors [`complete_passcode_run`]'s success branch — set status `confirmed` +
+    /// One `SERIALIZABLE` (`run_serializable!`) txn. Mirrors [`complete_passcode_run`]'s success branch — set status `confirmed` +
     /// `confirmed_principal` — minus the code check (the CALLER proved the email via a validated id_token). An
     /// unknown / non-live / expired `user_code` is the uniform `NotFound`.
     pub(crate) async fn confirm_external_identity_txn(
@@ -546,7 +546,7 @@ impl Db {
     }
 
     /// Verify a passcode under the TTL + attempt cap; on success confirm the session's identity. One
-    /// `BEGIN IMMEDIATE`. An unknown user code is the uniform `NotFound`; a missing passcode for a known
+    /// `SERIALIZABLE` (`run_serializable!`) txn. An unknown user code is the uniform `NotFound`; a missing passcode for a known
     /// session is an indistinguishable `WrongCode` (never a per-email existence oracle).
     pub(crate) async fn complete_passcode_txn(
         &self,
@@ -651,7 +651,7 @@ struct GrantRow {
 }
 
 impl Db {
-    /// Redeem a grant into a registered device + minted read tokens. ONE `BEGIN IMMEDIATE` (the
+    /// Redeem a grant into a registered device + minted read tokens. ONE `SERIALIZABLE` (`run_serializable!`) txn (the
     /// pointer-move's discipline). All `Denied` checks run BEFORE any write, so a denial has no side effect;
     /// only an all-checks-passed redeem confirms membership, registers the device, rosters the skills, and
     /// mints the (deterministic) read tokens — so a replay re-derives identical tokens with no extra creds.
@@ -1065,7 +1065,7 @@ async fn govern_preamble(
 }
 
 impl Db {
-    /// `create_invite`: the owner-signed invite mint. One `BEGIN IMMEDIATE`: governance authz (owner-only) →
+    /// `create_invite`: the owner-signed invite mint. One `SERIALIZABLE` (`run_serializable!`) txn: governance authz (owner-only) →
     /// store the (orchestration-derived) invite + its skills → UPSERT the invited members → record the audit
     /// receipt. `invite_token_sha256` is the deterministic token's sha256 (the plaintext never reaches here).
     pub(crate) async fn create_invite_txn(
@@ -1082,7 +1082,7 @@ impl Db {
 
     /// A governance roster/revoke mutation (owner-only roster set/remove with the last-owner-lockout guard;
     /// owner-or-self device revoke that flips `revoked` AND purges the device's read tokens). One
-    /// `BEGIN IMMEDIATE` per mutation.
+    /// `SERIALIZABLE` (`run_serializable!`) txn per mutation.
     pub(crate) async fn governance_mutation_txn(
         &self,
         input: &GovernanceInput<'_>,
@@ -1335,7 +1335,7 @@ async fn would_orphan_owner(
 
 impl Db {
     /// Consume a one-time admin-claim token: stand up the workspace (self-host), seat its first owner, and
-    /// register the claiming device. One `BEGIN IMMEDIATE`. An absent/consumed token is the uniform denial.
+    /// register the claiming device. One `SERIALIZABLE` (`run_serializable!`) txn. An absent/consumed token is the uniform denial.
     pub(crate) async fn admin_claim_txn(
         &self,
         claim_sha256: &[u8; 32],

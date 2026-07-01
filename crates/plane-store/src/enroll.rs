@@ -8,7 +8,7 @@
 //! (so a lost-ack retry re-derives the IDENTICAL credential) and stored ONLY as its sha256 (so a database
 //! read can never recover a live credential and a revoke is an instant row flip). This module does the work
 //! OUTSIDE the one write transaction (derive the credentials, build the kernel possession/governance frames);
-//! the raw SQL — and the single `BEGIN IMMEDIATE` redeem/governance transactions — live in [`crate::db`].
+//! the raw SQL — and the `SERIALIZABLE` (`run_serializable!`) redeem/governance transactions — live in [`crate::db`].
 
 use std::path::PathBuf;
 

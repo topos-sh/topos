@@ -401,12 +401,29 @@ impl Db {
     }
 }
 
-/// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a Postgres serialization failure
-/// (`40001`) or deadlock (`40P01`) — the transient, retryable classes the SERIALIZABLE runner retries.
+/// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a transient class the SERIALIZABLE runner
+/// retries: a serialization failure (`40001`) or deadlock (`40P01`), OR a unique-violation (`23505`) on one
+/// of the two IDEMPOTENCY-KEY constraints.
+///
+/// The idempotency-key case restores what SQLite's global writer lock gave for free. Two same-`op_id`
+/// writes can BOTH pass their replay-miss before either commits its receipt; the loser's receipt/event
+/// INSERT then hits the primary key. On SQLite the two were serialized, so the loser simply replayed the
+/// winner's receipt. Here, retrying makes the re-run's replay find that now-committed receipt and return it
+/// (the winner's outcome, byte-identical) instead of a spurious `Internal`/500. Scoped to exactly
+/// `op_receipts_pkey` + `workspace_events_pkey` so the proposals "one open per (skill,commit,base)"
+/// partial-unique still surfaces as its business `CONFLICT`, never a silent retry.
 pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
-    e.as_database_error()
-        .and_then(|d| d.code())
-        .is_some_and(|c| c == "40001" || c == "40P01")
+    let Some(db) = e.as_database_error() else {
+        return false;
+    };
+    match db.code().as_deref() {
+        Some("40001" | "40P01") => true,
+        Some("23505") => matches!(
+            db.constraint(),
+            Some("op_receipts_pkey" | "workspace_events_pkey")
+        ),
+        _ => false,
+    }
 }
 
 /// True if `e` is an [`AuthorityError::Internal`] wrapping such a serialization failure. The query
@@ -481,3 +498,53 @@ mod enroll;
 // to the feature-gated `Authority` shims a downstream test crate drives.
 #[cfg(any(test, feature = "test-fixtures"))]
 mod seed;
+
+#[cfg(test)]
+mod retry_classification_tests {
+    use sqlx::PgPool;
+
+    use super::is_serialization_failure_sqlx;
+
+    /// The SERIALIZABLE runner retries a `23505` on an IDEMPOTENCY-KEY constraint (`op_receipts` /
+    /// `workspace_events`) — so a concurrent same-`op_id` sibling that committed its receipt first is
+    /// replayed rather than surfaced as a 500 — but NEVER on an ordinary unique violation, which is a real
+    /// business/integrity outcome (e.g. the proposals "one open" partial-unique) and must not be silently
+    /// retried. Proven against real Postgres duplicate-key errors. Raw `sqlx::query` (not `query!`), so it
+    /// adds nothing to the `.sqlx` drift-gate surface.
+    #[sqlx::test]
+    async fn only_idempotency_key_unique_violations_are_retryable(pool: PgPool) {
+        // op_receipts_pkey → a unique violation the runner treats as retryable.
+        let receipt = "INSERT INTO op_receipts \
+            (workspace_id, device_key_id, op_id, command, skill_id, expected_epoch, expected_seq, \
+             outcome, created_at) \
+            VALUES ('w_a', 'dk', 'op1', 'publish', 's_a', 1, 1, 'OK', '2026-06-30T00:00:00Z')";
+        sqlx::query(receipt)
+            .execute(&pool)
+            .await
+            .expect("first receipt insert");
+        let dup = sqlx::query(receipt)
+            .execute(&pool)
+            .await
+            .expect_err("a duplicate op_id receipt must raise a unique violation");
+        assert!(
+            is_serialization_failure_sqlx(&dup),
+            "a 23505 on op_receipts_pkey must be retryable"
+        );
+
+        // roster_pkey → an ordinary unique violation the runner must NOT retry.
+        let roster =
+            "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ('w_a', 's_a', 'p_a')";
+        sqlx::query(roster)
+            .execute(&pool)
+            .await
+            .expect("first roster insert");
+        let dup = sqlx::query(roster)
+            .execute(&pool)
+            .await
+            .expect_err("a duplicate roster row must raise a unique violation");
+        assert!(
+            !is_serialization_failure_sqlx(&dup),
+            "a 23505 on an ordinary constraint must NOT be retried"
+        );
+    }
+}

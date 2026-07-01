@@ -8,8 +8,8 @@
 //! pass's base `now` advanced by its real elapsed) into `status_updated_at`, and that value is the actor's
 //! **claim token**: the unlink first re-confirms ownership of it and the finalize is gated on matching it, so
 //! a recovery sweep that takes over a frozen pass can never also unlink/finalize the same row (exactly one
-//! actor removes the bytes). Each step is its own short transaction (or none, for the unlink), so the single
-//! SQLite writer is never held across the filesystem op and a concurrent migrate's lease-insert is never
+//! actor removes the bytes). Each step is its own short transaction (or none, for the unlink), so no
+//! write transaction is held across the filesystem op and a concurrent migrate's lease-insert is never
 //! starved. GC acts ONLY on objects with an `object_presence` row — every migrated object has one, and an
 //! object with no presence row is invisible to it.
 //!

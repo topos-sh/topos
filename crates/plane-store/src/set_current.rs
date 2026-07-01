@@ -9,7 +9,7 @@
 //!
 //! Scope here is the **backbone**: genesis + direct publish + revert + the review-required typed-fail gate.
 //! The propose -> review-approve promotion, two-parent author merges, the client pull engine, and the HTTP
-//! surface are later work; this is exercised in-process against a real SQLite + git store.
+//! surface are later work; this is exercised in-process against a real Postgres + git store.
 
 use topos_core::sign::{self, Commit, DeviceOp};
 use topos_types::{Generation, TerminalOutcome};

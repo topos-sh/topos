@@ -2,7 +2,7 @@
 
 Why this crate is shaped the way it is. The contract + status live in `CLAUDE.md`; this is the *why*,
 for a future contributor or auditor. This increment builds the storage authority's **storage + read**
-half, in-process and directly tested against a real SQLite database and a real per-workspace git store.
+half, in-process and directly tested against a real Postgres database and a real per-workspace git store.
 It moves no pointer, signs nothing, and issues no identity.
 
 ## The security boundary is the database, not the directory
@@ -17,10 +17,11 @@ Cross-company separation is two independent mechanisms, and the directory is nev
 
 1. **Binding.** Every row in every table carries `workspace_id`, and every query predicates on it (bound,
    never interpolated). Structurally, every database method takes `workspace_id` as a mandatory first
-   argument — a query without it cannot be written outside `mod sqlite`. A forgotten predicate is the
-   monorepo's likeliest leak, so it is made unrepresentable.
-2. **Physical.** A per-workspace SQLite file + a per-workspace git store directory under a confined root.
-   `WorkspaceId` is a path-safe newtype (no separators, no `..`), so the store path can never escape.
+   argument — a query without it cannot be written outside `mod db`. A forgotten predicate is the
+   monorepo's likeliest leak, so it is made unrepresentable. The metadata is one shared Postgres database,
+   so this binding — not a physical file — is the whole of the metadata separation.
+2. **Physical.** A per-workspace git store directory under a confined root (the object bytes). `WorkspaceId`
+   is a path-safe newtype (no separators, no `..`), so the store path can never escape.
 
 ## The skill-scoped read rule
 
@@ -76,12 +77,19 @@ no presence/count table at all.
 
 ## Backend shape
 
-`Authority` holds a concrete SQLite database directly — no trait (premature for one backend), no
-`sqlx::Any` (it forfeits the compile-time-checked queries), and no single-arm enum yet. The invariant that
-earns its keep is that **no `sqlx` type crosses the `sqlite` module boundary**: every method there is
-domain-typed. That boundary is exactly the seam a future `enum Db { Sqlite, Pg }` wraps mechanically, with
-no change to callers — so the second backend is an add, not a reshape. This follows the workspace's
-governing posture: concrete first, extract on the second implementation.
+`Authority` holds a concrete Postgres pool directly — no trait, no `sqlx::Any` (it forfeits the
+compile-time-checked queries). Postgres is the single backend; there is no dialect abstraction to earn its
+keep. The invariant that does earn its keep is that **no `sqlx` type crosses the `db` module boundary**:
+every method there is domain-typed, so the choice of engine (and the retry machinery below) stays sealed
+inside `mod db` and the rest of the crate reasons in trust terms only.
+
+Because Postgres does not serialize writers the way SQLite's single-writer file did, every write runs
+through one private `run_serializable!` macro: a `SERIALIZABLE` transaction with a bounded retry on a
+serialization failure (`40001`) or deadlock (`40P01`), and on the two idempotency-key unique-violations
+(`op_receipts`/`workspace_events`) so a concurrent same-`op_id` sibling's retry replays the committed
+receipt instead of surfacing a spurious 500. Every read-then-write invariant SQLite's `BEGIN IMMEDIATE`
+gave for free — the whole-`(epoch,seq)` CAS, the last-owner write-skew guard, the object-presence fence —
+is re-proven by SSI + retry rather than by a global lock.
 
 ## The object-lifecycle / garbage-collection fence
 
@@ -107,8 +115,9 @@ presence — `object_presence` is the sole presence authority. A few decisions e
   an offloaded blob's identity — see below.)
 - **`deleting` is non-resurrectable by construction.** The only writer of `present` is the install
   compare-and-swap, whose `WHERE status = 'absent'` structurally cannot fire on a `deleting` row. A migrate
-  that meets a `deleting` object waits for `absent` (polling **outside** any write transaction, so it can
-  never hold the single SQLite writer that the finalize needs) and then re-copies fresh — it can never rescue
+  that meets a `deleting` object waits for `absent` (polling **outside** any write transaction, so it never
+  pins a connection across the wait or freezes a SERIALIZABLE snapshot the finalize needs) and then re-copies
+  fresh — it can never rescue
   bytes a GC has authorized to unlink.
 - **Lease-before-migrate, with a two-state lifetime.** The promotion lease names a commit's *full* object set
   — including an old, already-present object a dedup-skip would otherwise leave exposed — and is inserted
@@ -156,6 +165,6 @@ The large-object store's **S3-compatible remote backend** (a second `LocalLargeS
 `git repack`) — both additive and client-invisible — the pointer-move write (the compare-and-set, the
 in-process signer, durable receipts) that *moves* the `current` pointer this layer only creates **and**
 consumes a migrated candidate's lease, the `purge` verb + force-unlink (the tombstones table + denylist check
-already exist), the HTTP surface, identity/roster issuance, and Postgres are each a clean follow-on against
+already exist), the HTTP surface, and identity/roster issuance are each a clean follow-on against
 this foundation. The lineage predicate is built and tested read-only so wiring it into the pointer-move
 transaction is a small change.

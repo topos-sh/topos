@@ -32,7 +32,7 @@ pub(crate) const DEFAULT_LARGE_REJECT_CAP: u64 = 100 << 20;
 /// skill-scoped [`read_object`](Self::read_object); the pointer-move writes
 /// [`publish`](Self::publish) / [`revert`](Self::revert); the contribute writes [`propose`](Self::propose) /
 /// [`review_approve`](Self::review_approve) / [`review_reject`](Self::review_reject); and the read-only
-/// [`check_lineage`](Self::check_lineage). It owns one SQLite database (the per-workspace provenance,
+/// [`check_lineage`](Self::check_lineage). It owns one Postgres database (the per-workspace provenance,
 /// reachability, roster, and pointer rows, every one bound on `workspace_id`) and a confined root under
 /// which each workspace gets its own git object store. Cross-workspace isolation is that database
 /// binding — never the directory.
@@ -775,7 +775,7 @@ impl Authority {
 
     // ── pub(crate) internals the port modules drive ──────────────────────────────────────────────
 
-    /// The SQLite backend handle (raw SQL stays inside `mod db`).
+    /// The Postgres backend handle (raw SQL stays inside `mod db`).
     pub(crate) fn db(&self) -> &Db {
         &self.db
     }

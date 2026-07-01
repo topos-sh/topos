@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     let cfg = Config::parse();
 
-    // The two bin-local marshals `open_sqlite` does NOT do: default the public base URL to the bind address,
+    // The two bin-local marshals `open` does NOT do: default the public base URL to the bind address,
     // and assemble the SMTP relay from the five all-or-nothing fields (any missing ⇒ no passcode email, the
     // no-op mailer). Everything else — parsing the mode, defaulting the enrollment method, opening the
     // authority + enrollment config — is the constructor's, so there is one construction home and no drift.

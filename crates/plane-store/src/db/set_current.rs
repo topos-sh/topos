@@ -1,6 +1,6 @@
 //! The one pointer-move transaction — the raw-SQL half of `set-current`.
 //!
-//! One `BEGIN IMMEDIATE` write transaction advances a skill's `current` pointer by exactly one step, under
+//! One `SERIALIZABLE` (`run_serializable!`) write transaction advances a skill's `current` pointer by exactly one step, under
 //! a compare-and-set on the whole `(epoch, seq)` pair, signs the new pointer, re-roots the migrated bytes,
 //! and writes a durable all-outcome receipt — **with no filesystem op inside the transaction**. The
 //! ordered sub-steps (and why each ordering is load-bearing) are in [`run`]. All `sqlx` stays here; the
@@ -40,7 +40,7 @@ impl Db {
     }
 
     /// The standalone `review --reject` / proposer-withdraw transaction. NOT a pointer move — it never enters
-    /// [`run`]: `current` is untouched, nothing is signed, there is no lease. One `BEGIN IMMEDIATE` mirrors the
+    /// [`run`]: `current` is untouched, nothing is signed, there is no lease. One `SERIALIZABLE` transaction mirrors the
     /// promotion's discipline where it overlaps — receipt-replay first, then in-transaction authorization (the
     /// SAME device-op frame, `op = ReviewReject`) — then resolves the proposal and classifies it: `open` ⇒
     /// flip to `rejected`; already `rejected` ⇒ idempotent OK (a lost-ack retry under a different op_id); and

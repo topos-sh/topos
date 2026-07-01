@@ -29,7 +29,7 @@ thiserror.workspace = true
 # query checking, and would erase the per-backend SERIALIZABLE txn semantics the pointer-move needs).
 sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "postgres", "tls-rustls-ring-native-roots"] }
 # Only `tokio::time` — the bounded-backoff sleep the migrate deleting-wait uses while it polls OUTSIDE any
-# write transaction (holding it inside one would deadlock GC's finalize on SQLite's single writer). sqlx
+# write transaction (holding it inside one would stall GC's finalize write transaction). sqlx
 # already pulls tokio into this crate's tree via `runtime-tokio`, and the client takes NO edge to
 # `plane-store` (check-arch forbids it), so this never reaches the CLI.
 tokio = { workspace = true, features = ["time"] }

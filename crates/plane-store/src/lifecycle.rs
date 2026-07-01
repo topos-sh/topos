@@ -30,8 +30,8 @@ const QUARANTINE_TTL_SECS: i64 = 3600;
 /// SUCCESSFUL migrate makes its lease non-expiring (the version stays rooted until the later pointer-move).
 const LEASE_TTL_SECS: i64 = 600;
 
-/// The deleting-wait backoff (it polls OUTSIDE any write transaction — holding one would deadlock GC's
-/// finalize on SQLite's single writer). Bounded so a stranded `deleting` (a crashed GC the recovery sweep
+/// The deleting-wait backoff (it polls OUTSIDE any write transaction — holding one would stall GC's
+/// finalize write transaction). Bounded so a stranded `deleting` (a crashed GC the recovery sweep
 /// has not yet finalized) fails the migrate cleanly rather than hanging forever.
 const WAIT_BACKOFF_START: Duration = Duration::from_millis(5);
 const WAIT_BACKOFF_CAP: Duration = Duration::from_millis(200);

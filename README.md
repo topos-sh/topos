@@ -55,8 +55,11 @@ plane (the `db` service goes unused):
 
 ```sh
 export DATABASE_URL="postgres://user:pass@your-db.example:5432/topos?sslmode=require"
-docker compose up --build plane
+docker compose up --build --no-deps plane
 ```
+
+`--no-deps` starts only the plane, leaving the bundled `db` service down (it would otherwise start because
+the plane declares it as a dependency, and could clash on port 5432).
 
 Add `?sslmode=require` when reaching a database over the network — the plane speaks TLS to Postgres over
 rustls. Terminate TLS for the plane's own HTTP at a reverse proxy in front of it, and set
@@ -85,17 +88,19 @@ docker run --rm -v <project>_plane-data:/data -v "$PWD":/backup alpine \
 docker compose exec db pg_dump -U topos topos > topos-db.sql
 ```
 
-**After restoring an older database snapshot,** bump the pointer generation once so followers detect the
-rewind. Restoring a backup can move a skill's `current` pointer backward relative to what followers already
-observed; the plane's followers reject a pointer at or below the highest generation they've seen, so a
-restore that reused a generation would otherwise be silently ignored (or, worse, look like a rollback).
-Advancing the `epoch` past every restored row makes any reissued pointer distinguishable and lets followers
-converge cleanly:
+**Restoring an *older* snapshot needs care — prefer rolling forward.** Restoring a backup can move a skill's
+`current` pointer backward relative to what followers already observed, and followers reject a pointer at or
+below the highest generation they have seen (anti-rollback). Recovering forward from the newest good backup
+avoids this entirely.
 
-```sql
--- run once, immediately after restoring an older database
-UPDATE current SET epoch = epoch + 1;
-```
+If you must restore to an older state, the affected skills' `current` pointers have to be **re-issued
+through the plane** at a fresh, higher generation before followers reconnect. This must go through the plane
+because followers verify the *signed* pointer record (what `GET /v1/current` returns), not the database
+column — so a raw `UPDATE current SET epoch = …` does **not** work: it leaves the served signature unchanged
+(followers never see the bump) and makes every author's next write `CONFLICT` (the author signs the
+old served generation while the compare-and-set reads the bumped column). A standalone re-sign-on-restore
+helper is not yet shipped; until it is, treat an older-snapshot restore as requiring a re-publish of the
+affected pointers.
 
 ## License
 

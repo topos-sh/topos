@@ -116,7 +116,7 @@ impl PlaneState {
         }
     }
 
-    /// Open a serving [`PlaneState`] over SQLite from a leak-free [`PlaneConfig`] — the **single** construction
+    /// Open a serving [`PlaneState`] over Postgres from a leak-free [`PlaneConfig`] — the **single** construction
     /// path a downstream plane (and the OSS bin) use. Builds the storage [`Authority`] (the db + git + large
     /// stores, the plane signing key, the enrollment secret) and the internal enrollment config from the
     /// config's plain/owned fields, so the caller never names a `plane_store` type. Rate limits default to

@@ -221,7 +221,7 @@ const PROP_OP_1: &str = "a1111111-1111-4111-8111-111111111111";
 
 // ── the pointer-move write (`set-current`): genesis · publish · revert · the gate · interleavings ──────
 //
-// These drive the WHOLE backbone in-process against a real SQLite + git store: ingest → migrate → the one
+// These drive the WHOLE backbone in-process against a real Postgres + git store: ingest → migrate → the one
 // serializable pointer-move transaction. A test acts as the client device — it signs the device-op over the
 // SERVER-rehashed candidate values (exactly what the txn reconstructs), so a valid signature is the binding.
 
@@ -495,7 +495,7 @@ async fn sign_revert(
 // ── the contribute authority end-to-end: publish --propose · review --approve|--reject (the write paths) ──
 //
 // These drive the REAL propose/approve/reject through `Authority` (and the shared `set_current::propose`)
-// against a live SQLite + git store — the write paths that PRODUCE the proposal/approval rows the gated GC +
+// against a live Postgres + git store — the write paths that PRODUCE the proposal/approval rows the gated GC +
 // read arms above consume. A test acts as the client device, signing each device-op over the SERVER-rehashed
 // candidate values exactly as the transaction reconstructs them.
 
