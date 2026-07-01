@@ -242,8 +242,11 @@ fn hunks(old: &[&str], new: &[&str]) -> Vec<Hunk> {
             if changed[end] {
                 end += 1;
             } else {
-                // peek: keep extending if another change is within CONTEXT.
-                let next = (end..(end + CONTEXT + 1).min(script.len())).find(|&k| changed[k]);
+                // peek: keep extending if another change is within 2*CONTEXT — closer than that, this
+                // hunk's trailing context would meet the next hunk's leading context (git merges those).
+                // A split therefore means a gap >= 2*CONTEXT+1, which makes split hunks provably
+                // disjoint: the next hunk starts at `change - CONTEXT` > this hunk's `stop`.
+                let next = (end..(end + 2 * CONTEXT + 1).min(script.len())).find(|&k| changed[k]);
                 match next {
                     Some(_) => end += 1,
                     None => break,
@@ -387,5 +390,91 @@ mod tests {
             out, "--- a/x\n+++ b/x\n@@ -1,3 +1,4 @@\n a\n+INSERTED\n b\n c\n",
             "{out}"
         );
+    }
+
+    /// Two one-line edits separated by `gap` unchanged lines, with 4 unchanged lines on each flank
+    /// (one more than [`CONTEXT`], so the hunk boundary is exercised on both ends).
+    fn two_edit_diff(gap: usize) -> String {
+        let mut base_s = String::new();
+        let mut draft_s = String::new();
+        for i in 0..4 {
+            base_s.push_str(&format!("lead{i}\n"));
+            draft_s.push_str(&format!("lead{i}\n"));
+        }
+        base_s.push_str("first-old\n");
+        draft_s.push_str("first-new\n");
+        for i in 0..gap {
+            base_s.push_str(&format!("mid{i}\n"));
+            draft_s.push_str(&format!("mid{i}\n"));
+        }
+        base_s.push_str("second-old\n");
+        draft_s.push_str("second-new\n");
+        for i in 0..4 {
+            base_s.push_str(&format!("tail{i}\n"));
+            draft_s.push_str(&format!("tail{i}\n"));
+        }
+        let base = [f("t.md", FileMode::Regular, base_s.as_bytes())];
+        let draft = [f("t.md", FileMode::Regular, draft_s.as_bytes())];
+        unified_diff(&base, &draft)
+    }
+
+    /// The `(start, len)` pairs of every `@@ -<start>,<len> +<start>,<len> @@` header: (old, new).
+    #[allow(clippy::type_complexity)]
+    fn hunk_ranges(out: &str) -> Vec<((usize, usize), (usize, usize))> {
+        out.lines()
+            .filter_map(|l| l.strip_prefix("@@ -"))
+            .map(|l| {
+                let (old, rest) = l.split_once(" +").expect("header shape");
+                let new = rest.strip_suffix(" @@").expect("header shape");
+                let parse = |r: &str| {
+                    let (s, n) = r.split_once(',').expect("range shape");
+                    (s.parse().expect("start"), n.parse().expect("len"))
+                };
+                (parse(old), parse(new))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn edits_up_to_two_context_apart_merge_into_one_hunk() {
+        // Gaps of 4..=2*CONTEXT equal lines between two change runs: trailing + leading context would
+        // meet or overlap, so they must render as ONE hunk (git's behavior). Gaps <= CONTEXT merged
+        // before the window fix too; 4..=6 are the previously-overlapping shapes.
+        for gap in [4, 5, 6] {
+            let out = two_edit_diff(gap);
+            assert_eq!(out.matches("@@ -").count(), 1, "gap {gap}:\n{out}");
+            // Both edits render exactly once, and every between-lines equal line exactly once (context).
+            assert_eq!(out.matches("-first-old\n").count(), 1, "gap {gap}:\n{out}");
+            assert_eq!(out.matches("-second-old\n").count(), 1, "gap {gap}:\n{out}");
+            assert_eq!(out.matches(" mid").count(), gap, "gap {gap}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn edits_beyond_two_context_apart_split_into_disjoint_hunks() {
+        // A gap >= 2*CONTEXT+1 splits — and the split is provably non-overlapping: the second hunk's
+        // leading context starts strictly after the first hunk's trailing context, with at least one
+        // untouched line between them (no duplicated context, `git apply`-well-formed).
+        for gap in [7, 8, 12] {
+            let out = two_edit_diff(gap);
+            let ranges = hunk_ranges(&out);
+            assert_eq!(ranges.len(), 2, "gap {gap}:\n{out}");
+            let ((o1, ol1), (n1, nl1)) = ranges[0];
+            let ((o2, _), (n2, _)) = ranges[1];
+            assert!(
+                o2 > o1 + ol1,
+                "old ranges must not touch — gap {gap}:\n{out}"
+            );
+            assert!(
+                n2 > n1 + nl1,
+                "new ranges must not touch — gap {gap}:\n{out}"
+            );
+            // Exactly 2*CONTEXT of the between lines render (3 trailing + 3 leading), each once.
+            assert_eq!(
+                out.matches(" mid").count(),
+                2 * CONTEXT,
+                "gap {gap}:\n{out}"
+            );
+        }
     }
 }

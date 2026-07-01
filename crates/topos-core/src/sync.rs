@@ -283,6 +283,73 @@ mod tests {
         );
     }
 
+    /// The floor rules re-stated as a straight-line MODEL, deliberately naive and shaped differently
+    /// from the kernel (lookup-first, explicit `(epoch, seq)` tuple comparison — which independently
+    /// pins the epoch-dominant order) so the two implementations can only agree by both being right.
+    fn floor_model(
+        served: Generation,
+        served_commit: [u8; 32],
+        observed: Generation,
+        recorded: &[RecordedTuple],
+    ) -> FloorVerdict {
+        let above = (served.epoch, served.seq) > (observed.epoch, observed.seq);
+        let at = (served.epoch, served.seq) == (observed.epoch, observed.seq);
+        if above {
+            return FloorVerdict::Forward;
+        }
+        let known = recorded
+            .iter()
+            .find(|t| t.generation.epoch == served.epoch && t.generation.seq == served.seq);
+        match known {
+            Some(t) if t.commit_id != served_commit => FloorVerdict::ReusedTupleAlarm,
+            Some(_) if at => FloorVerdict::Replay,
+            Some(_) => FloorVerdict::StaleReplay,
+            None if at => FloorVerdict::CorruptNoRecord,
+            None => FloorVerdict::RefuseBelowFloor,
+        }
+    }
+
+    #[test]
+    fn evaluate_floor_agrees_with_the_brute_force_model_over_small_spaces() {
+        // Generative + exhaustive: for each seeded random recorded history (unique by generation, over
+        // a 3×3 generation grid and 3 commits), sweep EVERY (served, observed, served_commit) combo and
+        // demand the kernel's verdict equal the model's — coverage over the whole small input space
+        // instead of hand-picked rows.
+        use crate::testgen::Rng;
+
+        let gens: Vec<Generation> = (0..3u64)
+            .flat_map(|e| (0..3u64).map(move |s| g(e, s)))
+            .collect();
+        let commits = [c(1), c(2), c(3)];
+        let mut rng = Rng::new(0xF10_0DED_CAB1_E501);
+        let mut cases = 0usize;
+        for _ in 0..60 {
+            let mut recorded = alloc::vec::Vec::new();
+            for &generation in &gens {
+                if rng.next() & 1 == 0 {
+                    recorded.push(RecordedTuple {
+                        generation,
+                        commit_id: commits[(rng.next() % 3) as usize],
+                    });
+                }
+            }
+            for &observed in &gens {
+                for &served in &gens {
+                    for &served_commit in &commits {
+                        assert_eq!(
+                            evaluate_floor(served, served_commit, observed, &recorded),
+                            floor_model(served, served_commit, observed, &recorded),
+                            "served {served:?} commit {served_commit:?} observed {observed:?} \
+                             recorded {recorded:?}"
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert!(cases >= 10_000, "swept {cases} cases");
+    }
+
     /// Interleaving F — downgrade after a failed apply. `observed = (1,10)`; a served signed `(1,9)`
     /// (never recorded — the client authenticated 10 directly) is below the floor → refuse, no
     /// downgrade. A recorded lower tuple re-served with its own commit is a stale no-op. Either way the

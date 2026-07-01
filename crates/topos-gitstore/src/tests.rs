@@ -173,6 +173,59 @@ fn read_object_in_version_returns_verified_bytes_and_typed_misses() {
 }
 
 #[test]
+fn a_manifest_valued_file_is_not_addressable_as_the_version_or_digest_it_renders() {
+    // The three sha256 id spaces (content id / bundle digest / version id) can collide numerically:
+    // a file whose bytes are bundle A's rendered manifest has a content id equal to A's bundle_digest.
+    // Pin that every store lookup stays space-scoped — the value resolves as a CONTENT id only inside
+    // the version whose tree actually carries it, never as a version ref, and never inside A itself
+    // (where the same 32 bytes are a digest, not a leaf).
+    let scratch = Scratch::new("idspace");
+    let store = Store::init(&scratch.0).expect("init");
+    let a_files = [ImportFile {
+        path: "SKILL.md",
+        mode: FileMode::Regular,
+        bytes: b"# the described bundle\n",
+    }];
+    let (vid_a, digest_a) = commit_genesis(&store, &a_files);
+
+    let entries: Vec<digest::ManifestEntry> = a_files
+        .iter()
+        .map(|f| digest::ManifestEntry {
+            path: f.path.to_string(),
+            mode: f.mode,
+            content_sha256: digest::sha256(f.bytes),
+        })
+        .collect();
+    let manifest = digest::canonical_manifest(&entries).expect("manifest");
+    assert_eq!(digest::sha256(manifest.as_bytes()), digest_a);
+
+    // The carrier bundle holds A's manifest bytes as an ordinary file.
+    let b_files = [ImportFile {
+        path: "manifest.txt",
+        mode: FileMode::Regular,
+        bytes: manifest.as_bytes(),
+    }];
+    let (vid_b, _) = commit_genesis(&store, &b_files);
+
+    // Content space: readable only within the carrier's tree; inside A it is a typed miss.
+    assert_eq!(
+        store
+            .read_object_in_version(vid_b, digest_a)
+            .expect("the carrier's leaf reads by its content id"),
+        manifest.as_bytes()
+    );
+    assert!(matches!(
+        store.read_object_in_version(vid_a, digest_a),
+        Err(VerifyError::ObjectNotInVersion)
+    ));
+    // Version space: a bundle digest is never a version id — no ref, nothing renders.
+    assert!(matches!(
+        store.render_verified(digest_a, digest_a),
+        Err(VerifyError::MissingVersion)
+    ));
+}
+
+#[test]
 fn empty_bundle_round_trips_at_the_store_layer() {
     // The CLIENT rejects an empty bundle as a policy; the dumb store must still handle a zero-entry tree
     // (digest = sha256 of the empty manifest) without panicking.
@@ -961,6 +1014,206 @@ fn read_git_blob_verified_returns_bytes_or_a_typed_miss_for_an_offloaded_blob() 
         main.read_git_blob_verified(big.git_oid),
         Err(VerifyError::MissingObject)
     ));
+}
+
+// ===== The unified-diff renderer: patch-apply round-trips (the diff must be machine-appliable) =====
+
+use crate::{DiffFile, unified_diff};
+
+/// Reconstruct `new` from `old` + a rendered single-file unified diff — the test-side patch applier.
+/// It asserts what `patch`/`git apply` enforce: every context/`-` line must match `old` at the cursor
+/// and each hunk must start at or after the previous hunk's end — so an overlapping or misaligned
+/// hunk set fails the test rather than silently double-applying.
+fn apply_unified(old: &str, diff: &str) -> String {
+    let old_lines: Vec<&str> = if old.is_empty() {
+        Vec::new()
+    } else {
+        old.split_inclusive('\n').collect()
+    };
+    let mut out = String::new();
+    let mut cursor = 0usize; // the next unconsumed old line (0-based)
+    let mut lines = diff.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ -") {
+            let old_range = rest.split_once(' ').expect("hunk header").0;
+            let (s, n) = old_range.split_once(',').expect("old range");
+            let (start, len): (usize, usize) = (s.parse().expect("start"), n.parse().expect("len"));
+            // Unified convention: an empty old range is rendered at line 0 (no -1 shift).
+            let hunk_start = if len == 0 { start } else { start - 1 };
+            assert!(
+                hunk_start >= cursor,
+                "hunk starts at old line {hunk_start} but line {cursor} was already consumed (overlap)"
+            );
+            while cursor < hunk_start {
+                out.push_str(old_lines[cursor]);
+                cursor += 1;
+            }
+            continue;
+        }
+        // A body line: the renderer always terminates it with '\n'; a following no-newline marker
+        // means the content genuinely lacks one, otherwise the '\n' is part of the content.
+        let (op, rest) = line.split_at(1);
+        let mut content = String::from(rest.strip_suffix('\n').unwrap_or(rest));
+        if lines.peek().is_some_and(|l| l.starts_with("\\ No newline")) {
+            lines.next();
+        } else {
+            content.push('\n');
+        }
+        match op {
+            " " => {
+                assert_eq!(
+                    old_lines[cursor], content,
+                    "context line disagrees with old"
+                );
+                out.push_str(&content);
+                cursor += 1;
+            }
+            "-" => {
+                assert_eq!(old_lines[cursor], content, "deletion disagrees with old");
+                cursor += 1;
+            }
+            "+" => out.push_str(&content),
+            other => panic!("unexpected diff line prefix {other:?} in {line:?}"),
+        }
+    }
+    while cursor < old_lines.len() {
+        out.push_str(old_lines[cursor]);
+        cursor += 1;
+    }
+    out
+}
+
+/// Render + apply one Regular-mode text file pair, asserting the rebuilt bytes equal `new`.
+fn assert_diff_round_trips(old: &str, new: &str, label: &str) {
+    let base = [DiffFile {
+        path: "t.md",
+        mode: FileMode::Regular,
+        bytes: old.as_bytes(),
+    }];
+    let draft = [DiffFile {
+        path: "t.md",
+        mode: FileMode::Regular,
+        bytes: new.as_bytes(),
+    }];
+    let out = unified_diff(&base, &draft);
+    if old == new {
+        assert!(
+            out.is_empty(),
+            "{label}: identical bytes must render nothing"
+        );
+        return;
+    }
+    let rebuilt = apply_unified(old, &out);
+    assert_eq!(
+        rebuilt, new,
+        "{label}: applying the rendered hunks must reconstruct new\nold:\n{old}\nnew:\n{new}\ndiff:\n{out}"
+    );
+}
+
+#[test]
+fn unified_diff_round_trips_two_edits_across_every_gap() {
+    // Two one-line edits at every separation 0..=12 equal lines — sweeping straight through the
+    // hunk-merge boundary (gap <= 2*CONTEXT merges, >= 2*CONTEXT+1 splits): both shapes must apply.
+    for gap in 0..=12 {
+        let mut old = String::new();
+        let mut new = String::new();
+        for i in 0..4 {
+            old.push_str(&format!("lead{i}\n"));
+            new.push_str(&format!("lead{i}\n"));
+        }
+        old.push_str("first-old\n");
+        new.push_str("first-new\n");
+        for i in 0..gap {
+            old.push_str(&format!("mid{i}\n"));
+            new.push_str(&format!("mid{i}\n"));
+        }
+        old.push_str("second-old\n");
+        new.push_str("second-new\n");
+        for i in 0..4 {
+            old.push_str(&format!("tail{i}\n"));
+            new.push_str(&format!("tail{i}\n"));
+        }
+        assert_diff_round_trips(&old, &new, &format!("gap {gap}"));
+    }
+}
+
+#[test]
+fn unified_diff_round_trips_generated_line_edits() {
+    // The same deterministic-xorshift fuzz shape as the put→render round-trip, aimed at the diff
+    // renderer: random old/new line sequences (repeated lines, empty files, missing trailing
+    // newlines, edits at every distance) → render → apply → must equal new, byte-exact.
+    let pool: &[&str] = &[
+        "alpha\n",
+        "bravo\n",
+        "charlie\n",
+        "delta\n",
+        "echo\n",
+        "alpha\n",
+        "bravo\n",
+    ];
+    let mut rng = Rng::new(0xD1FF_5EED_0BAD_CAFE);
+
+    // A file of up to 30 pool lines; ~1 in 8 drops the trailing newline.
+    fn gen_file(rng: &mut Rng, pool: &[&str]) -> String {
+        let n = (rng.next() % 31) as usize;
+        let mut s = String::new();
+        for _ in 0..n {
+            s.push_str(pool[(rng.next() % pool.len() as u64) as usize]);
+        }
+        if !s.is_empty() && rng.next().is_multiple_of(8) {
+            s.pop();
+        }
+        s
+    }
+
+    // Derive `new` from `old` by 1..=4 random splices (delete / insert / replace short runs) —
+    // biased toward the nearby-change-runs region the hunk grouper has to get right.
+    fn mutate(rng: &mut Rng, old: &str, pool: &[&str]) -> String {
+        let mut lines: Vec<String> = old.split_inclusive('\n').map(String::from).collect();
+        for _ in 0..=(rng.next() % 4) {
+            let at = if lines.is_empty() {
+                0
+            } else {
+                (rng.next() % (lines.len() as u64 + 1)) as usize
+            };
+            let k = (rng.next() % 3) as usize + 1;
+            match rng.next() % 3 {
+                0 => {
+                    let end = (at + k).min(lines.len());
+                    lines.drain(at..end);
+                }
+                1 => {
+                    for i in 0..k {
+                        let l = pool[(rng.next() % pool.len() as u64) as usize];
+                        lines.insert(at + i, String::from(l));
+                    }
+                }
+                _ => {
+                    let end = (at + k).min(lines.len());
+                    let repl = pool[(rng.next() % pool.len() as u64) as usize];
+                    lines.splice(at..end, [String::from(repl)]);
+                }
+            }
+        }
+        let mut s: String = lines.concat();
+        if !s.is_empty() && rng.next().is_multiple_of(8) && s.ends_with('\n') {
+            s.pop();
+        }
+        s
+    }
+
+    for case in 0..300 {
+        let old = gen_file(&mut rng, pool);
+        let new = if rng.next().is_multiple_of(4) {
+            gen_file(&mut rng, pool) // unrelated contents
+        } else {
+            mutate(&mut rng, &old, pool)
+        };
+        assert_diff_round_trips(&old, &new, &format!("case {case}"));
+    }
 }
 
 #[test]

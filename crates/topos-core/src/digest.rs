@@ -8,6 +8,17 @@
 //! This module is pure: the caller does the filesystem walk (and rejects symlinks / devices /
 //! non-regular files there), then hands the kernel `(path, mode, content_sha256)` per file. The
 //! byte-pure path checks live here.
+//!
+//! ## Three id spaces, never conflated
+//!
+//! sha256 names three DISTINCT id spaces in this system: a file's **content id** (`sha256(raw
+//! bytes)`), the **bundle digest** (`sha256(canonical manifest)`), and the **commit id**
+//! (`sha256(canonical commit frame)` — [`crate::sign`]). All are 32 bytes, and a value can equal a
+//! value of another space by construction — a file whose bytes ARE a rendered manifest has a content
+//! id equal to that manifest's bundle digest — so the three spaces must never share a column, a
+//! lookup, or a dedup key. A cross-kind by-hash lookup (or a combined cache) would let one space
+//! answer for another; every resolution must be space-scoped (a content id only within an authorized
+//! version's tree, a version id only under the version-ref namespace, a digest only as a pin).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -329,6 +340,138 @@ mod tests {
         assert_eq!(check_path(""), Err(RejectReason::EmptyPath));
         assert_eq!(check_path("a//b"), Err(RejectReason::EmptyPath));
         assert_eq!(check_path("ok/path.md"), Ok(()));
+    }
+
+    #[test]
+    fn manifest_as_file_content_does_not_alias_the_described_bundle() {
+        // The cross-space numeric collision is real by construction: a file whose bytes are exactly a
+        // rendered manifest has a CONTENT id equal to that manifest's BUNDLE digest. Pin that this
+        // never aliases identities within the digest space itself — a bundle CARRYING the manifest
+        // bytes as a file shares neither the described bundle's manifest nor its digest, so only a
+        // space-blind lookup could conflate them (which the module docs forbid).
+        let described = vec![
+            entry("a.txt", FileMode::Regular, b"hello\n"),
+            entry("b/run.sh", FileMode::Executable, b"#!/bin/sh\n"),
+        ];
+        let manifest = canonical_manifest(&described).unwrap();
+        let described_digest = bundle_digest(&described).unwrap();
+        assert_eq!(sha256(manifest.as_bytes()), described_digest);
+
+        let carrier = vec![entry(
+            "manifest.txt",
+            FileMode::Regular,
+            manifest.as_bytes(),
+        )];
+        assert_ne!(canonical_manifest(&carrier).unwrap(), manifest);
+        assert_ne!(bundle_digest(&carrier).unwrap(), described_digest);
+    }
+
+    #[test]
+    fn canonical_manifest_is_injective_over_generated_entry_sets() {
+        // Generative: distinct entry SETS (as sets — input order is legitimately erased) must render
+        // distinct manifests, over an alphabet that includes tricky-but-legal paths (spaces, non-ASCII,
+        // a backslash byte, near-miss names, deep nesting). An injectivity break here would let two
+        // different bundles share one digest — the consent unit would stop meaning "these exact bytes."
+        use crate::testgen::Rng;
+        use alloc::collections::BTreeMap;
+
+        let paths: &[&str] = &[
+            "a",
+            "a.txt",
+            "A.md",
+            "dir/with spaces.md",
+            "caf\u{e9}",
+            "b\\c",
+            "reference/deep/nested/notes.md",
+            "x/y/z",
+        ];
+        let contents: &[&[u8]] = &[b"", b"1", b"22"];
+        let mut rng = Rng::new(0x1D5E_7C0D_E5E7_0001);
+        let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut distinct = 0usize;
+        for _ in 0..500 {
+            let mut entries = Vec::new();
+            for &p in paths {
+                if rng.next() & 1 == 0 {
+                    let mode = if rng.next() & 1 == 0 {
+                        FileMode::Regular
+                    } else {
+                        FileMode::Executable
+                    };
+                    let content = contents[(rng.next() % contents.len() as u64) as usize];
+                    entries.push(entry(p, mode, content));
+                }
+            }
+            // Collision-rejected sets have no manifest — they are outside the injectivity domain.
+            let Ok(manifest) = canonical_manifest(&entries) else {
+                continue;
+            };
+            // Determinism: the same set renders the same manifest.
+            assert_eq!(canonical_manifest(&entries).unwrap(), manifest);
+            let mut key: Vec<String> = entries
+                .iter()
+                .map(|e| {
+                    alloc::format!(
+                        "{}|{}|{}",
+                        e.path,
+                        e.mode.as_str(),
+                        to_hex(&e.content_sha256)
+                    )
+                })
+                .collect();
+            key.sort_unstable();
+            match seen.get(&manifest) {
+                Some(prior) => assert_eq!(
+                    prior, &key,
+                    "two distinct entry sets rendered the SAME manifest:\n{manifest}"
+                ),
+                None => {
+                    seen.insert(manifest, key);
+                    distinct += 1;
+                }
+            }
+        }
+        assert!(distinct > 50, "generator degenerated: {distinct} sets");
+    }
+
+    #[test]
+    fn collision_rejects_agree_with_normalize_for_collision() {
+        // Exhaustive over pairs of legal paths (incl. NFC and ASCII-case near-misses, and the non-ASCII
+        // case pair the documented residual deliberately does NOT fold): the manifest rejects the pair
+        // as a collision IFF the two paths normalize equal under [`normalize_for_collision`] — the same
+        // rule a client pre-checks derived paths with, so the two can never drift apart.
+        let paths: &[&str] = &[
+            "a",
+            "A",
+            "b",
+            "caf\u{e9}",
+            "cafe\u{301}",
+            "CAF\u{c9}", // non-ASCII uppercase É: NOT ASCII-foldable — the documented residual
+            "a.topos-mine",
+            "A.TOPOS-MINE",
+            "dir/x",
+            "DIR/X",
+        ];
+        for &p1 in paths {
+            for &p2 in paths {
+                let entries = vec![
+                    entry(p1, FileMode::Regular, b"1"),
+                    entry(p2, FileMode::Regular, b"2"),
+                ];
+                let normalized_equal = normalize_for_collision(p1) == normalize_for_collision(p2);
+                match canonical_manifest(&entries) {
+                    Err(RejectReason::DuplicatePath) => assert_eq!(p1, p2),
+                    Err(RejectReason::NfcCollision | RejectReason::CaseFoldCollision) => {
+                        assert!(normalized_equal && p1 != p2, "{p1:?} vs {p2:?}");
+                    }
+                    Ok(_) => assert!(
+                        !normalized_equal,
+                        "{p1:?} vs {p2:?} normalize equal but passed"
+                    ),
+                    Err(other) => panic!("unexpected reject {other:?} for {p1:?} vs {p2:?}"),
+                }
+            }
+        }
     }
 
     #[test]

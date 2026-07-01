@@ -601,6 +601,118 @@ mod tests {
     }
 
     #[test]
+    fn plan_merge_swap_symmetry_determinism_and_totality_over_generated_sides() {
+        // Generative, over presence × mode × content per path per side. Three laws:
+        //  - totality: every generated triple plans, covering exactly the union in raw-path-byte order;
+        //  - determinism: input order is erased — the reversed inputs plan identically;
+        //  - swap symmetry: exchanging mine/theirs maps TakeMine↔TakeTheirs, ModifyDelete↔DeleteModify,
+        //    swaps ContentMerge's mine/theirs, and fixes everything else (incl. each resolved mode).
+        use crate::testgen::Rng;
+        use alloc::collections::BTreeSet;
+
+        fn swap(plan: PathPlan) -> PathPlan {
+            match plan {
+                PathPlan::TakeMine {
+                    content_sha256,
+                    mode,
+                } => PathPlan::TakeTheirs {
+                    content_sha256,
+                    mode,
+                },
+                PathPlan::TakeTheirs {
+                    content_sha256,
+                    mode,
+                } => PathPlan::TakeMine {
+                    content_sha256,
+                    mode,
+                },
+                PathPlan::ContentMerge {
+                    base,
+                    mine,
+                    theirs,
+                    mode,
+                } => PathPlan::ContentMerge {
+                    base,
+                    mine: theirs,
+                    theirs: mine,
+                    mode,
+                },
+                PathPlan::FileSetConflict {
+                    kind: FileSetConflictKind::ModifyDelete,
+                } => PathPlan::FileSetConflict {
+                    kind: FileSetConflictKind::DeleteModify,
+                },
+                PathPlan::FileSetConflict {
+                    kind: FileSetConflictKind::DeleteModify,
+                } => PathPlan::FileSetConflict {
+                    kind: FileSetConflictKind::ModifyDelete,
+                },
+                other => other,
+            }
+        }
+
+        let paths: &[&str] = &["SKILL.md", "a", "b/run.sh", "z z"];
+        let contents: &[&[u8]] = &[b"0", b"1", b"2"];
+        let mut rng = Rng::new(0xA11C_E5ED_5EED_0001);
+
+        fn gen_side(rng: &mut Rng, paths: &[&str], contents: &[&[u8]]) -> Vec<FileId> {
+            let mut side = Vec::new();
+            for &p in paths {
+                if rng.next() & 1 == 0 {
+                    let mode = if rng.next() & 1 == 0 {
+                        FileMode::Regular
+                    } else {
+                        FileMode::Executable
+                    };
+                    side.push(fid(
+                        p,
+                        mode,
+                        contents[(rng.next() % contents.len() as u64) as usize],
+                    ));
+                }
+            }
+            side
+        }
+
+        for case in 0..400 {
+            let base = gen_side(&mut rng, paths, contents);
+            let mine = gen_side(&mut rng, paths, contents);
+            let theirs = gen_side(&mut rng, paths, contents);
+            let plan = plan_merge(&base, &mine, &theirs);
+
+            // Totality + order: exactly the union of present paths, in raw-path-byte order.
+            let union: BTreeSet<&str> = base
+                .iter()
+                .chain(&mine)
+                .chain(&theirs)
+                .map(|f| f.path.as_str())
+                .collect();
+            let planned: Vec<&str> = plan.paths.iter().map(|p| p.path.as_str()).collect();
+            assert_eq!(
+                planned,
+                union.into_iter().collect::<Vec<_>>(),
+                "case {case}"
+            );
+
+            // Determinism: input order is erased.
+            let rev = |s: &[FileId]| s.iter().rev().cloned().collect::<Vec<_>>();
+            assert_eq!(
+                plan,
+                plan_merge(&rev(&base), &rev(&mine), &rev(&theirs)),
+                "case {case}"
+            );
+
+            // Swap symmetry.
+            let swapped = plan_merge(&base, &theirs, &mine);
+            assert_eq!(swapped.paths.len(), plan.paths.len(), "case {case}");
+            for (p, q) in plan.paths.iter().zip(&swapped.paths) {
+                assert_eq!(p.path, q.path, "case {case}");
+                assert_eq!(swap(p.plan.clone()), q.plan, "case {case}, path {}", p.path);
+            }
+        }
+    }
+
+    #[test]
     fn publish_guard_is_presence_based() {
         assert!(!publish_blocked(None));
         let z = [0u8; 32];

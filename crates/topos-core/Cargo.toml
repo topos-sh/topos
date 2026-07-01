@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "THE PURE TRUST LOGIC — deterministic functions over explicit values, over its OWN validated domain newtypes. No I/O, no traits, no ambient clock/RNG. Every L0 invariant is a unit/proptest here. Does NOT depend on topos-types."
+description = "THE PURE TRUST LOGIC — deterministic functions over explicit values, over its OWN validated domain newtypes. No I/O, no traits, no ambient clock/RNG. Every L0 invariant is a unit or seeded generative test here. Does NOT depend on topos-types."
 
 # The kernel pulls ONLY crypto + canonical-form primitives (asserted by `cargo xtask check-arch` — no
 # I/O/async/storage crates). `ed25519-dalek` is verify-ONLY here (`default-features = false` keeps it

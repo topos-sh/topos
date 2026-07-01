@@ -33,7 +33,8 @@ Planned (land behind a golden vector as their wire encoding / mechanics freeze):
   `SystemTime::now` / RNG call would fail to BUILD in a production build, not just fail review.
 - **No I/O. No traits. No `tokio` / `sqlx` / `axum` / `gix` / `std::fs`.**
 - **No ambient clock or RNG** — time is a `now` parameter; keys/signatures are byte parameters.
-- **Every core invariant is a unit/proptest in this crate.**
+- **Every core invariant is a unit or seeded generative test in this crate** (the generative tests use
+  a deterministic in-repo xorshift generator — no proptest/RNG dependency).
 - Depends on nothing in the workspace, and only on crypto primitives (`cargo xtask check-arch` enforces it).
 
 Dependencies: `sha2` + `ed25519-dalek` (verify-only, `default-features = false`). Nothing else.
