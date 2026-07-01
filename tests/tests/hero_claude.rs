@@ -11,9 +11,9 @@
 //! never clobbered by any of it — each sweep surfaces the change as a `diverged` row and leaves the draft
 //! bytes untouched.
 //!
-//! The runner is table-driven over [`AdapterCase`] — the OpenClaw case below is exactly that, and a
-//! further sibling (Hermes) is one new case row + one `#[test]`, not a copy. Only Claude Code guarantees
-//! the swap completes before skills resolve; a sibling case asserts byte-landing, not that ordering.
+//! The runner is table-driven over [`AdapterCase`] — the OpenClaw and Hermes cases below are exactly
+//! that: one new case row + one `#[test]` each, not a copy. Only Claude Code guarantees the swap
+//! completes before skills resolve; a sibling case asserts byte-landing, not that ordering.
 //!
 //! MUST-VERIFY (manual, not asserted here): that a live Claude Code session's SessionStart hook injects
 //! `topos pull --quiet`'s stdout into the model context BEFORE skill resolution. This e2e proves the hook
@@ -29,6 +29,13 @@
 //! OpenClaw gateway auto-watched the config and injected the refreshed surface at bootstrap — that, plus
 //! the concrete config-byte shape (a readiness probe against the pilot's exact OpenClaw build), is an
 //! external MUST-VERIFY, never a headless assertion.
+//!
+//! The Hermes case is the same honest shape one notch further: its per-turn `pre_llm_call` hook runs only
+//! after Hermes's own one-time `(event, command)` approval, and no acceptance evidence exists in a fixture
+//! home — so the case asserts the real `config.yaml` gained the exact registered entry (and never an
+//! `on_session_start` one) AND that the disclosed report is honestly NOT active (the explicit-pull
+//! degrade), never fabricating the live per-turn injection the pilot's real build must be the one to
+//! prove.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -45,8 +52,8 @@ use plane_store::{
 use topos::test_support::{ContributeHarness, FollowHarness, PublishResult, Scope};
 use topos_core::sign::{GovernanceOpFields, GovernanceOpKind, governance_op_preimage};
 use topos_plane::{PlaneState, router};
-use topos_types::Generation;
 use topos_types::results::PullAction;
+use topos_types::{CurrencyKind, Generation, TriggerReport, TriggerState};
 
 // ── shared constants ──────────────────────────────────────────────────────────────────────────────
 const WS: &str = "w_acme";
@@ -117,15 +124,16 @@ struct AdapterCase {
     tag: &'static str,
     /// Build a follower rig wired to this adapter over an isolated temp config home.
     follower: fn(&str) -> FollowHarness,
-    /// Assert the adapter's own config gained the currency trigger, byte-exact.
-    assert_currency_armed: fn(&FollowHarness),
+    /// Assert the adapter's own config gained the currency trigger byte-exact AND that the disclosed
+    /// [`TriggerReport`] is honest for this adapter (a fixture home must never fabricate a live hook).
+    assert_currency: fn(&FollowHarness, &TriggerReport),
 }
 
 fn claude_case() -> AdapterCase {
     AdapterCase {
         tag: "claude",
         follower: FollowHarness::new_claude,
-        assert_currency_armed: |h| {
+        assert_currency: |h, report| {
             let raw = h
                 .settings_json()
                 .expect("promote wrote settings.json into the temp config home");
@@ -142,6 +150,43 @@ fn claude_case() -> AdapterCase {
                 group["hooks"][0]["timeout"].is_u64(),
                 "the managed hook carries a timeout"
             );
+            // Claude Code's hook needs no separate approval: a fresh install into the temp home is live.
+            assert_eq!(report.state, TriggerState::Active);
+            assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
+        },
+    }
+}
+
+/// The exact `pre_llm_call` entry line the Hermes adapter registers (duplicated here on purpose — the e2e
+/// pins the contract; an adapter change must break this loudly). The trailing `# topos:currency` is a YAML
+/// comment outside the scalar: Hermes parses the command as exactly `topos pull --quiet`.
+const HERMES_ENTRY_LINE: &str = "  - command: topos pull --quiet  # topos:currency";
+
+fn hermes_case() -> AdapterCase {
+    AdapterCase {
+        tag: "hermes",
+        follower: FollowHarness::new_hermes,
+        assert_currency: |h, report| {
+            let raw = h
+                .hermes_config()
+                .expect("promote wrote config.yaml into the temp hermes home");
+            assert!(
+                raw.lines().any(|l| l == HERMES_ENTRY_LINE),
+                "the registered entry must be the exact line the adapter contracts: {raw:?}"
+            );
+            assert!(
+                raw.contains("pre_llm_call"),
+                "the registered event is the injecting per-turn hook"
+            );
+            assert!(
+                !raw.contains("session_start"),
+                "on_session_start is observer-only and never the currency mechanism"
+            );
+            // Honest, fixture-home-based form: no acceptance evidence exists here, so the report must
+            // NOT claim the hook is live — the per-turn injection on the pilot's real build stays a
+            // MUST-VERIFY, and until then currency degrades plainly to explicit pull.
+            assert_eq!(report.state, TriggerState::Inactive);
+            assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         },
     }
 }
@@ -150,7 +195,7 @@ fn openclaw_case() -> AdapterCase {
     AdapterCase {
         tag: "openclaw",
         follower: FollowHarness::new_openclaw,
-        assert_currency_armed: |h| {
+        assert_currency: |h, report| {
             let home = h.openclaw_home().expect("the rig is in openclaw mode");
             let raw = h
                 .openclaw_config_json()
@@ -184,6 +229,11 @@ fn openclaw_case() -> AdapterCase {
                 !plugin.to_lowercase().contains("session start"),
                 "the inject surface never claims session-start currency"
             );
+            // A fresh temp home has no disabling flag and no blown budget, so the registration itself is
+            // live — honestly labeled first-`topos`-touch (the live gateway auto-watch stays the external
+            // MUST-VERIFY above, never asserted here).
+            assert_eq!(report.state, TriggerState::Active);
+            assert_eq!(report.currency_kind, CurrencyKind::FirstToposTouch);
         },
     }
 }
@@ -398,12 +448,13 @@ fn enroll_follower(
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
     let done = follower.resume(plane.plane_key).expect("follow --resume");
     assert!(done.enrolled);
-    // The promote armed the REAL adapter's currency trigger and disclosed it.
-    assert!(
-        done.currency.is_some(),
-        "the enrollment must disclose the currency-arm outcome"
-    );
-    (case.assert_currency_armed)(&follower);
+    // The promote armed the REAL adapter's currency trigger and disclosed it — assert both the config
+    // bytes and the report's honesty per adapter.
+    let currency = done
+        .currency
+        .as_ref()
+        .expect("the enrollment must disclose the currency-arm outcome");
+    (case.assert_currency)(&follower, currency);
     follower
 }
 
@@ -579,4 +630,9 @@ fn distribute_hero_on_the_real_claude_code_adapter() {
 #[test]
 fn distribute_hero_on_the_real_openclaw_adapter() {
     run_distribute_hero(&openclaw_case());
+}
+
+#[test]
+fn distribute_hero_on_the_real_hermes_adapter() {
+    run_distribute_hero(&hermes_case());
 }

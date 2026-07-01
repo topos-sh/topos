@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::to_hex;
-use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, OpenClaw, PlacementTarget};
+use topos_harness::{
+    ClaudeCode, DiscoveredPlacement, HarnessAdapter, Hermes, OpenClaw, PlacementTarget,
+};
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
 use topos_types::results::{DiffData, ProposeData, PublishData, PullData, RevertData, ReviewData};
@@ -411,9 +413,10 @@ impl HarnessAdapter for WorkHarness {
 /// Three adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
 /// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
 /// temp config home — placements land in `<config-home>/skills/<skill_id>` and the enrollment promote arms
-/// the REAL `settings.json` session-start hook — and [`new_openclaw`](Self::new_openclaw) wires the **real
+/// the REAL `settings.json` session-start hook — [`new_openclaw`](Self::new_openclaw) wires the **real
 /// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the bootstrap-inject
-/// surface in `openclaw.json` + writes the topos-owned plugin file), so an e2e can prove the whole
+/// surface in `openclaw.json` + writes the topos-owned plugin file) — and [`new_hermes`](Self::new_hermes)
+/// wires the **real Hermes adapter** over a temp `$HERMES_HOME`, so an e2e can prove the whole
 /// second-machine story against a genuine adapter.
 #[derive(Debug)]
 pub struct FollowHarness {
@@ -427,6 +430,10 @@ pub struct FollowHarness {
     claude: Option<Scratch>,
     /// `Some` = the real-OpenClaw mode: the temp stand-in `~/.openclaw` the real adapter resolves against.
     openclaw: Option<Scratch>,
+    /// `Some` = the real-Hermes mode: a temp stand-in `$HERMES_HOME`. The adapter is constructed with
+    /// `accept_hooks = false` — the honest no-acceptance-evidence form (the e2e never fabricates a live
+    /// per-turn hook; the one-time approval is Hermes's own to grant).
+    hermes: Option<Scratch>,
 }
 
 impl FollowHarness {
@@ -446,6 +453,7 @@ impl FollowHarness {
             harness,
             claude: None,
             openclaw: None,
+            hermes: None,
         }
     }
 
@@ -472,16 +480,31 @@ impl FollowHarness {
         rig
     }
 
+    /// A fresh rig wired to the REAL Hermes adapter over a temp stand-in `$HERMES_HOME` (the real
+    /// `~/.hermes` is never touched). Placement + the currency hook then go through the genuine adapter:
+    /// skills land in `<hermes-home>/skills/general/<skill_id>` and the promote registers the real
+    /// `config.yaml` per-turn `pre_llm_call` entry (reported honestly non-Active — no acceptance evidence
+    /// exists in a fixture home).
+    #[must_use]
+    pub fn new_hermes(tag: &str) -> Self {
+        let mut rig = Self::new(tag);
+        rig.hermes = Some(Scratch::new(&format!("{tag}-hermes")));
+        rig
+    }
+
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0)
     }
 
-    /// Run `f` over the rig's adapter: the real `ClaudeCode` / `OpenClaw` (a stack local borrowing the
-    /// fs seam — the adapter borrows its `ConfigStore`, so it cannot be an owned field) or the
-    /// `WorkHarness` stub.
+    /// Run `f` over the rig's adapter: the real `ClaudeCode` / `OpenClaw` / `Hermes` (a stack local
+    /// borrowing the fs seam — the adapter borrows its `ConfigStore`, so it cannot be an owned field) or
+    /// the `WorkHarness` stub.
     fn with_adapter<R>(&self, f: impl FnOnce(&dyn HarnessAdapter) -> R) -> R {
         if let Some(home) = &self.openclaw {
             return f(&OpenClaw::new(home.0.clone(), &self.fs));
+        }
+        if let Some(home) = &self.hermes {
+            return f(&Hermes::new(home.0.clone(), false, &self.fs));
         }
         match &self.claude {
             Some(home) => f(&ClaudeCode::new(home.0.clone(), &self.fs)),
@@ -663,10 +686,14 @@ impl FollowHarness {
     }
 
     /// Where this rig's adapter places `skill_id`: the real harness layout (`<home>/skills/<id>`) in
-    /// claude / openclaw mode, else the work root.
+    /// claude / openclaw mode, the real Hermes no-discovery default (`<hermes-home>/skills/general/<id>`)
+    /// in hermes mode, else the work root.
     fn placement_dir(&self, skill_id: &str) -> PathBuf {
         if let Some(home) = &self.openclaw {
             return home.0.join("skills").join(skill_id);
+        }
+        if let Some(home) = &self.hermes {
+            return home.0.join("skills").join("general").join(skill_id);
         }
         match &self.claude {
             Some(home) => home.0.join("skills").join(skill_id),
@@ -709,6 +736,14 @@ impl FollowHarness {
     pub fn openclaw_plugin(&self) -> Option<String> {
         let home = self.openclaw.as_ref()?;
         std::fs::read_to_string(home.0.join("topos-currency.mjs")).ok()
+    }
+
+    /// The raw `config.yaml` in the hermes home (`None` when absent or not in hermes mode) — the e2e
+    /// asserts the exact registered `pre_llm_call` entry line against it.
+    #[must_use]
+    pub fn hermes_config(&self) -> Option<String> {
+        let home = self.hermes.as_ref()?;
+        std::fs::read_to_string(home.0.join("config.yaml")).ok()
     }
 
     /// The followed skill's `sync.json` (the durable floor/applied state).
