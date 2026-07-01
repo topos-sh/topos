@@ -1555,6 +1555,10 @@ async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
 fn put_policy(auth: Option<&str>, review_required: bool) -> Request<Body> {
     let body =
         serde_json::to_vec(&serde_json::json!({ "review_required": review_required })).unwrap();
+    put_policy_raw(auth, body)
+}
+
+fn put_policy_raw(auth: Option<&str>, body: Vec<u8>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("PUT")
         .uri(format!("/v1/workspaces/{WS}/policy/review-required"))
@@ -1575,6 +1579,10 @@ async fn the_policy_route_is_invisible_without_an_admin_token(pool: PgPool) {
     let env = envelope(&bytes);
     assert!(!env.ok);
     assert!(env.receipt.is_none(), "the authority was never reached");
+    // A malformed body must NOT make the disabled route observable (auth is decided before any parse):
+    // still the same indistinguishable 404, never a 400 body-parse oracle.
+    let (status, _h, _b) = run(&ctx, put_policy_raw(Some("whatever"), b"not json".to_vec())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
@@ -1583,11 +1591,20 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     ctx.state = ctx.state.clone().with_admin_token("op_secret");
     let (g_vid, _) = seed_genesis(&ctx, "30000000-0000-4000-8000-000000000000").await;
 
-    // Configured + missing/wrong token ⇒ an honest 401; nothing flips.
+    // Configured + missing/wrong token ⇒ an honest 401; nothing flips. A malformed body never masks the
+    // auth answer (401 before any parse); only an AUTHENTICATED malformed body is a 400.
     let (status, _h, _b) = run(&ctx, put_policy(None, true)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _h, _b) = run(&ctx, put_policy(Some("wrong"), true)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _h, _b) = run(&ctx, put_policy_raw(Some("wrong"), b"not json".to_vec())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _h, _b) = run(
+        &ctx,
+        put_policy_raw(Some("op_secret"), b"not json".to_vec()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // The right token ⇒ 204, and the flip is OBSERVABLE: a direct publish now fails typed.
     let (status, _h, _b) = run(&ctx, put_policy(Some("op_secret"), true)).await;

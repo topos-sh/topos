@@ -16,8 +16,8 @@ use plane_store::WorkspaceId;
 use topos_types::requests::PolicyReviewRequiredRequest;
 
 use crate::state::PlaneState;
+use crate::wire;
 use crate::wire::error::PlaneHttpError;
-use crate::wire::{self, ApiJson};
 
 #[utoipa::path(
     put,
@@ -41,7 +41,10 @@ pub(crate) async fn set_review_required(
     State(state): State<PlaneState>,
     Path(ws): Path<String>,
     headers: HeaderMap,
-    ApiJson(req): ApiJson<PolicyReviewRequiredRequest>,
+    // The RAW body, not the JSON extractor: an extractor rejection would answer 400 BEFORE the admin
+    // checks below run, making a disabled route observable (400-vs-404) to an unauthenticated prober.
+    // Auth is decided first; only then is the body parsed.
+    body: axum::body::Bytes,
 ) -> Result<Response, PlaneHttpError> {
     // Disabled ⇒ the same indistinguishable 404 a missing route answers — checked BEFORE any parse or
     // authority touch, so an unconfigured plane's response carries no oracle.
@@ -53,6 +56,8 @@ pub(crate) async fn set_review_required(
     if !state.admin_token_matches(&provided) {
         return Err(PlaneHttpError::Unauthorized);
     }
+    let req: PolicyReviewRequiredRequest = serde_json::from_slice(&body)
+        .map_err(|e| PlaneHttpError::BadBody(format!("malformed policy body: {e}")))?;
     let ws = WorkspaceId::parse(&ws).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     state
         .authority()

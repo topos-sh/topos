@@ -386,6 +386,38 @@ pub(crate) fn write_follows_merged(
     )
 }
 
+/// Flip one skill's `following` flag IN PLACE, with the whole read-modify-write under the `"identity"`
+/// lock — so a concurrent enrollment writer's freshly-minted row (token/mode) is never clobbered by a
+/// stale pre-lock snapshot (the lost-update a read-then-merge shape would allow; `write_follows_merged`
+/// is safe only for callers whose rows are freshly built, like the promote). A missing file or entry is
+/// a clean no-op (already not-followed); an already-equal flag writes nothing.
+pub(crate) fn set_following(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    skill_id: &str,
+    following: bool,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.lock_file("identity"))?;
+    let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
+        return Ok(());
+    };
+    let Some(entry) = follows.follows.iter_mut().find(|e| e.skill_id == skill_id) else {
+        return Ok(());
+    };
+    if entry.following == following {
+        return Ok(());
+    }
+    entry.following = following;
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: SCHEMA_VERSION,
+            follows: follows.follows,
+        },
+    )
+}
+
 /// Write `identity/user.json` (metadata only; ordinary perms). The identity dir must exist.
 pub(crate) fn write_user(
     fs: &dyn FsOps,

@@ -217,9 +217,10 @@ flip `location` → `git repack`), both additive + client-invisible; **multi-rev
 (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff UI — single-approver only today, no
 role column; the client contribute loop + the proposals-listing read route that feeds it are now BUILT); the
 **HTTP plane's still-to-come surfaces** over the issuance
-core (the verification-page HTML, the workspace-policy mutation route, the audit outbox — the enrollment +
-governance request/response DTOs, the mailer, and one generic OSS OIDC connector all landed in `topos-plane`
-this increment, so the network surface itself is wired; these three remain unbuilt); **active read-token
+core (the verification-page HTML and the audit outbox — the enrollment + governance request/response DTOs,
+the mailer, and one generic OSS OIDC connector all landed in `topos-plane` earlier, and the workspace-policy
+mutation route is now BUILT there as the admin-token `PUT …/policy/review-required`; the two remain
+unbuilt); **active read-token
 rotation** (redeem
 mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
 revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);

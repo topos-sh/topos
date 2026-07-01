@@ -10,7 +10,7 @@
 use topos_types::results::UnfollowData;
 
 use crate::ctx::Ctx;
-use crate::enroll::{self, FollowEntry};
+use crate::enroll;
 use crate::error::ClientError;
 
 /// Dispatch the `unfollow` verb.
@@ -21,20 +21,12 @@ use crate::error::ClientError;
 pub(crate) fn unfollow(ctx: &Ctx<'_>, name: &str) -> Result<UnfollowData, ClientError> {
     let (skill_id, _lock) = super::resolve_skill(ctx, name)?;
 
-    // Flip only when an entry is currently following. The struct-update retains the read token /
-    // workspace / mode, so the entry stays a complete record a later follow resumes over. A tracked
-    // skill with no follow entry at all (e.g. adopted locally via `add`) is already not followed —
-    // the same clean success, nothing written.
-    if let Some(follows) = enroll::read_follows(ctx.fs, &ctx.layout)?
-        && let Some(entry) = follows.follows.iter().find(|e| e.skill_id == skill_id)
-        && entry.following
-    {
-        let flipped = FollowEntry {
-            following: false,
-            ..entry.clone()
-        };
-        enroll::write_follows_merged(ctx.fs, &ctx.layout, &[flipped])?;
-    }
+    // Flip `following` in place, entirely under the identity lock — only that one field moves, so the
+    // entry stays a complete record (token / workspace / mode retained) a later follow resumes over, and
+    // a concurrent enrollment writer's fresh row is never clobbered by a stale snapshot. A tracked skill
+    // with no follow entry at all (e.g. adopted locally via `add`) is already not followed — the same
+    // clean success, nothing written.
+    enroll::set_following(ctx.fs, &ctx.layout, &skill_id, false)?;
 
     Ok(UnfollowData {
         skill_id,
