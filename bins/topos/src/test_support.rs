@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::to_hex;
-use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, OpenClaw, PlacementTarget};
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
 use topos_types::results::{DiffData, ProposeData, PublishData, PullData, RevertData, ReviewData};
@@ -408,11 +408,13 @@ impl HarnessAdapter for WorkHarness {
 /// `ureq` enroll/read transports, so an EXTERNAL e2e crate can prove the whole loop (bootstrap → enroll →
 /// redeem → TOFU-pin → first-receive placement) without reaching the client's `pub(crate)` internals.
 ///
-/// Two adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
+/// Three adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
 /// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
 /// temp config home — placements land in `<config-home>/skills/<skill_id>` and the enrollment promote arms
-/// the REAL `settings.json` session-start hook, so an e2e can prove the whole second-machine story against
-/// the genuine adapter.
+/// the REAL `settings.json` session-start hook — and [`new_openclaw`](Self::new_openclaw) wires the **real
+/// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the bootstrap-inject
+/// surface in `openclaw.json` + writes the topos-owned plugin file), so an e2e can prove the whole
+/// second-machine story against a genuine adapter.
 #[derive(Debug)]
 pub struct FollowHarness {
     home: Scratch,
@@ -423,6 +425,8 @@ pub struct FollowHarness {
     harness: WorkHarness,
     /// `Some` = the real-Claude mode: the temp `$CLAUDE_CONFIG_DIR` the real adapter resolves against.
     claude: Option<Scratch>,
+    /// `Some` = the real-OpenClaw mode: the temp stand-in `~/.openclaw` the real adapter resolves against.
+    openclaw: Option<Scratch>,
 }
 
 impl FollowHarness {
@@ -441,6 +445,7 @@ impl FollowHarness {
             clock: RealClock,
             harness,
             claude: None,
+            openclaw: None,
         }
     }
 
@@ -455,13 +460,29 @@ impl FollowHarness {
         rig
     }
 
+    /// A fresh rig wired to the REAL OpenClaw adapter over a temp stand-in home (the real `~/.openclaw`
+    /// is never touched — the home is injected, mirroring the adapter's own test isolation). Placement +
+    /// the currency trigger then go through the genuine adapter: skills land in `<home>/skills/<skill_id>`
+    /// and the promote registers the bootstrap-inject surface in `openclaw.json` + writes the topos-owned
+    /// inject plugin file.
+    #[must_use]
+    pub fn new_openclaw(tag: &str) -> Self {
+        let mut rig = Self::new(tag);
+        rig.openclaw = Some(Scratch::new(&format!("{tag}-openclaw")));
+        rig
+    }
+
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0)
     }
 
-    /// Run `f` over the rig's adapter: the real `ClaudeCode` (a stack local borrowing the fs seam — the
-    /// adapter borrows its `ConfigStore`, so it cannot be an owned field) or the `WorkHarness` stub.
+    /// Run `f` over the rig's adapter: the real `ClaudeCode` / `OpenClaw` (a stack local borrowing the
+    /// fs seam — the adapter borrows its `ConfigStore`, so it cannot be an owned field) or the
+    /// `WorkHarness` stub.
     fn with_adapter<R>(&self, f: impl FnOnce(&dyn HarnessAdapter) -> R) -> R {
+        if let Some(home) = &self.openclaw {
+            return f(&OpenClaw::new(home.0.clone(), &self.fs));
+        }
         match &self.claude {
             Some(home) => f(&ClaudeCode::new(home.0.clone(), &self.fs)),
             None => f(&self.harness),
@@ -641,9 +662,12 @@ impl FollowHarness {
         snapshot_dir(&self.placement_dir(skill_id))
     }
 
-    /// Where this rig's adapter places `skill_id`: the real Claude layout (`<config-home>/skills/<id>`) in
-    /// claude mode, else the work root.
+    /// Where this rig's adapter places `skill_id`: the real harness layout (`<home>/skills/<id>`) in
+    /// claude / openclaw mode, else the work root.
     fn placement_dir(&self, skill_id: &str) -> PathBuf {
+        if let Some(home) = &self.openclaw {
+            return home.0.join("skills").join(skill_id);
+        }
         match &self.claude {
             Some(home) => home.0.join("skills").join(skill_id),
             None => self.work.0.join(skill_id),
@@ -662,6 +686,29 @@ impl FollowHarness {
     pub fn settings_json(&self) -> Option<String> {
         let home = self.claude.as_ref()?;
         std::fs::read_to_string(home.0.join("settings.json")).ok()
+    }
+
+    /// The openclaw-mode stand-in home path (`None` when not in openclaw mode) — the e2e derives the
+    /// expected registration entry from it.
+    #[must_use]
+    pub fn openclaw_home(&self) -> Option<PathBuf> {
+        self.openclaw.as_ref().map(|h| h.0.clone())
+    }
+
+    /// The raw `openclaw.json` in the stand-in home (`None` when absent or not in openclaw mode) — the
+    /// e2e asserts the exact bootstrap-inject registration against it.
+    #[must_use]
+    pub fn openclaw_config_json(&self) -> Option<String> {
+        let home = self.openclaw.as_ref()?;
+        std::fs::read_to_string(home.0.join("openclaw.json")).ok()
+    }
+
+    /// The topos-owned inject plugin file's text in the stand-in home (`None` when absent or not in
+    /// openclaw mode) — the e2e asserts the honest first-`topos`-touch labeling against it.
+    #[must_use]
+    pub fn openclaw_plugin(&self) -> Option<String> {
+        let home = self.openclaw.as_ref()?;
+        std::fs::read_to_string(home.0.join("topos-currency.mjs")).ok()
     }
 
     /// The followed skill's `sync.json` (the durable floor/applied state).

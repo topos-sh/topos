@@ -11,15 +11,24 @@
 //! never clobbered by any of it — each sweep surfaces the change as a `diverged` row and leaves the draft
 //! bytes untouched.
 //!
-//! The runner is table-driven over [`AdapterCase`] so a sibling harness adapter (OpenClaw / Hermes) is one
-//! new case row + one `#[test]`, not a copy. Only Claude Code guarantees the swap completes before skills
-//! resolve; a sibling case asserts byte-landing, not that ordering.
+//! The runner is table-driven over [`AdapterCase`] — the OpenClaw case below is exactly that, and a
+//! further sibling (Hermes) is one new case row + one `#[test]`, not a copy. Only Claude Code guarantees
+//! the swap completes before skills resolve; a sibling case asserts byte-landing, not that ordering.
 //!
 //! MUST-VERIFY (manual, not asserted here): that a live Claude Code session's SessionStart hook injects
 //! `topos pull --quiet`'s stdout into the model context BEFORE skill resolution. This e2e proves the hook
 //! command is installed byte-exact, the enrollment armed it through the real adapter, and the updated /
 //! reverted bytes materialize into the config home's `skills/<id>/` — it does NOT and cannot assert that
 //! a live Claude model saw the update.
+//!
+//! For OpenClaw the currency is honestly weaker: it surfaces on the first `topos` touch of a session,
+//! never at bare session open (`session_start` is observer-only, and cron is never a currency path). The
+//! OpenClaw case proves the `openclaw.json` bootstrap-inject registration + the topos-owned plugin file
+//! are written through the REAL adapter's `follow` promote and that updates/reverts land byte-exact on
+//! the follower's `pull` sweeps over a temp stand-in home. It does NOT and cannot assert that a live
+//! OpenClaw gateway auto-watched the config and injected the refreshed surface at bootstrap — that, plus
+//! the concrete config-byte shape (a readiness probe against the pilot's exact OpenClaw build), is an
+//! external MUST-VERIFY, never a headless assertion.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,6 +71,11 @@ const INVITE_OP_2: &str = "b0000000-0000-4000-8000-000000000002";
 /// e2e pins the contract; an adapter change must break this loudly).
 const HOOK_COMMAND: &str =
     "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
+
+/// The OpenClaw adapter's config artifacts (duplicated here on purpose, like `HOOK_COMMAND` — the e2e
+/// pins the contract). Provisional until the readiness probe against the pilot's exact OpenClaw build.
+const OPENCLAW_EXTRA_FILES_KEY: &str = "bootstrap-extra-files";
+const OPENCLAW_PLUGIN_FILE: &str = "topos-currency.mjs";
 
 /// v1 — the genesis bundle the author first publishes (a doc + an EXECUTABLE script).
 const V1: &[(&str, bool, &[u8])] = &[
@@ -127,6 +141,48 @@ fn claude_case() -> AdapterCase {
             assert!(
                 group["hooks"][0]["timeout"].is_u64(),
                 "the managed hook carries a timeout"
+            );
+        },
+    }
+}
+
+fn openclaw_case() -> AdapterCase {
+    AdapterCase {
+        tag: "openclaw",
+        follower: FollowHarness::new_openclaw,
+        assert_currency_armed: |h| {
+            let home = h.openclaw_home().expect("the rig is in openclaw mode");
+            let raw = h
+                .openclaw_config_json()
+                .expect("promote wrote openclaw.json into the temp stand-in home");
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).expect("openclaw.json is valid JSON");
+            let entries = v[OPENCLAW_EXTRA_FILES_KEY]
+                .as_array()
+                .expect("the bootstrap-inject registration array exists");
+            let expected = home.join(OPENCLAW_PLUGIN_FILE);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter_map(|e| e.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected.to_str().unwrap()],
+                "the registration is exactly the topos-owned plugin path"
+            );
+            let plugin = h
+                .openclaw_plugin()
+                .expect("promote wrote the topos-owned inject plugin file");
+            assert!(
+                plugin.contains("topos pull"),
+                "the inject surface names the currency verb"
+            );
+            assert!(
+                plugin.contains("first `topos` touch"),
+                "honest label: the update moment is the first `topos` touch"
+            );
+            assert!(
+                !plugin.to_lowercase().contains("session start"),
+                "the inject surface never claims session-start currency"
             );
         },
     }
@@ -518,4 +574,9 @@ fn run_distribute_hero(case: &AdapterCase) {
 #[test]
 fn distribute_hero_on_the_real_claude_code_adapter() {
     run_distribute_hero(&claude_case());
+}
+
+#[test]
+fn distribute_hero_on_the_real_openclaw_adapter() {
+    run_distribute_hero(&openclaw_case());
 }
