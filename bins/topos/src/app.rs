@@ -441,15 +441,19 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
 
 /// Build the harness adapter for `id`, borrowing the shared config-store seam. Adding a harness is ONE
 /// new match arm — no caller change. v0 only ever selects Claude Code (the CLI's one selection site
-/// above passes `HarnessId::ClaudeCode`; it resolves its own config home, `$CLAUDE_CONFIG_DIR` else
-/// `$HOME/.claude`). The OpenClaw arm serves the test rigs while its concrete config bytes stay
-/// provisional behind the pilot readiness probe (the `openclaw` module doc); the Hermes arm lands with
-/// its adapter.
+/// above passes `HarnessId::ClaudeCode`; each adapter resolves its own config home:
+/// `$CLAUDE_CONFIG_DIR` else `$HOME/.claude`; `$HOME/.openclaw`; `$HERMES_HOME` else `$HOME/.hermes`).
+/// The OpenClaw and Hermes arms serve the test rigs while their concrete config bytes stay provisional
+/// behind the pilot readiness probes (each module's doc).
 fn adapter_for<'a>(id: HarnessId, fs: &'a dyn ConfigStore) -> Box<dyn HarnessAdapter + 'a> {
     match id {
         HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home(), fs)),
         HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), fs)),
-        HarnessId::Hermes => unreachable!("harness adapter not yet wired for {id:?}"),
+        HarnessId::Hermes => Box::new(topos_harness::Hermes::new(
+            topos_harness::Hermes::resolve_home(),
+            topos_harness::Hermes::resolve_accept_hooks(),
+            fs,
+        )),
     }
 }
 
