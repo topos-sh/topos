@@ -194,7 +194,7 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > currency arms at `follow`** (the promote step installs the session-start hook best-effort + idempotent,
 > mirroring `add` — a pure follower's machine now self-updates; disclosed on the result's additive `currency`
 > field); the app's harness wiring is an **`adapter_for(HarnessId)` dispatch** (one match arm per harness —
-> the OpenClaw arm is now added below; the Hermes increment adds its own); and the self-host **admin-token policy route** (`PUT
+> the OpenClaw and Hermes arms are both wired below); and the self-host **admin-token policy route** (`PUT
 > /v1/workspaces/{ws}/policy/review-required`, 404-invisible unless `--admin-token` is set, 401 on a wrong
 > token, 204 on the idempotent set) toggles the review gate a self-hoster already had enforcement for. The
 > whole loop is proven by a **real-adapter hero e2e** over loopback HTTP: an author (a plain member)
@@ -227,6 +227,21 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > against the pilot's exact OpenClaw build** — the checklist lives in the `openclaw` module doc; the CLI's
 > production selection stays Claude-Code-only until that probe pins them.
 >
+> **The Hermes adapter is built too** — the third concrete `HarnessAdapter`, behind the frozen trait, real but
+> pilot-pending. Discovery walks Hermes's mixed-depth `~/.hermes/skills/` shape (`<name>/` uncategorized;
+> `<category>/<name>/` with the category as the placement's layer); placement defaults to
+> `skills/general/<skill_id>`; currency is the **injecting per-turn `pre_llm_call`** hook (`on_session_start`
+> is observer-only and never registered) — one `topos pull --quiet` entry registered idempotently in
+> `config.yaml` by an anchored, fail-closed, byte-preserving line merge (the config is YAML; unprovable
+> shapes degrade honestly, zero writes, never a clobber). Hermes's own one-time `(event, command)` consent
+> allowlist is **read as evidence, never written**: the report claims Active + first-turn currency only on
+> durable acceptance evidence (the persisted allowlist, `hooks_auto_accept: true`, or Hermes's accept env),
+> else the entry is registered but the report degrades plainly to explicit `topos pull`. The hero e2e gained
+> the Hermes case row (enroll → the real `config.yaml` entry byte-exact + the honestly-non-Active report →
+> genesis/update/revert land byte-exact in the temp `$HERMES_HOME`). The concrete config shapes were probed
+> against a real local Hermes Agent v0.17.0; the pilot build's per-turn injection + consent flow stay a
+> documented MUST-VERIFY (a failed probe degrades the report — no code rework).
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
 > client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
@@ -239,8 +254,11 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > workspace standup** (`admin-claim` stands up self-host today; the per-skill roster standup at a genesis
 > publish is now built — what remains is the cloud seating a signup's owner); **TLS termination** at the plane (loopback HTTP
 > today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
-> the enrollment secret are plaintext `0600` seeds for now); the OpenClaw **pilot-build readiness probe**
-> (the adapter is built; its concrete config bytes stay provisional until then); and the Hermes adapter. `sqlx`
+> the enrollment secret are plaintext `0600` seeds for now); the two **pilot-build readiness probes**
+> (both sibling adapters are built — see above; OpenClaw's concrete config bytes and Hermes's per-turn
+> injection + consent flow stay provisional until each pilot's exact build is probed); and harness
+> *selection* in the client's composition root (v0 constructs Claude Code only; the TTY receipt copy
+> already branches on the report's `CurrencyKind`). `sqlx`
 > is referenced by `plane-store` (and kept out of the client build — `check-arch` forbids that edge); `axum`
 > powers the OSS plane's HTTP server, `ureq` the client transport, and `lettre` the passcode mailer.
 >
@@ -288,7 +306,7 @@ topos-types  ◄── the app libs + every fixture (the shared WIRE DTOs; NOT a
 topos-core   the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns digest, consent, the CAS
    ▲   ▲     decision, the sync transition, diff3, Ed25519 sign-preimage + verify. Tested in-crate.
    │   ├── topos-gitstore ──► topos-core, topos-types   (gix object mechanics; the large-object store)
-   │   └── topos-harness  ──► topos-core, topos-types   (the one client-side port; 3 impls)
+   │   └── topos-harness  ──► topos-core, topos-types   (the one client-side port; the harness impls)
    │
 plane-store  ──► topos-core, topos-types, topos-gitstore   (the server authority: private SQL + authz + txn)
 topos-plane  ──► plane-store, topos-core, topos-types      (the OSS plane: lib + thin bin)

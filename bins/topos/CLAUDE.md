@@ -19,13 +19,18 @@ renderer over the SAME typed outcomes (one value, two presentations).
   idempotent recovery sweep (torn-log repair, incomplete-staging removal, never delete on unknown schema).
 - **The I/O scanner** (`scan`) — walks a real skill dir, rejects filesystem-level hazards
   (symlink/device/non-regular/non-UTF-8) before feeding bytes to the kernel digest.
-- **The Claude Code adapter wiring** (`config_io` + the `&dyn HarnessAdapter` seam on `Ctx`) — `topos`
+- **The harness adapter wiring** (`config_io` + the `&dyn HarnessAdapter` seam on `Ctx`, selected through
+  the `adapter_for(HarnessId)` dispatch — one match arm per harness) — `topos`
   drives `topos-harness::ClaudeCode` for discovery, adopt-in-place recognition, and the session-start
   currency hook. The adapter owns the strict-JSON `settings.json` merge; the durable write goes through a
   small `ConfigStore` port implemented here, which reuses the one `atomic_write` dance over `FsOps` (so
   the existing crash gate covers the config write too — never a second atomic-write to drift). The
   foreign-file writer adds the care a shared user file needs: ensure the parent dir, write through a
-  symlink, a topos-namespaced temp, best-effort mode preservation.
+  symlink, a topos-namespaced temp, best-effort mode preservation. The **OpenClaw and Hermes arms** are
+  wired too (`topos-harness::OpenClaw`; `topos-harness::Hermes`: `$HERMES_HOME` + the
+  `HERMES_ACCEPT_HOOKS` evidence resolved at construction), though v0's composition root still selects
+  Claude Code only — harness *selection* lands later (the TTY receipt copy already branches on the
+  report's `currency_kind`, so no surface overstates a sibling adapter's update moment).
 - **The verbs** (`ops`) — `add` (mint id+name, scan + import, stage + publish with one rename — all-or-
   nothing; **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
@@ -181,12 +186,12 @@ are asserted byte-equal in tests.
 Signing-at-rest lands later; **multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
-setting) + `log --team`'s plane half; the Hermes harness adapter (Claude Code is the reference — only it
-guarantees the swap completes before skills resolve; a sibling adapter leaves a named, bounded
-multi-file-read residual. The OpenClaw adapter is now built + wired into `adapter_for` — its concrete
-config bytes stay provisional behind the pilot readiness probe, and the CLI's production selection stays
-Claude-Code-only until then). The passcode / magic-link / OIDC identity steps run on the plane's
-verification page (the agent only polls), so the client needs no UI for them.
+setting) + `log --team`'s plane half; harness *selection* in the composition root (v0 constructs Claude
+Code only; both the OpenClaw and Hermes adapters are built + wired into `adapter_for` — OpenClaw's
+concrete config bytes and Hermes's per-turn-injection claim stay pilot-pending behind their readiness
+probes; only Claude Code guarantees the swap completes before skills resolve, so non-Claude adapters
+leave a named, bounded multi-file-read residual). The passcode / magic-link / OIDC identity steps run on
+the plane's verification page (the agent only polls), so the client needs no UI for them.
 
 ## Architectural layering (enforced at the dependency graph)
 

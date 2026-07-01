@@ -1,7 +1,8 @@
 # `topos-harness` — the `HarnessAdapter` port
 
 The `HarnessAdapter` trait + the `ConfigStore` port + the harness impls. The one real client-side port.
-Does discovery + byte-exact placement targeting + the currency-trigger (un)install.
+Does discovery + byte-exact placement targeting + the currency-trigger (un)install (session-start for
+Claude Code; first-`topos`-touch for OpenClaw; per-turn for Hermes).
 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
 `~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for`,
@@ -27,9 +28,27 @@ and unlinks only the marker-confirmed file. **Build-first behind the trait:** it
 against the pilot's exact OpenClaw build — the checklist is in the `openclaw` module doc, and the CLI
 never selects this adapter in production until then.
 
-**Planned:** the **Hermes** concrete config bytes stay build-first behind the trait until the pilot's
-real build is probed; the byte-writing materialization (atomic dir-swap) lives in the CLI's update path,
-not here.
+The **Hermes** adapter (`hermes`) is implemented too, mirroring the reference structurally — `discover`
+over Hermes's mixed-depth `~/.hermes/skills/` shape (`<name>/` uncategorized, `<category>/<name>/` with the
+category recorded as the placement's `layer`; support dirs under a skill dir pruned), `placement_for`
+(a discovered dir verbatim; the no-discovery default `skills/general/<skill_id>`), `currency_kind` =
+`FirstTurn` (the **injecting per-turn `pre_llm_call`** hook — `on_session_start` is observer-only and never
+registered), and the idempotent (un)install of the one `topos pull --quiet` entry in `config.yaml`. The
+config is YAML (no YAML dep exists here), so the edit is an **anchored line-surgical merge**: it handles
+only the shapes it can prove (the shipped `hooks: {}` default, an absent/empty `hooks:` key, an absent
+file, its own exact sentinel-commented entry line) byte-preservingly and fails closed (`Degraded`, zero
+writes) on everything else. Hermes gates hooks behind a one-time `(event, command)` consent allowlist it
+persists itself (`shell-hooks-allowlist.json`); the adapter **never writes that consent** — it only reads
+it (plus Hermes's `HERMES_ACCEPT_HOOKS` / `hooks_auto_accept: true` auto-accept signals) as evidence, and
+reports `Active`+`FirstTurn` **only** on such evidence, else the entry is registered but the report
+degrades honestly to `ExplicitPullOnly` — never a fake "live" hook. `$HERMES_HOME` (else `$HOME/.hermes`)
+and the acceptance evidence are **injected** so tests never touch the real home or the env. The concrete
+config/allowlist shapes were probed against a real local Hermes Agent v0.17.0 build; the pilot's exact
+build stays a MUST-VERIFY (every filename/key/line is a named const; a failed probe degrades the report,
+never rebuilds the adapter).
+
+**Planned:** the byte-writing materialization (atomic dir-swap) lives in the CLI's update path, not here;
+what remains for the adapters themselves is the two pilot readiness probes above, not code.
 
 **ALL platform / harness-version dependencies live here** — the rest of the workspace stays
 platform-agnostic.
@@ -37,13 +56,14 @@ platform-agnostic.
 **Content-blind.** The adapter answers only **where** (`discover` / `placement_for`) and **when**
 (`currency_kind`); it never receives a skill's bytes, never hashes a bundle, never moves a skill file. The
 only files it writes are its **own harness config surface** (`settings.json`; `openclaw.json` + the
-topos-owned inject plugin file) — never a skill dir. v0 places a
+topos-owned inject plugin file; `config.yaml`) — never a skill dir. v0 places a
 skill's **exact bytes** with no frontmatter rewrite, no dialect translation between harnesses, so adding a
 harness is a new impl (a directory mapping + a currency trigger), not a refactor anywhere else.
 
 **The durable config write is the CLI's, not a second atomic-write here.** `install`/`remove` compute the
-post-image bytes (a pure strict-JSON merge) and write them through an injected [`ConfigStore`] port — the
-CLI implements that port by reusing its one `temp → fsync → rename → fsync-dir` sequence, so the adapter's
-`&self` methods stay fault-injectable without re-implementing durability.
+post-image bytes (a pure merge — strict-JSON for Claude Code, line-anchored for Hermes's YAML) and write
+them through an injected [`ConfigStore`] port — the CLI implements that port by reusing its one
+`temp → fsync → rename → fsync-dir` sequence, so the adapter's `&self` methods stay fault-injectable
+without re-implementing durability.
 
 Dependencies: `topos-core`, `topos-types`, `serde_json`, plus the platform std surface.
