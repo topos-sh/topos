@@ -461,7 +461,12 @@ pub(crate) fn derive_token(secret: &[u8; 32], domain: &[u8], parts: &[&[u8]]) ->
     for part in parts {
         // A `u32be` length prefix per part (the kernel's length-prefix convention) makes the byte stream
         // self-delimiting, so two different part decompositions can never collide on one HMAC message.
-        mac.update(&(part.len() as u32).to_be_bytes());
+        mac.update(
+            &(u32::try_from(part.len()).expect(
+                "HMAC credential part length fits in u32 (parts are short validated ids/tokens)",
+            ))
+            .to_be_bytes(),
+        );
         mac.update(part);
     }
     let tag = mac.finalize().into_bytes();

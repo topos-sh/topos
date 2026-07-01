@@ -112,7 +112,7 @@ impl Db {
     /// against the partial-unique index).
     pub(crate) async fn live_user_code_exists(&self, user_code: &str) -> Result<bool> {
         let row = sqlx::query!(
-            r#"SELECT 1 AS "ok!: i64" FROM device_auth_sessions
+            r#"SELECT 1::int8 AS "ok!: i64" FROM device_auth_sessions
                WHERE user_code = $1 AND status IN ('pending', 'confirmed') LIMIT 1"#,
             user_code,
         )
@@ -291,7 +291,7 @@ async fn poll_run(
 }
 
 /// Issue (or re-derive) the single-use grant for a confirmed/issued session. The grant token is
-/// deterministic in `(device_code_sha256, ws)`, so a re-poll re-derives it and the `INSERT OR IGNORE` is a
+/// deterministic in `(device_code_sha256, ws)`, so a re-poll re-derives it and the `ON CONFLICT DO NOTHING` is a
 /// no-op — naturally idempotent. On the FIRST issue it binds the proven identity (principal, device, offered
 /// skills) and flips the session to `issued`.
 async fn issue_grant(

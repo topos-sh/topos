@@ -525,8 +525,7 @@ async fn run(
         )
         .await;
     }
-    let is_genesis = current.is_none();
-    if !is_genesis {
+    if let Some(cur) = &current {
         // Backbone rejects two-parent author merges wholesale (owned by a later increment).
         if input.parents.len() > 1 {
             return denied(
@@ -550,7 +549,6 @@ async fn run(
         // First-parent assert (load-bearing, orthogonal to the CAS): parents[0] == current.commit_id. A
         // CAS-pass + parent-mismatch is an es/commit desync (a clock anomaly) — a distinct DENIED carrying
         // the live commit id, never an auto-rebase.
-        let cur = current.as_ref().expect("present current (non-genesis)");
         match input.parents.first() {
             Some(p0) if *p0 == cur.commit => {}
             _ => return first_parent_mismatch(tx, input, &bound, cur).await,
@@ -1283,7 +1281,7 @@ async fn object_present_not_tombstoned(
     let ws_s = ws.as_str();
     let oid = object_id.0.as_slice();
     let row = sqlx::query!(
-        r#"SELECT 1 AS "ok!: i64" FROM object_presence
+        r#"SELECT 1::int8 AS "ok!: i64" FROM object_presence
            WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'
              AND NOT EXISTS (SELECT 1 FROM tombstones WHERE workspace_id = $1 AND blob_id = $2)"#,
         ws_s,

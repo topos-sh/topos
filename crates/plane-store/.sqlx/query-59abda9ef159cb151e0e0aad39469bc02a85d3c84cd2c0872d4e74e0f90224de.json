@@ -1,12 +1,12 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT 1 AS \"one!: i64\" FROM proposals WHERE workspace_id = $1 AND id = $2",
+  "query": "SELECT 1::int8 AS \"one!: i64\" FROM proposals WHERE workspace_id = $1 AND id = $2",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "one!: i64",
-        "type_info": "Int4"
+        "type_info": "Int8"
       }
     ],
     "parameters": {
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "84b48c49628d54530ff687215fa4190f1501c8523e6f1262e500122247832e9d"
+  "hash": "59abda9ef159cb151e0e0aad39469bc02a85d3c84cd2c0872d4e74e0f90224de"
 }

@@ -8,9 +8,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
-use plane_store::{Authority, DeploymentMode, EnrollmentConfig, WorkspaceId};
+use plane_store::{Authority, DeploymentMode, EnrollmentConfig, PoolConfig, WorkspaceId};
 
 use crate::enroll::mailer::{Mailer, NoopMailer, SmtpConfig, SmtpMailer};
 use crate::rate_limit::{Limiter, Limits};
@@ -97,6 +98,32 @@ impl Default for EnrollConfig {
     }
 }
 
+/// The Postgres pool tuning, read from the environment (the one place the plane reads `TOPOS_PLANE_DB_*`,
+/// mirroring how the rate limiter reads its env). Unset knobs keep the driver defaults (`max_connections =
+/// 10`, `acquire_timeout = 30s`) — raise them for a plane serving concurrent HTTP. The statement/lock ceilings
+/// stay off unless the operator opts in (so a long legitimate whole-bundle render is never capped); the
+/// idle-in-transaction timeout defaults to a safe 30s (every write txn is pure-DB and short, so it only ever
+/// trips an abandoned/stuck one that would otherwise pin row locks — set the env to `0` to disable it).
+fn pool_config_from_env() -> PoolConfig {
+    fn secs(var: &str) -> Option<Duration> {
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+    }
+    PoolConfig {
+        max_connections: std::env::var("TOPOS_PLANE_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok()),
+        acquire_timeout: secs("TOPOS_PLANE_DB_ACQUIRE_TIMEOUT_SECS"),
+        statement_timeout: secs("TOPOS_PLANE_DB_STATEMENT_TIMEOUT_SECS"),
+        lock_timeout: secs("TOPOS_PLANE_DB_LOCK_TIMEOUT_SECS"),
+        idle_in_transaction_timeout: Some(
+            secs("TOPOS_PLANE_DB_IDLE_IN_TX_TIMEOUT_SECS").unwrap_or(Duration::from_secs(30)),
+        ),
+    }
+}
+
 impl PlaneState {
     /// Construct from an already-built [`Authority`] with the **default** rate limits (read from the
     /// environment — `TOPOS_PLANE_RATELIMIT=off` disables enforcement; otherwise a generous in-process token
@@ -179,18 +206,23 @@ impl PlaneState {
             }
             .to_owned()
         });
-        let authority = Authority::open(&cfg.database_url, &cfg.git_root, &cfg.large_root)
-            .await
-            .context("opening the storage authority")?
-            .with_plane_key(&cfg.plane_key_path)
-            .context("loading the plane signing key")?
-            .with_enrollment_config(EnrollmentConfig {
-                secret_path: cfg.enroll_secret_path,
-                base_url: cfg.base_url.clone(),
-                deployment_mode,
-                enrollment_method: enrollment_method.clone(),
-            })
-            .context("loading the enrollment secret")?;
+        let authority = Authority::open_with_pool(
+            &cfg.database_url,
+            &cfg.git_root,
+            &cfg.large_root,
+            pool_config_from_env(),
+        )
+        .await
+        .context("opening the storage authority")?
+        .with_plane_key(&cfg.plane_key_path)
+        .context("loading the plane signing key")?
+        .with_enrollment_config(EnrollmentConfig {
+            secret_path: cfg.enroll_secret_path,
+            base_url: cfg.base_url.clone(),
+            deployment_mode,
+            enrollment_method: enrollment_method.clone(),
+        })
+        .context("loading the enrollment secret")?;
 
         Ok(
             PlaneState::new(Arc::new(authority)).with_enroll_config(EnrollConfig {

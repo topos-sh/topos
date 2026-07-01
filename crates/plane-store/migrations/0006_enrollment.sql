@@ -4,8 +4,9 @@
 -- `workspace_id`-scoped, content ids the raw 32-byte sha256 BYTEA the kernel passes, width-checked. Every
 -- opaque credential is stored ONLY as its sha256 (the plaintext is HMAC-derived from a 0600 enrollment secret
 -- and never persisted), so a database read can never recover a live credential and a revoke is an instant
--- server-side row flip. Time columns are epoch MILLISECONDS (the one server-clock unit, `wire::now_utc()`),
--- matching the read-token expiry this migration adds.
+-- server-side row flip. The deadline/mutable time columns (`expires_at`, `last_polled_at`, `consumed_at`) are
+-- BIGINT epoch MILLISECONDS (the one server-clock unit, `wire::now_utc()`), matching the read-token expiry
+-- this migration adds; the audit `created_at`/`added_at` columns are TEXT ISO-8601.
 
 -- WORKSPACE — the billable/addressable object an enrollment stands up. STANDALONE: nothing references it by
 -- foreign key (the existing skill_commit/current/roster carry a bare `workspace_id` and seed no workspace

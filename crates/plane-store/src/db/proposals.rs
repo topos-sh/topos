@@ -142,7 +142,7 @@ impl Db {
         let base_epoch = u64_to_i64(base.epoch)?;
         let base_seq = u64_to_i64(base.seq)?;
         let row = sqlx::query!(
-            r#"SELECT 1 AS "one!: i64" FROM proposals
+            r#"SELECT 1::int8 AS "one!: i64" FROM proposals
                WHERE workspace_id = $1 AND skill_id = $2 AND commit_id = $3
                  AND base_epoch = $4 AND base_seq = $5 AND status = 'open'"#,
             ws_s,
@@ -289,7 +289,7 @@ pub(super) async fn proposal_id_exists(
 ) -> Result<bool> {
     let ws_s = ws.as_str();
     let row = sqlx::query!(
-        r#"SELECT 1 AS "one!: i64" FROM proposals WHERE workspace_id = $1 AND id = $2"#,
+        r#"SELECT 1::int8 AS "one!: i64" FROM proposals WHERE workspace_id = $1 AND id = $2"#,
         ws_s,
         id,
     )

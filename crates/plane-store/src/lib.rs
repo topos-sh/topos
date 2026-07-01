@@ -74,7 +74,7 @@ mod lifecycle;
 #[cfg(test)]
 mod tests;
 
-pub use authority::Authority;
+pub use authority::{Authority, PoolConfig};
 pub use enroll::{
     ConfirmOutcome, CreateInviteOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart,
     EnrollmentConfig, EnrollmentRedeemed, GovernanceOp, GovernanceOutcome, GovernanceSignedOp,

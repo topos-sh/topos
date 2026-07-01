@@ -251,7 +251,7 @@ impl Db {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
         let row = sqlx::query!(
-            r#"SELECT 1 AS "one!: i64" FROM object_presence
+            r#"SELECT 1::int8 AS "one!: i64" FROM object_presence
                WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at = $3"#,
             ws_s,
             oid,

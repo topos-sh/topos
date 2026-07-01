@@ -12,9 +12,12 @@
 //! with `SERIALIZABLE` isolation + a bounded retry on a serialization failure — the one and only write
 //! entrypoint (there is no `begin`-returns-a-`Transaction` form to misuse).
 
+use std::time::Duration;
+
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 
+use crate::authority::PoolConfig;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -57,6 +60,11 @@ pub(crate) struct Db {
 /// captured by the caller before the loop, so a retried receipt is byte-stable — signing/HMAC are
 /// deterministic). Cap-exceeded is [`AuthorityError::Internal`] (a 500), never a receipted terminal (which
 /// would replay forever); the caller's `op_id` retry re-drives under lower contention.
+///
+/// `$body` must **return** its `Result` (every call site is the `.await` of an extracted `_txn`/`_run` fn,
+/// so a `?` inside that fn returns at the fn boundary into an `Err` value the macro's `Err` arm can classify
+/// and roll back). A bare `?` written directly in `$body` would instead return from the *enclosing* `async
+/// fn`, bypassing the rollback + retry arms — so the body hands the macro a `Result`, never `?`-propagates.
 macro_rules! run_serializable {
     ($self:expr, $tx:ident, $body:expr) => {{
         let mut __attempt: u32 = 0;
@@ -103,8 +111,44 @@ impl Db {
     /// Open a pool for `database_url` and apply the embedded migrations. sqlx's `Migrator` takes a
     /// `pg_advisory_lock` for the duration of the run, so this is multi-replica-safe with no hand-rolled
     /// lock (session-level, so a session-mode pool is required — a plain pooled connection is one).
-    pub(crate) async fn connect(database_url: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new()
+    pub(crate) async fn connect(database_url: &str, pool_config: &PoolConfig) -> Result<Self> {
+        let mut opts = PgPoolOptions::new();
+        if let Some(max) = pool_config.max_connections {
+            opts = opts.max_connections(max);
+        }
+        if let Some(acquire) = pool_config.acquire_timeout {
+            opts = opts.acquire_timeout(acquire);
+        }
+        // Opt-in session GUCs, applied on every pooled connection. Only a `Some` timeout emits a `SET`, so an
+        // unset one inherits the server default (a long legitimate whole-bundle render is never capped unless
+        // the operator opts in). The values are plane-controlled integers formatted into the statement — never
+        // client input — so the string build carries no injection surface.
+        let statement_ms = duration_millis(pool_config.statement_timeout);
+        let lock_ms = duration_millis(pool_config.lock_timeout);
+        let idle_ms = duration_millis(pool_config.idle_in_transaction_timeout);
+        if statement_ms.or(lock_ms).or(idle_ms).is_some() {
+            opts = opts.after_connect(move |conn, _meta| {
+                Box::pin(async move {
+                    if let Some(ms) = statement_ms {
+                        sqlx::query(&format!("SET statement_timeout = {ms}"))
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+                    if let Some(ms) = lock_ms {
+                        sqlx::query(&format!("SET lock_timeout = {ms}"))
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+                    if let Some(ms) = idle_ms {
+                        sqlx::query(&format!("SET idle_in_transaction_session_timeout = {ms}"))
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            });
+        }
+        let pool = opts
             .connect(database_url)
             .await
             .map_err(AuthorityError::internal)?;
@@ -372,7 +416,7 @@ impl Db {
         let cid = version_id.0.as_slice();
         let row = sqlx::query!(
             r#"
-            SELECT 1 AS "ok!: i64" FROM (
+            SELECT 1::int8 AS "ok!: i64" FROM (
                 SELECT 1 AS ok
                 FROM roster r
                 JOIN skill_commit  sc ON sc.workspace_id = r.workspace_id AND sc.skill_id = r.skill_id AND sc.commit_id = $4
@@ -403,15 +447,22 @@ impl Db {
 
 /// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a transient class the SERIALIZABLE runner
 /// retries: a serialization failure (`40001`) or deadlock (`40P01`), OR a unique-violation (`23505`) on one
-/// of the two IDEMPOTENCY-KEY constraints.
+/// of the three CONVERGENT constraints — the two idempotency-key PKs plus the one-open-proposal index.
 ///
-/// The idempotency-key case restores what SQLite's global writer lock gave for free. Two same-`op_id`
-/// writes can BOTH pass their replay-miss before either commits its receipt; the loser's receipt/event
-/// INSERT then hits the primary key. On SQLite the two were serialized, so the loser simply replayed the
-/// winner's receipt. Here, retrying makes the re-run's replay find that now-committed receipt and return it
-/// (the winner's outcome, byte-identical) instead of a spurious `Internal`/500. Scoped to exactly
-/// `op_receipts_pkey` + `workspace_events_pkey` so the proposals "one open per (skill,commit,base)"
-/// partial-unique still surfaces as its business `CONFLICT`, never a silent retry.
+/// All three restore what SQLite's global writer lock gave for free: a losing racer of an idempotent write
+/// converges to the winner's outcome instead of a spurious `Internal`/500. Two same-`op_id` writes can BOTH
+/// pass their replay-miss before either commits, and the loser's receipt/event INSERT then hits
+/// `op_receipts_pkey`/`workspace_events_pkey`; retrying makes the re-run's replay find the now-committed
+/// receipt and return it byte-identically. The `proposals_one_open` case is the same shape: two proposers of
+/// the SAME candidate on the SAME base (the index key is `(workspace_id, skill_id, commit_id, base_epoch,
+/// base_seq) WHERE status='open'`, and `commit_id` is content-derived, so a violation ONLY ever means
+/// "identical candidate, identical base, already open") both pass `propose_arm`'s `read_open_proposal`
+/// is-none guard, and the loser's `INSERT INTO proposals` hits the partial-unique index; retrying re-runs the
+/// arm against the winner's now-committed row, so `read_open_proposal` finds it, the duplicate insert is
+/// skipped, and the loser returns the SAME idempotent `NEEDS_REVIEW` the sequential re-propose guard produces
+/// (the retry always resolves, since the index key pins the exact row the re-read then finds). Scoped to
+/// exactly these three so an ordinary unique violation (a `roster_pkey`, a real integrity duplicate) still
+/// surfaces, never a silent retry.
 pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
     let Some(db) = e.as_database_error() else {
         return false;
@@ -420,7 +471,7 @@ pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
         Some("40001" | "40P01") => true,
         Some("23505") => matches!(
             db.constraint(),
-            Some("op_receipts_pkey" | "workspace_events_pkey")
+            Some("op_receipts_pkey" | "workspace_events_pkey" | "proposals_one_open")
         ),
         _ => false,
     }
@@ -435,6 +486,13 @@ pub(in crate::db) fn is_serialization_failure(e: &AuthorityError) -> bool {
     };
     src.downcast_ref::<sqlx::Error>()
         .is_some_and(is_serialization_failure_sqlx)
+}
+
+/// Whole milliseconds for a Postgres `SET <timeout> = <ms>` GUC, saturating rather than wrapping (a duration
+/// beyond `u64::MAX` ms is clamped). A sub-millisecond non-zero duration floors to 0 — which Postgres reads
+/// as "disabled" — but callers pass whole seconds, so that is not reachable in practice.
+fn duration_millis(d: Option<Duration>) -> Option<u64> {
+    d.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Shared roster-existence probe (used by both the cheap pre-read on the pool and the authoritative
@@ -505,14 +563,14 @@ mod retry_classification_tests {
 
     use super::is_serialization_failure_sqlx;
 
-    /// The SERIALIZABLE runner retries a `23505` on an IDEMPOTENCY-KEY constraint (`op_receipts` /
-    /// `workspace_events`) — so a concurrent same-`op_id` sibling that committed its receipt first is
-    /// replayed rather than surfaced as a 500 — but NEVER on an ordinary unique violation, which is a real
-    /// business/integrity outcome (e.g. the proposals "one open" partial-unique) and must not be silently
-    /// retried. Proven against real Postgres duplicate-key errors. Raw `sqlx::query` (not `query!`), so it
-    /// adds nothing to the `.sqlx` drift-gate surface.
+    /// The SERIALIZABLE runner retries a `23505` on a CONVERGENT constraint — the two idempotency-key PKs
+    /// (`op_receipts` / `workspace_events`) and the one-open-proposal partial-unique (`proposals_one_open`) —
+    /// so a concurrent same-`op_id` receipt sibling or same-candidate proposer converges to the winner's
+    /// outcome rather than surfacing a 500 — but NEVER on an ordinary unique violation (e.g. `roster_pkey`), a
+    /// real business/integrity duplicate that must not be silently retried. Proven against real Postgres
+    /// duplicate-key errors. Raw `sqlx::query` (not `query!`), so it adds nothing to the `.sqlx` drift surface.
     #[sqlx::test]
-    async fn only_idempotency_key_unique_violations_are_retryable(pool: PgPool) {
+    async fn only_convergent_unique_violations_are_retryable(pool: PgPool) {
         // op_receipts_pkey → a unique violation the runner treats as retryable.
         let receipt = "INSERT INTO op_receipts \
             (workspace_id, device_key_id, op_id, command, skill_id, expected_epoch, expected_seq, \
@@ -529,6 +587,41 @@ mod retry_classification_tests {
         assert!(
             is_serialization_failure_sqlx(&dup),
             "a 23505 on op_receipts_pkey must be retryable"
+        );
+
+        // proposals_one_open → the one-open-proposal partial-unique. A concurrent same-candidate/same-base
+        // propose races past `propose_arm`'s `read_open_proposal` is-none guard; the loser's INSERT hits this
+        // index and, on retry, converges to the winner's NEEDS_REVIEW — so it is retryable, like the receipt
+        // PKs. (The FK targets `skill_commit`, so seed the provenance row first.)
+        let provenance = "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) \
+            VALUES ('w_a', decode(repeat('ab', 32), 'hex'), 's_a', decode(repeat('cd', 32), 'hex'))";
+        sqlx::query(provenance)
+            .execute(&pool)
+            .await
+            .expect("skill_commit provenance insert");
+        let open_proposal_op1 = "INSERT INTO proposals \
+            (workspace_id, id, skill_id, commit_id, base_commit_id, base_epoch, base_seq, status, \
+             proposer, created_at) \
+            VALUES ('w_a', 'op1', 's_a', decode(repeat('ab', 32), 'hex'), decode(repeat('ef', 32), 'hex'), \
+             1, 1, 'open', 'p_a', '2026-06-30T00:00:00Z')";
+        let open_proposal_op2 = "INSERT INTO proposals \
+            (workspace_id, id, skill_id, commit_id, base_commit_id, base_epoch, base_seq, status, \
+             proposer, created_at) \
+            VALUES ('w_a', 'op2', 's_a', decode(repeat('ab', 32), 'hex'), decode(repeat('ef', 32), 'hex'), \
+             1, 1, 'open', 'p_a', '2026-06-30T00:00:00Z')";
+        sqlx::query(open_proposal_op1)
+            .execute(&pool)
+            .await
+            .expect("first open proposal insert");
+        let dup = sqlx::query(open_proposal_op2)
+            .execute(&pool)
+            .await
+            .expect_err(
+                "a second open proposal of the same candidate+base must violate proposals_one_open",
+            );
+        assert!(
+            is_serialization_failure_sqlx(&dup),
+            "a 23505 on proposals_one_open must be retryable (it converges to the winner's NEEDS_REVIEW)"
         );
 
         // roster_pkey → an ordinary unique violation the runner must NOT retry.

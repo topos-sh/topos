@@ -38,12 +38,12 @@
 //! also has no `.await`/yield between the claim and the synchronous unlink, so on a single writer nothing
 //! interleaves there.)
 //!
-//! **Power-loss note (self-healing):** under WAL + `synchronous = NORMAL` a fsync'd unlink can briefly get
-//! ahead of the not-yet-checkpointed claim/finalize commits, so a crash can leave a `present` row over
+//! **Power-loss note (self-healing):** with a relaxed `synchronous_commit` a fsync'd unlink can briefly get
+//! ahead of the not-yet-durably-committed claim/finalize commits, so a crash can leave a `present` row over
 //! already-gone bytes. It is reconciled by the next pass (the object is rooted by nothing, so it is
 //! re-claimed and the re-unlink tolerates the already-gone object), and no *materializable* root is ever
 //! created over it. When the pointer-move makes a long-idle `present` row load-bearing for dedup-reuse, the
-//! destructive transitions should be made power-durable (a checkpoint/`synchronous = FULL` barrier).
+//! destructive transitions should be made power-durable (a `synchronous_commit = on` / WAL-checkpoint barrier).
 
 use topos_gitstore::{LargeObjectStore, Store};
 
@@ -227,12 +227,11 @@ fn unlink_object(
 ) -> Result<()> {
     match location {
         Location::Git => {
-            if git_store.is_none() {
-                *git_store = Some(authority.open_store(ws)?);
-            }
-            git_store
-                .as_ref()
-                .expect("git store opened above")
+            let store = match git_store {
+                Some(s) => s,
+                None => git_store.insert(authority.open_store(ws)?),
+            };
+            store
                 .delete_loose_object(git_oid)
                 .map_err(crate::error::AuthorityError::internal)?;
         }

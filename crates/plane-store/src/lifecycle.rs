@@ -369,7 +369,7 @@ async fn install_one(
                         object_id,
                         location,
                         &entry.git_oid,
-                        entry.size as i64,
+                        i64::try_from(entry.size).map_err(AuthorityError::integrity)?,
                         now,
                     )
                     .await?

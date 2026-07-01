@@ -1,6 +1,7 @@
 //! The sealed authority facade — the crate's one public type.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use topos_gitstore::{LocalLargeStore, Store};
 
@@ -25,6 +26,31 @@ pub(crate) const DEFAULT_LARGE_THRESHOLD: u64 = 1 << 20;
 /// The default per-blob hard reject cap (≈ 100 MiB): a blob larger than this is refused at ingest before
 /// any bytes are staged.
 pub(crate) const DEFAULT_LARGE_REJECT_CAP: u64 = 100 << 20;
+
+/// Connection-pool tuning for the Postgres backend — plain owned data (no `sqlx` type crosses it), so a
+/// composing plane sets it without naming the driver. `None` on a field keeps the default: sqlx's
+/// `max_connections = 10` / `acquire_timeout = 30s`, and the server's own statement/lock/idle values. The
+/// OSS bin fills this from `TOPOS_PLANE_DB_*` inside `PlaneState::open` (the one place the env is read);
+/// tests open with [`PoolConfig::default`] via [`Authority::open`]. Each `Some` timeout is applied as a
+/// session `SET` on every pooled connection (see [`Authority::open_with_pool`]).
+#[derive(Debug, Clone, Default)]
+pub struct PoolConfig {
+    /// Max pooled connections (sqlx's default 10 when `None`). Raise it for a plane serving concurrent HTTP:
+    /// a write holds one connection for the whole `run_serializable!` retry loop, so 10 can bottleneck under
+    /// contention or once one plane fronts many workspaces.
+    pub max_connections: Option<u32>,
+    /// How long `acquire` waits for a free pooled connection before failing (sqlx's default 30s when `None`).
+    pub acquire_timeout: Option<Duration>,
+    /// Per-statement server ceiling (`statement_timeout`). `None` ⇒ unset (the server default). Opt in for a
+    /// hard runaway-query ceiling, but keep it above the slowest legitimate whole-bundle render.
+    pub statement_timeout: Option<Duration>,
+    /// Lock-wait ceiling (`lock_timeout`). `None` ⇒ unset (the server default).
+    pub lock_timeout: Option<Duration>,
+    /// How long a transaction may sit idle — open but running no statement — before the server aborts it
+    /// (`idle_in_transaction_session_timeout`), bounding an abandoned/stuck txn that would otherwise pin row
+    /// locks. `None` ⇒ unset; a modest value is safe here because every write txn is pure-DB and short.
+    pub idle_in_transaction_timeout: Option<Duration>,
+}
 
 /// The plane's per-workspace storage authority — the **only** public type in this crate.
 ///
@@ -69,9 +95,25 @@ impl Authority {
     /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
     /// migrated.
     pub async fn open(database_url: &str, git_root: &Path, large_root: &Path) -> Result<Self> {
+        Self::open_with_pool(database_url, git_root, large_root, PoolConfig::default()).await
+    }
+
+    /// Open the authority exactly like [`open`](Self::open) but with explicit connection-pool tuning
+    /// ([`PoolConfig`]) — `open` is this with [`PoolConfig::default`]. The OSS bin uses this to apply the
+    /// operator's `TOPOS_PLANE_DB_*` settings.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if a store root cannot be created or the database cannot be opened or
+    /// migrated.
+    pub async fn open_with_pool(
+        database_url: &str,
+        git_root: &Path,
+        large_root: &Path,
+        pool: PoolConfig,
+    ) -> Result<Self> {
         std::fs::create_dir_all(git_root).map_err(AuthorityError::internal)?;
         std::fs::create_dir_all(large_root).map_err(AuthorityError::internal)?;
-        let db = Db::connect(database_url).await?;
+        let db = Db::connect(database_url, &pool).await?;
         Ok(Self {
             db,
             git_root: git_root.to_path_buf(),

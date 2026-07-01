@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1::int8 AS \"one!: i64\" FROM proposals\n               WHERE workspace_id = $1 AND skill_id = $2 AND commit_id = $3\n                 AND base_epoch = $4 AND base_seq = $5 AND status = 'open'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "one!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1203ee478e9ad93bec6f04a507546f641577464d3516eb73487010ca9a98905f"
+}
