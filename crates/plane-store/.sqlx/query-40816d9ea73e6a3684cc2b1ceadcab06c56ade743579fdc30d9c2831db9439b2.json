@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT op.object_id AS \"object_id!: Vec<u8>\" FROM object_presence op\n            WHERE op.workspace_id = $1 AND op.status = 'present'\n              AND NOT EXISTS (\n                  SELECT 1 FROM commit_object co\n                  WHERE co.workspace_id = op.workspace_id AND co.object_id = op.object_id)\n              AND NOT EXISTS (\n                  SELECT 1 FROM promotion_lease_object plo\n                  JOIN promotion_lease pl\n                    ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id\n                  WHERE plo.workspace_id = op.workspace_id AND plo.object_id = op.object_id\n                    AND (pl.expires_at IS NULL OR pl.expires_at > $2))\n              AND NOT EXISTS (\n                  SELECT 1 FROM proposal_object po\n                  JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id\n                  JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id\n                  WHERE po.workspace_id = op.workspace_id AND po.object_id = op.object_id\n                    AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_id!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "40816d9ea73e6a3684cc2b1ceadcab06c56ade743579fdc30d9c2831db9439b2"
+}

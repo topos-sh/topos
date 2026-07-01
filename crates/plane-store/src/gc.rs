@@ -1,7 +1,17 @@
 //! Garbage collection — the transactional mark-then-claim fence over the git object store, plus the
 //! recovery sweep and the quarantine janitor. The database leads; the filesystem trails.
 //!
-//! **GC (per workspace):** scan `present` objects (advisory), then for each run the three-step fence —
+//! **Scheduling is the composing server's** (this library holds none): the public
+//! [`Authority::run_gc`]/[`Authority::run_recovery`]/[`Authority::run_janitor`] wrappers are what it drives,
+//! on startup and periodically. All three futures are `Send` (the non-`Send` gix `Store` is opened per
+//! unlink inside a synchronous helper, never held across an `.await`) so they spawn onto a multi-threaded
+//! runtime; a compile-time assertion below pins that.
+//!
+//! **Clock convention: one server-clock unit = one epoch MILLISECOND** (as `lifecycle` / `enroll`); the
+//! stale threshold below is millisecond-valued to match the epoch-ms `now` the composing server stamps.
+//!
+//! **GC (per workspace):** scan for unrooted `present` objects (advisory), then for each run the three-step
+//! fence —
 //! **claim** a guarded `present → deleting` that re-verifies AT DELETE TIME that the object is referenced by
 //! no commit (the read-authorization surface) and named by no live lease; **unlink** the loose object
 //! OUTSIDE any transaction; **finalize** `deleting → absent`. The claim stamps an ACCURATE wall-clock (the
@@ -45,42 +55,43 @@
 //! created over it. When the pointer-move makes a long-idle `present` row load-bearing for dedup-reuse, the
 //! destructive transitions should be made power-durable (a `synchronous_commit = on` / WAL-checkpoint barrier).
 
-use topos_gitstore::{LargeObjectStore, Store};
+use topos_gitstore::LargeObjectStore;
 
 use crate::authority::Authority;
 use crate::db::{ClaimOutcome, Location};
 use crate::error::Result;
 use crate::id::{ObjectId, WorkspaceId};
+use crate::lifecycle::elapsed_ms;
 
-/// How long a `deleting` row must sit before the recovery sweep treats it as a crashed GC's leftover. A live
-/// `run_gc` stamps every claim with an accurate wall-clock (it advances `now` by the pass's real elapsed), so
-/// a HEALTHY in-flight unlink is never this old and recovery does not race it. A GC frozen longer than this
-/// (effectively crashed) IS taken over — and even then the claim-token fence (`finalize_delete` and
-/// `confirm_deleting_owner` both gate on the claimant's `status_updated_at`) guarantees exactly one actor
-/// unlinks + finalizes the row, so the takeover never collides with the original.
-const RECOVERY_STALE_SECS: i64 = 60;
+/// How long (epoch-ms; one minute) a `deleting` row must sit before the recovery sweep treats it as a
+/// crashed GC's leftover. A live `run_gc` stamps every claim with an accurate wall-clock (it advances `now`
+/// by the pass's real elapsed), so a HEALTHY in-flight unlink is never this old and recovery does not race
+/// it. A GC frozen longer than this (effectively crashed) IS taken over — and even then the claim-token
+/// fence (`finalize_delete` and `confirm_deleting_owner` both gate on the claimant's `status_updated_at`)
+/// guarantees exactly one actor unlinks + finalizes the row, so the takeover never collides with the
+/// original.
+const RECOVERY_STALE_MS: i64 = 60 * 1000;
 
 /// Run one GC pass over a workspace. Returns the number of objects reclaimed (claimed → unlinked →
 /// finalized) this pass — a bounded result, so a single pass reclaims every currently-unrooted object.
 pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) -> Result<usize> {
-    let candidates = authority.db().present_objects(ws).await?;
+    // The advisory scan already anti-joins the keep-set in SQL (the same three clauses the claim re-verifies),
+    // so a pass does work proportional to actual garbage, not to every present object; the guarded per-object
+    // claim below remains the sole authority.
+    let candidates = authority.db().gc_candidates(ws, now).await?;
     if candidates.is_empty() {
         return Ok(0);
     }
-    // The git store is opened LAZILY (cached), only when a `git`-located object is actually unlinked — so a
-    // workspace whose first migrate routed every blob to the large store (and crashed before `migrate_finish`
-    // created the git repo) can still have its large-local rows reclaimed instead of aborting on a missing repo.
-    let mut git_store: Option<Store> = None;
     let started = tokio::time::Instant::now();
     let mut reclaimed = 0;
     for object_id in candidates {
         // Stamp each claim with an ACCURATE wall-clock — `now` advanced by this pass's real elapsed, never
         // the pass-fixed `now` — so a long pass does not back-date a late claim. A back-dated `deleting` row
-        // would look older than RECOVERY_STALE_SECS the instant it is claimed, and a concurrently-scheduled
+        // would look older than RECOVERY_STALE_MS the instant it is claimed, and a concurrently-scheduled
         // recovery sweep would wrongly take it for a crashed-GC leftover and re-claim it. (Same `now +
         // monotonic elapsed` trick as `lifecycle::migrate`; the base `now` is still caller-supplied.) This
         // `claim_now` is also this actor's CLAIM TOKEN (the value the claim stamps into `status_updated_at`).
-        let claim_now = now.saturating_add(started.elapsed().as_secs() as i64);
+        let claim_now = now.saturating_add(elapsed_ms(started));
         // Claim — the guarded `present → deleting` (its own short txn; releases the write lock at once).
         // `location` selects which store the unlink targets; the claim's keep-set re-check is unchanged.
         let (location, git_oid) = match authority
@@ -104,10 +115,10 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
         }
         // Unlink — remove the bytes OUTSIDE any transaction (the filesystem trails the DB), dispatching on
         // the recorded location: a loose git-object delete, or a large-object-store unlink keyed on the id.
-        unlink_object(authority, ws, &mut git_store, location, object_id, git_oid)?;
+        unlink_object(authority, ws, location, object_id, git_oid)?;
         // Finalize — `deleting → absent` (its own short transaction), GATED on this actor's claim token so a
         // row a recovery sweep re-claimed is never finalized out from under it.
-        let finalize_now = now.saturating_add(started.elapsed().as_secs() as i64);
+        let finalize_now = now.saturating_add(elapsed_ms(started));
         authority
             .db()
             .finalize_delete(ws, object_id, claim_now, finalize_now)
@@ -123,16 +134,13 @@ pub(crate) async fn run_gc(authority: &Authority, ws: &WorkspaceId, now: i64) ->
 /// periodically (≈ every few minutes) so a stranded `deleting` cannot make every migrate of that content
 /// time out.
 pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<usize> {
-    let older_than = now - RECOVERY_STALE_SECS;
+    let older_than = now - RECOVERY_STALE_MS;
     let mut recovered = 0;
     for ws in authority
         .db()
         .workspaces_with_stale_deleting(older_than)
         .await?
     {
-        // Opened lazily (cached), only for a `git`-located unlink — so a workspace with only large-local
-        // rows and no git repo still recovers (see `run_gc`).
-        let mut git_store: Option<Store> = None;
         // The stale list is advisory; the per-object claim is the one-winner guard (mirroring run_gc's
         // claim) — it keeps the row `deleting` across the unlink and hands the git locator to exactly one
         // sweeper, so two concurrent recoveries can't both unlink and a migrate can't reinstall mid-sweep.
@@ -161,7 +169,7 @@ pub(crate) async fn recovery_sweep(authority: &Authority, now: i64) -> Result<us
             {
                 continue;
             }
-            unlink_object(authority, &ws, &mut git_store, location, object_id, git_oid)?;
+            unlink_object(authority, &ws, location, object_id, git_oid)?;
             authority
                 .db()
                 .finalize_delete(&ws, object_id, now, now)
@@ -214,24 +222,22 @@ pub(crate) async fn quarantine_janitor(authority: &Authority, now: i64) -> Resul
 /// no-op), so the recovery sweep's re-run is safe. The DB transitions + the claim-token fence are unchanged
 /// — only the physical target differs by location.
 ///
-/// The git store is opened **lazily** into `git_store` (cached for the pass) on the first `git` unlink, so a
-/// workspace that has only `large-local` objects — and therefore may have no git repo yet — never tries to
-/// open one.
+/// The non-`Send` gix `Store` is opened INSIDE this synchronous fn, per unlink, and only on a `git`-located
+/// one — so the calling futures stay `Send` (never a `Store` across an `.await`), and a workspace that has
+/// only `large-local` objects (and therefore may have no git repo yet) never tries to open one. The unlink
+/// deliberately runs inline (never on the blocking pool): the owner-check → unlink step must have no
+/// `.await` between them, and a single loose-object delete is small.
 fn unlink_object(
     authority: &Authority,
     ws: &WorkspaceId,
-    git_store: &mut Option<Store>,
     location: Location,
     object_id: ObjectId,
     git_oid: [u8; 20],
 ) -> Result<()> {
     match location {
         Location::Git => {
-            let store = match git_store {
-                Some(s) => s,
-                None => git_store.insert(authority.open_store(ws)?),
-            };
-            store
+            authority
+                .open_store(ws)?
                 .delete_loose_object(git_oid)
                 .map_err(crate::error::AuthorityError::internal)?;
         }
@@ -243,4 +249,16 @@ fn unlink_object(
         }
     }
     Ok(())
+}
+
+/// Compile-time pin: the three GC entry points' futures are `Send`, so the composing server can spawn them
+/// onto a multi-threaded runtime. Fails to compile if a non-`Send` value (the gix `Store`) is ever again
+/// held across an `.await` in any of them. Never called — the assertion is the compilation itself.
+#[cfg(test)]
+#[allow(dead_code)]
+fn assert_gc_futures_are_send(authority: &Authority, ws: &WorkspaceId) {
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(run_gc(authority, ws, 0));
+    assert_send(recovery_sweep(authority, 0));
+    assert_send(quarantine_janitor(authority, 0));
 }

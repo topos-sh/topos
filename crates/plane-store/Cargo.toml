@@ -28,11 +28,13 @@ thiserror.workspace = true
 # migrations (its Migrator takes a free `pg_advisory_lock`). NEVER `sqlx::Any` (it forfeits compile-time
 # query checking, and would erase the per-backend SERIALIZABLE txn semantics the pointer-move needs).
 sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "postgres", "tls-rustls-ring-native-roots"] }
-# Only `tokio::time` — the bounded-backoff sleep the migrate deleting-wait uses while it polls OUTSIDE any
-# write transaction (holding it inside one would stall GC's finalize write transaction). sqlx
-# already pulls tokio into this crate's tree via `runtime-tokio`, and the client takes NO edge to
-# `plane-store` (check-arch forbids it), so this never reaches the CLI.
-tokio = { workspace = true, features = ["time"] }
+# `time` — the bounded-backoff sleep the migrate deleting-wait uses while it polls OUTSIDE any write
+# transaction (holding it inside one would stall GC's finalize write transaction). `rt` —
+# `task::spawn_blocking`, which isolates the fsync-heavy/verify-on-read store sections onto the blocking
+# pool so they never pin an async worker. sqlx already pulls tokio into this crate's tree via
+# `runtime-tokio`, and the client takes NO edge to `plane-store` (check-arch forbids it), so this never
+# reaches the CLI.
+tokio = { workspace = true, features = ["time", "rt"] }
 # The in-process plane SIGNER — this crate is the ONLY private-key holder (topos-core stays verify-only
 # no_std). `std` gives std::error::Error on SignatureError; `zeroize` restores SigningKey's ZeroizeOnDrop
 # (the root pin is default-features=false, which strips it). `getrandom` seeds first-run key generation;

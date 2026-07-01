@@ -37,7 +37,10 @@
 //!   server-side dedup, durable install); the transactional mark-then-claim GC (claim →
 //!   unlink-outside-any-transaction → finalize; keep-set = exactly the read-authorization surface) with a
 //!   recovery sweep + a quarantine janitor; and the tombstones denylist. The database leads, the filesystem
-//!   trails. It moves no pointer and is wired to no verb yet — the in-crate tests drive it.
+//!   trails. The GC pass / recovery sweep / quarantine janitor are public ops
+//!   ([`Authority::run_gc`] / [`Authority::run_recovery`] / [`Authority::run_janitor`]) the composing
+//!   server MUST schedule (startup + periodic) — this library holds no scheduler. The server clock is one
+//!   unit throughout: epoch **milliseconds**.
 //! - **The size-routed large-object store (offload).** At migrate a file blob >= a configurable threshold is
 //!   physically offloaded to a per-workspace content-addressed side store (`location = large-local`), keyed
 //!   by the same `blob_id`; smaller blobs stay in git; a per-blob reject cap fails typed at ingest. Identity
@@ -51,6 +54,14 @@
 //! HTTP surface (these writes are exercised in-process only), real identity/roster/device issuance (the
 //! registry is fixture-seeded), at-rest key encryption, and the `purge` verb are later work.
 
+// Layout — the orchestration/db twin convention. Each write domain X splits into two halves:
+//   src/X.rs    — the orchestration OUTSIDE the transaction (filesystem work, credential derivation,
+//                 candidate assembly; no SQL);
+//   src/db/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write transaction plus its
+//                 pool reads (no `sqlx` type ever crosses out of `mod db`).
+// Exceptions: `gc`'s SQL lives in `db/lifecycle` (one fence, one file), and the proposals' orchestration
+// lives in `set_current` (propose/approve are arms of the one pointer-move write; `db/proposals` holds
+// their SQL).
 mod authority;
 mod db;
 mod enroll;
@@ -63,13 +74,11 @@ mod set_current;
 mod signer;
 mod upload;
 
-// The object-lifecycle fence: `ingest`/`migrate` now drive the publish/propose writes, but the GC pass,
-// recovery sweep, and quarantine janitor are scheduler-driven (the composing server owns scheduling — this
-// library holds none), so they are legitimately unreferenced in a non-test production build; the lint stays
-// active under `test`, where the in-crate tests exercise every path. (Same for the decomposed migrate steps.)
-#[cfg_attr(not(test), allow(dead_code))]
+// The object-lifecycle fence: `ingest`/`migrate` drive the publish/propose writes, and the GC pass,
+// recovery sweep, and quarantine janitor are exposed as the public `Authority::run_gc`/`run_recovery`/
+// `run_janitor` (the composing server owns scheduling — this library holds none, but it now hands the
+// composer the handles to schedule).
 mod gc;
-#[cfg_attr(not(test), allow(dead_code))]
 mod lifecycle;
 
 #[cfg(test)]

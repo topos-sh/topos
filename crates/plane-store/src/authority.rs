@@ -771,6 +771,47 @@ impl Authority {
         crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
     }
 
+    /// Run one **garbage-collection pass** over a workspace: reclaim every currently-unrooted object through
+    /// the transactional mark-then-claim fence (claim → unlink-outside-any-transaction → finalize; the
+    /// keep-set is exactly the read-authorization surface, so a readable object is never reclaimed). Returns
+    /// the number of objects reclaimed. `now` is the server clock in epoch **milliseconds**.
+    ///
+    /// **The composing server owns scheduling** — this library holds no scheduler. Run it on startup and
+    /// periodically (≈ every few minutes) per active workspace; without it, storage abandoned by rejected/
+    /// stale proposals and crashed migrates grows without bound.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database/store fault; [`AuthorityError::Integrity`] on a corrupt row.
+    pub async fn run_gc(&self, ws: &WorkspaceId, now: i64) -> Result<usize> {
+        crate::gc::run_gc(self, ws, now).await
+    }
+
+    /// Run the **recovery sweep**: finalize every STALE `deleting` object across all workspaces (a crashed
+    /// GC's leftover mid-unlink), re-verifying the read-authorization surface at delete time so a re-rooted
+    /// row is spared. Returns the number recovered. `now` is the server clock in epoch **milliseconds**.
+    ///
+    /// **The composing server owns scheduling** — run it on startup and periodically (≈ every few minutes),
+    /// or a stranded `deleting` row makes every migrate of that content wait out its bound and fail.
+    ///
+    /// # Errors
+    /// As [`run_gc`](Self::run_gc).
+    pub async fn run_recovery(&self, now: i64) -> Result<usize> {
+        crate::gc::recovery_sweep(self, now).await
+    }
+
+    /// Run the **quarantine janitor**: sweep every expired/abandoned upload quarantine across all workspaces
+    /// (claim-before-rm, so a re-ingest that reused an op id is never swept out from under its in-flight
+    /// migrate). Returns the number swept. `now` is the server clock in epoch **milliseconds**.
+    ///
+    /// **The composing server owns scheduling** — run it on startup and periodically (the quarantine TTL is
+    /// generous, so hourly is plenty).
+    ///
+    /// # Errors
+    /// As [`run_gc`](Self::run_gc).
+    pub async fn run_janitor(&self, now: i64) -> Result<usize> {
+        crate::gc::quarantine_janitor(self, now).await
+    }
+
     /// Set the workspace's `review_required` policy — the off-by-default anti-poisoning gate. With it on, a
     /// direct publish short-circuits to `APPROVAL_REQUIRED` (ingesting nothing) and an approval requires a
     /// second, distinct reviewer (four-eyes); genesis + revert bypass it. This is the authorized public op a
@@ -849,7 +890,9 @@ impl Authority {
 
     /// The per-workspace git-store directory — one component under the confined root. `WorkspaceId` is
     /// a validated path-safe id (no separators, no `..`), so this can never escape `git_root`.
-    fn workspace_git_dir(&self, ws: &WorkspaceId) -> PathBuf {
+    /// `pub(crate)` so a blocking-pool closure (which cannot capture `&Authority` — `spawn_blocking`
+    /// requires `'static`) can carry the owned path and open the non-`Send` store inside itself.
+    pub(crate) fn workspace_git_dir(&self, ws: &WorkspaceId) -> PathBuf {
         self.git_root.join(ws.as_str())
     }
 
@@ -857,8 +900,6 @@ impl Authority {
     /// `.`, so `<ws>.quarantine` can never collide with a real workspace store dir (`git_root/<ws>`), and
     /// it is a SIBLING of that store — so the GC scanner, which walks only `git_root/<ws>/`, never sees a
     /// quarantine. Both ids are validated path-safe newtypes, so the path can never escape `git_root`.
-    /// (Used by the not-yet-wired lifecycle ops, so unreferenced in a non-test production build.)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn workspace_quarantine_dir(
         &self,
         ws: &WorkspaceId,
@@ -876,22 +917,10 @@ impl Authority {
     }
 
     /// Open-or-create the per-workspace git store for an upload's object write (the bare repo is created
-    /// on a workspace's first upload).
-    ///
-    /// Open first, then create, then open again on a failed create: two concurrent first-time uploads to
-    /// the same workspace can both observe the directory as absent, and bare-repo `init` is not an
-    /// idempotent open-or-create — so the loser of the creation race falls back to opening what the winner
-    /// just made instead of failing. (A finer-grained guard against a writer racing *mid*-init lands with
-    /// the broader concurrency work.)
+    /// on a workspace's first upload). Delegates to the free [`open_or_init_store`], which a blocking-pool
+    /// closure calls directly with the owned dir (it cannot capture `&Authority`).
     pub(crate) fn store_for_write(&self, ws: &WorkspaceId) -> Result<Store> {
-        let dir = self.workspace_git_dir(ws);
-        match Store::open(&dir) {
-            Ok(store) => Ok(store),
-            Err(_) => match Store::init(&dir) {
-                Ok(store) => Ok(store),
-                Err(_) => Store::open(&dir).map_err(AuthorityError::internal),
-            },
-        }
+        open_or_init_store(&self.workspace_git_dir(ws))
     }
 
     /// The per-workspace large-object store handle, rooted at `large_root/<ws>/`. `WorkspaceId` is a
@@ -903,6 +932,45 @@ impl Authority {
     pub(crate) fn large_store(&self, ws: &WorkspaceId) -> LocalLargeStore {
         LocalLargeStore::new(self.large_root.join(ws.as_str()))
     }
+}
+
+/// Open-or-create a bare per-workspace git store at `dir` — the write-path open. A free fn so a
+/// blocking-pool closure can call it with an owned dir.
+///
+/// Creation is serialized under an in-process lock: two concurrent first-time writers can both observe
+/// the directory as absent, and bare-repo `init` is neither an idempotent open-or-create nor atomic (a
+/// racer can open a repo mid-init and fail) — write sections now genuinely run in parallel on the
+/// blocking pool, so the old open→init→open fallback is not enough. Under the lock the loser re-opens
+/// what the winner completed. One process owns this git root (per-workspace stores under one plane), so
+/// a process lock is the whole story; the fast path (the store already exists) takes no lock at all.
+pub(crate) fn open_or_init_store(dir: &Path) -> Result<Store> {
+    if let Ok(store) = Store::open(dir) {
+        return Ok(store);
+    }
+    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _creation = INIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match Store::open(dir) {
+        Ok(store) => Ok(store),
+        Err(_) => Store::init(dir).map_err(AuthorityError::internal),
+    }
+}
+
+/// Run one synchronous store section on tokio's **blocking pool**, so fsync-heavy git/large-object I/O
+/// (bundle staging, durable installs and commits, verify-on-read byte fetches up to the reject cap) never
+/// pins an async worker thread — a few concurrent large operations would otherwise stall every cheap route
+/// (the 304 currency check each agent session fires). The closure takes **owned** inputs and opens the
+/// non-`Send` gix `Store` inside itself (it can never cross the boundary); a pool-join fault maps to
+/// [`AuthorityError::Internal`].
+pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(AuthorityError::internal)?
 }
 
 // ── test-fixtures shims (feature-gated; NEVER part of the production API) ──────────────────────────────

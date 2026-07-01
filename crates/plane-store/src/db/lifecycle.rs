@@ -263,15 +263,38 @@ impl Db {
         Ok(row.is_some())
     }
 
-    /// Every `present` object in the workspace — the GC candidate scan (a pool read; advisory only, since
-    /// the guarded claim re-verifies each candidate). Bound on `workspace_id`: an unbound scan would
-    /// silently enumerate another tenant's (content-addressed, repeatable) ids.
-    pub(crate) async fn present_objects(&self, ws: &WorkspaceId) -> Result<Vec<ObjectId>> {
+    /// The GC pass's ADVISORY candidate list: every `present` object the keep-set does NOT currently root —
+    /// the SAME three exclusion clauses [`Self::claim_for_delete`] re-verifies (a `commit_object` trunk
+    /// edge, a live promotion lease, an open-non-stale `proposal_object` root), evaluated here as one
+    /// indexed SQL anti-join so a pass does work proportional to actual garbage, not to every object the
+    /// workspace ever accumulated. Purely advisory (a point-in-time pool read): the guarded per-object
+    /// claim remains the SOLE authority — an object rooted between this scan and the claim is spared there,
+    /// and one unrooted after the scan is simply picked up by the next pass. Bound on `workspace_id`: an
+    /// unbound scan would silently enumerate another tenant's (content-addressed, repeatable) ids.
+    pub(crate) async fn gc_candidates(&self, ws: &WorkspaceId, now: i64) -> Result<Vec<ObjectId>> {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
-            r#"SELECT object_id AS "object_id!: Vec<u8>" FROM object_presence
-               WHERE workspace_id = $1 AND status = 'present'"#,
+            r#"
+            SELECT op.object_id AS "object_id!: Vec<u8>" FROM object_presence op
+            WHERE op.workspace_id = $1 AND op.status = 'present'
+              AND NOT EXISTS (
+                  SELECT 1 FROM commit_object co
+                  WHERE co.workspace_id = op.workspace_id AND co.object_id = op.object_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM promotion_lease_object plo
+                  JOIN promotion_lease pl
+                    ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
+                  WHERE plo.workspace_id = op.workspace_id AND plo.object_id = op.object_id
+                    AND (pl.expires_at IS NULL OR pl.expires_at > $2))
+              AND NOT EXISTS (
+                  SELECT 1 FROM proposal_object po
+                  JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
+                  JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
+                  WHERE po.workspace_id = op.workspace_id AND po.object_id = op.object_id
+                    AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
+            "#,
             ws_s,
+            now,
         )
         .fetch_all(self.pool())
         .await
@@ -311,22 +334,26 @@ impl Db {
             .collect()
     }
 
-    /// Every PRESENT object in the workspace as `git_oid -> object_id`, BOTH locations — the version-metadata
-    /// read's join table. Each tree leaf's `git_oid` (the loose-object id for a git-resident blob, the
-    /// tree-entry bridge key for an offloaded one — both stored in `object_presence.git_oid`) resolves to its
-    /// content id WITHOUT reading any blob bytes (pure metadata). Mirrors [`Self::large_local_objects`] but
-    /// without the `location` filter. Bound on `workspace_id`; big-blob sets are small and version trees tiny,
-    /// so the existing `(workspace_id, status)` index suffices (no `git_oid` index needed).
-    pub(crate) async fn objects_by_git_oid(
+    /// The PRESENT objects among exactly the given `git_oid` locators, as `git_oid -> object_id` — the
+    /// version-metadata read's join table. Each tree leaf's `git_oid` (the loose-object id for a
+    /// git-resident blob, the tree-entry bridge key for an offloaded one — both stored in
+    /// `object_presence.git_oid`) resolves to its content id WITHOUT reading any blob bytes (pure
+    /// metadata). Filtered to the requested leaves with an array bind (`git_oid = ANY($2)`) over the
+    /// `(workspace_id, git_oid)` index, so the read scales with the requested version's tree — never with
+    /// the workspace's lifetime present-object count. Bound on `workspace_id`.
+    pub(crate) async fn objects_by_git_oids(
         &self,
         ws: &WorkspaceId,
+        git_oids: &[[u8; GIT_OID_LEN]],
     ) -> Result<HashMap<[u8; GIT_OID_LEN], [u8; 32]>> {
         let ws_s = ws.as_str();
+        let goids: Vec<Vec<u8>> = git_oids.iter().map(|g| g.to_vec()).collect();
         let rows = sqlx::query!(
             r#"SELECT git_oid AS "git_oid: Vec<u8>", object_id AS "object_id!: Vec<u8>"
                FROM object_presence
-               WHERE workspace_id = $1 AND status = 'present'"#,
+               WHERE workspace_id = $1 AND status = 'present' AND git_oid = ANY($2)"#,
             ws_s,
+            &goids,
         )
         .fetch_all(self.pool())
         .await
@@ -855,41 +882,42 @@ async fn insert_lease_txn(
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-    for obj in object_ids {
-        let oid = obj.0.as_slice();
-        sqlx::query!(
-            "INSERT INTO promotion_lease_object (workspace_id, op_id, object_id) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, op_id, object_id) DO NOTHING",
-            ws_s,
-            op_s,
-            oid,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-        // GC-lease MVCC fence (Postgres-specific): also WRITE the `object_presence` row of each currently
-        // `present` leased object, so a concurrent GC `claim_for_delete` — which UPDATEs the same row
-        // `present → deleting` — has a genuine write-write conflict with this lease transaction. Under
-        // SQLite the global writer lock made a committed lease visible to any later claim; under Postgres
-        // SSI a lease that wrote only `promotion_lease*` would be a lone rw-antidependency SSI does NOT
-        // abort, so a GC whose snapshot predates the lease commit could reclaim a freshly-leased
-        // dedup-`present` object (the migrate present-path reuses it WITHOUT re-touching the row). The
-        // self-assignment still writes a new row version (Postgres never elides a no-op UPDATE) and takes
-        // the row lock, so the loser aborts 40001 → the runner retries → the claim's keep-set re-check now
-        // sees the live lease and spares the object. It changes no meaning: `status` stays `present`, and
-        // `status_updated_at` only gates recovery-staleness of `deleting` rows. A to-be-installed (`absent`)
-        // object matches nothing here and is instead protected by `install_object`'s own `absent → present`
-        // write.
-        sqlx::query!(
-            "UPDATE object_presence SET status_updated_at = status_updated_at \
-             WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'",
-            ws_s,
-            oid,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-    }
+    // The full child set in ONE set-valued statement (an UNNEST array bind) — a per-object statement per
+    // blob would stretch the SERIALIZABLE conflict window linearly with bundle size on every publish/propose.
+    let oids: Vec<Vec<u8>> = object_ids.iter().map(|o| o.0.to_vec()).collect();
+    sqlx::query!(
+        "INSERT INTO promotion_lease_object (workspace_id, op_id, object_id) \
+         SELECT $1, $2, UNNEST($3::bytea[]) \
+         ON CONFLICT (workspace_id, op_id, object_id) DO NOTHING",
+        ws_s,
+        op_s,
+        &oids,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    // GC-lease MVCC fence (Postgres-specific): also WRITE the `object_presence` row of each currently
+    // `present` leased object, so a concurrent GC `claim_for_delete` — which UPDATEs the same row
+    // `present → deleting` — has a genuine write-write conflict with this lease transaction. Under
+    // SQLite the global writer lock made a committed lease visible to any later claim; under Postgres
+    // SSI a lease that wrote only `promotion_lease*` would be a lone rw-antidependency SSI does NOT
+    // abort, so a GC whose snapshot predates the lease commit could reclaim a freshly-leased
+    // dedup-`present` object (the migrate present-path reuses it WITHOUT re-touching the row). The
+    // self-assignment still writes a new row version (Postgres never elides a no-op UPDATE) and takes
+    // the row locks, so the loser aborts 40001 → the runner retries → the claim's keep-set re-check now
+    // sees the live lease and spares the object. It changes no meaning: `status` stays `present`, and
+    // `status_updated_at` only gates recovery-staleness of `deleting` rows. A to-be-installed (`absent`)
+    // object matches nothing here and is instead protected by `install_object`'s own `absent → present`
+    // write. One set-valued UPDATE (`ANY` array bind), same rows touched as the old per-object loop.
+    sqlx::query!(
+        "UPDATE object_presence SET status_updated_at = status_updated_at \
+         WHERE workspace_id = $1 AND status = 'present' AND object_id = ANY($2)",
+        ws_s,
+        &oids,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
     Ok(())
 }
 

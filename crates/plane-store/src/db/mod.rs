@@ -589,7 +589,8 @@ fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
 struct BadBlobWidth;
 
 // The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). Driven
-// by the not-yet-wired orchestration + the tests; unreferenced in a non-test production build.
+// by the ingest/migrate orchestration and the GC/recovery/janitor entry points; a few helpers (e.g.
+// `release_lease`) are exercised only by tests, so the dead-code waiver stays on the module.
 #[cfg_attr(not(test), allow(dead_code))]
 mod lifecycle;
 

@@ -407,12 +407,14 @@ async fn run(
 
     // (3) Authorization — authoritative + in-txn. Resolve the device to a NON-REVOKED public key bound to a
     // principal, verify the device-op signature over SERVER-trusted fields, and require the principal is
-    // rostered. A revoke committed before this txn is serialized ahead of it and blocks the move.
+    // rostered. A revoke committed before this txn is serialized ahead of it and blocks the move. A
+    // PRE-AUTHENTICATION failure (unknown/revoked device, invalid signature) is DENIED **without a durable
+    // receipt** — see `denied_preauth`; the authenticated-but-unauthorized denials below stay receipted.
     let Some(device) = resolve_device(tx, input.ws, input.device_key_id).await? else {
-        return denied(tx, input, &bound, "device unknown or revoked").await;
+        return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
     };
     if device.revoked {
-        return denied(tx, input, &bound, "device unknown or revoked").await;
+        return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
     }
     let fields = DeviceOpFields {
         workspace_id: input.ws.as_str(),
@@ -426,7 +428,7 @@ async fn run(
         bundle_digest: input.candidate_bundle_digest,
     };
     if !verify_device_op(&fields, input.signature, &device.public_key) {
-        return denied(tx, input, &bound, "device signature invalid").await;
+        return denied_preauth(tx, input, &bound, "device signature invalid").await;
     }
     // (3b) The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
     // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish) by a
@@ -506,18 +508,18 @@ async fn run(
     };
 
     // (5) Availability — every candidate object is present (not deleting/absent/unavailable) and not
-    // tombstoned. Plus the lease-completion gate: the committed (non-expiring) lease for THIS candidate is
-    // the only in-txn evidence that migrate finished (commit_durable wrote the git commit + tree).
-    for obj in input.object_ids {
-        if !object_present_not_tombstoned(tx, input.ws, *obj).await? {
-            return denied(
-                tx,
-                input,
-                &bound,
-                "a candidate object is not present or is tombstoned",
-            )
-            .await;
-        }
+    // tombstoned, checked as ONE set-valued statement (a per-object round-trip would stretch the
+    // SERIALIZABLE conflict window linearly with bundle size). Plus the lease-completion gate: the
+    // committed (non-expiring) lease for THIS candidate is the only in-txn evidence that migrate finished
+    // (commit_durable wrote the git commit + tree).
+    if !all_present_not_tombstoned(tx, input.ws, input.object_ids).await? {
+        return denied(
+            tx,
+            input,
+            &bound,
+            "a candidate object is not present or is tombstoned",
+        )
+        .await;
     }
     // The lease-completion gate proves migrate finished for an UPLOADED candidate (publish / propose / revert
     // each hold a committed lease over their candidate). `review --approve` uploads and leases NOTHING — the
@@ -854,12 +856,14 @@ async fn reject_run(
 
     // (2) Authorization — the SAME in-transaction device-op verification the promotion runs (a non-revoked
     // registered key bound to a rostered principal), over the `ReviewReject`-typed frame. A revoke serialized
-    // ahead of this blocks the reject.
+    // ahead of this blocks the reject. A pre-authentication failure is DENIED without a durable receipt
+    // (mirroring `run`'s `denied_preauth`; a reject has no lease, so nothing is even released) — the roster
+    // denial below names a verified device and stays receipted.
     let Some(device) = resolve_device(tx, r.ws, r.device_key_id).await? else {
-        return reject_denied(tx, r, "device unknown or revoked").await;
+        return Ok(reject_denied_preauth(r, "device unknown or revoked"));
     };
     if device.revoked {
-        return reject_denied(tx, r, "device unknown or revoked").await;
+        return Ok(reject_denied_preauth(r, "device unknown or revoked"));
     }
     let fields = DeviceOpFields {
         workspace_id: r.ws.as_str(),
@@ -873,7 +877,7 @@ async fn reject_run(
         bundle_digest: r.bundle_digest,
     };
     if !verify_device_op(&fields, r.signature, &device.public_key) {
-        return reject_denied(tx, r, "device signature invalid").await;
+        return Ok(reject_denied_preauth(r, "device signature invalid"));
     }
     if !super::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
         return reject_denied(tx, r, "principal not rostered for the skill").await;
@@ -925,6 +929,25 @@ async fn reject_terminal(
     Ok(stored.into_receipt())
 }
 
+/// The reject transaction's **pre-authentication** DENIED — synthesized, never persisted (the same
+/// rationale as [`denied_preauth`]; a reject holds no lease, so there is nothing to release either).
+fn reject_denied_preauth(r: &RejectInput<'_>, msg: &str) -> SetCurrentReceipt {
+    SetCurrentReceipt {
+        op_id: r.op_id.to_owned(),
+        command: crate::set_current::device_op_command(r.op).to_owned(),
+        skill_id: r.skill.as_str().to_owned(),
+        version_id: Some(r.commit),
+        bundle_digest: Some(r.bundle_digest),
+        expected: r.expected,
+        outcome: TerminalOutcome::Denied,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: r.created_at.to_owned(),
+        details: detail(msg),
+    }
+}
+
 async fn reject_denied(
     tx: &mut Transaction<'_, Postgres>,
     r: &RejectInput<'_>,
@@ -967,6 +990,43 @@ async fn denied(
         detail(msg),
     )
     .await
+}
+
+/// A **pre-authentication** DENIED (unknown/revoked device, invalid signature): synthesize the receipt
+/// WITHOUT persisting it — mirroring the governance preamble's posture (`db/enroll`): the failure is not
+/// attributable to any verified actor, so a durable row keyed on the attacker-chosen `(device_key_id,
+/// op_id)` would let an UNAUTHENTICATED client mint audit noise and grow `op_receipts` without bound.
+/// Determinism makes a retry reproduce the same outcome (exactly like [`permanent_key_reuse`], which is
+/// likewise never stored); only `created_at` re-stamps, and an unauthenticated caller is owed no
+/// byte-stable replay. This ALSO means a later, correctly-signed retry of the same op id proceeds fresh
+/// instead of replaying a burned DENIED. The candidate's promotion lease IS still released (this write
+/// removes a row the caller's own ingest created — it grows nothing): an unauthenticated publish/propose
+/// already migrated its bytes, and skipping the release would leave them GC-rooted forever. (The pre-txn
+/// typed failures written by `record_pretxn` — op-mismatch, non-UUID op ids, the review gate — stay
+/// durable: they are the replay surface for those outcomes.)
+async fn denied_preauth(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &PromoteInput<'_>,
+    bound: &BoundIdentity<'_>,
+    msg: &str,
+) -> Result<SetCurrentReceipt> {
+    if !matches!(input.op, DeviceOp::ReviewApprove) {
+        delete_lease(tx, input.ws, input.op_id).await?;
+    }
+    Ok(SetCurrentReceipt {
+        op_id: input.op_id.to_owned(),
+        command: bound.command.to_owned(),
+        skill_id: bound.skill_id.to_owned(),
+        version_id: bound.commit,
+        bundle_digest: bound.bundle_digest,
+        expected: bound.expected,
+        outcome: TerminalOutcome::Denied,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: input.created_at.to_owned(),
+        details: detail(msg),
+    })
 }
 
 async fn conflict(
@@ -1306,24 +1366,29 @@ async fn read_current(
     }
 }
 
-async fn object_present_not_tombstoned(
+/// Whether EVERY given object is `present` and not tombstoned — one set-valued query (`ANY` array bind)
+/// counting the passing subset against the (distinct) candidate set, replacing a per-object round-trip.
+async fn all_present_not_tombstoned(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    object_id: ObjectId,
+    object_ids: &[ObjectId],
 ) -> Result<bool> {
     let ws_s = ws.as_str();
-    let oid = object_id.0.as_slice();
+    let oids: Vec<Vec<u8>> = object_ids.iter().map(|o| o.0.to_vec()).collect();
     let row = sqlx::query!(
-        r#"SELECT 1::int8 AS "ok!: i64" FROM object_presence
-           WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'
-             AND NOT EXISTS (SELECT 1 FROM tombstones WHERE workspace_id = $1 AND blob_id = $2)"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM object_presence op
+           WHERE op.workspace_id = $1 AND op.status = 'present' AND op.object_id = ANY($2)
+             AND NOT EXISTS (SELECT 1 FROM tombstones t
+                             WHERE t.workspace_id = op.workspace_id AND t.blob_id = op.object_id)"#,
         ws_s,
-        oid,
+        &oids,
     )
-    .fetch_optional(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-    Ok(row.is_some())
+    // The candidate sets are distinct by construction (`distinct_object_ids` / the `commit_object` and
+    // `proposal_object` primary keys), so an exact count match means every object passed.
+    Ok(row.n == i64::try_from(object_ids.len()).unwrap_or(i64::MAX))
 }
 
 async fn lease_committed_commit(
@@ -1518,10 +1583,15 @@ where
         signed_record: r.signed_record,
         key_id: r.key_id,
         created_at: r.created_at,
+        // A stored `details` column that no longer parses is store corruption: silently dropping it (an
+        // `.ok()`) would REPLAY an altered receipt — breaking the byte-identical-replay invariant without a
+        // sound. Alarm instead (mirrors `BadOutcome` on the outcome column).
         details: r
             .details
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok()),
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| AuthorityError::integrity(BadDetails))?,
     }))
 }
 
@@ -1665,6 +1735,12 @@ struct GenerationOutOfRange;
 #[derive(Debug, thiserror::Error)]
 #[error("a stored receipt outcome is not a known terminal code")]
 struct BadOutcome;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "a stored receipt's details column is not valid JSON — the receipt cannot replay byte-identically"
+)]
+struct BadDetails;
 
 #[derive(Debug, thiserror::Error)]
 #[error("a propose reached the open step with no recorded base parent")]

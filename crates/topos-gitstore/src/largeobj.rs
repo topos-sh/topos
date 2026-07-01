@@ -26,6 +26,12 @@ use crate::error::GitstoreError;
 /// crash-safe two-phase install (`temp → fsync → recompute-sha256 == blob_id → atomic rename → fsync`).
 /// The [`LocalLargeStore`] below is the v0 local-filesystem impl; a deferred S3-compatible backend is a
 /// second impl of this same trait.
+///
+/// **Decision point before any remote backend:** these signatures are deliberately **synchronous** — the
+/// server isolates its calls onto a blocking pool, which is right for local-filesystem I/O. A remote
+/// (S3-style) impl must NOT hide network I/O behind these sync signatures on an async runtime thread;
+/// choosing its shape (an async trait, or a blocking adapter over a remote client) is a prerequisite of
+/// that backend, settled then — not a today refactor.
 pub trait LargeObjectStore {
     /// Store `bytes` under `blob_id` (the caller declares `blob_id == sha256(bytes)`; the impl re-checks).
     ///

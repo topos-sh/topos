@@ -195,13 +195,71 @@ async fn gc_never_touches_an_active_quarantine_but_the_janitor_sweeps_an_expired
         ObjectStatus::Absent
     );
 
-    // The janitor spares an unexpired quarantine and sweeps an expired one (TTL = ingest_now + 3600).
+    // The janitor spares an unexpired quarantine and sweeps an expired one (TTL = ingest_now + the
+    // epoch-ms quarantine TTL).
     assert_eq!(gc::quarantine_janitor(a, 200).await.unwrap(), 0);
     assert!(qdir.exists());
-    assert_eq!(gc::quarantine_janitor(a, 100 + 3600 + 1).await.unwrap(), 1);
+    assert_eq!(
+        gc::quarantine_janitor(a, 100 + lifecycle::QUARANTINE_TTL_MS + 1)
+            .await
+            .unwrap(),
+        1
+    );
     assert!(
         !qdir.exists(),
         "the janitor sweeps an expired quarantine whole"
+    );
+}
+
+#[sqlx::test]
+async fn a_fresh_lease_is_live_under_a_realistic_epoch_ms_clock(pool: PgPool) {
+    // The production clock is epoch MILLISECONDS (the plane bin stamps `now` with epoch-ms), so every TTL
+    // constant here must be millisecond-valued. Regression pin for the seconds/ms unit bug: with a
+    // seconds-valued lease TTL misread against an epoch-ms clock, an in-flight migrate's lease would
+    // "expire" 600 real milliseconds after insert — a GC pass two (real) seconds in would reclaim the
+    // freshly-installed bytes out from under it, and `migrate_finish`'s lease-liveness CAS would fail.
+    let fx = Fixture::new(pool, "e-ms-clock").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let body = b"# skill\nfresh under an epoch-ms clock\n";
+    let now_ms: i64 = 1_782_000_000_000; // a realistic 2026 epoch-ms wall clock
+
+    // Ingest + lease + install at `now_ms`; the migrate is still in flight (finish not yet run).
+    let staged = lifecycle::ingest(
+        a,
+        &w,
+        &op("msop"),
+        genesis(vec![file("SKILL.md", body)]),
+        now_ms,
+    )
+    .await
+    .unwrap();
+    lifecycle::migrate_lease(a, &w, &staged, now_ms)
+        .await
+        .unwrap();
+    lifecycle::migrate_install(a, &w, &staged, now_ms)
+        .await
+        .unwrap();
+
+    // Two real seconds later: the quarantine is NOT janitor-expired, nothing is recovery-stale, and a GC
+    // pass spares the leased, freshly-installed object (the lease is live for minutes, not sub-second).
+    let later = now_ms + 2_000;
+    assert_eq!(gc::quarantine_janitor(a, later).await.unwrap(), 0);
+    assert_eq!(gc::recovery_sweep(a, later).await.unwrap(), 0);
+    assert_eq!(gc::run_gc(a, &w, later).await.unwrap(), 0);
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present,
+        "a fresh lease must still root the in-flight migrate's bytes at now + 2s"
+    );
+
+    // ...and the finish at +2s still passes the lease-liveness CAS (the lease has minutes left).
+    lifecycle::migrate_finish(a, &w, &staged, later)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.db().object_status(&w, object_id(body)).await.unwrap(),
+        ObjectStatus::Present
     );
 }
 

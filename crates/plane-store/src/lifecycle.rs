@@ -9,6 +9,11 @@
 //! the durable install), then record the version. The pointer-move that consumes the lease is a later step.
 //! `migrate` is split into `lease` / `install` / `finish` so a test can interleave a GC between them
 //! deterministically (no timing).
+//!
+//! **Clock convention: one server-clock unit = one epoch MILLISECOND** (the enrollment module's stated
+//! convention; the plane bin stamps `now` with epoch-ms). Every TTL constant and elapsed-time computation
+//! here is millisecond-valued — a seconds-valued constant added to an epoch-ms `now` would silently
+//! collapse the lease/quarantine fences a thousandfold.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,13 +27,14 @@ use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
 use crate::upload::CandidateUpload;
 
-/// How long an in-flight quarantine lives before the janitor may sweep it. Generous: in-process
-/// ingest→migrate is sub-second, and a slow client can re-ingest under a fresh op id.
-const QUARANTINE_TTL_SECS: i64 = 3600;
+/// How long an in-flight quarantine lives before the janitor may sweep it (epoch-ms; one hour). Generous:
+/// in-process ingest→migrate is sub-second, and a slow client can re-ingest under a fresh op id.
+pub(crate) const QUARANTINE_TTL_MS: i64 = 3600 * 1000;
 
-/// How long an in-flight promotion lease lives before GC may treat it as a crashed/abandoned migrate. A
-/// SUCCESSFUL migrate makes its lease non-expiring (the version stays rooted until the later pointer-move).
-const LEASE_TTL_SECS: i64 = 600;
+/// How long an in-flight promotion lease lives before GC may treat it as a crashed/abandoned migrate
+/// (epoch-ms; ten minutes). A SUCCESSFUL migrate makes its lease non-expiring (the version stays rooted
+/// until the later pointer-move).
+pub(crate) const LEASE_TTL_MS: i64 = 600 * 1000;
 
 /// The deleting-wait backoff (it polls OUTSIDE any write transaction — holding one would stall GC's
 /// finalize write transaction). Bounded so a stranded `deleting` (a crashed GC the recovery sweep
@@ -102,27 +108,39 @@ pub(crate) async fn ingest(
             ws,
             op_id,
             &quarantine_dir.to_string_lossy(),
-            now + QUARANTINE_TTL_SECS,
+            now + QUARANTINE_TTL_MS,
         )
         .await?;
 
-    let import: Vec<ImportFile<'_>> = candidate
-        .files
-        .iter()
-        .map(|f| ImportFile {
-            path: &f.path,
-            mode: f.mode,
-            bytes: &f.bytes,
-        })
-        .collect();
-    let staged = Store::stage(&quarantine_dir, &import).map_err(map_stage_reject)?;
+    // Stage on the blocking pool: `Store::stage` writes + fsyncs every blob of the bundle, so running it
+    // inline would pin an async worker for the whole candidate. The files move into the closure (owned);
+    // the non-`Send` gix `Store` is opened and dropped inside it.
+    let CandidateUpload {
+        files,
+        parents,
+        author,
+        message,
+    } = candidate;
+    let stage_dir = quarantine_dir.clone();
+    let staged = crate::authority::run_blocking(move || {
+        let import: Vec<ImportFile<'_>> = files
+            .iter()
+            .map(|f| ImportFile {
+                path: &f.path,
+                mode: f.mode,
+                bytes: &f.bytes,
+            })
+            .collect();
+        Store::stage(&stage_dir, &import).map_err(map_stage_reject)
+    })
+    .await?;
 
-    let parents: Vec<[u8; 32]> = candidate.parents.iter().map(|c| c.0).collect();
+    let parent_ids: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
     let version_id = sign::commit_id(&Commit {
-        parents: &parents,
+        parents: &parent_ids,
         tree: staged.bundle_digest,
-        author: &candidate.author,
-        message: &candidate.message,
+        author: &author,
+        message: &message,
     })
     .map_err(|e| AuthorityError::RejectedUpload(format!("invalid commit frame: {e:?}")))?;
 
@@ -132,9 +150,9 @@ pub(crate) async fn ingest(
         version_id: CommitId(version_id),
         bundle_digest: staged.bundle_digest,
         entries: staged.entries,
-        parents: candidate.parents,
-        author: candidate.author,
-        message: candidate.message,
+        parents,
+        author,
+        message,
     })
 }
 
@@ -155,7 +173,7 @@ pub(crate) async fn migrate_lease(
             &staged.op_id,
             staged.version_id,
             &objects,
-            now + LEASE_TTL_SECS,
+            now + LEASE_TTL_MS,
         )
         .await
 }
@@ -188,25 +206,36 @@ pub(crate) async fn migrate_finish(
     staged: &StagedCandidate,
     now: i64,
 ) -> Result<()> {
-    // Scope the (non-`Send`) gix `Store` to this synchronous block so it is dropped before the awaits below
-    // — keeping the migrate future `Send` (axum requires it). The commit-then-lease ORDER is unchanged.
+    // The durable commit write runs on the blocking pool (fsync-heavy tree + commit + ref writes must not
+    // pin an async worker); the non-`Send` gix `Store` is opened and dropped inside the closure, so the
+    // migrate future stays `Send` (axum requires it). The commit-then-lease ORDER is unchanged.
     {
-        let main = authority.store_for_write(ws)?;
-        let entries: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = staged
+        let git_dir = authority.workspace_git_dir(ws);
+        let entries: Vec<(String, topos_core::digest::FileMode, [u8; 20])> = staged
             .entries
             .iter()
-            .map(|e| (e.path.as_str(), e.mode, e.git_oid))
+            .map(|e| (e.path.clone(), e.mode, e.git_oid))
             .collect();
         let parents: Vec<[u8; 32]> = staged.parents.iter().map(|c| c.0).collect();
-        main.commit_durable(
-            staged.version_id.0,
-            &parents,
-            &entries,
-            staged.bundle_digest,
-            &staged.author,
-            &staged.message,
-        )
-        .map_err(map_stage_reject)?;
+        let (version_id, bundle_digest) = (staged.version_id.0, staged.bundle_digest);
+        let (author, message) = (staged.author.clone(), staged.message.clone());
+        crate::authority::run_blocking(move || {
+            let main = crate::authority::open_or_init_store(&git_dir)?;
+            let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
+                .iter()
+                .map(|(p, m, g)| (p.as_str(), *m, *g))
+                .collect();
+            main.commit_durable(
+                version_id,
+                &parents,
+                &entry_refs,
+                bundle_digest,
+                &author,
+                &message,
+            )
+            .map_err(map_stage_reject)
+        })
+        .await?;
     }
 
     // Success: the lease becomes the durable root until the pointer-move consumes it. The CAS on the
@@ -249,27 +278,33 @@ pub(crate) async fn stage_forward_commit(
     // committed lease, and the GC keep-set protects the objects meanwhile — exactly as migrate does).
     authority
         .db()
-        .insert_lease(ws, op_id, version_id, object_ids, now + LEASE_TTL_SECS)
+        .insert_lease(ws, op_id, version_id, object_ids, now + LEASE_TTL_MS)
         .await?;
 
-    // Scope the (non-`Send`) gix `Store` to this synchronous block so it drops before the `commit_lease`
-    // await (axum requires the future to be `Send`); the write order is unchanged.
+    // The durable commit write runs on the blocking pool (as `migrate_finish`); the non-`Send` gix `Store`
+    // is opened and dropped inside the closure, so the revert future stays `Send`. Order is unchanged.
     {
-        let main = authority.store_for_write(ws)?;
-        let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
-            .iter()
-            .map(|(p, m, g)| (p.as_str(), *m, *g))
-            .collect();
+        let git_dir = authority.workspace_git_dir(ws);
+        let entries = entries.to_vec();
         let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
-        main.commit_durable(
-            version_id.0,
-            &parent_bytes,
-            &entry_refs,
-            bundle_digest,
-            author,
-            message,
-        )
-        .map_err(map_stage_reject)?;
+        let (author, message) = (author.to_owned(), message.to_owned());
+        crate::authority::run_blocking(move || {
+            let main = crate::authority::open_or_init_store(&git_dir)?;
+            let entry_refs: Vec<(&str, topos_core::digest::FileMode, [u8; 20])> = entries
+                .iter()
+                .map(|(p, m, g)| (p.as_str(), *m, *g))
+                .collect();
+            main.commit_durable(
+                version_id.0,
+                &parent_bytes,
+                &entry_refs,
+                bundle_digest,
+                &author,
+                &message,
+            )
+            .map_err(map_stage_reject)
+        })
+        .await?;
     }
 
     authority
@@ -309,7 +344,7 @@ pub(crate) async fn migrate(
     // I/O; a pathological multi-minute fsync stall there is the one window this approximation misses — and
     // it cannot corrupt bytes, only over-commit a lapsed lease, which the deferred pointer-move that
     // consumes the lease re-verifies for renderability before trusting.)
-    let finish_now = now.saturating_add(started.elapsed().as_secs() as i64);
+    let finish_now = now.saturating_add(elapsed_ms(started));
     migrate_finish(authority, ws, staged, finish_now).await
 }
 
@@ -341,7 +376,7 @@ async fn install_one(
                     .object_location(ws, object_id)
                     .await?
                     .unwrap_or(Location::Git);
-                rematerialize_if_gone(authority, ws, quarantine_dir, entry, location)?;
+                rematerialize_if_gone(authority, ws, quarantine_dir, entry, location).await?;
                 return Ok(()); // dedup: reuse the already-present (and now verified) bytes
             }
             ObjectStatus::Unavailable => {
@@ -361,7 +396,7 @@ async fn install_one(
                 // Install the bytes durably FIRST, then the `absent → present` CAS records that location — so
                 // a `present` row always denotes durably-installed bytes, in either store.
                 let location = route_location(entry.size, authority.large_threshold());
-                install_bytes(authority, ws, quarantine_dir, entry, location)?;
+                install_bytes(authority, ws, quarantine_dir, entry, location).await?;
                 match authority
                     .db()
                     .install_object(
@@ -408,25 +443,43 @@ fn route_location(size: u64, threshold: u64) -> Location {
 /// Physically install one staged blob into the store named by `location`, durably — a git loose object (a
 /// FRESH main handle each time, so gix's object cache can't make `write_blob` skip a just-removed object),
 /// or the per-workspace large-object store (verify-on-write `put`). The DB `absent → present` CAS that
-/// records the location runs only AFTER this returns.
+/// records the location runs only AFTER this returns. The fsync-heavy copy runs on the blocking pool; the
+/// non-`Send` gix `Store` is opened and dropped inside the closure (never alive across an `.await`).
 ///
-/// (Residual: on a workspace's FIRST migrate `store_for_write` creates the bare repo but the repo's own
+/// (Residual: on a workspace's FIRST migrate `open_or_init_store` creates the bare repo but the repo's own
 /// creation isn't fsynced — the same documented power-durability gap the git fence carries; fail-safe, a
 /// later read faults Integrity, never wrong bytes. The large store carries the equivalent `sync_all`/
 /// `F_FULLFSYNC` residual.)
-fn install_bytes(
+async fn install_bytes(
     authority: &Authority,
     ws: &WorkspaceId,
     quarantine_dir: &Path,
     entry: &StagedEntry,
     location: Location,
 ) -> Result<()> {
-    // A fresh quarantine handle, opened + dropped within this synchronous fn — so the non-`Send` gix `Store`
-    // is never alive across an `.await` in the calling migrate future.
+    let qdir = quarantine_dir.to_path_buf();
+    let entry = entry.clone();
+    let git_dir = authority.workspace_git_dir(ws);
+    let large = authority.large_store(ws);
+    crate::authority::run_blocking(move || {
+        install_bytes_sync(&qdir, &entry, location, &git_dir, &large)
+    })
+    .await
+}
+
+/// The synchronous body of [`install_bytes`] (also the re-copy arm of [`rematerialize_if_gone`]): open a
+/// fresh quarantine handle, then copy into the target store `location` names.
+fn install_bytes_sync(
+    quarantine_dir: &Path,
+    entry: &StagedEntry,
+    location: Location,
+    git_dir: &Path,
+    large: &topos_gitstore::LocalLargeStore,
+) -> Result<()> {
     let quarantine = Store::open(quarantine_dir).map_err(AuthorityError::internal)?;
     match location {
         Location::Git => {
-            let main = authority.store_for_write(ws)?;
+            let main = crate::authority::open_or_init_store(git_dir)?;
             main.install_object_durable(&quarantine, entry.git_oid)
                 .map_err(AuthorityError::internal)?;
         }
@@ -434,8 +487,7 @@ fn install_bytes(
             let bytes = quarantine
                 .read_staged_blob(entry.git_oid)
                 .map_err(AuthorityError::internal)?;
-            authority
-                .large_store(ws)
+            large
                 .put(entry.object_id, &bytes)
                 .map_err(AuthorityError::internal)?;
         }
@@ -445,28 +497,40 @@ fn install_bytes(
 
 /// The dedup-reuse belt: if the object's bytes are gone from its RECORDED store (a crash lost them), re-copy
 /// them from this candidate's quarantine — re-asserting "no root over gone bytes" without making the store
-/// the presence authority. `exists` is a belt only; the DB row's `present` status stays the authority.
-fn rematerialize_if_gone(
+/// the presence authority. `exists` is a belt only; the DB row's `present` status stays the authority. The
+/// stat + conditional copy run in one blocking-pool closure (the gix `Store` never crosses an `.await`).
+async fn rematerialize_if_gone(
     authority: &Authority,
     ws: &WorkspaceId,
     quarantine_dir: &Path,
     entry: &StagedEntry,
     location: Location,
 ) -> Result<()> {
-    let present = match location {
-        Location::Git => authority
-            .store_for_write(ws)?
-            .object_exists(entry.git_oid)
-            .map_err(AuthorityError::internal)?,
-        Location::LargeLocal => authority
-            .large_store(ws)
-            .exists(entry.object_id)
-            .map_err(AuthorityError::internal)?,
-    };
-    if !present {
-        install_bytes(authority, ws, quarantine_dir, entry, location)?;
-    }
-    Ok(())
+    let qdir = quarantine_dir.to_path_buf();
+    let entry = entry.clone();
+    let git_dir = authority.workspace_git_dir(ws);
+    let large = authority.large_store(ws);
+    crate::authority::run_blocking(move || {
+        let present = match location {
+            Location::Git => crate::authority::open_or_init_store(&git_dir)?
+                .object_exists(entry.git_oid)
+                .map_err(AuthorityError::internal)?,
+            Location::LargeLocal => large
+                .exists(entry.object_id)
+                .map_err(AuthorityError::internal)?,
+        };
+        if !present {
+            install_bytes_sync(&qdir, &entry, location, &git_dir, &large)?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Whole elapsed milliseconds since `started`, saturating into `i64` — the increment added to a
+/// caller-supplied epoch-ms `now` (the one server-clock unit).
+pub(crate) fn elapsed_ms(started: tokio::time::Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
 /// The distinct object ids of a staged bundle's entries (a blob at two paths is one object). The

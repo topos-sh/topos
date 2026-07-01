@@ -96,7 +96,12 @@ same-process code.) The error type holds this line too: internal faults carry a 
   BOTH the `commit_object` edge AND the proposal arm on its re-claim — so a `deleting` row re-rooted after a
   crashed claim is spared — but NOT the lease, since a lease over a `deleting` object is a waiting migrate it
   must unblock), and a **quarantine janitor** (claim-before-rm, so a re-ingest that reuses an op id is never
-  swept). The in-crate tests drive it (deterministic interleavings for the dedup race, the
+  swept). The three are **public ops** — `Authority::run_gc` / `run_recovery` / `run_janitor` — the composing
+  server MUST schedule (startup + periodic; this library holds no scheduler); their futures are `Send`
+  (compile-pinned), the GC's advisory candidate scan anti-joins the keep-set in SQL (a pass is O(garbage),
+  the guarded per-object claim stays the sole authority), and the server clock is one unit throughout —
+  epoch **milliseconds** (the TTL constants are `*_MS`). The in-crate tests drive it (deterministic
+  interleavings for the dedup race, the
   snapshot-then-delete race, cross-workspace isolation, crash recovery, and — pinned by an equivalence test —
   that the read arm and the two GC-claim arms evaluate the proposal predicate identically). `topos-gitstore`
   supplies the dumb byte primitives (quarantine staging, durable per-object install, loose-object delete).
@@ -127,7 +132,10 @@ same-process code.) The error type holds this line too: internal faults carry a 
   the pointer advance (the immediate FK) and **before** the lease release (so the GC keep-set covers the
   objects continuously across the re-root — no reclaim window) → an **in-process Ed25519 signer** (the only
   private-key holder; load-or-generate `0600`; signs the JCS pointer preimage) → a durable **all-outcome
-  receipt** keyed `(workspace_id, device_key_id, op_id)` (a lost-ack retry replays it byte-for-byte). A
+  receipt** keyed `(workspace_id, device_key_id, op_id)` (a lost-ack retry replays it byte-for-byte) — with
+  ONE carve-out: a **pre-authentication** DENIED (unknown/revoked device, invalid signature) is synthesized,
+  **never persisted** (mirroring the governance preamble: an unauthenticated client must not mint durable
+  attacker-keyed rows), its lease still released; a corrected same-op_id retry proceeds fresh. A
   candidate is re-verified **renderable** before the txn (the migrate path defers that re-check to here).
   **`revert --to <good>`** is a **forward** commit `{tree: good.tree, parents: [current]}` (`seq` advances,
   the pointer never moves backward); good's tree digest is read from its provenance row (migration `0003`
@@ -243,11 +251,12 @@ binary) needs **no C toolchain**; the old `libsqlite3-sys` build edge is gone fr
 depends on neither.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `thiserror`, raw `sqlx` (postgres,
-runtime-tokio, macros, migrate, tls-rustls-ring-native-roots); `tokio` with only the `time` feature is a
-**normal** dependency (the migrate deleting-wait uses a bounded-backoff sleep while it polls outside any
-write transaction) — arch-clean because the client takes no edge to `plane-store`; `tokio`'s `rt` +
-`macros` are dev-only (to drive `#[tokio::test]`). The async runtime itself is still the caller's, via
-sqlx's `runtime-tokio` feature.
+runtime-tokio, macros, migrate, tls-rustls-ring-native-roots); `tokio` with the `time` + `rt` features is a
+**normal** dependency (`time`: the migrate deleting-wait uses a bounded-backoff sleep while it polls outside
+any write transaction; `rt`: `spawn_blocking` isolates the fsync-heavy/verify-on-read store sections onto
+the blocking pool) — arch-clean because the client takes no edge to `plane-store`; `tokio`'s `macros` is
+dev-only (to drive `#[tokio::test]`). The async runtime itself is still the caller's, via sqlx's
+`runtime-tokio` feature.
 
 The **pointer-move signer** adds, to **this crate only** (never the client — `check-arch` forbids the
 `topos → plane-store` edge, so none of these reach the CLI): `ed25519-dalek` with `std` + `zeroize` (the

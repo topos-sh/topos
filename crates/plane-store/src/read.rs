@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 
 use topos_core::digest::{self, FileMode, ManifestEntry, RejectReason};
-use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile};
+use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
 use topos_types::{Generation, SignedCurrentRecord};
 
-use crate::authority::Authority;
+use crate::authority::{Authority, run_blocking};
 use crate::db::Location;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
@@ -26,7 +26,7 @@ pub(crate) async fn read_object(
 ) -> Result<Vec<u8>> {
     // Step one (async DB): authorize. The witness commit proves BOTH facts at once — the principal is
     // rostered for the skill, and that skill reaches the object. The borrow on the database is released
-    // before the synchronous store read below (no git borrow ever crosses an await).
+    // before the store read below (no git borrow ever crosses an await).
     let witness = match authority
         .db()
         .authorize_object_read(ws, skill, principal, object_id)
@@ -41,39 +41,40 @@ pub(crate) async fn read_object(
     // Step two: fetch + verify the bytes from the store the database records, dispatching on `location`. The
     // witness already proved reachability, so a clean run has no benign miss: a post-authz failure is a
     // provenance/store divergence (corruption) → an Integrity fault, kept distinct from the not-found path
-    // (so the indistinguishable 404 holds across the large-object surface), never by bare hash.
-    let fetched = match authority.db().object_dispatch(ws, object_id).await? {
+    // (so the indistinguishable 404 holds across the large-object surface), never by bare hash. The
+    // verify-on-read byte fetch (up to the reject cap) runs on the blocking pool; the non-`Send` gix `Store`
+    // opens + drops inside the closure.
+    let dispatch = authority.db().object_dispatch(ws, object_id).await?;
+    let git_dir = authority.workspace_git_dir(ws);
+    let large = authority.large_store(ws);
+    let fetched = run_blocking(move || match dispatch {
         // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
-        Some((Location::LargeLocal, _)) => authority
-            .large_store(ws)
-            .get(object_id.0)
-            .map_err(AuthorityError::integrity),
+        Some((Location::LargeLocal, _)) => {
+            large.get(object_id.0).map_err(AuthorityError::integrity)
+        }
         // Git-resident: read the loose object DIRECTLY by its locator and re-verify the content id — NOT a
         // whole-version-tree walk, which would fault on an offloaded sibling's absent git object in a mixed
         // bundle before reaching the requested blob.
-        Some((Location::Git, git_oid)) => {
-            let store = authority.open_store(ws)?;
-            store
-                .read_git_blob_verified(git_oid)
-                .map_err(AuthorityError::integrity)
-                .and_then(|(bytes, content_sha256)| {
-                    if content_sha256 == object_id.0 {
-                        Ok(bytes)
-                    } else {
-                        Err(AuthorityError::integrity(GitLocatorMismatch))
-                    }
-                })
-        }
+        Some((Location::Git, git_oid)) => Store::open(&git_dir)
+            .map_err(AuthorityError::integrity)?
+            .read_git_blob_verified(git_oid)
+            .map_err(AuthorityError::integrity)
+            .and_then(|(bytes, content_sha256)| {
+                if content_sha256 == object_id.0 {
+                    Ok(bytes)
+                } else {
+                    Err(AuthorityError::integrity(GitLocatorMismatch))
+                }
+            }),
         // No live presence row: a legacy straight-to-git object — its version is all-git, so the tree walk is
         // safe — read by content id from the witness version. (A reclaimed object also lands here, because
         // `object_dispatch` filters `status = 'present'`; the re-authorize guard below catches that case.)
-        None => {
-            let store = authority.open_store(ws)?;
-            store
-                .read_object_in_version(witness.0, object_id.0)
-                .map_err(AuthorityError::integrity)
-        }
-    };
+        None => Store::open(&git_dir)
+            .map_err(AuthorityError::integrity)?
+            .read_object_in_version(witness.0, object_id.0)
+            .map_err(AuthorityError::integrity),
+    })
+    .await;
 
     // Re-authorize-on-miss (the read-time TOCTOU guard). The authorization above and this fetch are two
     // steps; between them a proposal can go stale (an eventless derived transition — a concurrent publish
@@ -306,23 +307,39 @@ pub(crate) async fn read_version_metadata(
         return Err(AuthorityError::NotFound);
     }
 
-    // Authorized — assemble. All async DB reads run FIRST so the synchronous git-store borrow below never
-    // crosses an await (mirrors `read_object`). An authorized version always carries a recorded digest; its
-    // absence is a provenance divergence (corruption), never a not-found.
+    // Authorized — assemble. An authorized version always carries a recorded digest; its absence is a
+    // provenance divergence (corruption), never a not-found.
     let bundle_digest = authority
         .db()
         .skill_commit_bundle_digest(scope.ws(), scope.skill(), commit)
         .await?
         .ok_or_else(|| AuthorityError::integrity(MissingProvenanceDigest))?;
-    let by_git_oid = authority.db().objects_by_git_oid(scope.ws()).await?;
 
-    let store = authority.open_store(scope.ws())?;
-    let node = store
-        .read_commit_meta(version_id)
-        .map_err(AuthorityError::integrity)?;
-    let leaves = store
-        .read_tree_structure(version_id)
-        .map_err(AuthorityError::integrity)?;
+    // The version's structure comes FIRST, from a blocking-pool store section (the non-`Send` gix `Store`
+    // opens + drops inside the closure — never across an await); THEN the presence rows are queried for
+    // exactly those tree leaves, so the DB read scales with the requested version, never the workspace's
+    // lifetime object count.
+    let git_dir = authority.workspace_git_dir(scope.ws());
+    let (node, leaves) = run_blocking(move || {
+        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
+        // Follow-up: `read_commit_meta` recovers this ONE commit's parents by enumerating every version
+        // ref in the skill's repo (the reverse map) — per-request cost that grows with the skill's version
+        // count. The DB provenance (`skill_commit`) records no parent edges today, so it cannot source the
+        // parent set; a provenance parents column (or a cached reverse map) is the named follow-up.
+        let node = store
+            .read_commit_meta(version_id)
+            .map_err(AuthorityError::integrity)?;
+        let leaves = store
+            .read_tree_structure(version_id)
+            .map_err(AuthorityError::integrity)?;
+        Ok((node, leaves))
+    })
+    .await?;
+    let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|l| l.git_oid).collect();
+    let by_git_oid = authority
+        .db()
+        .objects_by_git_oids(scope.ws(), &leaf_oids)
+        .await?;
 
     let mut files = Vec::with_capacity(leaves.len());
     for leaf in leaves {
@@ -443,8 +460,8 @@ pub(crate) async fn render_version(
 ) -> Result<RenderedBundle> {
     // The offloaded set for this workspace: git_oid -> object_id (small — big blobs are rare). A git-resident
     // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency. Read
-    // it FIRST (the only `.await` here) so the non-`Send` gix `Store` opened below is never held across an
-    // await — keeping every authority future that renders `Send` (axum's handlers require it).
+    // it FIRST (the only `.await` before the blocking section) so the whole assembly below can move onto the
+    // blocking pool with owned inputs.
     let offloaded: HashMap<[u8; 20], [u8; 32]> = authority
         .db()
         .large_local_objects(ws)
@@ -453,52 +470,58 @@ pub(crate) async fn render_version(
         .map(|(git_oid, object_id)| (git_oid, object_id.0))
         .collect();
 
-    let store = authority.open_store(ws)?;
-    let structure = store
-        .read_tree_structure(version_id)
-        .map_err(AuthorityError::integrity)?;
+    // The whole-bundle assembly (every blob read + re-hashed, up to the reject cap each) runs on the
+    // blocking pool — inline it would pin an async worker for the full render. The non-`Send` gix `Store`
+    // opens + drops inside the closure, so every authority future that renders stays `Send`.
+    let git_dir = authority.workspace_git_dir(ws);
+    let large = authority.large_store(ws);
+    run_blocking(move || {
+        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
+        let structure = store
+            .read_tree_structure(version_id)
+            .map_err(AuthorityError::integrity)?;
 
-    let mut files = Vec::with_capacity(structure.len());
-    let mut manifest = Vec::with_capacity(structure.len());
-    for leaf in structure {
-        let (bytes, content_sha256) = match offloaded.get(&leaf.git_oid) {
-            Some(&object_id) => {
-                // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
-                let bytes = authority
-                    .large_store(ws)
-                    .get(object_id)
-                    .map_err(AuthorityError::integrity)?;
-                (bytes, object_id)
-            }
-            None => store
-                .read_git_blob_verified(leaf.git_oid)
-                .map_err(AuthorityError::integrity)?,
-        };
-        manifest.push(ManifestEntry {
-            path: leaf.path.clone(),
-            mode: leaf.mode,
-            content_sha256,
-        });
-        files.push(RenderedFile {
-            path: leaf.path,
-            mode: leaf.mode,
-            bytes,
-            content_sha256,
-        });
-    }
+        let mut files = Vec::with_capacity(structure.len());
+        let mut manifest = Vec::with_capacity(structure.len());
+        for leaf in structure {
+            let (bytes, content_sha256) = match offloaded.get(&leaf.git_oid) {
+                Some(&object_id) => {
+                    // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
+                    let bytes = large.get(object_id).map_err(AuthorityError::integrity)?;
+                    (bytes, object_id)
+                }
+                None => store
+                    .read_git_blob_verified(leaf.git_oid)
+                    .map_err(AuthorityError::integrity)?,
+            };
+            manifest.push(ManifestEntry {
+                path: leaf.path.clone(),
+                mode: leaf.mode,
+                content_sha256,
+            });
+            files.push(RenderedFile {
+                path: leaf.path,
+                mode: leaf.mode,
+                bytes,
+                content_sha256,
+            });
+        }
 
-    // Recompute the consent digest over the assembled real bytes and assert it equals the pin — the integrity
-    // gate that makes "reviewed-bytes == run-bytes" hold regardless of which store each blob came from.
-    let recomputed = digest::bundle_digest(&manifest)
-        .map_err(|r| AuthorityError::integrity(RenderPathRejected(r)))?;
-    if recomputed != expected_bundle_digest {
-        return Err(AuthorityError::integrity(RenderDigestMismatch));
-    }
-    files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    Ok(RenderedBundle {
-        files,
-        bundle_digest: recomputed,
+        // Recompute the consent digest over the assembled real bytes and assert it equals the pin — the
+        // integrity gate that makes "reviewed-bytes == run-bytes" hold regardless of which store each blob
+        // came from.
+        let recomputed = digest::bundle_digest(&manifest)
+            .map_err(|r| AuthorityError::integrity(RenderPathRejected(r)))?;
+        if recomputed != expected_bundle_digest {
+            return Err(AuthorityError::integrity(RenderDigestMismatch));
+        }
+        files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        Ok(RenderedBundle {
+            files,
+            bundle_digest: recomputed,
+        })
     })
+    .await
 }
 
 #[derive(Debug, thiserror::Error)]

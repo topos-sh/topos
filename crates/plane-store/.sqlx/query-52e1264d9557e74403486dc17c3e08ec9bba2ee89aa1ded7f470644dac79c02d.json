@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO promotion_lease_object (workspace_id, op_id, object_id) SELECT $1, $2, UNNEST($3::bytea[]) ON CONFLICT (workspace_id, op_id, object_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "52e1264d9557e74403486dc17c3e08ec9bba2ee89aa1ded7f470644dac79c02d"
+}
