@@ -1,5 +1,5 @@
 //! `topos-harness` — the `HarnessAdapter` trait + the `ConfigStore` port + the Claude Code reference
-//! impl and the OpenClaw impl (Hermes lands later).
+//! impl, the OpenClaw impl, and the Hermes impl.
 //!
 //! The ONE real client-side port. Content-blind: no `translate`, no `project`, no `to_dialect` (cut).
 //! Placement *bytes* are identical across adapters; an adapter differs only in *where* + *when currency
@@ -8,15 +8,18 @@
 //! This **harness-independent** unit is frozen (the trait + `CurrencyKind` incl. `ExplicitPullOnly` +
 //! `TriggerReport` + the idempotency-marker convention); the OpenClaw impl ships **build-first behind the
 //! trait** — its concrete config bytes stay provisional until the pilot's real build is probed (see the
-//! `openclaw` module doc) — and the Hermes concrete bytes stay the same way until that impl lands.
+//! `openclaw` module doc) — and Hermes's were probed against a real local build, with the pilot's exact
+//! build staying a MUST-VERIFY (see `hermes.rs`).
 
 use std::io;
 use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 
 mod claude_code;
+mod hermes;
 mod openclaw;
 pub use claude_code::ClaudeCode;
+pub use hermes::Hermes;
 pub use openclaw::OpenClaw;
 
 /// A discovered skill placement — probe known dirs; read frontmatter to CONFIRM only. Carries the
@@ -71,8 +74,8 @@ pub trait HarnessAdapter {
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget;
     fn currency_kind(&self) -> CurrencyKind;
-    /// Idempotently install the session-start currency trigger into the harness config (never a skill
-    /// dir), check-before-add against a topos sentinel. Reports what state the trigger is in; a re-run
+    /// Idempotently install the currency trigger into the harness config (never a skill dir),
+    /// check-before-add against a topos sentinel. Reports what state the trigger is in; a re-run
     /// when the managed entry is already present writes nothing.
     fn install_currency_trigger(&self) -> TriggerReport;
     /// The reverse of [`HarnessAdapter::install_currency_trigger`]: surgically scrub the topos-managed
@@ -86,5 +89,6 @@ pub trait HarnessAdapter {
     fn uninstall_footprint(&self) -> Vec<PathBuf>;
 }
 
-// The Hermes impl lands later — ClaudeCode (this crate's `claude_code` module) is the reference;
-// OpenClaw (the `openclaw` module) ships build-first behind the pilot readiness probe.
+// ClaudeCode (this crate's `claude_code` module) is the reference; OpenClaw (the `openclaw` module)
+// ships build-first behind the pilot readiness probe; Hermes (the `hermes` module) is built against a
+// probed real local build.
