@@ -10,9 +10,41 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router};
 
-/// The self-hostable plane's runtime configuration (flags or env).
+/// The CLI surface: the runtime configuration plus an optional operator subcommand. A bare invocation
+/// (`command = None` — the container ENTRYPOINT, every existing flag/env unchanged) serves the plane
+/// exactly as before; a subcommand runs an operator task over the same configuration and exits.
 #[derive(Debug, Parser)]
 #[command(name = "topos-plane", about = "The self-hostable Topos plane (OSS).")]
+struct Cli {
+    #[command(flatten)]
+    config: Config,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The operator subcommands (the bare invocation — no subcommand — serves).
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Re-sign every selected skill's `current` pointer one epoch forward (same version, same seq) — the
+    /// recovery step after restoring the database from a backup, so every follower's next pull is an
+    /// ordinary forward move instead of a reused-generation alarm. Requires an explicit selection
+    /// (`--workspace` or `--all-workspaces`); run it with the plane stopped.
+    RestoreBumpEpoch {
+        /// A workspace to bump (repeatable).
+        #[arg(long = "workspace")]
+        workspaces: Vec<String>,
+        /// Bump every workspace on this plane.
+        #[arg(long, conflicts_with = "workspaces")]
+        all_workspaces: bool,
+        /// A floor for the new epoch (max semantics: `new = max(old + 1, this)`) — for an operator who
+        /// restored once before from an even older backup and must jump past every epoch ever served.
+        #[arg(long)]
+        epoch_at_least: Option<u64>,
+    },
+}
+
+/// The self-hostable plane's runtime configuration (flags or env).
+#[derive(Debug, clap::Args)]
 struct Config {
     /// The address to bind (host:port).
     #[arg(long, env = "TOPOS_PLANE_BIND", default_value = "127.0.0.1:8787")]
@@ -77,12 +109,91 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cfg = Config::parse();
+    let cli = Cli::parse();
+    match cli.command {
+        None => serve(cli.config).await,
+        Some(Command::RestoreBumpEpoch {
+            workspaces,
+            all_workspaces,
+            epoch_at_least,
+        }) => restore_bump_epoch(cli.config, workspaces, all_workspaces, epoch_at_least).await,
+    }
+}
 
-    // The two bin-local marshals `open` does NOT do: default the public base URL to the bind address,
-    // and assemble the SMTP relay from the five all-or-nothing fields (any missing ⇒ no passcode email, the
-    // no-op mailer). Everything else — parsing the mode, defaulting the enrollment method, opening the
-    // authority + enrollment config — is the constructor's, so there is one construction home and no drift.
+/// The bare invocation: open the plane state, bind, and serve — exactly the pre-subcommand behavior.
+async fn serve(cfg: Config) -> Result<()> {
+    let bind = cfg.bind;
+    let state = open_state(cfg).await?;
+
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    tracing::info!(addr = %bind, "topos-plane listening");
+
+    // `ConnectInfo<SocketAddr>` is wired so the rate limiter can key on the peer IP when no credential rides.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("serving the plane")?;
+    Ok(())
+}
+
+/// The `restore-bump-epoch` subcommand: open the SAME plane state serve does (the database + the plane key
+/// — never the listen socket), run the bump, and print one line per re-signed pointer plus a summary. The
+/// printed `key <key_id>` is the operator's tripwire that the restored data directory still holds the
+/// pre-incident signing seed. An empty selection result is a success (`re-signed 0 pointer(s)`, exit 0).
+async fn restore_bump_epoch(
+    cfg: Config,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    epoch_at_least: Option<u64>,
+) -> Result<()> {
+    // The explicit-selection consent gate: an operator must SAY which workspaces get re-signed pointers —
+    // there is no default and no prompt.
+    if workspaces.is_empty() && !all_workspaces {
+        anyhow::bail!(
+            "restore-bump-epoch needs an explicit selection: pass --workspace <id> (repeatable) or --all-workspaces"
+        );
+    }
+    let state = open_state(cfg).await?;
+    let selection: Option<&[String]> = if all_workspaces {
+        None
+    } else {
+        Some(&workspaces)
+    };
+    let bumps = state.restore_bump_epochs(selection, epoch_at_least).await?;
+    for b in &bumps {
+        println!(
+            "{}/{}: ({},{}) -> ({},{})  commit {}  key {}",
+            b.workspace_id,
+            b.skill_id,
+            b.old_epoch,
+            b.old_seq,
+            b.new_epoch,
+            b.new_seq,
+            &b.commit_hex[..8],
+            b.key_id,
+        );
+    }
+    match bumps.first() {
+        Some(first) => println!(
+            "re-signed {} pointer(s) with key {}",
+            bumps.len(),
+            first.key_id
+        ),
+        None => println!("re-signed 0 pointer(s)"),
+    }
+    Ok(())
+}
+
+/// The ONE construction home serve and the operator subcommands share: the two bin-local marshals
+/// (default the public base URL to the bind address; assemble the SMTP relay from the five all-or-nothing
+/// fields — any missing ⇒ no passcode email, the no-op mailer), then the library's leak-free constructor
+/// (the same one a downstream plane uses), which opens the authority, loads/generates the `0600` plane key
+/// + enrollment secret, and builds the enrollment config internally. Binds no socket.
+async fn open_state(cfg: Config) -> Result<PlaneState> {
     let base_url = cfg
         .base_url
         .clone()
@@ -104,9 +215,6 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // The single construction path (dogfooding the library's leak-free constructor — the same one a downstream
-    // plane uses): build the serving state from a `PlaneConfig`. It opens the authority, loads/generates the
-    // `0600` plane key + enrollment secret, and builds the enrollment config internally.
     let state = PlaneState::open(PlaneConfig {
         database_url: cfg.database_url,
         git_root: cfg.git_root,
@@ -133,19 +241,7 @@ async fn main() -> Result<()> {
         None => state,
     };
 
-    let listener = tokio::net::TcpListener::bind(cfg.bind)
-        .await
-        .with_context(|| format!("binding {}", cfg.bind))?;
-    tracing::info!(addr = %cfg.bind, "topos-plane listening");
-
-    // `ConnectInfo<SocketAddr>` is wired so the rate limiter can key on the peer IP when no credential rides.
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .context("serving the plane")?;
-    Ok(())
+    Ok(state)
 }
 
 /// Read the OIDC connector config from `TOPOS_PLANE_OIDC_*` (a full set enables it). Returns the config to

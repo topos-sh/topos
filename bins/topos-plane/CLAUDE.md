@@ -63,6 +63,11 @@
   set. NOT device-op-signed (the device-signed governance variant needs a new kernel frame — later work).
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
+- **The backup/restore epoch bump** (`restore_cmd.rs`): `PlaneState::restore_bump_epochs(workspaces,
+  epoch_at_least)` — the leak-free wrapper (plain `String`/`u64` in, a plain `EpochBumpSummary` out, ids
+  parsed at this edge) over `Authority::restore_bump_epochs`, which re-signs every selected `current`
+  pointer one epoch forward (same commit, same seq) so followers roll forward after a database restore
+  instead of alarming on a reused generation.
 
 **Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
 issuance decision (every credential/identity decision is `plane-store::Authority`'s):
@@ -104,6 +109,13 @@ loads the plane key + enrollment secret, and builds the enrollment config INTERN
 `plane-store` type, dogfooding the same path a downstream plane uses) — and serves `router(state)`. Under
 `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto `PlaneState` (`with_oidc_config`) so
 the `/v1/enroll/oidc/*` routes can drive it.
+
+One operator subcommand: **`topos-plane restore-bump-epoch --workspace <id> … | --all-workspaces
+[--epoch-at-least <n>]`** — opens the same state serve does (never binding the listen socket), runs the
+epoch bump, prints one line per re-signed pointer plus a `re-signed <N> pointer(s) with key <key_id>`
+summary (the key id is the operator's tripwire that the restored data dir still holds the pre-incident
+signing seed), and refuses to run without an explicit selection. The **bare invocation still serves**,
+byte-identically — the container ENTRYPOINT and every existing flag/env are unchanged.
 
 ## The litmus for what belongs in this lib
 

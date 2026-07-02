@@ -160,6 +160,13 @@ same-process code.) The error type holds this line too: internal faults carry a 
   (approve@stale ⇒ CONFLICT → rebase + re-propose → approve@new ⇒ OK) and the **ABA** interleaving (a `revert`
   makes `current.tree == the proposal's base tree`, yet the whole-`(epoch,seq)` CAS still ⇒ CONFLICT) —
   **no HTTP, no client**.
+- **The operator backup/restore epoch bump** (`Authority::restore_bump_epochs`). One `SERIALIZABLE`
+  transaction locks the selected `current` rows (`FOR UPDATE`), re-signs each pointer at `max(epoch + 1,
+  epoch_at_least)` — SAME commit, SAME seq, via the same `PlaneSigner` + frozen JCS preimage — and updates
+  ONLY the `current` table (no receipt/provenance/proposal change; an envelope-parity test pins the rebuilt
+  signed-record DTO to the promote path's), so after a database restore every follower's next record is
+  strictly higher and ordinary forward sync resumes instead of a reused-tuple ALARM. At-rest key encryption
+  stays Planned.
 - **The enrollment + governance issuance core (real, but basic).** The fixture-seeded device/roster/read-token
   era is over: this layer now **mints real credentials**. Migration `0006` adds the standalone `workspace`
   (deployment posture), the workspace-level RBAC `workspace_member` roster (DISTINCT from the per-skill

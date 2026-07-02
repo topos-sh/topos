@@ -58,6 +58,7 @@ mod error;
 mod id;
 mod lineage;
 mod read;
+mod restore;
 mod set_current;
 mod signer;
 mod upload;
@@ -85,6 +86,7 @@ pub use error::{AuthorityError, Result};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
+pub use restore::EpochBumpReport;
 pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 

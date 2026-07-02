@@ -595,6 +595,9 @@ mod lifecycle;
 
 pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 
+// The operator backup/restore epoch bump (re-sign `current` one epoch forward; touches ONLY `current`).
+mod restore;
+
 // The pointer-move transaction (the `set-current` write) + its receipt/policy/device-registry helpers.
 mod set_current;
 

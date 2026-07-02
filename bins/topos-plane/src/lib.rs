@@ -30,6 +30,7 @@
 
 mod enroll;
 mod rate_limit;
+mod restore_cmd;
 mod router;
 mod routes;
 mod state;
@@ -44,6 +45,7 @@ mod tests;
 pub use enroll::mailer::SmtpConfig;
 pub use openapi::openapi;
 pub use rate_limit::Limits;
+pub use restore_cmd::EpochBumpSummary;
 pub use router::router;
 pub use state::{PlaneConfig, PlaneState};
 

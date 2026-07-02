@@ -656,4 +656,5 @@ mod lifecycle_gc;
 mod proposals_root;
 mod read_access;
 mod read_surface;
+mod restore;
 mod set_current;
