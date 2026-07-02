@@ -97,10 +97,14 @@ same-process code.) The error type holds this line too: internal faults carry a 
   crashed claim is spared — but NOT the lease, since a lease over a `deleting` object is a waiting migrate it
   must unblock), and a **quarantine janitor** (claim-before-rm, so a re-ingest that reuses an op id is never
   swept). The three are **public ops** — `Authority::run_gc` / `run_recovery` / `run_janitor` — the composing
-  server MUST schedule (startup + periodic; this library holds no scheduler); their futures are `Send`
+  server MUST schedule (startup + periodic; this library holds no scheduler — `topos-plane`'s
+  `spawn_maintenance` is the reference composition); their futures are `Send`
   (compile-pinned), the GC's advisory candidate scan anti-joins the keep-set in SQL (a pass is O(garbage),
   the guarded per-object claim stays the sole authority), and the server clock is one unit throughout —
-  epoch **milliseconds** (the TTL constants are `*_MS`). The in-crate tests drive it (deterministic
+  epoch **milliseconds** (the TTL constants are `*_MS`). The per-workspace `run_gc` is driven over the
+  public **`Authority::workspaces()`** enumeration (the distinct workspace ids holding an `object_presence`
+  row — ids only, a scheduling surface, not a read; recovery + janitor enumerate cross-workspace
+  internally). The in-crate tests drive it (deterministic
   interleavings for the dedup race, the
   snapshot-then-delete race, cross-workspace isolation, crash recovery, and — pinned by an equivalence test —
   that the read arm and the two GC-claim arms evaluate the proposal predicate identically). `topos-gitstore`

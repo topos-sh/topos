@@ -304,6 +304,26 @@ impl Db {
             .collect()
     }
 
+    /// Every distinct workspace currently holding an `object_presence` row — the composing server's
+    /// GC-scheduling enumeration ([`crate::Authority::workspaces`]). GC acts ONLY on objects with a
+    /// presence row, so this set is exactly the workspaces a periodic [`Self::gc_candidates`]-driven pass
+    /// could reclaim in; a workspace that never stored a byte is deliberately absent (nothing to sweep).
+    /// Deliberately unfiltered on `status`: a workspace holding only `deleting`/`absent` rows still costs
+    /// one cheap empty candidate scan, and filtering would only save that. Like
+    /// [`Self::workspaces_with_stale_deleting`], each id is re-parsed and every per-workspace query
+    /// re-binds it.
+    pub(crate) async fn workspaces_with_objects(&self) -> Result<Vec<WorkspaceId>> {
+        let rows = sqlx::query!(
+            r#"SELECT DISTINCT workspace_id AS "workspace_id!" FROM object_presence"#,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| reparse_workspace(&r.workspace_id))
+            .collect()
+    }
+
     /// Every PRESENT **large-local** object in the workspace as `(git_oid, object_id)` — the
     /// location-dispatching render's offloaded set. Render anchors on the version's git tree structure
     /// (`(path, mode, git_oid)` per file); a tree entry whose `git_oid` is in this set is offloaded and is

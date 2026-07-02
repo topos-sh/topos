@@ -76,30 +76,44 @@ impl IntoResponse for PlaneHttpError {
                 vec![],
                 "missing or invalid admin token".to_owned(),
             ),
-            PlaneHttpError::Authority(e) => match e {
-                AuthorityError::NotFound => (
-                    StatusCode::NOT_FOUND,
-                    "NOT_FOUND",
-                    false,
-                    vec![],
-                    "not found".to_owned(),
-                ),
-                AuthorityError::Integrity(_) | AuthorityError::Internal(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL",
-                    true,
-                    vec![retry()],
-                    "internal store error".to_owned(),
-                ),
-                // InvalidId / RejectedUpload / Denied (+ any future variant): a refused request → 400.
-                other => (
-                    StatusCode::BAD_REQUEST,
-                    "BAD_REQUEST",
-                    false,
-                    vec![],
-                    other.to_string(),
-                ),
-            },
+            PlaneHttpError::Authority(e) => {
+                // The server-side diagnostics the flat body deliberately omits: `plane-store`'s error
+                // contract retains the boxed source chain on Integrity/Internal "for server-side
+                // diagnostics" — THIS is where that promise is honored. Log the full chain BEFORE
+                // flattening (the event fires inside the router's request span, so it correlates with one
+                // method/route/status line); the wire body below stays the schema-pinned flat "internal
+                // store error" — an internal detail never crosses the wire.
+                if matches!(
+                    e,
+                    AuthorityError::Integrity(_) | AuthorityError::Internal(_)
+                ) {
+                    tracing::error!(error = %error_chain(&e), "authority fault");
+                }
+                match e {
+                    AuthorityError::NotFound => (
+                        StatusCode::NOT_FOUND,
+                        "NOT_FOUND",
+                        false,
+                        vec![],
+                        "not found".to_owned(),
+                    ),
+                    AuthorityError::Integrity(_) | AuthorityError::Internal(_) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL",
+                        true,
+                        vec![retry()],
+                        "internal store error".to_owned(),
+                    ),
+                    // InvalidId / RejectedUpload / Denied (+ any future variant): a refused request → 400.
+                    other => (
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        false,
+                        vec![],
+                        other.to_string(),
+                    ),
+                }
+            }
         };
         let outcome = if status == StatusCode::INTERNAL_SERVER_ERROR {
             TerminalOutcome::RetryableFailure
@@ -146,5 +160,42 @@ fn retry() -> NextAction {
     NextAction {
         code: ActionCode::Retry,
         argv: vec![],
+    }
+}
+
+/// Flatten an error's full `source()` chain into one `": "`-joined line — the server-side diagnostic the
+/// flat wire body deliberately omits. `AuthorityError::{Integrity, Internal}` `Display` a generic line and
+/// carry the real fault (the database/store error and everything under it) as a boxed source, so without
+/// walking the chain a 500 is undiagnosable. One line (not one event per level) keeps a JSON log entry
+/// self-contained and grep-able. Shared with the maintenance scheduler's step logging.
+pub(crate) fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut line = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        line.push_str(": ");
+        line.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_chain;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer fault")]
+    struct Outer(#[source] Inner);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("inner cause")]
+    struct Inner(#[source] std::io::Error);
+
+    /// The chain walk renders EVERY `source()` level, joined on `": "` — the diagnostic line the 500
+    /// mapper and the maintenance scheduler log (the wire body never carries it).
+    #[test]
+    fn error_chain_renders_every_source_level() {
+        let e = Outer(Inner(std::io::Error::other("disk on fire")));
+        assert_eq!(error_chain(&e), "outer fault: inner cause: disk on fire");
     }
 }

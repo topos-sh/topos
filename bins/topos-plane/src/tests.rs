@@ -758,6 +758,70 @@ async fn review_approve_promotes_an_open_proposal(pool: PgPool) {
     );
 }
 
+// ── maintenance: one scheduled tick body drives the authority's reclamation ops ─────────────────────
+
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgPool) {
+    // The tick BODY (`run_maintenance_pass`) is tested directly against a real authority — the scheduler's
+    // interval is tokio's to test, not ours. Make real garbage over the wire: open a proposal with unique
+    // bytes, then reject it — its `proposal_object` root stops matching and the unique objects become
+    // unrooted; a pass must enumerate the workspace and reclaim them, logging no fault.
+    let ctx = setup(pool, "maintenance").await;
+    let (g_vid, _) = seed_genesis(&ctx, "90000000-0000-4000-8000-000000000000").await;
+
+    let op_p = "90000000-0000-4000-8000-000000000001";
+    let files = vec![file("SKILL.md", b"a change nobody wanted\n")];
+    let (prop_vid, prop_digest) = compute_ids(&[g_vid], &files);
+    let sig_p = sign_sig(
+        &ctx.key,
+        DeviceOp::PublishPropose,
+        op_p,
+        gn(1, 1),
+        prop_vid,
+        prop_digest,
+    );
+    let (sp, _, _) = run(
+        &ctx,
+        post(
+            "/v1/proposals",
+            &sig_p,
+            candidate_body(op_p, gn(1, 1), &[g_vid], &files),
+        ),
+    )
+    .await;
+    assert_eq!(sp, StatusCode::OK);
+
+    let op_r = "90000000-0000-4000-8000-000000000002";
+    let sig_r = sign_sig(
+        &ctx.key,
+        DeviceOp::ReviewReject,
+        op_r,
+        gn(1, 1),
+        prop_vid,
+        prop_digest,
+    );
+    let body = serde_json::to_vec(&serde_json::json!({
+        "workspace_id": WS, "skill_id": SKILL, "op_id": op_r, "device_key_id": DKID,
+        "expected": { "epoch": 1, "seq": 1 },
+        "proposal": hex::encode(prop_vid), "decision": "reject",
+    }))
+    .unwrap();
+    let (sr, _, _) = run(&ctx, post("/v1/reviews", &sig_r, body)).await;
+    assert_eq!(sr, StatusCode::OK);
+
+    // One pass — the same body the spawned scheduler runs each tick (and once at startup).
+    let pass = crate::maintenance::run_maintenance_pass(&ctx.state).await;
+    assert_eq!(pass.faults, 0, "a healthy store logs no faults: {pass:?}");
+    assert!(
+        pass.objects_reclaimed >= 1,
+        "the rejected proposal's unique bytes are unrooted and must be reclaimed: {pass:?}"
+    );
+
+    // A second pass converges to nothing-to-do (the reclaim is not repeated; genesis stays rooted).
+    let second = crate::maintenance::run_maintenance_pass(&ctx.state).await;
+    assert_eq!(second, crate::maintenance::MaintenancePass::default());
+}
+
 // ── reads: 404-not-403 ──────────────────────────────────────────────────────────────────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]

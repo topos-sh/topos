@@ -51,7 +51,7 @@ thiserror.workspace = true # the mailer / OIDC typed error (creds never reach it
 # generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.
 axum.workspace = true
 utoipa.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] } # `time`: the maintenance scheduler's interval
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { workspace = true, features = ["env"] } # `derive` from the workspace base; `env` for arg env-fallback

@@ -51,6 +51,26 @@
   byte-identically.
 - A minimal **in-process token-bucket rate limiter** (`rate_limit.rs`, no extra dependency) that freezes the
   429 wire shape (`Retry-After` + a `RETRYABLE_FAILURE` envelope); on by default, env-disableable.
+- **The storage-maintenance scheduler** (`maintenance.rs`): `plane-store` mandates that the composing server
+  run the recovery sweep + quarantine janitor on startup and, with a per-workspace GC pass, periodically —
+  and holds no scheduler. This module is that half, in the LIBRARY so every composition owns it the same
+  way: `pub fn spawn_maintenance(state, every) -> JoinHandle<()>` (one pass immediately — the mandated
+  startup run — then one per interval; `every` clamped ≥ 1 s) over `pub async fn run_maintenance_pass(state)
+  -> MaintenancePass` (recovery → janitor → `Authority::workspaces()` → `run_gc` per workspace; `now` is the
+  same epoch-ms wall clock the wire layer stamps, re-read per step). Every step error is
+  `tracing::error!`-logged with its FULL source chain and tallied (`MaintenancePass.faults`) — a fault never
+  crashes the loop or the server, and one faulting workspace never starves the rest. `router()` deliberately
+  does NOT start it (building a router is pure composition; spawning is the composition root's one-time
+  runtime decision — the OSS bin spawns it; a downstream plane makes the same call, or drives the pass from
+  its own scheduler).
+- **Server diagnostics** (`router.rs` + `wire/error.rs`, no new dependency): request-level tracing — one
+  `request` span per request (method + the matched ROUTE TEMPLATE, never the raw path, which carries the
+  read credential on `/v1/current/{read_token}` and the invite token on `/i/{token}`; unmatched logs the
+  constant `(unmatched)`) closed by an `info` event with status + latency, layered OUTERMOST in `router()`
+  so every composition gets it and 429s are recorded too. The 500 mapper honors `plane-store`'s "retained
+  for server-side diagnostics" error contract: an `AuthorityError::{Integrity, Internal}` is
+  `tracing::error!`-logged with its full flattened `source()` chain (inside the request span, so it
+  correlates) BEFORE flattening to the schema-pinned flat wire body — chain detail never crosses the wire.
 - **The self-host operator policy route** (`routes/policy.rs`): `PUT
   /v1/workspaces/{ws}/policy/review-required` sets the `review-required` workspace policy through
   `Authority::set_review_required` (enforcement stays in the write path — a direct publish under the gate
@@ -106,11 +126,13 @@ a real box (public DNS, Let's Encrypt staging→prod, rate limits, renewal timin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / database URL / git-root /
 large-root / plane-key / enrollment secret / base URL / mode / SMTP relay / the optional operator
-admin token, which enables the policy route), resolves its two bin-local
+admin token, which enables the policy route / the maintenance interval), resolves its two bin-local
 marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
 **single leak-free constructor** `PlaneState::open(PlaneConfig { .. })` — which opens the `Authority`,
 loads the plane key + enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
-`plane-store` type, dogfooding the same path a downstream plane uses) — and serves `router(state)`. Under
+`plane-store` type, dogfooding the same path a downstream plane uses) — spawns the maintenance scheduler
+(`--gc-interval-secs` / **`TOPOS_PLANE_GC_INTERVAL_SECS`**, default **300**; `0` disables it for an operator
+running the passes out-of-band), and serves `router(state)`. Under
 `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto `PlaneState` (`with_oidc_config`) so
 the `/v1/enroll/oidc/*` routes can drive it.
 

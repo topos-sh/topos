@@ -20,15 +20,21 @@
 //!   serving [`PlaneState`] out, the authority + enrollment config built internally.
 //! - [`PlaneState`] — the shared, cheap-to-clone handle (`Arc<Authority>` + the in-process rate limiter).
 //! - [`router`] — wires the seven routes (4 device-signed writes + 3 token-scoped reads) with the
-//!   rate-limit middleware and a body-size limit; every handler is **thin** (parse → call the authority →
-//!   serialize), never a trust decision.
+//!   rate-limit middleware, request-level tracing (method + matched route template + status + latency —
+//!   never a raw, credential-bearing path), and a body-size limit; every handler is **thin** (parse → call
+//!   the authority → serialize), never a trust decision.
 //! - [`PlaneState::set_review_required`] — the `review_required` workspace-policy toggle, set via the public
 //!   API (the off-by-default anti-poisoning gate; a composing admin route calls it).
+//! - [`spawn_maintenance`] / [`run_maintenance_pass`] — the storage-maintenance scheduler (the recovery
+//!   sweep + quarantine janitor + per-workspace GC the storage layer mandates but does not schedule). The
+//!   composition root starts it once, right after construction — the OSS bin does; a downstream plane
+//!   makes the same call (or drives the pass from its own scheduler).
 //! - [`openapi()`] — the `utoipa`-generated OpenAPI document (emitted to `contracts/openapi/` by `xtask`).
 //!
 //! The enrollment connectors are the enrollment port's, not this layer's; they land behind their own seams.
 
 mod enroll;
+mod maintenance;
 mod rate_limit;
 mod restore_cmd;
 mod router;
@@ -43,6 +49,7 @@ pub mod openapi;
 mod tests;
 
 pub use enroll::mailer::SmtpConfig;
+pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use rate_limit::Limits;
 pub use restore_cmd::EpochBumpSummary;

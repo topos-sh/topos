@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router};
+use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router, spawn_maintenance};
 
 // The optional built-in ACME TLS serve path — bin-side composition only, behind the default-off `acme`
 // feature (the library surface gains nothing; a default build resolves none of its dependencies).
@@ -140,6 +140,12 @@ struct Config {
     #[cfg(feature = "acme")]
     #[arg(long, env = "TOPOS_PLANE_ACME_EXTRA_ROOT")]
     acme_extra_root: Option<PathBuf>,
+    /// Seconds between storage-maintenance passes (the recovery sweep + quarantine janitor + a GC pass per
+    /// workspace — the reclamation the storage layer mandates but does not schedule; without it, storage
+    /// abandoned by rejected/stale proposals grows without bound). The first pass runs at startup. `0`
+    /// disables the scheduler (an operator running the passes out-of-band).
+    #[arg(long, env = "TOPOS_PLANE_GC_INTERVAL_SECS", default_value_t = 300)]
+    gc_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -293,6 +299,21 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
         Some(oidc) => state.with_oidc_config(oidc),
         None => state,
     };
+
+    // The storage-maintenance scheduler — recovery + janitor at startup (the first tick fires at once),
+    // then recovery/janitor/per-workspace GC every interval. The LIBRARY owns the pass and the loop
+    // (`spawn_maintenance` — the same call a downstream composition makes); the bin only decides to run it.
+    // Errors are logged inside the task and never take the server down.
+    if cfg.gc_interval_secs > 0 {
+        spawn_maintenance(
+            state.clone(),
+            std::time::Duration::from_secs(cfg.gc_interval_secs),
+        );
+    } else {
+        tracing::warn!(
+            "storage maintenance disabled (TOPOS_PLANE_GC_INTERVAL_SECS=0); run the GC passes out-of-band"
+        );
+    }
 
     Ok(state)
 }

@@ -4,8 +4,11 @@
 //! mutations (axum 0.8 `{param}` syntax), all under the rate-limit middleware, with the body-size belts.
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::{get, post, put};
+use tracing::Instrument as _;
 
 use crate::rate_limit;
 use crate::routes;
@@ -64,7 +67,36 @@ pub fn router(state: PlaneState) -> Router {
             state.clone(),
             rate_limit::enforce,
         ))
+        // Outermost (the last layer added), so the rate limiter's 429s are recorded too.
+        .layer(axum::middleware::from_fn(trace_requests))
         .with_state(state)
+}
+
+/// Request-level tracing, wired into [`router`] so every composition gets it (no new dependency): ONE
+/// `request` span per request carrying the method + the matched ROUTE TEMPLATE, and one completion `info`
+/// event recording the status + latency. Handlers — and the error mapper's `tracing::error!` authority-fault
+/// chains ([`crate::wire::error`]) — run inside the span, so a 500's server-side diagnostics correlate with
+/// exactly one request line in the JSON logs.
+///
+/// The span records the route TEMPLATE (`/v1/current/{read_token}`), never the raw path: a raw path carries
+/// the read credential on the conditional-GET route (and the invite token on `/i/{token}`), and a credential
+/// never reaches the logs (the same posture as storing only token sha256s). A request that matched no route
+/// has no template and logs the constant `(unmatched)` — same reasoning: a mistyped credential-bearing URL
+/// must not land in the logs either.
+async fn trace_requests(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("(unmatched)", MatchedPath::as_str)
+        .to_owned();
+    let span = tracing::info_span!("request", %method, %route);
+    let started = std::time::Instant::now();
+    let response = next.run(req).instrument(span.clone()).await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let status = response.status().as_u16();
+    span.in_scope(|| tracing::info!(status, latency_ms, "request served"));
+    response
 }
 
 /// The enrollment + governance route group (sharing the 64 KiB belt). Factored out so the feature-gated OIDC

@@ -3,7 +3,8 @@
 //!
 //! **Scheduling is the composing server's** (this library holds none): the public
 //! [`Authority::run_gc`]/[`Authority::run_recovery`]/[`Authority::run_janitor`] wrappers are what it drives,
-//! on startup and periodically. All three futures are `Send` (the non-`Send` gix `Store` is opened per
+//! on startup and periodically ([`Authority::workspaces`] enumerates the per-workspace GC targets; recovery
+//! and the janitor sweep cross-workspace internally). All three futures are `Send` (the non-`Send` gix `Store` is opened per
 //! unlink inside a synchronous helper, never held across an `.await`) so they spawn onto a multi-threaded
 //! runtime; a compile-time assertion below pins that.
 //!

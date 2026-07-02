@@ -771,6 +771,18 @@ impl Authority {
         crate::enroll::governance_mutation(self, ws, op_id, &signed, created_at).await
     }
 
+    /// Every workspace currently holding stored objects (an `object_presence` row exists) — the enumeration
+    /// the composing server drives its periodic per-workspace [`run_gc`](Self::run_gc) over (the recovery
+    /// sweep and janitor enumerate cross-workspace internally). GC acts only on objects with a presence row,
+    /// so a workspace absent here has nothing a pass could reclaim; ids only (no names, no bytes, no roster
+    /// facts — a scheduling surface, not a read).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault; [`AuthorityError::Integrity`] on a corrupt stored id.
+    pub async fn workspaces(&self) -> Result<Vec<WorkspaceId>> {
+        self.db.workspaces_with_objects().await
+    }
+
     /// Run one **garbage-collection pass** over a workspace: reclaim every currently-unrooted object through
     /// the transactional mark-then-claim fence (claim → unlink-outside-any-transaction → finalize; the
     /// keep-set is exactly the read-authorization surface, so a readable object is never reclaimed). Returns

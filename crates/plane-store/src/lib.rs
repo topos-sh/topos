@@ -39,8 +39,9 @@
 //!   recovery sweep + a quarantine janitor; and the tombstones denylist. The database leads, the filesystem
 //!   trails. The GC pass / recovery sweep / quarantine janitor are public ops
 //!   ([`Authority::run_gc`] / [`Authority::run_recovery`] / [`Authority::run_janitor`]) the composing
-//!   server MUST schedule (startup + periodic) — this library holds no scheduler. The server clock is one
-//!   unit throughout: epoch **milliseconds**.
+//!   server MUST schedule (startup + periodic) — this library holds no scheduler, and
+//!   [`Authority::workspaces`] enumerates the workspaces the per-workspace pass is driven over. The server
+//!   clock is one unit throughout: epoch **milliseconds**.
 //! - **The size-routed large-object store (offload).** At migrate a file blob >= a configurable threshold is
 //!   physically offloaded to a per-workspace content-addressed side store (`location = large-local`), keyed
 //!   by the same `blob_id`; smaller blobs stay in git; a per-blob reject cap fails typed at ingest. Identity
