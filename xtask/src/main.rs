@@ -805,6 +805,9 @@ fn check_arch() -> Result<()> {
     // SQLite C lib, and no async runtime / async HTTP stack (`ureq` is blocking + self-contained). `tokio`
     // is the load-bearing one — a future `reqwest`/async-`ureq` transport would pull it in without touching
     // `plane-store`/`sqlx`, so the gate must name it explicitly to hold the documented tokio-free line.
+    // The last three hold the prebuilt-binary claim (static on musl, OS-libs-only on macOS, no
+    // system cert store): a transitive native-TLS/openssl edge would ship silently — a vendored
+    // static openssl links fine — so the gate names them, not just the storage/async bans.
     assert_excludes(
         "topos",
         &[
@@ -814,6 +817,9 @@ fn check_arch() -> Result<()> {
             "tokio",
             "reqwest",
             "hyper",
+            "openssl-sys",
+            "native-tls",
+            "rustls-native-certs",
         ],
     )?;
     // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates, no diff/merge engines — only

@@ -32,7 +32,9 @@ TARGET="aarch64-unknown-linux-musl"
 ASSET="topos-$TARGET.tar.gz"
 TAG="v0.0.0-rehearsal"
 BUILDER_IMAGE="rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663"
-CLIENT_IMAGE="buildpack-deps:bookworm-curl"
+# Digest-pinned like the builder image: the "no toolchain" premise asserted below must not
+# drift with a re-pushed tag. Refresh: docker buildx imagetools inspect buildpack-deps:bookworm-curl
+CLIENT_IMAGE="buildpack-deps:bookworm-curl@sha256:66cc6f34ca3b53e5d611a39eb387e5ee6046930b5ec992d97cf2a3e694f2ffa9"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/topos-rehearsal.XXXXXX")"
 NET="topos-rehearsal-net-$$"
@@ -137,6 +139,16 @@ docker run -d --rm --name "$SRV_BAD" --network "$NET" \
   -v "$BAD":/www:ro busybox httpd -f -p 80 -h /www >/dev/null
 
 # ---------- 4. happy path, pinned URL ---------------------------------------------------
+
+# Assert the "toolchain-free" premise instead of trusting the image name: the clean-machine
+# claim is only proven if the client container really has no compiler / Node / Python / git.
+echo
+echo "== asserting the client container is toolchain-free"
+# shellcheck disable=SC2016  # the single quotes are the point: $t expands in the container, not here
+TOOLCHECK_OUT="$(run_client 'for t in cc gcc g++ make git python3 python node npm rustc cargo; do command -v "$t" >/dev/null 2>&1 && { echo "TOOLCHAIN-PRESENT: $t"; exit 42; }; done; echo NO-TOOLCHAIN')" ||
+  { echo "$TOOLCHECK_OUT"; fail "the client container carries a toolchain — the clean-machine premise is broken"; }
+need "$TOOLCHECK_OUT" "NO-TOOLCHAIN" "the toolchain-free assert"
+pass "client container has no compiler / Node / Python / git"
 
 echo
 echo "== happy path (pinned: /download/$TAG/$ASSET)"

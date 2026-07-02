@@ -44,6 +44,12 @@ impl PlaneState {
     /// operator who restored once before from an even older backup. One serializable transaction over the
     /// whole selection; running it twice bumps twice (one more ordinary forward move for followers).
     ///
+    /// This is an OPERATOR capability, deliberately public on the lib (the bin's subcommand needs it,
+    /// like [`PlaneState::set_review_required`]): it signs with the plane key directly — no device
+    /// signature, no review gate, no receipt row (the returned report, printed by the subcommand, is
+    /// the audit trail). A downstream composition must wire it only to operator surfaces, never to a
+    /// request handler.
+    ///
     /// # Errors
     /// Returns an [`anyhow::Error`] if a workspace id is invalid, no plane key is configured, a bumped
     /// epoch would exceed the safe-integer bound (nothing written), or the authority write fails.

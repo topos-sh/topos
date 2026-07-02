@@ -141,14 +141,23 @@ fn sums(args: &[String]) -> Result<()> {
     let dir = from_root(&dir_arg);
 
     // Every regular file directly in <dir>, except the manifest itself — sorted by filename so
-    // the manifest is deterministic.
+    // the manifest is deterministic. Anything else (a symlink, a subdirectory, a device) is a
+    // hard error, not a skip: a silently-uncovered entry would ship outside checksum coverage.
     let mut files: Vec<String> = Vec::new();
     for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name != "SHA256SUMS" && entry.file_type()?.is_file() {
-            files.push(name);
+        if name == "SHA256SUMS" {
+            continue;
         }
+        // `file_type()` does not follow symlinks, so a symlink-to-file reports as a symlink here.
+        if !entry.file_type()?.is_file() {
+            bail!(
+                "{name}: not a regular file — only regular files can ship as release assets \
+                 (a symlink or directory would fall outside SHA256SUMS coverage)"
+            );
+        }
+        files.push(name);
     }
     files.sort();
 

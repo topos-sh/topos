@@ -250,6 +250,12 @@ else
 fi
 [ -n "$BIN_SRC" ] || die "no 'topos' binary found inside $ASSET"
 
+# A directory squatting on the binary's path would swallow the staged rename ("mv into it")
+# and produce a misleading failure — refuse up front instead.
+if [ -d "$INSTALL_DIR/topos" ]; then
+  die "$INSTALL_DIR/topos is a directory - refusing to install over it. Remove or rename it, or pick another directory with --to."
+fi
+
 if [ -x "$INSTALL_DIR/topos" ]; then
   OLD_VERSION="$("$INSTALL_DIR/topos" --version 2>/dev/null || true)"
   if [ -n "$OLD_VERSION" ]; then
@@ -265,17 +271,24 @@ fi
 STAGE="$INSTALL_DIR/.topos.tmp.$$"
 cp "$BIN_SRC" "$STAGE"
 chmod 0755 "$STAGE"
-mv -f "$STAGE" "$INSTALL_DIR/topos"
-STAGE=""
 
-# Run the installed binary once — this also catches a wrong-architecture binary
-# (exec format error) loudly, right now, instead of at first real use.
-if ! NEW_VERSION="$("$INSTALL_DIR/topos" --version)"; then
-  err "ERROR: installed $INSTALL_DIR/topos, but it failed to execute on this machine."
+# Run the STAGED binary once, before it replaces anything — a checksum-valid but
+# wrong-architecture (or otherwise broken) asset must never displace a working install.
+if ! NEW_VERSION="$("$STAGE" --version)"; then
+  rm -f "$STAGE"
+  STAGE=""
+  err "ERROR: the downloaded binary failed to execute on this machine."
   err "This usually means a wrong-architecture binary (exec format error)."
+  if [ -x "$INSTALL_DIR/topos" ]; then
+    err "Nothing was replaced - your existing install is untouched."
+  else
+    err "Nothing was installed."
+  fi
   err "Report it: https://github.com/topos-sh/topos/issues"
   exit 1
 fi
+mv -f "$STAGE" "$INSTALL_DIR/topos"
+STAGE=""
 say "installed: $NEW_VERSION -> $INSTALL_DIR/topos"
 
 # ---------- PATH hint (printed only — this script never edits your shell config) -------

@@ -31,10 +31,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # Honors rust-toolchain.toml (pinned channel + rustfmt/clippy components) — do NOT pin a
       # channel here, or it would override the repo's reproducible toolchain.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       - name: format
         run: cargo fmt --all --check
       # Compiles every target (incl. the test binaries' `query!`s) against the committed `.sqlx` — no
@@ -81,8 +81,8 @@ jobs:
     env:
       DATABASE_URL: "postgres://topos:topos@localhost:5432/topos"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       - name: test
         run: cargo test --workspace --locked
 
@@ -90,8 +90,8 @@ jobs:
     name: cargo-deny (advisories + licenses)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
 
   sqlx-drift:
     name: sqlx offline-metadata drift gate
@@ -116,8 +116,8 @@ jobs:
       SQLX_OFFLINE: "false"
       DATABASE_URL: "postgres://topos:topos@localhost:5432/topos"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       # Pin the CLI to the EXACT library version. A bare `cargo install sqlx-cli` resolves to a newer
       # major whose generated metadata format differs from the pinned library's, which would silently
       # turn this drift gate into a no-op.
