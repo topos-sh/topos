@@ -50,6 +50,12 @@ pub(crate) enum ClientError {
     /// mere version mismatch). Recovery reports it; it never fabricates the missing state.
     #[error("corrupt sidecar state: {0}")]
     Corrupt(String),
+    /// A PLANE RESPONSE failed client-side validation (a wire-boundary id/shape check) — the remote
+    /// counterpart of [`ClientError::Corrupt`]. Same `CORRUPT_STATE` wire code (the vocabulary stays
+    /// closed), but the safe surface says the plane's response failed validation instead of falsely
+    /// blaming a local sidecar document. Persisted-doc failures (a `follows.json` load) stay `Corrupt`.
+    #[error("plane response failed validation: {0}")]
+    WireInvalid(String),
     /// The scan of a real skill dir hit a filesystem-level reject (symlink / device / non-regular file /
     /// non-UTF-8 name) or a kernel path reject (absolute / `..` / NUL / collision).
     #[error("skill directory rejected: {0}")]
@@ -163,6 +169,8 @@ impl ClientError {
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
             ClientError::UnsupportedLegacy { .. } => "UNSUPPORTED_SCHEMA",
             ClientError::Corrupt(_) => "CORRUPT_STATE",
+            // Same closed-vocabulary code; only the safe MESSAGE differs (wire, not sidecar).
+            ClientError::WireInvalid(_) => "CORRUPT_STATE",
             ClientError::Scan(_) => "SCAN_REJECTED",
             ClientError::EmptyBundle => "EMPTY_BUNDLE",
             ClientError::SourceOverlap => "SOURCE_OVERLAP",

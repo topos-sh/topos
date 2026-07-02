@@ -12,7 +12,7 @@ use topos_core::digest::to_hex;
 use topos_core::sign::{self, Commit};
 use topos_types::persisted::{OpKind, OpRecord};
 use topos_types::results::RevertData;
-use topos_types::{SCHEMA_VERSION, TerminalOutcome};
+use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
 use super::{VersionRef, resolve_skill, resolve_version_ref};
@@ -147,7 +147,7 @@ pub(crate) fn revert(
             })
             .map_err(|_| ClientError::Corrupt("forward-revert commit id preimage".to_owned()))?;
             OpRecord {
-                schema_version: SCHEMA_VERSION,
+                schema_version: PERSISTED_SCHEMA_VERSION,
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
                 skill_id: id.to_string(),

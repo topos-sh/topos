@@ -8,8 +8,8 @@ use topos_types::results::{
     PullSkill, RevertData, ReviewData, ReviewDecision, UnfollowData,
 };
 use topos_types::{
-    ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome,
-    TriggerState, WireError,
+    ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
+    WIRE_SCHEMA_VERSION, WireError,
 };
 
 use crate::error::ClientError;
@@ -18,7 +18,7 @@ use crate::ops::{ListOutcome, UninstallOutcome};
 /// A success envelope wrapping a verb's typed `data`.
 pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelope {
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: command.to_owned(),
         ok: true,
         data,
@@ -38,7 +38,7 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
     );
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: command.to_owned(),
         ok: false,
         data: serde_json::json!({}),
@@ -166,6 +166,7 @@ pub(crate) fn safe_message(err: &ClientError) -> String {
         ClientError::Gitstore(_) => "the embedded git store reported an error".to_owned(),
         ClientError::Verify(_) => "an integrity check failed".to_owned(),
         ClientError::Corrupt(_) => "a sidecar document is corrupt".to_owned(),
+        ClientError::WireInvalid(_) => "the plane's response failed validation".to_owned(),
         ClientError::Scan(_) => "the skill directory was rejected".to_owned(),
         // The remaining Display strings are fixed text, a user-supplied name, or (InvalidArgument)
         // usage guidance written by this code — safe to show verbatim.
@@ -253,7 +254,10 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             .and_then(Option::as_ref);
         let follow_note = match note {
             Some(n) if n.following => format!("  (following, {})", n.mode),
-            Some(_) => "  (not following — `topos follow` resumes)".to_owned(),
+            Some(_) => format!(
+                "  (not following — `topos follow --approve {}` resumes)",
+                e.skill
+            ),
             None => String::new(),
         };
         s.push_str(&format!(
@@ -410,7 +414,8 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
     out
 }
 
-pub(crate) fn follow_tty(data: &FollowData) -> String {
+pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
+    let data = &out.data;
     // A pending enrollment: surface the verification URL WITH the workspace + verified-domain provenance
     // (the relay-phishing guard — the human checks the domain before approving).
     if let Some(pending) = &data.pending {
@@ -418,47 +423,56 @@ pub(crate) fn follow_tty(data: &FollowData) -> String {
             .workspace_display_name
             .clone()
             .unwrap_or_else(|| data.workspace_id.clone());
-        let mut out = format!("Enrolling with {workspace}");
+        let mut s = format!("Enrolling with {workspace}");
         if let Some(domain) = &data.verified_domain {
             let status = match data.verified_domain_status {
                 Some(VerifiedDomainStatus::Verified) => "verified",
                 Some(VerifiedDomainStatus::Pending) => "pending verification",
                 _ => "unverified",
             };
-            out.push_str(&format!(" ({domain}, {status})"));
+            s.push_str(&format!(" ({domain}, {status})"));
         }
-        out.push_str(&format!(
+        s.push_str(&format!(
             "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}",
             pending.verification_uri_complete, pending.user_code
         ));
-        return out;
+        return s;
     }
     // A completed enrollment.
-    if !data.enrolled {
-        return format!("Enrolled with workspace {}.", data.workspace_id);
-    }
-    if data.skills.is_empty() {
-        return format!(
+    let mut s = if !data.enrolled {
+        format!("Enrolled with workspace {}.", data.workspace_id)
+    } else if data.skills.is_empty() {
+        format!(
             "Enrolled with workspace {} (no skills to follow).",
             data.workspace_id
+        )
+    } else {
+        let mut s = format!(
+            "Enrolled with workspace {}. Offered skills:",
+            data.workspace_id
         );
-    }
-    let mut out = format!(
-        "Enrolled with workspace {}. Offered skills:",
-        data.workspace_id
-    );
-    for s in &data.skills {
-        out.push_str(&format!(
-            "\n  {}  {}@{}",
-            s.name,
-            s.name,
-            short(&s.offer.version_id)
+        for sk in &data.skills {
+            s.push_str(&format!(
+                "\n  {}  {}@{}",
+                sk.name,
+                sk.name,
+                short(&sk.offer.version_id)
+            ));
+        }
+        s.push_str(
+            "\nApprove a skill with `topos follow --approve <skill>` (or `topos pull <skill>`).",
+        );
+        s
+    };
+    // The resume disclosure: `--approve` flipped a paused entry back on (TTY-only; the pinned
+    // `FollowData` shape has no resume field).
+    for name in &out.resumed {
+        s.push_str(&format!(
+            "\nResumed following {name} — auto-updates are back on; the next `topos pull` lands the \
+             team's current."
         ));
     }
-    out.push_str(
-        "\nApprove a skill with `topos follow --approve <skill>` (or `topos pull <skill>`).",
-    );
-    out
+    s
 }
 
 pub(crate) fn invite_tty(data: &InviteData) -> String {
@@ -481,8 +495,8 @@ pub(crate) fn invite_tty(data: &InviteData) -> String {
 pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
     format!(
         "Stopped following {} — auto-updates stop; your local copy is kept, nothing was deleted. \
-         `follow` resumes.",
-        data.skill_id,
+         `topos follow --approve {}` resumes.",
+        data.skill_id, data.skill_id,
     )
 }
 
@@ -934,7 +948,7 @@ mod tests {
         assert!(text.contains("docs@ababababab"), "{text}");
         assert!(text.contains("(following, auto)"), "{text}");
         assert!(
-            text.contains("paused@") && text.contains("(not following — `topos follow` resumes)"),
+            text.contains("paused@") && text.contains("(not following — `topos follow --approve"),
             "{text}"
         );
         // A purely local skill carries no follow note; its draft flag still shows.

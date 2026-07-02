@@ -13,6 +13,20 @@ entry is one shipped increment.
   immediate — the mandated startup recovery). The bin schedules it via `--gc-interval-secs` /
   `TOPOS_PLANE_GC_INTERVAL_SECS` (default 300; `0` disables); a downstream composition calls the same
   function. `Authority` exposes `run_gc` / `run_recovery` / `run_janitor` / `workspaces()` to drive it.
+- **The GC clock got one unit.** The lifecycle TTL constants were seconds-valued while the server clock
+  is epoch **milliseconds**, so every quarantine/lease/claim expiry fired ~1000× early (a fresh upload
+  was already "expired" to the janitor). The constants are now `*_MS` in the clock's own unit, with a
+  test pinning the fence's arithmetic against a real timestamp.
+- **Unified diffs merge hunks correctly.** Two change clusters within `2 × CONTEXT` lines of each other
+  now merge into one hunk instead of emitting overlapping (invalid) hunks; the diff and merge kernels
+  additionally gained **seeded generative suites** (randomized inputs under a fixed seed) alongside the
+  golden vectors.
+- **The CLI says what the engine knows.** `pull` renders a per-skill outcome line (fast-forwarded /
+  up-to-date / offered / held / diverged / alarm) with the concrete next command instead of a bare
+  summary; pasted **short hashes** (≥ 8 hex chars, resolved against the skill's recorded history) work
+  for the pull go-back, `revert --to`, and `diff` refs; `list` leads with the enrollment header
+  (workspace, plane URL, hook state) and each row's follow state; `log` renders human-readable columns
+  with raw JSON only as the unknown-shape fallback.
 - **Error codes got honest.** A typo'd hash or bad flag combination reports `INVALID_ARGUMENT` (remapped
   only at the argv boundary) instead of masquerading as a corrupt sidecar; filesystem errors carry their
   `io::ErrorKind`, so permission-denied / read-only / disk-full classify `PERMANENT_FAILURE` instead of
@@ -202,6 +216,22 @@ converges — proven by a fault-injection sweep). The disclosed escape (`pull <s
 commits the author's bytes on `current` with a drop-diff; unrelated histories fall back to a 2-way manual
 choice, never a silent merge.
 
+## The client pull/apply sync engine
+
+The `checkForUpdates → plan → apply` machine over the pure four-state currency transition (in
+`topos-core`), reading a signed `current` pointer through a source seam, authenticating its signature +
+workspace/skill scope, holding the **anti-rollback floor** (`observed` rises only on a verified
+strictly-higher record; a record at or below the floor is never auto-applied, and one naming a different
+commit than recorded raises a loud ALARM), snapshotting a local draft before any decision (never clobbered
+— a divergence is detected + surfaced), fetching + re-verifying the bytes (digest == tree == `commit_id`)
+and recording them durably before a **crash-safe, namespace-atomic byte-writing materialization** (a
+sibling staging dir → fsync → atomic directory swap → fsync parent → `map → lock → sync` commit, so a
+fault at any boundary leaves the placement holding old-or-new complete bytes and `applied` advances only
+after the swap; a crash-after-swap heals forward rather than showing a false divergence). `pull <skill>`
+accepts a pending update and `pull <skill>@<hash>` goes back to a version locally (a `held` pin that never
+lowers the floor). Consent stays the kernel's one `decide()` policy. (The plane response + follow-state
+were fixture-fed in-process at this stage — no HTTP yet.)
+
 ## The pointer-move write (set-current)
 
 The write that *moves* `current` (publish · genesis · revert): **one serializable pure-DB transaction**
@@ -245,22 +275,6 @@ object-read access rule (rostered AND reachable, one indistinguishable not-found
 hash); full-tree upload with server rehash that records provenance + reachability only after an
 authoritative roster check; and the cross-skill lineage predicate — all directly tested against a real
 database + git store. (At this point it moved no pointer and signed nothing yet.)
-
-## The client pull/apply sync engine
-
-The `checkForUpdates → plan → apply` machine over the pure four-state currency transition (in
-`topos-core`), reading a signed `current` pointer through a source seam, authenticating its signature +
-workspace/skill scope, holding the **anti-rollback floor** (`observed` rises only on a verified
-strictly-higher record; a record at or below the floor is never auto-applied, and one naming a different
-commit than recorded raises a loud ALARM), snapshotting a local draft before any decision (never clobbered
-— a divergence is detected + surfaced), fetching + re-verifying the bytes (digest == tree == `commit_id`)
-and recording them durably before a **crash-safe, namespace-atomic byte-writing materialization** (a
-sibling staging dir → fsync → atomic directory swap → fsync parent → `map → lock → sync` commit, so a
-fault at any boundary leaves the placement holding old-or-new complete bytes and `applied` advances only
-after the swap; a crash-after-swap heals forward rather than showing a false divergence). `pull <skill>`
-accepts a pending update and `pull <skill>@<hash>` goes back to a version locally (a `held` pin that never
-lowers the floor). Consent stays the kernel's one `decide()` policy. (The plane response + follow-state
-were fixture-fed in-process at this stage — no HTTP yet.)
 
 ## The Claude Code harness adapter
 

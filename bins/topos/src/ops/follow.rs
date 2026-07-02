@@ -8,7 +8,9 @@
 //!   (write `instance.json` / `follows.json` / `user.json` / the device key + lay the first-receive
 //!   baselines), delete the WAL, and disclose the offers.
 //! - **`follow --approve <skill>[@<digest>] …`** (post-enroll) — drive the existing pull engine to place
-//!   the named, already-disclosed first-receive bytes (the I-TOFU "one --approve").
+//!   the named, already-disclosed first-receive bytes (the I-TOFU "one --approve"). On a retained entry
+//!   `unfollow` paused (`following == false`) it RESUMES the follow instead: the flag flips back on, a
+//!   still-pending first-receive offer is placed, and otherwise the next `pull` lands the team's current.
 //!
 //! **I-NO-USER-TOKEN.** The agent only ever holds the opaque grant + the minted read creds — never a user
 //! token; enrollment completes by POLLING. **Secrets** (the device code, the grant, the read tokens) live
@@ -21,13 +23,13 @@ use topos_core::sign::EnrollFields;
 use topos_gitstore::Store;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer};
-use topos_types::{Generation, SCHEMA_VERSION};
+use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::identity::{self, DeviceKeyRef};
-use crate::plane::{EnrollSource, PlaneSource, PointerFetch, TokenPoll};
+use crate::plane::{EnrollSource, FollowContext, PlaneSource, PointerFetch, TokenPoll};
 use crate::plane_http::SkillCred;
 use crate::{doc, enroll, sidecar};
 
@@ -62,6 +64,14 @@ pub(crate) struct FollowConnectors<'a> {
     pub plane: &'a PlaneConnect<'a>,
 }
 
+/// The verb's outcome: the schema-pinned wire payload, plus TTY-only disclosure (`FollowData`'s pinned
+/// shape has no resume field, so the resumed names ride alongside it — never on the `--json` surface).
+pub(crate) struct FollowOutcome {
+    pub data: FollowData,
+    /// Display names of skills whose retained `following == false` entry this `--approve` flipped back on.
+    pub resumed: Vec<String>,
+}
+
 /// Dispatch the `follow` verb. `--approve` and `--resume` ignore `link`; a bare `follow <link>` begins.
 ///
 /// # Errors
@@ -72,17 +82,25 @@ pub(crate) fn follow(
     connectors: &FollowConnectors<'_>,
     link: Option<String>,
     opts: FollowOpts,
-) -> Result<FollowData, ClientError> {
+) -> Result<FollowOutcome, ClientError> {
     if !opts.approve.is_empty() {
         return approve(ctx, &opts.approve);
     }
     if opts.resume {
-        return resume(ctx, connectors);
+        return Ok(plain(resume(ctx, connectors)?));
     }
     let link = link.ok_or_else(|| {
         ClientError::Enrollment("follow needs an /i/ link (or --resume / --approve)".into())
     })?;
-    begin(ctx, connectors, &link, opts.manual)
+    Ok(plain(begin(ctx, connectors, &link, opts.manual)?))
+}
+
+/// Wrap a non-`--approve` result (those paths never resume a paused follow).
+fn plain(data: FollowData) -> FollowOutcome {
+    FollowOutcome {
+        data,
+        resumed: Vec::new(),
+    }
 }
 
 // =================================================================================================
@@ -138,7 +156,7 @@ fn begin(
             .saturating_mul(1000),
     );
     let wal = enroll::PendingEnrollment {
-        schema_version: SCHEMA_VERSION,
+        schema_version: PERSISTED_SCHEMA_VERSION,
         state: enroll::EnrollPhase::Authorizing {
             context: context.clone(),
             device_code: auth.device_code,
@@ -270,7 +288,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                         ctx.fs,
                         &ctx.layout,
                         &enroll::PendingEnrollment {
-                            schema_version: SCHEMA_VERSION,
+                            schema_version: PERSISTED_SCHEMA_VERSION,
                             state: enroll::EnrollPhase::Redeemed {
                                 context: context.clone(),
                                 read_creds: read_creds.clone(),
@@ -347,7 +365,7 @@ fn promote(
         ctx.fs,
         &ctx.layout,
         &enroll::Instance {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             base_url: context.base_url.clone(),
             plane_key: context.pinned_plane_key.clone(),
             plane_key_id: context.plane_key_id.clone(),
@@ -379,7 +397,7 @@ fn promote(
         ctx.fs,
         &ctx.layout,
         &enroll::UserDoc {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             deployment_mode: context.deployment_mode,
             email: None,
@@ -470,7 +488,7 @@ fn lay_first_receive_baseline(
         ctx.fs,
         &sp.sync,
         &SyncState {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             observed: GENESIS,
             applied: GENESIS,
             recorded: Vec::new(),
@@ -483,7 +501,7 @@ fn lay_first_receive_baseline(
         ctx.fs,
         &sp.map,
         &PlacementMap {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             placements: vec![placement.to_string_lossy().into_owned()],
             applied_commit: ZERO_HEX.to_owned(),
             materialized_sha: ZERO_HEX.to_owned(),
@@ -498,7 +516,7 @@ fn lay_first_receive_baseline(
         ctx.fs,
         &sp.lock,
         &Lock {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             skill_id: skill_id.to_string(),
             name,
             base_commit: ZERO_HEX.to_owned(),
@@ -597,7 +615,7 @@ fn disclose_one(
 // `follow --approve` — drive the existing pull engine to place the named first-receive bytes.
 // =================================================================================================
 
-fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError> {
+fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientError> {
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
         .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to approve".into()))?;
     let contexts = enroll::follow_contexts(&follows);
@@ -608,19 +626,40 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError>
         .unwrap_or_default();
 
     let mut skills = Vec::new();
+    let mut resumed = Vec::new();
     for target in targets {
         // Strip an optional `@<digest>` (the disclosed-offer reference) and resolve by skill name.
         let name = strip_digest(target);
         let (skill_id, lock) = super::resolve_skill(ctx, name)?;
-        if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| id == skill_id.as_str())
-            && follow_ctx.following
-        {
-            // The explicit accept IS the I-TOFU first-receive yes (places the bytes).
-            sync_engine::sync_one(ctx, &skill_id, follow_ctx, Invocation::Accept)?;
+        let mut was_resumed = false;
+        if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| id == skill_id.as_str()) {
+            if follow_ctx.following {
+                // The explicit accept IS the I-TOFU first-receive yes (places the bytes).
+                sync_engine::sync_one(ctx, &skill_id, follow_ctx, Invocation::Accept)?;
+            } else {
+                // A retained-but-paused entry (what `unfollow` keeps): `--approve` RESUMES it — the
+                // command every paused surface points at. Flip the durable flag first; then, if a
+                // first-receive offer is still pending, place it as a normal approve. Otherwise nothing
+                // is pulled here — the resume is disclosed and the next `pull` lands the team's current.
+                enroll::set_following(ctx.fs, &ctx.layout, skill_id.as_str(), true)?;
+                was_resumed = true;
+                let sync: Option<SyncState> =
+                    doc::read_doc(ctx.fs, &ctx.layout.published(&skill_id).sync)?;
+                if sync.as_ref().is_some_and(sync_engine::is_never_received) {
+                    let resumed_ctx = FollowContext {
+                        following: true,
+                        ..follow_ctx.clone()
+                    };
+                    sync_engine::sync_one(ctx, &skill_id, &resumed_ctx, Invocation::Accept)?;
+                }
+            }
         }
         // Re-read the lock to disclose what is now current locally.
         let updated =
             doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&skill_id).lock)?.unwrap_or(lock);
+        if was_resumed {
+            resumed.push(updated.name.clone());
+        }
         skills.push(FollowOffer {
             skill_id: skill_id.into_string(),
             name: updated.name.clone(),
@@ -631,16 +670,19 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowData, ClientError>
         });
     }
 
-    Ok(FollowData {
-        workspace_id,
-        enrolled: true,
-        skills,
-        deployment_mode: None,
-        workspace_display_name: None,
-        verified_domain: None,
-        verified_domain_status: None,
-        pending: None,
-        currency: None,
+    Ok(FollowOutcome {
+        data: FollowData {
+            workspace_id,
+            enrolled: true,
+            skills,
+            deployment_mode: None,
+            workspace_display_name: None,
+            verified_domain: None,
+            verified_domain_status: None,
+            pending: None,
+            currency: None,
+        },
+        resumed,
     })
 }
 

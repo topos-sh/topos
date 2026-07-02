@@ -52,7 +52,7 @@ pub(crate) struct ListEnrollment {
 pub(crate) struct FollowNote {
     /// `"auto"` / `"confirm-each"`.
     pub mode: &'static str,
-    /// `false` = the entry is retained but unfollowed (`topos follow` resumes it).
+    /// `false` = the entry is retained but unfollowed (`topos follow --approve <skill>` resumes it).
     pub following: bool,
 }
 

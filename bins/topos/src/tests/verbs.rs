@@ -1124,7 +1124,126 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     assert!(out.data.followed.is_empty());
     let text = render::list_tty(&out);
     assert!(
-        text.contains("(not following — `topos follow` resumes)"),
+        text.contains("(not following — `topos follow --approve pr-describe` resumes)"),
         "{text}"
+    );
+}
+
+#[test]
+fn follow_approve_resumes_an_unfollowed_skill() {
+    use std::collections::HashMap;
+
+    use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance};
+    use crate::plane::{EnrollSource, PlaneSource};
+    use crate::plane_http::SkillCred;
+    use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
+
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("resume");
+    let ctx = h.ctx();
+    let a = ops::add(&ctx, &root).unwrap();
+
+    // Seed what a real `follow` promote writes (instance + follow entry), then pause it — the exact
+    // state `unfollow` leaves behind.
+    enroll::write_instance(
+        ctx.fs,
+        &ctx.layout,
+        &Instance {
+            schema_version: 1,
+            base_url: "https://topos.example".to_owned(),
+            plane_key: "a".repeat(64),
+            plane_key_id: "pk_demo".to_owned(),
+            deployment_mode: DeploymentMode::SelfHost,
+            enrollment_method: "device_code".to_owned(),
+            workspace_display_name: Some("Acme".to_owned()),
+            verified_domain: None,
+            verified_domain_status: VerifiedDomainStatus::Unverified,
+        },
+    )
+    .unwrap();
+    enroll::write_follows_merged(
+        ctx.fs,
+        &ctx.layout,
+        &[FollowEntry {
+            skill_id: a.skill_id.clone(),
+            workspace_id: "w_acme".to_owned(),
+            read_token: "rt_secret".to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+        }],
+    )
+    .unwrap();
+    let u = ops::unfollow(&ctx, "pr-describe").unwrap();
+    assert!(!u.following);
+
+    // `follow --approve <skill>` resumes the paused entry. The skill has already been received (its
+    // base is the adopted genesis — no pending first-receive offer), so no transport is touched: the
+    // connectors panic if reached, and the inert ctx plane would error on any fetch.
+    let enroll_connect =
+        |_b: &str| -> Box<dyn EnrollSource> { unreachable!("--approve never enrolls") };
+    let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
+        unreachable!("--approve builds no offer-disclosure transport")
+    };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        plane: &plane_connect,
+    };
+    let out = ops::follow(
+        &ctx,
+        &connectors,
+        None,
+        ops::FollowOpts {
+            manual: false,
+            resume: false,
+            approve: vec!["pr-describe".to_owned()],
+        },
+    )
+    .unwrap();
+
+    // The `--json` payload stays the schema-pinned FollowData shape; the resume rides alongside.
+    assert!(out.data.enrolled);
+    assert_eq!(out.data.skills.len(), 1);
+    assert_eq!(out.data.skills[0].name, "pr-describe");
+    assert_eq!(out.resumed, vec!["pr-describe".to_owned()]);
+    let text = render::follow_tty(&out);
+    assert!(
+        text.contains("Resumed following pr-describe"),
+        "the resume is disclosed on the TTY: {text}"
+    );
+
+    // The durable flag flipped back on, credentials retained.
+    let follows = enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap();
+    let e = follows
+        .follows
+        .iter()
+        .find(|e| e.skill_id == a.skill_id)
+        .unwrap();
+    assert!(e.following, "the retained entry resumed");
+    assert_eq!(e.read_token, "rt_secret");
+
+    // `list` shows (following, mode) again…
+    let listed = ops::list(&ctx, None, false).unwrap();
+    let en = listed.enrollment.as_ref();
+    assert!(
+        en.is_some_and(
+            |en| matches!(en.notes.as_slice(), [Some(n)] if n.following && n.mode == "auto")
+        ),
+        "list discloses the resumed follow state"
+    );
+
+    // …and a subsequent bare sweep includes the skill again (an up-to-date row, not a skip).
+    let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
+    let sweep_ctx = Ctx {
+        follow: &file_follow,
+        ..h.ctx()
+    };
+    let data = pull_data(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        data.skills.len(),
+        1,
+        "the resumed skill is swept again: {:?}",
+        data.skills
     );
 }

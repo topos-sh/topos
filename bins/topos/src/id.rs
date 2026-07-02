@@ -9,8 +9,8 @@
 //! already-parsed type reaches [`crate::sidecar::Layout`]'s path builders, so `"../../x"` can never
 //! escape the sidecar or a harness skills dir.
 //!
-//! The charset is the **lowercase** path-safe set `[a-z0-9_-]` (stricter than the server's mixed-case
-//! `SkillId`, which is a database key): on the client the id IS a directory component, and on a
+//! The charset is the **lowercase** path-safe set `[a-z0-9_-]` (the SAME rule the server's `SkillId`
+//! enforces, held at both ends): on the client the id IS a directory component, and on a
 //! case-insensitive filesystem (the macOS default) two case-only-distinct ids would fold to one physical
 //! directory. It excludes `/`, `\`, `.` (so `.` / `..`), NUL, and every non-ASCII byte by construction.
 //! Every real id fits: client-minted `topos_<hex>`, plane-minted `s_…`, and the plane's `w_…` workspace
@@ -37,12 +37,23 @@ pub(crate) fn is_valid_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= MAX_ID_LEN && s.bytes().all(is_lower_path_safe)
 }
 
+/// Re-flavor an id-validation failure that happened at a WIRE boundary (validating a plane response):
+/// the same `CORRUPT_STATE` code, but the safe surface renders "the plane's response failed validation"
+/// instead of falsely claiming a local sidecar document is corrupt. Persisted-doc sites (a
+/// `follows.json` load) keep the plain [`ClientError::Corrupt`] flavor.
+pub(crate) fn wire_flavor(err: ClientError) -> ClientError {
+    match err {
+        ClientError::Corrupt(m) => ClientError::WireInvalid(m),
+        other => other,
+    }
+}
+
 /// Validate a workspace id at a wire/persisted boundary. Same rule as [`SkillId::parse`]; the fixed
 /// message never echoes the hostile bytes.
 ///
 /// # Errors
 /// [`ClientError::Corrupt`] (the malformed-document family — a plane/document that supplies such an id is
-/// corrupt or forged, never a usable enrollment).
+/// corrupt or forged, never a usable enrollment). Wire call sites re-flavor via [`wire_flavor`].
 pub(crate) fn validate_workspace_id(s: &str) -> Result<(), ClientError> {
     if is_valid_id(s) {
         Ok(())

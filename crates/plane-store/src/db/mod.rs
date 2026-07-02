@@ -27,6 +27,15 @@ use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 /// terminal (which would poison replay).
 pub(in crate::db) const MAX_TXN_RETRIES: u32 = 10;
 
+/// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault when the width is wrong (the
+/// schema's `CHECK (octet_length(…) = 32)` forbids it; a violation is store corruption). The ONE shared
+/// definition — every `mod db` sibling imports this one.
+pub(in crate::db) fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| AuthorityError::integrity(BadBlobWidth))
+}
+
 /// The Postgres-backed authority database: one connection pool. Reads run autocommit at the pool's
 /// default `READ COMMITTED`; every write goes through [`run_serializable`](Self::run_serializable),
 /// which opens `SERIALIZABLE` per-transaction (it reverts on commit — no connection-global default).
@@ -574,13 +583,9 @@ where
     Ok(())
 }
 
-/// Convert a stored 32-byte BLOB into a [`CommitId`], or an integrity fault if the width is wrong (the
-/// schema's length CHECK should prevent it; a violation means store corruption).
+/// Convert a stored 32-byte BLOB into a [`CommitId`] via the shared [`blob32`].
 fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| AuthorityError::integrity(BadBlobWidth))?;
-    Ok(CommitId(arr))
+    Ok(CommitId(blob32(bytes)?))
 }
 
 /// A stored commit-id BLOB was not exactly 32 bytes (the schema CHECK should forbid this).

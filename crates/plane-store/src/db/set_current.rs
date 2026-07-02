@@ -12,10 +12,9 @@ use sqlx::{Postgres, Transaction};
 use topos_core::sign::{CurrentPointer, DeviceOp, DeviceOpFields, verify_device_op};
 use topos_types::{
     CurrentRecord, Generation, PointerScope, Signature, SignatureAlg, SignedCurrentRecord,
-    TerminalOutcome,
+    TerminalOutcome, WIRE_SCHEMA_VERSION,
 };
 
-use super::Db;
 use super::proposals::{
     ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
     read_open_proposal, resolve_proposal, set_proposal_status,
@@ -25,6 +24,7 @@ use super::receipts::{
     first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse, reject_denied,
     reject_denied_preauth, reject_terminal, replay, retryable,
 };
+use super::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 use crate::set_current::{PromoteInput, RejectInput, SetCurrentReceipt};
@@ -1013,7 +1013,8 @@ fn serialize_signed_record(
     signature: &[u8; 64],
 ) -> Result<Vec<u8>> {
     let record = SignedCurrentRecord {
-        schema_version: 1,
+        // The signed-`current` record is a WIRE shape (it rides the read route + the OK receipt).
+        schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
             workspace_id: pointer.workspace_id.to_owned(),
             skill_id: pointer.skill_id.to_owned(),
@@ -1041,12 +1042,7 @@ fn base64_url(signature: &[u8; 64]) -> String {
 }
 
 // --- small conversions (a stored value that violates a width/range CHECK is store corruption) ---
-
-pub(super) fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
-    bytes
-        .try_into()
-        .map_err(|_| AuthorityError::integrity(BadBlobWidth))
-}
+// (`blob32` lives once in `super` — the shared `mod db` helper.)
 
 pub(super) fn i64_to_u64(v: i64) -> Result<u64> {
     u64::try_from(v).map_err(|_| AuthorityError::integrity(GenerationOutOfRange))
@@ -1055,10 +1051,6 @@ pub(super) fn i64_to_u64(v: i64) -> Result<u64> {
 pub(super) fn u64_to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| AuthorityError::integrity(GenerationOutOfRange))
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("stored content id is not 32 bytes")]
-struct BadBlobWidth;
 
 #[derive(Debug, thiserror::Error)]
 #[error("a stored generation is out of the safe-integer range")]

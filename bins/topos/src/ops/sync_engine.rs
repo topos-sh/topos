@@ -655,9 +655,12 @@ pub(crate) fn snapshot_draft(
 ///
 /// Every version this call WRITES adds its own durability set to `written` (accumulated across the
 /// backfill; the caller fsyncs once at the end, before any JSON records the target) — so the fsync cost
-/// is bounded by this op's writes, never the store's lifetime history. An already-present target adds
+/// is bounded by this op's writes, never the store's lifetime history. An already-present version adds
 /// its set too: present-and-renderable does not imply durable (a prior pull may have crashed between its
-/// write and its fsync), and the caller is about to record it.
+/// write and its fsync), and the caller is about to record it. That present arm RETURNS before the
+/// parent walk below, so a present parent contributes exactly its own set (no-op fsyncs when already
+/// durable) without recursing into its own ancestors — the recursion frontier stops at the first
+/// present generation.
 fn ensure_local(
     ctx: &Ctx<'_>,
     store: &Store,
@@ -676,11 +679,13 @@ fn ensure_local(
         return Ok(existing);
     }
     let fetched = fetch(ctx, skill_id, version_id)?;
-    // Backfill any missing ancestors first (so `commit` sees its parents).
+    // Walk EVERY parent — unconditionally. An absent parent is backfilled (so `commit` sees its
+    // parents); a PRESENT parent still contributes its durability set via the early-return arm above,
+    // because present ≠ durable (a prior pull may have crashed after the parent's write but before its
+    // fsync, and this pull is about to record a child that names it). The present arm returns before
+    // its own parent walk, so a present parent never recurses further.
     for parent in &fetched.parents {
-        if store_bundle_digest_opt(store, *parent)?.is_none() {
-            ensure_local(ctx, store, skill_id, *parent, depth + 1, written)?;
-        }
+        ensure_local(ctx, store, skill_id, *parent, depth + 1, written)?;
     }
     let import: Vec<ImportFile<'_>> = fetched
         .files
@@ -973,7 +978,7 @@ fn is_zero_gen(g: Generation) -> bool {
 /// keying on those would let a SECOND auto sweep mistake the still-unapproved baseline for a normal followed
 /// skill and AUTO-LAND it (breaking I-TOFU). `applied` stays `(0,0)` and `base_commit` stays all-zero until the
 /// first explicit accept actually MATERIALIZES bytes, so they remain a true "never placed" signal every sweep.
-fn is_never_received(sync: &SyncState) -> bool {
+pub(crate) fn is_never_received(sync: &SyncState) -> bool {
     is_zero_gen(sync.applied) && is_zero_commit(&sync.base_commit)
 }
 

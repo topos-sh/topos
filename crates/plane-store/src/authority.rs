@@ -953,9 +953,9 @@ impl Authority {
 /// Creation is serialized under an in-process lock: two concurrent first-time writers can both observe
 /// the directory as absent, and bare-repo `init` is neither an idempotent open-or-create nor atomic (a
 /// racer can open a repo mid-init and fail) — write sections now genuinely run in parallel on the
-/// blocking pool, so the old open→init→open fallback is not enough. Under the lock the loser re-opens
-/// what the winner completed. One process owns this git root (per-workspace stores under one plane), so
-/// a process lock is the whole story; the fast path (the store already exists) takes no lock at all.
+/// blocking pool, so a bare open→init would race. Under the lock the loser re-opens what the winner
+/// completed; the fast path (the store already exists) takes no lock at all. The lock covers ONE
+/// process; the `or_else(open)` below covers the rest.
 pub(crate) fn open_or_init_store(dir: &Path) -> Result<Store> {
     if let Ok(store) = Store::open(dir) {
         return Ok(store);
@@ -966,7 +966,13 @@ pub(crate) fn open_or_init_store(dir: &Path) -> Result<Store> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     match Store::open(dir) {
         Ok(store) => Ok(store),
-        Err(_) => Store::init(dir).map_err(AuthorityError::internal),
+        // The CROSS-PROCESS creation race: two plane processes sharing one git volume (a rolling
+        // deploy's overlap, a second replica on a shared mount) can both attempt first-time creation,
+        // and the in-process mutex is no help there. If our `init` lost to another process's completed
+        // `init`, fall back to opening what that process created rather than failing the write.
+        Err(_) => Store::init(dir)
+            .or_else(|_| Store::open(dir))
+            .map_err(AuthorityError::internal),
     }
 }
 

@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use topos_types::persisted::{
     Lock, LockedFile, OpRecord, PlacementMap, RecordedTuple, SwapCapability, SyncState,
 };
-use topos_types::{Generation, SCHEMA_VERSION};
+use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::atomic::{atomic_write, load_versioned, temp_path};
 use crate::error::ClientError;
@@ -147,7 +147,8 @@ fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T) {
 
             // (a) whatever is on disk deserializes (no torn JSON).
             if let Some(bytes) = &now {
-                let _: T = load_versioned(bytes, SCHEMA_VERSION).expect("target deserializes");
+                let _: T =
+                    load_versioned(bytes, PERSISTED_SCHEMA_VERSION).expect("target deserializes");
             }
 
             // (c) the only artifact a faulted write leaves is the recognizable temp; clearing it and
@@ -159,7 +160,7 @@ fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T) {
             atomic_write(&real, &target, &new_bytes).unwrap();
             let after = real.read_opt(&target).unwrap().unwrap();
             assert_eq!(after, new_bytes, "clean rewrite must reach the post state");
-            let _: T = load_versioned(&after, SCHEMA_VERSION).unwrap();
+            let _: T = load_versioned(&after, PERSISTED_SCHEMA_VERSION).unwrap();
         }
     }
 }
@@ -322,13 +323,16 @@ fn check_dispatch<T: Serialize + DeserializeOwned + std::fmt::Debug>(valid: T) {
 
     // schema_version = 1 -> parses.
     let bytes = serde_json::to_vec(&base).unwrap();
-    assert!(load_versioned::<T>(&bytes, SCHEMA_VERSION).is_ok());
+    assert!(load_versioned::<T>(&bytes, PERSISTED_SCHEMA_VERSION).is_ok());
 
     // = 2 -> newer -> fail closed (never handed to serde).
     let mut newer = base.clone();
     newer["schema_version"] = serde_json::json!(2);
-    let err =
-        load_versioned::<T>(&serde_json::to_vec(&newer).unwrap(), SCHEMA_VERSION).unwrap_err();
+    let err = load_versioned::<T>(
+        &serde_json::to_vec(&newer).unwrap(),
+        PERSISTED_SCHEMA_VERSION,
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         ClientError::UnknownSchemaVersion { found: 2, max: 1 }
@@ -337,13 +341,20 @@ fn check_dispatch<T: Serialize + DeserializeOwned + std::fmt::Debug>(valid: T) {
     // = 0 -> below floor -> unsupported.
     let mut zero = base.clone();
     zero["schema_version"] = serde_json::json!(0);
-    let err = load_versioned::<T>(&serde_json::to_vec(&zero).unwrap(), SCHEMA_VERSION).unwrap_err();
+    let err = load_versioned::<T>(
+        &serde_json::to_vec(&zero).unwrap(),
+        PERSISTED_SCHEMA_VERSION,
+    )
+    .unwrap_err();
     assert!(matches!(err, ClientError::UnsupportedLegacy { found: 0 }));
 
     // missing schema_version -> corrupt (never silently accepted).
     let mut missing = base.clone();
     missing.as_object_mut().unwrap().remove("schema_version");
-    let err =
-        load_versioned::<T>(&serde_json::to_vec(&missing).unwrap(), SCHEMA_VERSION).unwrap_err();
+    let err = load_versioned::<T>(
+        &serde_json::to_vec(&missing).unwrap(),
+        PERSISTED_SCHEMA_VERSION,
+    )
+    .unwrap_err();
     assert!(matches!(err, ClientError::Corrupt(_)));
 }

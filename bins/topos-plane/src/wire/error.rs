@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use plane_store::AuthorityError;
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, TerminalOutcome, WIRE_SCHEMA_VERSION, WireError,
 };
 
 /// A transport/auth/integrity fault on the way in or out of a handler. Maps to a non-2xx status with a
@@ -145,7 +145,7 @@ fn error_envelope(
         next_actions: next_actions.clone(),
     };
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: "error".to_owned(),
         ok: false,
         data: serde_json::json!({}),

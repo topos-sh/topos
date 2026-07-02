@@ -12,7 +12,7 @@ use sqlx::{Postgres, Transaction};
 use topos_core::digest;
 use topos_core::sign::{EnrollFields, verify_enroll};
 
-use super::Db;
+use super::{Db, blob32};
 use crate::enroll::{
     self, ConfirmOutcome, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued, MintedReadToken,
     PasscodeComplete, RedeemInput, RedeemOutcome,
@@ -944,14 +944,6 @@ pub(super) async fn read_device(
 }
 
 // ── shared in-txn helpers (also used by [`super::governance`]) ─────────────────────────────────────────
-
-/// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault if the width is wrong (a CHECK
-/// should forbid it; a violation is store corruption).
-pub(super) fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
-    bytes
-        .try_into()
-        .map_err(|_| AuthorityError::integrity(EnrollCorrupt("stored content id is not 32 bytes")))
-}
 
 /// A stored enrollment value violated an invariant (a width/range CHECK, an unparseable enum) — store corruption.
 #[derive(Debug, thiserror::Error)]

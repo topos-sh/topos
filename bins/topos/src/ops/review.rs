@@ -10,7 +10,7 @@
 use topos_core::digest::to_hex;
 use topos_types::persisted::{OpKind, OpRecord};
 use topos_types::results::{ReviewData, ReviewDecision};
-use topos_types::{SCHEMA_VERSION, TerminalOutcome};
+use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect};
 use super::{parse_hex32_arg, resolve_skill};
@@ -103,7 +103,7 @@ pub(crate) fn review(
             let bundle_digest =
                 contribute::verified_version_digest(ctx, id.as_str(), proposal_commit)?;
             OpRecord {
-                schema_version: SCHEMA_VERSION,
+                schema_version: PERSISTED_SCHEMA_VERSION,
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
                 skill_id: id.to_string(),

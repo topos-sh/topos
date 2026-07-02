@@ -103,8 +103,8 @@ workspace-wide; clippy `all` = warn.
 
 ```
 topos-types  ◄── the app libs + every fixture (the shared WIRE DTOs; NOT a dep of topos-core)
-topos-core   the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns digest, consent, the CAS
-   ▲   ▲     decision, the sync transition, diff3 policy, Ed25519 sign-preimage + verify. Tested in-crate.
+topos-core   the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns digest, consent, the sync
+   ▲   ▲     transition, diff3 policy, Ed25519 sign-preimage + verify. Tested in-crate.
    │   ├── topos-gitstore ──► topos-core   (gix object mechanics; the large-object store)
    │   └── topos-harness  ──► topos-core, topos-types   (the one client-side port; the three harness impls)
    │
@@ -122,9 +122,11 @@ a default build resolves none of it.
 
 ## Principles that constrain this code
 
-- **One trust implementation.** Every trust decision — digest, consent, the CAS decision, the sync
-  transition, diff3, the signing-preimage — is written ONCE, in `topos-core`, the only crate with no I/O.
-  The plane, the CLI, the fixtures, and the tests all link it, so no second implementation can drift.
+- **One trust implementation.** Every trust decision — digest, consent, the sync transition, diff3, the
+  signing-preimage — is written ONCE, in `topos-core`, the only crate with no I/O. The plane, the CLI,
+  the fixtures, and the tests all link it, so no second implementation can drift. (Named exception, for
+  now: the `(epoch,seq)` compare-and-set *decision* lives in `plane-store`'s SQL — its kernel extraction
+  is on `topos-core`'s own planned list.)
 - **The client is never an authority.** `bins/topos` takes no dependency on `plane-store`, `sqlx`, or a SQL
   driver — it is a thin sync tool. The dependency graph enforces this.
 - **The plane is a library, composed — not a framework with holes.** `topos-plane`'s lib exposes clean

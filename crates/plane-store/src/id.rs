@@ -39,7 +39,14 @@ pub enum IdError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceId(String);
 
-/// A skill identifier (the `s_…` id shape) — a database key, never a path component.
+/// A skill identifier (the `s_…` id shape) — a database key, never a path component on the plane.
+///
+/// Lowercase `[a-z0-9_-]` only, matching the CLIENT's rule: there the id IS a directory component
+/// (`~/.topos/skills/<id>`, the harness placement), and on a case-insensitive filesystem two
+/// case-only-distinct ids would fold to one physical directory. Every real id is lowercase
+/// (client-minted `topos_<hex>`, plane-minted `s_…`), so one charset at both ends means an id the plane
+/// accepts is an id every client can hold — no id can be mintable server-side yet unrepresentable
+/// client-side.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SkillId(String);
 
@@ -57,8 +64,9 @@ pub struct Principal(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpId(String);
 
-/// `[A-Za-z0-9_-]` — the path-safe id charset (skill ids: a database key, never a path component, so a
-/// mixed case is fine — the database uses BINARY collation and the bytes never reach the filesystem).
+/// `[A-Za-z0-9_-]` — the mixed-case path-safe base charset. Only [`is_principal_char`] builds on it now
+/// (principals are database keys that legitimately carry mixed case); the id newtypes all use the
+/// lowercase rule below.
 fn is_path_safe(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
@@ -111,12 +119,13 @@ impl WorkspaceId {
 }
 
 impl SkillId {
-    /// Parse a skill id, rejecting anything outside the path-safe charset.
+    /// Parse a skill id, rejecting anything outside the lowercase path-safe charset (including
+    /// uppercase — the client's directory-component rule, held at both ends).
     ///
     /// # Errors
     /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_path_safe)?;
+        validate(s, is_lower_path_safe)?;
         Ok(Self(s.to_owned()))
     }
 
@@ -248,6 +257,25 @@ mod tests {
         // The path-safe charset (skill/workspace) rejects the email metacharacters.
         assert!(SkillId::parse("dev@example.com").is_err());
         assert!(WorkspaceId::parse("a.b").is_err());
+    }
+
+    #[test]
+    fn skill_id_rejects_uppercase_and_accepts_every_real_shape() {
+        // The lowercase rule, held at both ends: the client stores a skill id as a directory component,
+        // so a mixed-case id the plane accepted would be unrepresentable (or case-fold-colliding) there.
+        for bad in ["S_deploy", "sD", "TOPOS_ABC", "Topos_X", "s.d", "s/d", ""] {
+            assert!(
+                SkillId::parse(bad).is_err(),
+                "should reject skill id {bad:?}"
+            );
+        }
+        for ok in [
+            "s_deploy",
+            "topos_0af3c9d2b1e845f7a6c0d9e8b7a61234",
+            "a_b-9",
+        ] {
+            assert!(SkillId::parse(ok).is_ok(), "should accept skill id {ok:?}");
+        }
     }
 
     #[test]

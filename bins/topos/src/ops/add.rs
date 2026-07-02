@@ -12,7 +12,7 @@ use topos_types::persisted::{
     Lock, LockedFile, PlacementMap, RecordedTuple, SwapCapability, SyncState,
 };
 use topos_types::results::AddData;
-use topos_types::{Generation, SCHEMA_VERSION};
+use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -113,7 +113,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         ctx.fs,
         &sp.sync,
         &SyncState {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             observed: genesis,
             applied: genesis,
             recorded: vec![RecordedTuple {
@@ -139,7 +139,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         ctx.fs,
         &sp.map,
         &PlacementMap {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             placements: vec![placement],
             applied_commit: version_hex.clone(),
             materialized_sha: digest_hex.clone(),
@@ -153,7 +153,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         ctx.fs,
         &sp.lock,
         &Lock {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             skill_id: skill_id.to_string(),
             name: name.clone(),
             base_commit: version_hex.clone(),

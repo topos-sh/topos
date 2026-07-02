@@ -238,8 +238,7 @@ pub fn run() -> ExitCode {
             onto_current,
             quiet,
         } => {
-            let result =
-                build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(&ctx, scope));
+            let result = pull_with_name_fallback(&ctx, skill, onto_current);
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
@@ -354,22 +353,24 @@ fn finish_list(
 }
 
 /// `follow`'s finisher — like [`finish`], but it carries the success-path `next_actions` (run
-/// `follow --resume` while pending; `pull` once offers are disclosed) on the envelope.
+/// `follow --resume` while pending; `pull` once offers are disclosed) on the envelope. The `--json`
+/// payload is exactly the schema-pinned `FollowData`; the resume disclosure the outcome carries
+/// alongside is TTY-only (the pinned shape has no resume field).
 fn finish_follow(
     json: bool,
     command: &str,
-    result: Result<topos_types::results::FollowData, ClientError>,
+    result: Result<ops::FollowOutcome, ClientError>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(data) => {
+        Ok(out) => {
             if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
+                let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::follow_next_actions(&data);
+                envelope.next_actions = render::follow_next_actions(&out.data);
                 println!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::follow_tty(&data));
+                println!("{}", render::follow_tty(&out));
             }
             ExitCode::SUCCESS
         }
@@ -433,6 +434,9 @@ impl Diag<'_> {
             command,
             err.code(),
             &err.detail(),
+            // Verb-level (not scoped to one skill) — the per-skill field stays for the sweep's
+            // isolated failures.
+            None,
             self.clock.now_unix_millis(),
         )
     }
@@ -463,7 +467,9 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 ///
 /// `--onto-current` (the escape) requires a `<skill>` target (clap enforces that half via `requires`)
 /// and is mutually exclusive with `@<ref>` (a runtime usage error — the suffix shape is only known
-/// after parsing).
+/// after parsing). A skill LITERALLY named like `docs@abcdef12` is not lost to the go-back parse:
+/// [`pull_with_name_fallback`] retries the whole argument as the name when the pre-@ part resolves to
+/// no tracked skill.
 fn build_pull_scope(
     skill: Option<String>,
     onto_current: bool,
@@ -501,6 +507,40 @@ fn build_pull_scope(
     })
 }
 
+/// Run `pull` with the @-suffix shadowing fallback. `<name>@<ref>` parses as a go-back first — but a
+/// skill can LITERALLY be named `docs@abcdef12` (a name is a directory basename, unrestricted; only the
+/// skill ID charset forbids `@`), so when the go-back interpretation finds NO tracked skill under the
+/// pre-@ name, the WHOLE argument is retried as the skill name (a plain targeted pull) before erroring.
+/// A tracked pre-@ name still wins: the go-back is primary, and remains reachable for a colliding name
+/// via a longer/full version id whose pre-@ part IS the tracked name.
+pub(crate) fn pull_with_name_fallback(
+    ctx: &Ctx<'_>,
+    skill: Option<String>,
+    onto_current: bool,
+) -> Result<ops::PullOutcome, ClientError> {
+    let arg = skill.clone();
+    let first = build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(ctx, scope));
+    match first {
+        Err(ClientError::NoSuchSkill { .. })
+            if arg.as_ref().is_some_and(|a| {
+                a.rsplit_once('@')
+                    .is_some_and(|(_, s)| ops::VersionRef::recognize(s).is_some())
+            }) =>
+        {
+            // The retry's own NoSuchSkill (neither interpretation is tracked) names the FULL argument —
+            // the exact token the user typed.
+            ops::pull(
+                ctx,
+                ops::PullScope::One {
+                    name: arg.expect("guard checked Some"),
+                    mode: ops::TargetMode::AcceptPending,
+                },
+            )
+        }
+        other => other,
+    }
+}
+
 /// The real plane wiring, present only when enrollment has been written. Owns the transport + the on-disk
 /// follow source so [`run`] can borrow them as `&dyn` trait objects for the lifetime of the command.
 struct Enrollment {
@@ -522,7 +562,7 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         return Ok(None);
     };
     let follows = enroll::read_follows(fs, layout)?.unwrap_or_else(|| enroll::Follows {
-        schema_version: topos_types::SCHEMA_VERSION,
+        schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
         follows: Vec::new(),
     });
     let plane_key = ops::parse_hex32(&instance.plane_key).map_err(|_| {

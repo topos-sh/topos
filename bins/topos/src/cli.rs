@@ -28,7 +28,7 @@ pub(crate) enum Command {
     },
     /// Enroll with a plane via an `/i/` invite link, then follow its skills. Two-call resume: `follow
     /// <link>` returns a verification URL; `follow --resume` polls + completes. `follow --approve
-    /// <skill>[@<hash>]` places a disclosed first-receive offer.
+    /// <skill>[@<hash>]` places a disclosed first-receive offer, or resumes a skill `unfollow` paused.
     Follow {
         /// The `/i/<token>` invite link (the full URL, or a bare token once already enrolled). Omitted
         /// with `--resume` / `--approve`.
@@ -40,11 +40,12 @@ pub(crate) enum Command {
         #[arg(long)]
         resume: bool,
         /// Place the named, already-disclosed first-receive offer(s): `<skill>` or `<skill>@<hash>`.
+        /// On a skill `unfollow` paused, this resumes following instead.
         #[arg(long = "approve")]
         approve: Vec<String>,
     },
     /// Stop following a skill's `current`. Your local copy is KEPT as a frozen copy (nothing is deleted);
-    /// auto-updates stop, and a later `follow` resumes. Local-only.
+    /// auto-updates stop, and `follow --approve <skill>` resumes. Local-only.
     Unfollow {
         /// The skill name to stop following.
         skill: String,

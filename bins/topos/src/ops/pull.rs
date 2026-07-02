@@ -180,6 +180,8 @@ fn note_skill_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, skill_id: &str,
         "pull",
         e.code(),
         &format!("skill {skill_id}: {}", e.detail()),
+        // First-class, so `topos log <skill>`'s skill_id filter surfaces the wedged skill's failures.
+        Some(skill_id),
         ctx.clock.now_unix_millis(),
     );
     eprintln!(

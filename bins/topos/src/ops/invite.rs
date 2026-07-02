@@ -43,9 +43,33 @@ fn role_signing_byte(role: Option<WorkspaceRole>) -> u8 {
     .signing_byte()
 }
 
+/// Validate every `--skills` token at the argv boundary with the client id rules (`crate::id` — the same
+/// lowercase path-safe charset every other id boundary enforces, and the rule the plane's own parse
+/// applies). Failing here names the bad token BEFORE anything is signed or sent; a token carrying
+/// non-printable or non-ASCII bytes is described, never echoed.
+fn validate_skill_tokens(skills: &[String]) -> Result<(), ClientError> {
+    for token in skills {
+        if crate::id::is_valid_id(token) {
+            continue;
+        }
+        let shown = if token.is_empty() {
+            "an empty token".to_owned()
+        } else if token.chars().all(|c| c.is_ascii_graphic()) {
+            format!("`{token}`")
+        } else {
+            "a token containing non-printable or non-ASCII characters".to_owned()
+        };
+        return Err(ClientError::InvalidArgument(format!(
+            "--skills takes skill ids (lowercase, [a-z0-9_-], at most 128 bytes); {shown} is not one"
+        )));
+    }
+    Ok(())
+}
+
 /// Mint an `/i/<token>` invite: sign the governance Invite op with this device's key, then POST it.
 ///
 /// # Errors
+/// [`ClientError::InvalidArgument`] for a malformed `--skills` token (refused at the argv boundary);
 /// [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the workspace can't be inferred (no
 /// `identity/user.json`); a signing / transport failure otherwise (a role-DENIED surfaces as
 /// [`ClientError::Plane`] — "not authorized").
@@ -56,6 +80,8 @@ pub(crate) fn invite(
     role: Option<WorkspaceRole>,
     skills: Vec<String>,
 ) -> Result<InviteData, ClientError> {
+    // The argv boundary: refuse a malformed skill id before signing or contacting anything.
+    validate_skill_tokens(&skills)?;
     // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -492,6 +518,54 @@ mod tests {
         match out.unwrap_err() {
             ClientError::Enrollment(m) => assert!(m.contains("follow"), "got {m}"),
             other => panic!("expected an Enrollment error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_skills_token_is_refused_at_the_argv_boundary() {
+        let rig = Rig::new("bad-skill-token");
+        rig.seed_enrolled();
+        // A mixed-case token: the client refuses with the id rule BEFORE signing or POSTing (the plane's
+        // own parse enforces the same lowercase charset).
+        let (out, cap) = run_invite(
+            &rig,
+            Resp::Ok(InviteData {
+                invite_link: String::new(),
+                roster_added: Vec::new(),
+                skills: Vec::new(),
+            }),
+            &["alice@acme.com"],
+            None,
+            &["S_Deploy"],
+        );
+        assert!(cap.is_none(), "a refused token never reaches the transport");
+        match out.unwrap_err() {
+            ClientError::InvalidArgument(m) => {
+                assert!(m.contains("S_Deploy"), "an ASCII token is named: {m}");
+                assert!(m.contains("--skills"), "the flag is named: {m}");
+            }
+            other => panic!("expected INVALID_ARGUMENT, got {other:?}"),
+        }
+
+        // A non-ASCII token is DESCRIBED, never echoed.
+        let (out, cap) = run_invite(
+            &rig,
+            Resp::Ok(InviteData {
+                invite_link: String::new(),
+                roster_added: Vec::new(),
+                skills: Vec::new(),
+            }),
+            &["alice@acme.com"],
+            None,
+            &["s_dëploy"],
+        );
+        assert!(cap.is_none());
+        match out.unwrap_err() {
+            ClientError::InvalidArgument(m) => {
+                assert!(!m.contains("dëploy"), "never echo non-ASCII bytes: {m}");
+                assert!(m.contains("non-ASCII"), "the shape is described: {m}");
+            }
+            other => panic!("expected INVALID_ARGUMENT, got {other:?}"),
         }
     }
 

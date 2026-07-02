@@ -16,7 +16,8 @@ use topos_core::sign::{
 };
 
 use super::Db;
-use super::enroll::{EnrollCorrupt, blob32, read_device};
+use super::blob32;
+use super::enroll::{EnrollCorrupt, read_device};
 use crate::enroll::{self, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
 use crate::governance::{GovernanceInput, GovernanceOp, GovernanceOutcome, Role};

@@ -545,7 +545,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: Some(WireError {
             code: "STALE_BASE".to_owned(),
             outcome: TerminalOutcome::Conflict,
-            retryable: true,
+            // A blind retry cannot resolve a CAS conflict — the caller must pull/rebase first (the
+            // client and the plane both compute false).
+            retryable: false,
             affected: Affected {
                 skill: Some("pr-describe".to_owned()),
                 ..Default::default()

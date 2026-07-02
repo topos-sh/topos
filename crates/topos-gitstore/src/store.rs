@@ -235,8 +235,10 @@ impl Store {
     /// per written version via [`WriteBatch::extend`]) instead of the whole store: the per-op fsync cost
     /// is bounded by the versions the op wrote, never by lifetime history. Objects shared with older
     /// versions are re-named (already durable — a harmless no-op), so the set is self-contained without
-    /// tracking write novelty; parents are NOT walked (a parent became durable before the doc that
-    /// recorded it, by this same contract).
+    /// tracking write novelty. Parent versions are NOT walked here — this set names ONE version's
+    /// writes. A caller that must guarantee a parent is durable (a present parent may sit in the crash
+    /// window between its write and its fsync, recorded nowhere) accumulates the parent's own set too,
+    /// one call per version.
     ///
     /// # Errors
     /// [`GitstoreError::Gix`] if the version ref is absent (the write being made durable should have

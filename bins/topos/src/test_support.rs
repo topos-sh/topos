@@ -557,7 +557,9 @@ impl FollowHarness {
                 plane_key,
                 follow,
             };
-            ops::follow(&ctx, &connectors, link, opts).map_err(|e| e.to_string())
+            ops::follow(&ctx, &connectors, link, opts)
+                .map(|o| o.data)
+                .map_err(|e| e.to_string())
         })
     }
 

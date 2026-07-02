@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topos_gitstore::{FileMode, RenderedBundle};
-use topos_types::SCHEMA_VERSION;
+use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 
 use crate::doc;
@@ -164,7 +164,7 @@ pub(crate) fn materialize(
 
     // Commit map → lock → sync (the commit point; `applied` advances only here).
     let next_map = PlacementMap {
-        schema_version: SCHEMA_VERSION,
+        schema_version: PERSISTED_SCHEMA_VERSION,
         placements: req.next_map_core.placements.clone(),
         applied_commit: req.next_map_core.applied_commit.clone(),
         materialized_sha: req.next_map_core.materialized_sha.clone(),

@@ -3,7 +3,7 @@
 Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
 
 - **`topos-types/`** — the wire DTOs (the serde boundary; the JSON-Schema source). The shared leaf.
-- **`topos-core/`** — the PURE trust kernel: digest, consent, the CAS decision, the sync transition, diff3,
+- **`topos-core/`** — the PURE trust kernel: digest, consent, the sync transition, diff3,
   Ed25519 sign-preimage + verify. No I/O. Depends on nothing else in the workspace (not even `topos-types`).
 - **`topos-gitstore/`** — the `gix` object mechanics + the content-addressed large-object store
   (verify-on-read). Depends on `topos-core` only.
@@ -14,8 +14,10 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
   publish transaction. Depends on `topos-core` + `topos-types` + `topos-gitstore`.
 
 **The rule that keeps the graph legible:** a trust decision is written once, in `topos-core`. Everything
-links it; nothing re-implements digest / consent / CAS / sync. `topos-core` has no I/O and no workspace
-deps, so an orchestration edit never recompiles the kernel math.
+links it; nothing re-implements digest / consent / sync. (The `(epoch,seq)` CAS *decision* is the named
+exception for now — it lives in `plane-store`'s SQL; its kernel extraction is on `topos-core`'s planned
+list.) `topos-core` has no I/O and no workspace deps, so an orchestration edit never recompiles the
+kernel math.
 
 Every split here is paid for by a real boundary — a testable-authority boundary, a platform-dependency
 boundary, or `plane-store`'s privacy boundary — never a crate-per-noun.

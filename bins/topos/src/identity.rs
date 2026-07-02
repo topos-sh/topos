@@ -4,7 +4,7 @@
 //! lives only in that `0600` sibling ([`crate::device_signer`]); `host.json` stays secret-free.
 
 use serde::{Deserialize, Serialize};
-use topos_types::SCHEMA_VERSION;
+use topos_types::PERSISTED_SCHEMA_VERSION;
 
 use crate::atomic::{atomic_write, load_versioned};
 use crate::error::ClientError;
@@ -55,12 +55,12 @@ pub(crate) fn load_or_create_device_id(
     let path = layout.host_path();
 
     if let Some(bytes) = fs.read_opt(&path)? {
-        let host: HostIdentity = load_versioned(&bytes, SCHEMA_VERSION)?;
+        let host: HostIdentity = load_versioned(&bytes, PERSISTED_SCHEMA_VERSION)?;
         return Ok(host.device_id);
     }
 
     let host = HostIdentity {
-        schema_version: SCHEMA_VERSION,
+        schema_version: PERSISTED_SCHEMA_VERSION,
         device_id: format!("d_{}", uuid::Uuid::new_v4().simple()),
         device_key: None,
     };
@@ -74,7 +74,7 @@ pub(crate) fn load_or_create_device_id(
     let persisted: HostIdentity = load_versioned(
         &fs.read_opt(&path)?
             .ok_or_else(|| ClientError::Corrupt("host identity vanished after write".into()))?,
-        SCHEMA_VERSION,
+        PERSISTED_SCHEMA_VERSION,
     )?;
     Ok(persisted.device_id)
 }
@@ -99,7 +99,7 @@ pub(crate) fn set_device_key(
             "host identity is absent; mint the device id before the device key".into(),
         )
     })?;
-    let mut host: HostIdentity = load_versioned(&bytes, SCHEMA_VERSION)?;
+    let mut host: HostIdentity = load_versioned(&bytes, PERSISTED_SCHEMA_VERSION)?;
     host.device_key = Some(device_key.clone());
     let mut out =
         serde_json::to_vec_pretty(&host).map_err(|e| ClientError::Corrupt(format!("{e}")))?;
@@ -144,7 +144,7 @@ mod tests {
 
         // host.json round-trips the reference; the device id is unchanged.
         let bytes = fs.read_opt(&layout.host_path()).unwrap().unwrap();
-        let host: HostIdentity = load_versioned(&bytes, SCHEMA_VERSION).unwrap();
+        let host: HostIdentity = load_versioned(&bytes, PERSISTED_SCHEMA_VERSION).unwrap();
         assert_eq!(host.device_id, device_id);
         assert_eq!(host.device_key.as_ref(), Some(&dref));
         // The device id is stable across a re-load — the device_key addition didn't fork identity.

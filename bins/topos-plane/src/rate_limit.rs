@@ -25,7 +25,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, SCHEMA_VERSION, TerminalOutcome, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, TerminalOutcome, WIRE_SCHEMA_VERSION, WireError,
 };
 
 use crate::state::PlaneState;
@@ -190,7 +190,7 @@ fn too_many_requests(retry_after_seconds: u64) -> Response {
         next_actions: vec![retry_action()],
     };
     let envelope = JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: "rate_limited".to_owned(),
         ok: false,
         data: serde_json::json!({}),

@@ -472,7 +472,7 @@ fn run_follow(
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    ops::follow(&ctx, &connectors, link.map(str::to_owned), opts)
+    ops::follow(&ctx, &connectors, link.map(str::to_owned), opts).map(|o| o.data)
 }
 
 fn opts(manual: bool, resume: bool, approve: &[&str]) -> ops::FollowOpts {
@@ -733,7 +733,9 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    let data = ops::follow(&ctx, &connectors, None, opts(false, true, &[])).unwrap();
+    let data = ops::follow(&ctx, &connectors, None, opts(false, true, &[]))
+        .unwrap()
+        .data;
 
     assert!(data.enrolled);
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
@@ -1097,10 +1099,14 @@ fn approve_places_the_named_first_receive_offer() {
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    let data = ops::follow(&ctx, &connectors, None, opts(false, false, &["deploy"])).unwrap();
+    let out = ops::follow(&ctx, &connectors, None, opts(false, false, &["deploy"])).unwrap();
 
-    assert!(data.enrolled);
-    assert_eq!(data.skills.len(), 1);
+    assert!(out.data.enrolled);
+    assert_eq!(out.data.skills.len(), 1);
+    assert!(
+        out.resumed.is_empty(),
+        "an active follow's approve is not a resume"
+    );
     // The named bytes were placed.
     let placement = rig.placement("s_deploy");
     assert_eq!(

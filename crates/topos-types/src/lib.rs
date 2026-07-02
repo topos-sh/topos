@@ -42,11 +42,6 @@ pub const PERSISTED_SCHEMA_VERSION: u32 = 1;
 /// with the op vocabulary, not with the envelope or the sidecar docs).
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 
-/// The legacy shared constant, kept so existing call sites compile unchanged — deprecated in favor
-/// of the per-family constants above (wire / persisted / receipt evolve independently; one shared
-/// number would couple all three). New code names its family; a mechanical sweep retires this alias.
-pub use self::WIRE_SCHEMA_VERSION as SCHEMA_VERSION;
-
 /// The `data` payload defaults to an empty object (`{}`), not `null`, when absent — matching the
 /// emitted envelope (a pure-signal command still carries `"data": {}`).
 fn empty_object() -> serde_json::Value {

@@ -11,7 +11,7 @@
 use sqlx::{Postgres, Transaction};
 use topos_types::Generation;
 
-use super::Db;
+use super::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -446,12 +446,6 @@ fn parse_status(s: &str) -> Result<ProposalStatus> {
     }
 }
 
-fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
-    bytes
-        .try_into()
-        .map_err(|_| AuthorityError::integrity(BadBlobWidth))
-}
-
 fn u64_to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| AuthorityError::integrity(GenerationOutOfRange))
 }
@@ -463,10 +457,6 @@ fn i64_to_u64(v: i64) -> Result<u64> {
 #[derive(Debug, thiserror::Error)]
 #[error("a stored proposal status is not a known value")]
 struct BadProposalStatus;
-
-#[derive(Debug, thiserror::Error)]
-#[error("stored content id is not 32 bytes")]
-struct BadBlobWidth;
 
 #[derive(Debug, thiserror::Error)]
 #[error("a stored generation is out of the safe-integer range")]

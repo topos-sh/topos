@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use topos_types::SCHEMA_VERSION;
+use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 
 use crate::doc;
@@ -394,7 +394,7 @@ pub(crate) fn write_follows_merged(
         fs,
         &layout.follows_path(),
         &Follows {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             follows: merged,
         },
     )
@@ -426,7 +426,7 @@ pub(crate) fn set_following(
         fs,
         &layout.follows_path(),
         &Follows {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             follows: follows.follows,
         },
     )
@@ -517,7 +517,7 @@ pub(crate) fn sweep_expired_wal(
 mod tests {
     use super::*;
     use crate::atomic::load_versioned;
-    use topos_types::SCHEMA_VERSION;
+    use topos_types::PERSISTED_SCHEMA_VERSION;
 
     fn sample_instance() -> Instance {
         Instance {
@@ -593,18 +593,18 @@ mod tests {
         // A NEWER schema_version is never handed to serde — an upgrade error, fail closed.
         let newer = br#"{"schema_version":2,"base_url":"x","plane_key":"a","plane_key_id":"k"}"#;
         assert!(matches!(
-            load_versioned::<Instance>(newer, SCHEMA_VERSION),
+            load_versioned::<Instance>(newer, PERSISTED_SCHEMA_VERSION),
             Err(ClientError::UnknownSchemaVersion { found: 2, .. })
         ));
         // A v0 doc is below the floor.
         let legacy = br#"{"schema_version":0,"follows":[]}"#;
         assert!(matches!(
-            load_versioned::<Follows>(legacy, SCHEMA_VERSION),
+            load_versioned::<Follows>(legacy, PERSISTED_SCHEMA_VERSION),
             Err(ClientError::UnsupportedLegacy { found: 0 })
         ));
         // A current-version doc parses.
         let ok = br#"{"schema_version":1,"follows":[]}"#;
-        assert!(load_versioned::<Follows>(ok, SCHEMA_VERSION).is_ok());
+        assert!(load_versioned::<Follows>(ok, PERSISTED_SCHEMA_VERSION).is_ok());
     }
 
     #[test]
@@ -673,7 +673,7 @@ mod tests {
         let layout = Layout::new(&scratch("hostile-wal"));
         std::fs::create_dir_all(layout.identity_dir()).unwrap();
         let wal = PendingEnrollment {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::Redeemed {
                 context: EnrollContext {
                     base_url: "https://acme.topos.test".to_owned(),

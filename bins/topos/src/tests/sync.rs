@@ -629,6 +629,71 @@ fn go_back_then_resume() {
 }
 
 #[test]
+fn pull_name_fallback_reaches_a_skill_literally_named_with_a_hex_at_suffix() {
+    let rig = Rig::new("atname");
+    // Adopt a skill whose NAME looks exactly like a go-back target (a name is a directory basename —
+    // only the skill ID charset forbids `@`).
+    let dir = rig.work.0.join("docs@abcdef12");
+    write_tree(&dir, BASE);
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let added = ops::add(&rig.ctx(&inert_p, &inert_f), &dir).unwrap();
+    assert_eq!(added.name, "docs@abcdef12");
+
+    // The go-back parse tries the pre-@ name (`docs`) first, finds no tracked skill, and retries the
+    // WHOLE argument as the name — the skill is reachable, never shadowed by the suffix parse.
+    let out = crate::app::pull_with_name_fallback(
+        &rig.ctx(&inert_p, &inert_f),
+        Some("docs@abcdef12".to_owned()),
+        false,
+    )
+    .unwrap();
+    assert_eq!(out.data.skills.len(), 1, "the @-named skill resolved");
+
+    // Neither interpretation tracked → the typed NoSuchSkill names the FULL argument the user typed.
+    let err = match crate::app::pull_with_name_fallback(
+        &rig.ctx(&inert_p, &inert_f),
+        Some("nope@abcdef12".to_owned()),
+        false,
+    ) {
+        Ok(_) => panic!("an untracked name must not resolve"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(&err, crate::error::ClientError::NoSuchSkill { name } if name == "nope@abcdef12"),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pull_name_fallback_keeps_the_go_back_primary() {
+    // The go-back interpretation still wins when the pre-@ name IS tracked — same shape as
+    // `go_back_then_resume`, but driven through the app-level fallback entry point.
+    let rig = Rig::new("atgoback");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+
+    let out = crate::app::pull_with_name_fallback(
+        &rig.ctx(&plane, &foll),
+        Some(format!("{name}@{}", to_hex(&genesis))),
+        false,
+    )
+    .unwrap();
+    assert_eq!(out.data.skills[0].action, PullAction::Held);
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(BASE)),
+        "the go-back landed the old bytes"
+    );
+}
+
+#[test]
 fn go_back_resolves_a_unique_short_prefix_and_refuses_a_no_match() {
     // Same shape as `go_back_then_resume`, but the target rides as a pasted 12-char short form — the
     // exact string every TTY surface renders — resolved against the skill's recorded history.
@@ -1894,6 +1959,45 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
 }
 
 #[test]
+fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
+    let rig = Rig::new("wedgelog");
+    let (id, name, _genesis) = rig.adopt(BASE);
+    // Wedge the tracked skill: a corrupt sync.json makes every sweep of it fail. lock.json + the store
+    // stay intact, so `log` still resolves the skill.
+    std::fs::write(rig.layout().published(&sid(&id)).sync, b"{not json").unwrap();
+    let plane = FixturePlane::default();
+    let foll = follow(&id, FollowMode::Auto);
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert!(out.data.skills.is_empty(), "the wedged skill has no row");
+    assert_eq!(out.warnings.len(), 1);
+
+    // The REAL read path: `topos log <skill>` filters on the first-class skill_id field, so the wedged
+    // skill's error event surfaces in its own log.
+    let log = ops::log(&rig.ctx(&plane, &foll), &name).unwrap();
+    let errors: Vec<_> = log
+        .events
+        .iter()
+        .filter(|e| e.get("action").and_then(|v| v.as_str()) == Some("error"))
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "the wedged skill's failure is in its log: {:?}",
+        log.events
+    );
+    assert_eq!(
+        errors[0].get("skill_id").and_then(|v| v.as_str()),
+        Some(id.as_str())
+    );
+    assert_eq!(errors[0].get("verb").and_then(|v| v.as_str()), Some("pull"));
+
+    // The TTY renderer's error arm renders it readably (verb + code).
+    let text = crate::render::log_tty(&log);
+    assert!(text.contains("error  pull ["), "{text}");
+}
+
+#[test]
 fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
     let rig = Rig::new("hostileid");
     let (_id, _name, _genesis) = rig.adopt(BASE);
@@ -2045,20 +2149,46 @@ fn store_loose_objects(store_dir: &Path) -> std::collections::HashSet<PathBuf> {
     out
 }
 
+/// V2 in the genesis → v1 → v2 chain — every file's bytes differ from BOTH earlier generations, so the
+/// three versions share no blobs and the era sets below partition cleanly.
+const V2: &[(&str, FileMode, &[u8])] = &[
+    ("SKILL.md", FileMode::Regular, b"# v2\n"),
+    ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v2\n"),
+    ("ref/notes.md", FileMode::Regular, b"new in v2\n"),
+];
+
 #[test]
-fn pull_fsyncs_exactly_the_fetched_version_never_the_whole_store() {
+fn pull_fsyncs_exactly_the_fetched_version_plus_its_direct_parent() {
+    // Chain genesis → v1 → v2. Land v1 with a plain pull, then record a pull of v2 and pin its
+    // durability frontier: the fetched version's own writes PLUS its direct parent's set (present ≠
+    // durable, so a present v1 is re-fsynced — no-ops when it already was) — and NOTHING beyond:
+    // grandparent-era (genesis) objects are never re-fsynced when the parent was present.
     let rig = Rig::new("fsyncset");
     let (id, _name, genesis) = rig.adopt(BASE);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let v2 = mk_version(&[v1.id], V2, "d_pub", "v2");
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
+    plane.add_version(&id, &v2);
     plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
     let foll = follow(&id, FollowMode::Auto);
 
     let store_dir = rig.layout().published(&sid(&id)).store;
-    let before = store_loose_objects(&store_dir);
-    assert!(!before.is_empty(), "adopt left genesis objects");
+    let genesis_era = store_loose_objects(&store_dir);
+    assert!(!genesis_era.is_empty(), "adopt left genesis objects");
 
+    // Land v1 first (not the pull under test) — v2's direct parent becomes present + recorded.
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::FastForwarded);
+    let after_v1 = store_loose_objects(&store_dir);
+    let v1_era: Vec<&PathBuf> = after_v1
+        .iter()
+        .filter(|p| !genesis_era.contains(*p))
+        .collect();
+    assert!(!v1_era.is_empty(), "the v1 pull wrote v1's objects");
+
+    // The recorded pull: v2 arrives; its direct parent v1 is already present.
+    plane.set_current(&id, signed(WS, &id, v2.id, 1, 2));
     let fs = RecordingFs::new();
     let data = pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
     assert_eq!(only(&data).action, PullAction::FastForwarded);
@@ -2073,29 +2203,49 @@ fn pull_fsyncs_exactly_the_fetched_version_never_the_whole_store() {
     let synced: std::collections::HashSet<&PathBuf> =
         store_fsyncs.iter().map(|&(_, p)| p).collect();
 
-    // (a) COMPLETE: every loose object the fetch wrote — and v1's version ref — was fsynced before the
+    // (a) COMPLETE: every loose object the fetch wrote — and v2's version ref — was fsynced before the
     // pull returned (the crash-safety contract: reachable ⇒ durable before recorded).
     let new: Vec<PathBuf> = store_loose_objects(&store_dir)
         .into_iter()
-        .filter(|p| !before.contains(p))
+        .filter(|p| !after_v1.contains(p))
         .collect();
-    assert!(!new.is_empty(), "the fetch wrote v1's objects");
+    assert!(!new.is_empty(), "the fetch wrote v2's objects");
     for p in &new {
         assert!(synced.contains(p), "fetched object {p:?} was not fsynced");
     }
-    let v1_ref = store_dir.join("refs/topos/versions").join(to_hex(&v1.id));
-    assert!(synced.contains(&v1_ref), "v1's version ref was not fsynced");
+    let v2_ref = store_dir.join("refs/topos/versions").join(to_hex(&v2.id));
+    assert!(synced.contains(&v2_ref), "v2's version ref was not fsynced");
 
-    // (b) BOUNDED: no genesis-era (historical) object was re-fsynced — the per-pull durability set is
-    // the fetched version's own writes, never the store's lifetime history.
-    for p in &before {
+    // (b) PARENT INCLUDED: the direct parent's whole era was re-fsynced too — a present parent may sit
+    // in the crash window between its write and its fsync, and this pull records a child naming it.
+    for p in &v1_era {
         assert!(
-            !synced.contains(p),
-            "historical object {p:?} was re-fsynced — the durability set is unbounded"
+            synced.contains(*p),
+            "direct-parent object {p:?} was not re-fsynced — present was treated as durable"
         );
     }
+    let v1_ref = store_dir.join("refs/topos/versions").join(to_hex(&v1.id));
+    assert!(
+        synced.contains(&v1_ref),
+        "v1's version ref was not re-fsynced"
+    );
 
-    // (c) ORDERED: every store fsync precedes the first doc write that records the applied version
+    // (c) BOUNDED: nothing beyond the fetched version + its direct parent — no grandparent-era
+    // (genesis) object or ref was re-fsynced, because the present parent's arm returns before walking
+    // ITS parents. The per-pull durability set stays bounded, never the store's lifetime history.
+    for p in &genesis_era {
+        assert!(
+            !synced.contains(p),
+            "grandparent-era object {p:?} was re-fsynced — the durability set is unbounded"
+        );
+    }
+    let genesis_ref = store_dir.join("refs/topos/versions").join(to_hex(&genesis));
+    assert!(
+        !synced.contains(&genesis_ref),
+        "the grandparent's version ref was re-fsynced"
+    );
+
+    // (d) ORDERED: every store fsync precedes the first doc write that records the applied version
     // (map/lock are written only by the post-swap doc commit; sync.json's floor raise is earlier by
     // design and names no local bytes).
     let last_store_fsync = store_fsyncs.iter().map(|&(i, _)| i).max().unwrap();
@@ -2113,6 +2263,72 @@ fn pull_fsyncs_exactly_the_fetched_version_never_the_whole_store() {
         last_store_fsync < first_apply_doc,
         "a store fsync ({last_store_fsync}) landed after the doc commit began ({first_apply_doc})"
     );
+}
+
+#[test]
+fn pull_fsyncs_a_present_but_unrecorded_parent() {
+    // The crash window itself: a prior pull wrote v1's objects + ref but died BEFORE its fsync and
+    // before any doc recorded it — v1 is present-and-renderable yet recorded nowhere and possibly not
+    // durable. A pull of its child v2 must fsync v1's whole set too (never fetching it — it IS present),
+    // not just v2's own writes.
+    let rig = Rig::new("fsyncparent");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let v2 = mk_version(&[v1.id], V2, "d_pub", "v2");
+
+    // Simulate the crash: commit v1 straight into the sidecar store — no fsync, no doc record.
+    {
+        let store = rig.open_store(&id);
+        let import: Vec<topos_gitstore::ImportFile<'_>> = v1
+            .fetched
+            .files
+            .iter()
+            .map(|f| topos_gitstore::ImportFile {
+                path: &f.path,
+                mode: f.mode,
+                bytes: &f.bytes,
+            })
+            .collect();
+        let tree = store.write_bundle(&import).unwrap();
+        store
+            .commit(
+                v1.id,
+                &[genesis],
+                &tree,
+                &v1.fetched.author,
+                &v1.fetched.message,
+            )
+            .unwrap();
+    }
+
+    // The plane serves ONLY v2 — the pull must not need to fetch the present parent.
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v2);
+    plane.set_current(&id, signed(WS, &id, v2.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let store_dir = rig.layout().published(&sid(&id)).store;
+    let fs = RecordingFs::new();
+    let data = pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::FastForwarded);
+
+    let synced: std::collections::HashSet<PathBuf> = fs
+        .ops()
+        .into_iter()
+        .filter(|(label, p)| *label == "fsync_file" && p.starts_with(&store_dir))
+        .map(|(_, p)| p)
+        .collect();
+
+    // v1's entire durability set (ref + commit + trees + blobs) was fsynced by the pull of v2, closing
+    // the window where a doc records a child whose parent lineage could vanish on power loss.
+    let v1_set = rig.open_store(&id).version_durability(&v1.id).unwrap();
+    assert!(!v1_set.files.is_empty(), "v1 names a durability set");
+    for p in &v1_set.files {
+        assert!(
+            synced.contains(p),
+            "present-but-unrecorded parent path {p:?} was not fsynced"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

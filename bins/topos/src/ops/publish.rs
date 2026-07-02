@@ -13,7 +13,7 @@ use topos_core::sign::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
 use topos_types::results::{ProposeData, PublishData};
-use topos_types::{Generation, SCHEMA_VERSION, TerminalOutcome};
+use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::invite::{GovernanceConnect, invite as mint_invite};
@@ -253,7 +253,7 @@ fn build_publish_op(
         .as_hyphenated()
         .to_string();
     Ok(OpRecord {
-        schema_version: SCHEMA_VERSION,
+        schema_version: PERSISTED_SCHEMA_VERSION,
         op_id,
         workspace_id: workspace_id.to_owned(),
         skill_id: id.to_owned(),

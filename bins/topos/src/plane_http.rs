@@ -489,8 +489,9 @@ impl EnrollSource for UreqDeviceClient {
                 "device authorize: HTTP {status}"
             )));
         }
-        let resp: DeviceAuthorizeResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| ClientError::Corrupt(format!("authorize response is malformed: {e}")))?;
+        let resp: DeviceAuthorizeResponse = serde_json::from_slice(&bytes).map_err(|e| {
+            ClientError::WireInvalid(format!("authorize response is malformed: {e}"))
+        })?;
         Ok(DeviceAuthorize {
             device_code: resp.device_code,
             user_code: resp.user_code,
@@ -513,7 +514,7 @@ impl EnrollSource for UreqDeviceClient {
             )));
         }
         let resp: DeviceTokenResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| ClientError::Corrupt(format!("token response is malformed: {e}")))?;
+            .map_err(|e| ClientError::WireInvalid(format!("token response is malformed: {e}")))?;
         Ok(match resp.status {
             DeviceTokenStatus::Pending => TokenPoll::Pending,
             DeviceTokenStatus::SlowDown => TokenPoll::SlowDown,
@@ -523,7 +524,7 @@ impl EnrollSource for UreqDeviceClient {
                 Some(g) => TokenPoll::Granted(Grant::new(g)),
                 // `granted` without a grant is a malformed response, not a silent re-poll.
                 None => {
-                    return Err(ClientError::Corrupt(
+                    return Err(ClientError::WireInvalid(
                         "a granted device-token poll carried no grant".into(),
                     ));
                 }
@@ -540,7 +541,7 @@ impl EnrollSource for UreqDeviceClient {
     ) -> Result<Redeem, ClientError> {
         // The workspace id is spliced into the URL path below — validate before building the request
         // (it entered via the bootstrap, which already validated; this is the last-line guard).
-        crate::id::validate_workspace_id(workspace_id)?;
+        crate::id::validate_workspace_id(workspace_id).map_err(crate::id::wire_flavor)?;
         let body = serde_json::to_value(RedeemRequest {
             workspace_id: workspace_id.to_owned(),
             grant: grant.to_owned(),
@@ -565,7 +566,7 @@ fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError>
         return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::Corrupt(format!("redeem envelope is malformed: {e}")))?;
+        .map_err(|e| ClientError::WireInvalid(format!("redeem envelope is malformed: {e}")))?;
     if !env.ok {
         // A DENIED redeem (e.g. a device-key mismatch) — surface the code, never any secret.
         let code = env
@@ -575,13 +576,14 @@ fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError>
         return Err(ClientError::Plane(format!("redeem refused ({code})")));
     }
     let resp: RedeemResponse = serde_json::from_value(env.data)
-        .map_err(|e| ClientError::Corrupt(format!("redeem data is malformed: {e}")))?;
-    crate::id::validate_workspace_id(&resp.workspace_id)?;
+        .map_err(|e| ClientError::WireInvalid(format!("redeem data is malformed: {e}")))?;
+    crate::id::validate_workspace_id(&resp.workspace_id).map_err(crate::id::wire_flavor)?;
     let mut read_creds = Vec::with_capacity(resp.read_creds.len());
     for c in resp.read_creds {
         // The wire boundary: the minted skill id must be a safe path component (it keys the sidecar +
-        // the harness placement). Parse-don't-validate — the failure is the corrupt family, no new code.
-        crate::id::SkillId::parse(&c.skill_id)?;
+        // the harness placement). Parse-don't-validate — the failure is the corrupt family's WIRE
+        // flavor (same code; the safe message names the plane, not a sidecar).
+        crate::id::SkillId::parse(&c.skill_id).map_err(crate::id::wire_flavor)?;
         read_creds.push(RedeemedCred {
             skill_id: c.skill_id,
             read_token: c.read_token,
@@ -600,10 +602,11 @@ fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError>
 /// segments (they persist into the WAL and later key path joins). **Pure**, unit-tested with canned JSON.
 fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
     let bootstrap: BootstrapData = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::Corrupt(format!("invite bootstrap is malformed: {e}")))?;
-    crate::id::validate_workspace_id(&bootstrap.workspace.workspace_id)?;
+        .map_err(|e| ClientError::WireInvalid(format!("invite bootstrap is malformed: {e}")))?;
+    crate::id::validate_workspace_id(&bootstrap.workspace.workspace_id)
+        .map_err(crate::id::wire_flavor)?;
     for s in &bootstrap.offered_skills {
-        crate::id::SkillId::parse(&s.skill_id)?;
+        crate::id::SkillId::parse(&s.skill_id).map_err(crate::id::wire_flavor)?;
     }
     Ok(bootstrap)
 }
@@ -638,7 +641,7 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
         return Err(ClientError::Plane(format!("create invite: HTTP {status}")));
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::Corrupt(format!("invite envelope is malformed: {e}")))?;
+        .map_err(|e| ClientError::WireInvalid(format!("invite envelope is malformed: {e}")))?;
     if !env.ok {
         // A DENIED invite (e.g. the signer is not an owner) — surface the code, never any secret.
         let code = env
@@ -648,7 +651,7 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
         return Err(ClientError::Plane(format!("invite refused ({code})")));
     }
     serde_json::from_value(env.data)
-        .map_err(|e| ClientError::Corrupt(format!("invite data is malformed: {e}")))
+        .map_err(|e| ClientError::WireInvalid(format!("invite data is malformed: {e}")))
 }
 
 // =================================================================================================
@@ -708,10 +711,10 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
         });
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::Corrupt(format!("write envelope is malformed: {e}")))?;
+        .map_err(|e| ClientError::WireInvalid(format!("write envelope is malformed: {e}")))?;
     let receipt = env
         .receipt
-        .ok_or_else(|| ClientError::Corrupt("a write 200 carried no receipt".to_owned()))?;
+        .ok_or_else(|| ClientError::WireInvalid("a write 200 carried no receipt".to_owned()))?;
     // The signed pointer is present ONLY when a pointer actually moved. NEEDS_REVIEW, an OK `review
     // --reject` (the plane returns OK with no signed record → data `{}`), and every failure carry `{}`;
     // parse leniently so a valid reject is never wrongly rejected as Corrupt.
@@ -1047,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn map_write_envelope_missing_receipt_is_corrupt() {
+    fn map_write_envelope_missing_receipt_is_wire_invalid() {
         let bytes = envelope_bytes(&JsonEnvelope {
             schema_version: 1,
             command: "publish".to_owned(),
@@ -1059,7 +1062,12 @@ mod tests {
             error: None,
         });
         let err = map_write_envelope(200, &bytes).unwrap_err();
-        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+        assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
+        assert_eq!(
+            crate::render::safe_message(&err),
+            "the plane's response failed validation",
+            "a wire fault never blames a local sidecar"
+        );
     }
 
     // ---- The id boundary: hostile plane-supplied ids are refused at the wire parse. ----
@@ -1086,14 +1094,19 @@ mod tests {
     #[test]
     fn map_redeem_envelope_refuses_a_hostile_skill_id() {
         // The redeem's skill ids become path components (~/.topos/skills/<id>, the harness skills dir),
-        // so every traversal/separator/case shape must fail the WHOLE redeem as the corrupt family.
+        // so every traversal/separator/case shape must fail the WHOLE redeem — as the WIRE flavor of the
+        // corrupt family (same CORRUPT_STATE code; the safe message names the plane, not a sidecar).
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
             let err = map_redeem_envelope(200, &redeem_env(bad, "w_acme")).unwrap_err();
             assert!(
-                matches!(err, ClientError::Corrupt(_)),
-                "skill id {bad:?} must be refused as Corrupt, got {err:?}"
+                matches!(err, ClientError::WireInvalid(_)),
+                "skill id {bad:?} must be refused as WireInvalid, got {err:?}"
             );
             assert_eq!(err.code(), "CORRUPT_STATE", "no new wire code");
+            assert_eq!(
+                crate::render::safe_message(&err),
+                "the plane's response failed validation"
+            );
         }
         // A clean redeem still parses.
         let ok = map_redeem_envelope(200, &redeem_env("s_deploy", "w_acme")).unwrap();
@@ -1105,7 +1118,7 @@ mod tests {
         // The workspace id is spliced into request URL paths — same charset rule.
         for bad in ["../../x", "a/b", "A", ""] {
             let err = map_redeem_envelope(200, &redeem_env("s_deploy", bad)).unwrap_err();
-            assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+            assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
         }
     }
 
@@ -1139,12 +1152,12 @@ mod tests {
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
             let err = parse_bootstrap(&bootstrap_json(bad, "w_acme")).unwrap_err();
             assert!(
-                matches!(err, ClientError::Corrupt(_)),
+                matches!(err, ClientError::WireInvalid(_)),
                 "offered skill id {bad:?} must be refused, got {err:?}"
             );
             let err = parse_bootstrap(&bootstrap_json("s_deploy", bad)).unwrap_err();
             assert!(
-                matches!(err, ClientError::Corrupt(_)),
+                matches!(err, ClientError::WireInvalid(_)),
                 "workspace id {bad:?} must be refused, got {err:?}"
             );
         }

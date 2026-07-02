@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use topos_types::SCHEMA_VERSION;
+use topos_types::PERSISTED_SCHEMA_VERSION;
 
 use crate::atomic::{atomic_write, atomic_write_private, load_versioned};
 use crate::error::ClientError;
@@ -37,7 +37,7 @@ pub(crate) fn read_doc<T: DeserializeOwned>(
 ) -> Result<Option<T>, ClientError> {
     match fs.read_opt(path)? {
         None => Ok(None),
-        Some(bytes) => Ok(Some(load_versioned::<T>(&bytes, SCHEMA_VERSION)?)),
+        Some(bytes) => Ok(Some(load_versioned::<T>(&bytes, PERSISTED_SCHEMA_VERSION)?)),
     }
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn read_doc_private<T: DeserializeOwned>(
                     path.display()
                 )));
             }
-            Ok(Some(load_versioned::<T>(&bytes, SCHEMA_VERSION)?))
+            Ok(Some(load_versioned::<T>(&bytes, PERSISTED_SCHEMA_VERSION)?))
         }
     }
 }
@@ -115,7 +115,7 @@ mod tests {
         let dir = scratch("rt");
         let p = dir.join("follows.json");
         let s = Secret {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             token: "rt_secret".to_owned(),
         };
         write_doc_private(&fs, &p, &s).unwrap();
@@ -138,7 +138,7 @@ mod tests {
         let fs = RealFs;
         let p = scratch("perm").join("follows.json");
         let s = Secret {
-            schema_version: SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             token: "rt_secret".to_owned(),
         };
         // Write it as a NON-private 0644 doc, then demand it as a secret → refused BEFORE parsing.

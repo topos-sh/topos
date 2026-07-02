@@ -12,6 +12,16 @@ check an item off in the same change that lands it.
 - [ ] `CONTRIBUTING.md` — how to build (`cargo xtask ci`), run the Postgres-backed suite
       (`DATABASE_URL` + `cargo test`), and propose changes.
 
+## History hygiene (before the first public push)
+
+- [ ] **Scrub or squash the pre-branch mainline commit messages that name internal review processes.**
+      The published history must be self-contained: no commit message may reference internal reviewers,
+      review-round labels, private planning documents, or internal roadmap/phase tags. Audit the shape,
+      not just known strings — anything that reads as "who reviewed this and in which internal round"
+      rather than "what changed and why" gets reworded (or the run of commits squashed) before the
+      remote ever sees it. The committed files are already swept by the in-repo greps; this item covers
+      the `git log` itself.
+
 ## Operational gaps to close (or explicitly accept and document)
 
 - [ ] **First-boot workspace standup**: mint + log the one-time `admin-claim` token so a fresh self-hosted

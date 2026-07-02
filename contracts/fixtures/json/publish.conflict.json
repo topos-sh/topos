@@ -35,7 +35,7 @@
   "error": {
     "code": "STALE_BASE",
     "outcome": "CONFLICT",
-    "retryable": true,
+    "retryable": false,
     "affected": {
       "skill": "pr-describe"
     },

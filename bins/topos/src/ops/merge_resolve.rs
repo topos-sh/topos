@@ -184,7 +184,7 @@ pub(crate) fn resolve_diverged(
                 commit_result(ctx, &store, theirs_commit, &merged, MERGE_CONFLICT_MESSAGE)?;
             // The journal is written + fsynced BEFORE the swap, so a crash mid-materialize is recoverable.
             let cs = ConflictState {
-                schema_version: topos_types::SCHEMA_VERSION,
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
                 base_commit: to_hex(&base_commit),
                 base_digest: to_hex(&base.bundle_digest),
                 current_commit: to_hex(&theirs_commit),
@@ -298,7 +298,7 @@ fn no_base(
     // base is unrenderable, so a base-parented snapshot is impossible — M is the recoverable draft).
     let result_commit = commit_result(ctx, &store, theirs_commit, &merged, MERGE_NOBASE_MESSAGE)?;
     let cs = ConflictState {
-        schema_version: topos_types::SCHEMA_VERSION,
+        schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
         base_commit: to_hex(&base_commit),
         base_digest: to_hex(&base_digest),
         current_commit: to_hex(&theirs_commit),

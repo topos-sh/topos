@@ -20,8 +20,8 @@ use topos_types::requests::{
 };
 use topos_types::results::InviteData;
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, Receipt, SCHEMA_VERSION, SignatureAlg,
-    SignedCurrentRecord, TerminalOutcome, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, RECEIPT_SCHEMA_VERSION, Receipt, SignatureAlg,
+    SignedCurrentRecord, TerminalOutcome, WIRE_SCHEMA_VERSION, WireError,
 };
 
 use super::error::PlaneHttpError;
@@ -38,7 +38,7 @@ pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvel
     let command = wire_command(&receipt.command).to_owned();
 
     let wire_receipt = Receipt {
-        schema_version: SCHEMA_VERSION,
+        schema_version: RECEIPT_SCHEMA_VERSION,
         op_id: receipt.op_id.clone(),
         command: command.clone(),
         outcome,
@@ -95,7 +95,7 @@ pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvel
     };
 
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command,
         ok,
         data,
@@ -197,13 +197,13 @@ fn next_actions_for(outcome: TerminalOutcome) -> Vec<NextAction> {
         .collect()
 }
 
-/// Whether a failure outcome is worth a blind retry.
+/// Whether a failure outcome is worth a blind retry. A CAS `Conflict` is NOT: replaying the identical
+/// request against a moved pointer conflicts forever — the caller must pull/rebase first (the client
+/// computes the same `false`; both halves agree).
 fn retryable(outcome: TerminalOutcome) -> bool {
     matches!(
         outcome,
-        TerminalOutcome::Conflict
-            | TerminalOutcome::Unavailable
-            | TerminalOutcome::RetryableFailure
+        TerminalOutcome::Unavailable | TerminalOutcome::RetryableFailure
     )
 }
 
@@ -247,7 +247,7 @@ fn default_code(outcome: TerminalOutcome) -> &'static str {
 /// invite link token the client used (echoed as the non-secret `token_id`); the plane key is pinned here.
 pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapData {
     BootstrapData {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         invite: BootstrapInvite {
             token_id: token.to_owned(),
             // The domain `InviteBootstrap` does not carry the invite's own expiry; the bootstrap omits it
@@ -392,7 +392,7 @@ pub(crate) fn governance_envelope(
 /// `SetCurrentReceipt`; their idempotency record is the authority's `workspace_events`/deterministic credential).
 fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelope {
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: command.to_owned(),
         ok: true,
         data,
@@ -419,7 +419,7 @@ fn denied_envelope(command: &str) -> JsonEnvelope {
         next_actions: actions.clone(),
     };
     JsonEnvelope {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         command: command.to_owned(),
         ok: false,
         data: serde_json::json!({}),

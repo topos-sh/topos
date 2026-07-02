@@ -59,9 +59,12 @@ renderer over the SAME typed outcomes (one value, two presentations).
   + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
   degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
   `follow --approve <skill>[@<hash>]` drives the existing pull engine to
-  place a disclosed first-receive offer (the I-TOFU "one --approve"). The enrollment transports (`UreqDeviceClient`
+  place a disclosed first-receive offer (the I-TOFU "one --approve"), and RESUMES a retained entry
+  `unfollow` paused (flips `following` back on; a still-pending first-receive offer is placed, else the
+  next `pull` lands current). The enrollment transports (`UreqDeviceClient`
   + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
-  whole flow is tested over a **fake** with no HTTP (the real loopback proof lands with the test member next).
+  whole flow is tested over a **fake** with no HTTP (the real loopback proof lives in
+  `tests/tests/follow_e2e.rs`).
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
   by signing the governance Invite op and POSTing it. Requires prior enrollment: the pinned plane (`base_url`
   from `instance.json`), the workspace (`workspace_id` from `identity/user.json`), and the device key all come
@@ -174,7 +177,9 @@ are asserted byte-equal in tests.
 
 - **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
   byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
-  the enrollment uses (retaining the workspace / mode / read credential so a later `follow` resumes),
+  the enrollment uses (retaining the workspace / mode / read credential so a later
+  `follow --approve <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
+  pending, placing it),
   and touches nothing else — never a skill file, never the sync state or a `held` pin, never the currency
   hook (the per-install hook's sweep simply skips an unfollowed skill; `load_enrollment` keeps the pinned
   plane key loaded even with zero active follows, so an enrolled author who unfollowed everything can
