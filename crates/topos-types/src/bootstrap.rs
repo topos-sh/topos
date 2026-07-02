@@ -15,10 +15,14 @@ use crate::SignatureAlg;
 
 /// The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the
 /// workspace + the plane signing root to pin. No bytes, no role.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapData {
     /// Always `1` for this contract version (the schema pins it `const`).
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// The invite's non-secret descriptor (consent posture, expiry).
     pub invite: BootstrapInvite,
@@ -33,7 +37,11 @@ pub struct BootstrapData {
 }
 
 /// The invite's non-secret descriptor — the consent posture a redeemer agrees to, never a role.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapInvite {
     /// A stable, non-secret reference for this invite (the link token the client used to reach the payload).
     pub token_id: String,
@@ -49,16 +57,10 @@ pub struct BootstrapInvite {
 
 /// The consent posture of an invite — a CLOSED set. v0 is a single mode: a received skill is disclosed and
 /// awaits a direct human yes on first receive (never auto-landed).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub enum ConsentMode {
     /// First receive re-discloses the bytes and awaits a direct human yes (TOFU) — never auto-landed.
@@ -68,7 +70,11 @@ pub enum ConsentMode {
 
 /// The plane a workspace lives on — its public base URL, deployment posture, offered enrollment method, and
 /// the signing key a device pins as its trust root.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapPlane {
     /// The plane's public base URL (the verification + invite links are built on it).
     pub base_url: String,
@@ -83,16 +89,10 @@ pub struct BootstrapPlane {
 
 /// A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;
 /// `self_host` grants membership straight from a valid grant.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentMode {
@@ -103,7 +103,11 @@ pub enum DeploymentMode {
 }
 
 /// The plane's signing key as a device pins it — the algorithm, the key id, and the raw public key.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapSigningKey {
     /// The signature algorithm — Ed25519 only (the CLOSED kernel enum; an unknown alg fails to deserialize).
     pub alg: SignatureAlg,
@@ -115,7 +119,11 @@ pub struct BootstrapSigningKey {
 
 /// The workspace an invite is for — its id, display name, and domain-verification state. No role (the role
 /// lives server-side on the pre-seeded member rows).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapWorkspace {
     /// The workspace id.
     pub workspace_id: String,
@@ -129,16 +137,10 @@ pub struct BootstrapWorkspace {
 }
 
 /// A workspace's domain-verification state — snake_case on the wire.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum VerifiedDomainStatus {
@@ -152,7 +154,11 @@ pub enum VerifiedDomainStatus {
 
 /// One skill an invite pre-offers — its id, plus an optional display name (names ride the invite; a missing
 /// name means the client shows the id).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct BootstrapSkill {
     /// The offered skill id.
     pub skill_id: String,

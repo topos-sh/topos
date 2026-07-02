@@ -28,16 +28,10 @@ use serde::{Deserialize, Serialize};
 /// the wire leaf owns its own copy. The route handler maps it 1:1 at the edge —
 /// `Regular ⇔ FileMode::Regular`, `Executable ⇔ FileMode::Executable` — for both the inbound candidate
 /// ([`WireFile`]) and the outbound version metadata ([`WireVersionFile`]).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub enum WireFileMode {
     /// `100644` — a regular, non-executable file.
@@ -52,7 +46,11 @@ pub enum WireFileMode {
 /// (`content_base64`, standard alphabet); the server base64-decodes them and **rehashes every byte** to
 /// derive the content id — there is no reference-by-id, and a client hash is never trusted. Maps to
 /// `plane-store`'s `UploadedFile { path, mode, bytes }` (decode `content_base64` → `bytes`).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireFile {
     /// The bundle-relative, forward-slash path.
     pub path: String,
@@ -67,7 +65,11 @@ pub struct WireFile {
 /// server builds that forward commit from the good version). Maps to `plane-store`'s
 /// `CandidateUpload { files, parents, author, message }` — each `parents` entry hex-decoded into a
 /// `CommitId`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireCandidate {
     /// Every file in the candidate bundle (each server-rehashed).
     pub files: Vec<WireFile>,
@@ -84,14 +86,18 @@ pub struct WireCandidate {
 /// `POST /v1/publish` body — a direct publish that moves `current`. The device signature is the
 /// `Topos-Device-Signature` header (not a body field); the server stamps `created_at`. Under
 /// `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PublishRequest {
     /// The target workspace id (the receipt + pointer scope).
     pub workspace_id: String,
     /// The target skill id within the workspace.
     pub skill_id: String,
     /// The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte.
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the device key whose signature (in the header) authorizes this op.
     pub device_key_id: String,
@@ -105,14 +111,18 @@ pub struct PublishRequest {
 /// `current` or signing** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as
 /// `publish` (candidate + device + `op_id` + `expected`); there is **no** separate title/body on the op (a
 /// title/body, if ever surfaced, would be composed into the candidate's commit message).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ProposeRequest {
     /// The target workspace id.
     pub workspace_id: String,
     /// The target skill id within the workspace.
     pub skill_id: String,
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the device key whose signature (in the header) authorizes this op.
     pub device_key_id: String,
@@ -125,21 +135,25 @@ pub struct ProposeRequest {
 /// `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the
 /// `good` version's bytes on top of `current` (`seq` advances; the pointer never moves backward). There is
 /// **no candidate** — the server reads `good`'s tree + digest from its provenance and builds the commit.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RevertRequest {
     /// The target workspace id.
     pub workspace_id: String,
     /// The target skill id within the workspace.
     pub skill_id: String,
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the device key whose signature (in the header) authorizes this op.
     pub device_key_id: String,
     /// The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`.
     pub expected: Generation,
     /// The GOOD version (the `version_id` whose bytes are restored) as 64-char lowercase hex.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub good: String,
     /// The author device id recorded in the forward-revert commit frame.
     pub author: String,
@@ -151,14 +165,18 @@ pub struct RevertRequest {
 /// `(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
 /// `review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`
 /// is a standalone status flip (nothing signed).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ReviewRequest {
     /// The target workspace id.
     pub workspace_id: String,
     /// The target skill id within the workspace.
     pub skill_id: String,
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the device key whose signature (in the header) authorizes this op.
     pub device_key_id: String,
@@ -166,7 +184,7 @@ pub struct ReviewRequest {
     /// `approve` yields `CONFLICT`.
     pub expected: Generation,
     /// The proposal being reviewed, named by its candidate commit id (64-char lowercase hex).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub proposal: String,
     /// The verdict — `approve` (promote) or `reject`.
     pub decision: ReviewDecision,
@@ -175,14 +193,18 @@ pub struct ReviewRequest {
 /// One file of a version's metadata on the wire — its path, mode, and content id (`object_id`), mirroring
 /// `plane-store`'s `VersionFile` with the id hex-encoded. The **bytes are NOT here**: a client fetches each
 /// by `object_id` through the bundle (object) read route.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireVersionFile {
     /// The bundle-relative, forward-slash path.
     pub path: String,
     /// The file mode (regular or executable).
     pub mode: WireFileMode,
     /// The file's content id (64-char lowercase hex) — the handle the per-blob read route resolves.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub object_id: String,
 }
 
@@ -191,10 +213,14 @@ pub struct WireVersionFile {
 /// per-file `(path, mode, object_id)` leaves. Mirrors `plane-store`'s `VersionMeta` with every 32-byte id
 /// hex-encoded. Assembled WITHOUT reading any blob bytes; the `bundle_digest` is the pin the client's
 /// per-blob fetches + its own re-hash must reproduce.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireVersionMeta {
     /// This version's commit id (64-char lowercase hex).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
     /// The COMPLETE parent set, each a 64-char lowercase-hex commit id (`0` for genesis, `1` normally, `2`
     /// for an author merge).
@@ -204,7 +230,7 @@ pub struct WireVersionMeta {
     /// The commit message (title + body as one string).
     pub message: String,
     /// The byte-exact consent hash over the bundle (64-char lowercase hex) — the fetch + re-hash pin.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// The per-file leaves, in the version's recorded order.
     pub files: Vec<WireVersionFile>,
@@ -213,10 +239,14 @@ pub struct WireVersionMeta {
 /// One OPEN proposal on the wire — its candidate `version_id` (the `@hash`), the `base_generation` it was
 /// opened against, and when. The proposals-listing read returns ONLY these three fields: **no bytes, no
 /// proposer, no roles, no rendered diff**. Mirrors `plane-store`'s `OpenProposalSummary` with the id hex-encoded.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireOpenProposal {
     /// The proposal's candidate commit id (64-char lowercase hex) — the `<skill>@<version_id>` handle.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
     /// The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the
     /// proposal stales and drops out of this list.
@@ -229,7 +259,11 @@ pub struct WireOpenProposal {
 /// rostered skill (a possibly-empty list, ordered by `(created_at, version_id)`). A staled proposal is absent
 /// (keep == read == list); the list carries no bytes and no proposer — it is the thin handle a client turns
 /// into a `diff` / `review` follow-up.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireProposalList {
     /// The open proposals (possibly empty).
     pub proposals: Vec<WireOpenProposal>,
@@ -246,7 +280,11 @@ pub struct WireProposalList {
 
 /// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow against an invite. The
 /// server SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct DeviceAuthorizeRequest {
     /// The opaque `/i/<token>` invite token the device enrolls against.
     pub invite_token: String,
@@ -258,7 +296,11 @@ pub struct DeviceAuthorizeRequest {
 }
 
 /// `POST /v1/device/authorize` response — the RFC-8628 device-authorization grant (the names mirror the RFC).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct DeviceAuthorizeResponse {
     /// The SECRET device code the client polls `device/token` with.
     pub device_code: String,
@@ -273,7 +315,11 @@ pub struct DeviceAuthorizeResponse {
 }
 
 /// `POST /v1/device/token` body — poll a device-authorization session for its grant.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct DeviceTokenRequest {
     /// The SECRET device code from `device/authorize`.
     pub device_code: String,
@@ -281,16 +327,10 @@ pub struct DeviceTokenRequest {
 
 /// A device-authorization poll status — the RFC-8628 outcomes (snake_case). `granted` carries the opaque
 /// grant; every other status carries only itself (no grant).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceTokenStatus {
@@ -308,7 +348,11 @@ pub enum DeviceTokenStatus {
 
 /// `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
 /// when `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct DeviceTokenResponse {
     /// The poll status.
     pub status: DeviceTokenStatus,
@@ -319,7 +363,11 @@ pub struct DeviceTokenResponse {
 
 /// `GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before
 /// confirming an identity (the RFC-8628 confused-deputy guard). Carries no secret.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct VerificationContextResponse {
     /// The human-readable machine name the device offered at start.
     pub machine_name: String,
@@ -339,7 +387,11 @@ pub struct VerificationContextResponse {
 }
 
 /// `POST /v1/enroll/passcode` body — start a passcode challenge for an email on a live device-auth session.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PasscodeRequest {
     /// The user code naming the live device-auth session.
     pub user_code: String,
@@ -349,16 +401,10 @@ pub struct PasscodeRequest {
 
 /// The constant-shaped status of a started passcode challenge — always `sent`, so a non-rostered address is
 /// no enumeration oracle (the cloud roster gate is enforced at redeem, never here).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum PasscodeAckStatus {
@@ -368,14 +414,22 @@ pub enum PasscodeAckStatus {
 
 /// `POST /v1/enroll/passcode` response — a CONSTANT-shaped ack (always `sent`); the send is fire-and-forget,
 /// so neither the body nor its latency reveals whether the address was rostered.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PasscodeAck {
     /// Always `sent`.
     pub status: PasscodeAckStatus,
 }
 
 /// `POST /v1/enroll/passcode/confirm` body — submit a passcode to confirm the session's identity.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PasscodeConfirmRequest {
     /// The user code naming the live device-auth session.
     pub user_code: String,
@@ -387,16 +441,10 @@ pub struct PasscodeConfirmRequest {
 
 /// The outcome of a passcode confirmation (snake_case). A wrong code carries only the status — never the
 /// attempts remaining (no brute-force timing/count oracle on the wire).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum PasscodeConfirmStatus {
@@ -411,7 +459,11 @@ pub enum PasscodeConfirmStatus {
 }
 
 /// `POST /v1/enroll/passcode/confirm` response — the confirmation status.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PasscodeConfirmResponse {
     /// The confirmation status.
     pub status: PasscodeConfirmStatus,
@@ -420,7 +472,11 @@ pub struct PasscodeConfirmResponse {
 /// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted
 /// per-skill read tokens. The enrollment possession signature rides the `Topos-Device-Signature` header
 /// (NOT a body field); the server re-derives the device key id from `device_public_key`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RedeemRequest {
     /// The workspace the device enrolls into (authoritatively the grant's; echoed for the client's clarity).
     pub workspace_id: String,
@@ -432,7 +488,11 @@ pub struct RedeemRequest {
 
 /// `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device and
 /// the minted per-skill read tokens. **NO user token, ever.** Rides in the all-outcome envelope's `data`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RedeemResponse {
     /// The workspace the device enrolled into.
     pub workspace_id: String,
@@ -444,7 +504,11 @@ pub struct RedeemResponse {
 }
 
 /// One minted per-skill read credential — the `0600` at-rest secret a follower stores to pull a skill.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RedeemedSkillCred {
     /// The skill the token reads.
     pub skill_id: String,
@@ -457,7 +521,11 @@ pub struct RedeemedSkillCred {
 
 /// `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
 /// first owner. The server re-derives the device key id from `device_public_key`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct AdminClaimRequest {
     /// The one-time admin-claim token.
     pub claim_token: String,
@@ -473,16 +541,10 @@ pub struct AdminClaimRequest {
 // =================================================================================================
 
 /// A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceRole {
@@ -496,7 +558,11 @@ pub enum WorkspaceRole {
 
 /// One skill an invite pre-offers, with an optional display name (the name is NOT bound into the invite
 /// signing frame — only the skill id is — so a rename never forks the deterministic invite link).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct InviteSkill {
     /// The offered skill id.
     pub skill_id: String,
@@ -508,12 +574,16 @@ pub struct InviteSkill {
 /// `POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster
 /// (omitted `role` defaults to `member`; the client must sign the same role byte). Returns
 /// [`InviteData`](crate::results::InviteData) on success.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct InviteRequest {
     /// The target workspace id (bound into the governance signing frame).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key (a retry replays the deterministic link + receipt).
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the signing OWNER's device key (the registry selects the verifying key by this).
     pub device_key_id: String,
@@ -529,12 +599,16 @@ pub struct InviteRequest {
 
 /// `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
 /// principal is the `{email}` path segment; the role rides the body (bound into the signing frame).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RosterSetRequest {
     /// The target workspace id (bound into the governance signing frame).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the signing owner's device key.
     pub device_key_id: String,
@@ -544,12 +618,16 @@ pub struct RosterSetRequest {
 
 /// `DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster
 /// (owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RosterRemoveRequest {
     /// The target workspace id (bound into the governance signing frame).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the signing owner's device key.
     pub device_key_id: String,
@@ -557,12 +635,16 @@ pub struct RosterRemoveRequest {
 
 /// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
 /// principal). The revoke is INSTANT (flip `revoked` + drop the device's read tokens in one transaction).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct DeviceRevokeRequest {
     /// The target workspace id (bound into the governance signing frame).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The id of the SIGNING device key (the actor; not the target).
     pub device_key_id: String,
@@ -574,7 +656,11 @@ pub struct DeviceRevokeRequest {
 /// `review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a
 /// path-shape change). Authenticated by the plane's admin token, not a device-op signature; the route is
 /// invisible (404) on a plane with no admin token configured.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PolicyReviewRequiredRequest {
     /// The desired policy value: `true` gates any direct publish behind a reviewer's approval.
     pub review_required: bool,

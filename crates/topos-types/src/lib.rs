@@ -31,8 +31,21 @@ pub use bootstrap::{
     BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 
-/// Bumped on any breaking change to a persisted/wire shape; every document carries it.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bumped on any breaking change to a WIRE shape (the `--json` envelope, the signed-`current`
+/// pointer, the HTTP request/response bodies); every wire document carries it.
+pub const WIRE_SCHEMA_VERSION: u32 = 1;
+
+/// Bumped on any breaking change to an on-disk persisted client document ([`persisted`]).
+pub const PERSISTED_SCHEMA_VERSION: u32 = 1;
+
+/// Bumped on any breaking change to the [`Receipt`] shape (the durable idempotency record evolves
+/// with the op vocabulary, not with the envelope or the sidecar docs).
+pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+/// The legacy shared constant, kept so existing call sites compile unchanged — deprecated in favor
+/// of the per-family constants above (wire / persisted / receipt evolve independently; one shared
+/// number would couple all three). New code names its family; a mechanical sweep retires this alias.
+pub use self::WIRE_SCHEMA_VERSION as SCHEMA_VERSION;
 
 /// The `data` payload defaults to an empty object (`{}`), not `null`, when absent — matching the
 /// emitted envelope (a pure-signal command still carries `"data": {}`).
@@ -47,10 +60,14 @@ fn empty_object() -> serde_json::Value {
 
 /// The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the
 /// SAME typed value where practical.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct JsonEnvelope {
     /// Always `1` for this contract version (the schema pins it `const`).
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// The verb that produced this (`add`, `follow`, `pull`, `list`, `publish`, …).
     pub command: String,
@@ -76,16 +93,10 @@ pub struct JsonEnvelope {
 // ---------------------------------------------------------------------------------------------
 
 /// The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TerminalOutcome {
@@ -112,8 +123,10 @@ pub enum TerminalOutcome {
 
 /// A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
 /// branch on the known set and still pass through unknowns.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct NextAction {
     pub code: ActionCode,
@@ -223,6 +236,7 @@ impl<'de> Deserialize<'de> for ActionCode {
     }
 }
 
+#[cfg(feature = "contract-derives")]
 impl schemars::JsonSchema for ActionCode {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "ActionCode".into()
@@ -246,6 +260,7 @@ impl schemars::JsonSchema for ActionCode {
 // MIRROR the OPEN-string schemars schema above: `ActionCode` is an open string — any value validates,
 // the known vocabulary rides in `examples`, and an unrecognized future code passes through (executed via
 // the action's `argv`, never rejected). The derive can't express "open enum", so both halves are manual.
+#[cfg(feature = "contract-derives")]
 impl utoipa::PartialSchema for ActionCode {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::ObjectBuilder::new()
@@ -261,6 +276,7 @@ impl utoipa::PartialSchema for ActionCode {
     }
 }
 
+#[cfg(feature = "contract-derives")]
 impl utoipa::ToSchema for ActionCode {
     fn name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("ActionCode")
@@ -273,16 +289,10 @@ impl utoipa::ToSchema for ActionCode {
 
 /// The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the
 /// agent consumes `expected`/`current` on a CONFLICT.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct Generation {
     pub epoch: u64,
@@ -290,16 +300,10 @@ pub struct Generation {
 }
 
 /// What an outcome refers to (every field optional — a policy flip has no skill/version).
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct Affected {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,7 +312,7 @@ pub struct Affected {
     pub skill: Option<String>,
     /// A `version_id` (commit SHA-256, lowercase hex) when the outcome refers to a version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
@@ -316,13 +320,17 @@ pub struct Affected {
 
 /// The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even
 /// on failures): one stable receipt per op, identical on retry.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct Receipt {
     /// Always `1` for this contract version (the schema pins it `const`).
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// Client-minted UUIDv4, persisted before the first send.
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     pub command: String,
     pub outcome: TerminalOutcome,
@@ -331,18 +339,18 @@ pub struct Receipt {
     pub skill_id: Option<String>,
     /// The commit SHA-256 (lowercase hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: Option<String>,
     /// The byte-exact consent hash (lowercase hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<Generation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<Generation>,
     /// RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).
-    #[schemars(extend("format" = "date-time"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "date-time")))]
     pub created_at: String,
     /// The signing key id that covered this op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,7 +362,11 @@ pub struct Receipt {
 
 /// The flat wire error (rich `thiserror` enums stay internal). Carries a
 /// stable code + retryability + the safe next actions; never raw SQL/git strings.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct WireError {
     /// A stable, machine-branchable error code, distinct from (and finer than) `outcome`. This is an
     /// **open, additive** string vocabulary — it is intentionally NOT a closed enum: new codes are
@@ -380,17 +392,25 @@ pub struct WireError {
 // the signed preimage also binds workspace_id + skill_id (no cross-scope replay).
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PointerScope {
     pub workspace_id: String,
     pub skill_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct CurrentRecord {
     /// The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the
     /// pointer names the version, and the commit transitively pins the bytes.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
     pub generation: Generation,
 }
@@ -399,35 +419,37 @@ pub struct CurrentRecord {
 /// fail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root
 /// pointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the
 /// exact opposite of a next-action code and must never silently pass through.)
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub enum SignatureAlg {
     Ed25519,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct Signature {
     pub alg: SignatureAlg,
     pub key_id: String,
     /// base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars.
-    #[schemars(extend("pattern" = "^[A-Za-z0-9_-]{86}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[A-Za-z0-9_-]{86}$")))]
     pub value: String,
 }
 
 /// The signed `current` pointer — a versioned envelope; `ETag = "<epoch>.<seq>"`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct SignedCurrentRecord {
     /// Always `1` for this contract version (the schema pins it `const`).
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     pub scope: PointerScope,
     pub record: CurrentRecord,
@@ -439,7 +461,8 @@ pub struct SignedCurrentRecord {
 // itself lives in `topos-harness`; these wire/report DTOs live here.
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub enum HarnessId {
     #[serde(rename = "claude-code")]
     ClaudeCode,
@@ -451,7 +474,8 @@ pub enum HarnessId {
 
 /// What fires currency for a harness — drives HONEST receipt copy ("current by next session",
 /// "next topos touch", …). `ExplicitPullOnly` is the honest-degrade floor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CurrencyKind {
     SessionStart,
@@ -460,7 +484,8 @@ pub enum CurrencyKind {
     ExplicitPullOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerState {
     Active,
@@ -472,7 +497,8 @@ pub enum TriggerState {
 
 /// The result of installing a currency trigger — what was touched + the marker, so re-install is
 /// idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct TriggerReport {
     pub harness: HarnessId,
     pub currency_kind: CurrencyKind,
@@ -553,7 +579,7 @@ mod tests {
     #[test]
     fn envelope_serializes_minimally() {
         let env = JsonEnvelope {
-            schema_version: SCHEMA_VERSION,
+            schema_version: WIRE_SCHEMA_VERSION,
             command: "pull".to_owned(),
             ok: true,
             data: serde_json::json!({}),

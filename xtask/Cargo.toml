@@ -9,7 +9,9 @@ publish = false
 description = "The ONE codegen + invariant-gate entrypoint (a cargo-xtask bin, not a prod dep): `gen-schema` (JSON-Schema + the plane OpenAPI; `--check` = the drift gate), `gen-fixtures` (the golden --json envelopes; `--check`), `check-arch` (dependency-graph + lint-opt-in + toolchain-pin invariants), `ci` (the full non-DB gate sequence, in CI's order). No formal-model subcommand — the integration interleaving tests are the correctness net."
 
 [dependencies]
-topos-types.workspace = true
+# `contract-derives` turns on the JsonSchema/ToSchema impls gen-schema reads — xtask is one of the two
+# contract producers (with topos-plane); the feature stays off everywhere else (the client stays lean).
+topos-types = { workspace = true, features = ["contract-derives"] }
 topos-plane.workspace = true # the OSS plane lib — for `topos_plane::openapi()` (the OpenAPI drift gate)
 schemars.workspace = true
 utoipa.workspace = true

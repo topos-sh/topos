@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 /// `skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).
 /// **Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from these
 /// fields, never stored.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SyncState {
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// Highest AUTHENTICATED (signature-verified) generation ever seen — the anti-rollback floor and
     /// the retry target. Only a signed record raises it.
@@ -29,10 +30,10 @@ pub struct SyncState {
     #[serde(default)]
     pub recorded: Vec<RecordedTuple>,
     /// The commit the working tree derives from (= the applied commit when clean).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_commit: String,
     /// sha256 (lowercase hex) of the current harness-dir bytes (recomputed; cheap).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub work_hash: String,
     /// A transient local pin (a `pull <skill>@<hash>` go-back) suppressing one auto fast-forward.
     pub held: bool,
@@ -40,28 +41,30 @@ pub struct SyncState {
 
 /// One `(generation → commit)` record in [`SyncState::recorded`]. (A list, not a JSON-object map,
 /// because the key is the `(epoch,seq)` pair.)
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct RecordedTuple {
     pub generation: Generation,
     /// The commit (`version_id`) seen at this generation.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub commit_id: String,
 }
 
 /// `skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the
 /// per-file `(path, mode, sha256, size)` tuple and the digest are frozen; the JSON spelling here is
 /// the natural object form).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct Lock {
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     pub skill_id: String,
     pub name: String,
     /// The `version_id` (commit SHA-256) this lock is pinned to.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_commit: String,
     /// The byte-exact consent hash over the file list.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// Files sorted by raw path bytes — the same ordering the canonical manifest uses.
     pub files: Vec<LockedFile>,
@@ -69,14 +72,15 @@ pub struct Lock {
 
 /// One file in [`Lock::files`]. `size` is OPERATIONAL only — it never enters the canonical manifest
 /// or the digest (so the digest is placement-independent).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct LockedFile {
     pub path: String,
     /// `100644` (regular) or `100755` (executable) — the only two allowed.
-    #[schemars(extend("enum" = ["100644", "100755"]))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("enum" = ["100644", "100755"])))]
     pub mode: String,
     /// The file's content sha256 (lowercase hex).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub sha256: String,
     /// Size in bytes (operational metadata only).
     pub size: u64,
@@ -84,22 +88,23 @@ pub struct LockedFile {
 
 /// `skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and
 /// exact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PlacementMap {
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// The target dir(s) where the skill is placed (project / global / per-category layers).
     pub placements: Vec<String>,
     /// The `version_id` currently realized on disk.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub applied_commit: String,
     /// sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source
     /// `bundle_digest` if a harness ever projected; with no projection the two match.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub materialized_sha: String,
     /// sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub pre_existing_sha: Option<String>,
     pub swap_capability: SwapCapability,
     /// The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude
@@ -115,7 +120,8 @@ pub struct PlacementMap {
 }
 
 /// Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SwapCapability {
     /// `renameat2(RENAME_EXCHANGE)` (Linux) / `renamex_np(RENAME_SWAP)` (macOS).
@@ -133,35 +139,36 @@ pub enum SwapCapability {
 /// crash mid-materialize is healed by rendering the already-committed `result_commit` (pinned by
 /// `conflicted_digest`), never by re-merging on-disk marker bytes. Cleared only by a clean resolution (a
 /// clean merge) or the disclosed escape — never by an incidental edit.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ConflictState {
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// The three-way base the conflict was computed against (the draft's fork point).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_commit: String,
     /// The base's `bundle_digest` — a render pin so recovery verifies offline without re-derivation.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_digest: String,
     /// `current` (theirs) at the time the conflict was recorded.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub current_commit: String,
     /// `current`'s `bundle_digest` — the render pin recovery uses to rebuild the `lock`-as-base.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub current_digest: String,
     /// The author's draft (mine) snapshot the conflict was computed from (recoverable).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub draft_commit: String,
     /// The draft's `bundle_digest` — a render pin for the recoverable draft.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub draft_digest: String,
     /// The conflict tree committed as a forward 1-parent commit on `current_commit` — the deterministic
     /// render target recovery re-materializes (so it never re-merges on-disk markers).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub result_commit: String,
     /// The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the on-disk heal signal and
     /// the `render_verified` pin. Disk re-scanning to this exact digest means "the materialize completed".
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub conflicted_digest: String,
     pub reason: ConflictReason,
     /// The conflicting paths, sorted by raw path bytes (the agent's resolution checklist).
@@ -170,7 +177,8 @@ pub struct ConflictState {
 }
 
 /// Why a merge could not be applied cleanly. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictReason {
     /// A genuine three-way merge with at least one unresolved path.
@@ -180,14 +188,16 @@ pub enum ConflictReason {
 }
 
 /// One conflicting path + how it conflicts. **Field-set pinned**; `kind`'s value set is INFERRED.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ConflictPath {
     pub path: String,
     pub kind: ConflictPathKind,
 }
 
 /// How a single path conflicts. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictPathKind {
     /// A textual three-way overlap — diff3 markers were written at the path.
@@ -209,7 +219,8 @@ pub enum ConflictPathKind {
 /// The device-signed operation an [`OpRecord`] carries — a serde mirror of the kernel's `DeviceOp` (which
 /// lives in `topos-core`, not a dependency of this crate). The client maps it 1:1 to `DeviceOp` when
 /// re-signing a replayed op. snake_case on the wire/disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
     /// `publish` that moves `current` directly (or genesis).
@@ -228,12 +239,13 @@ pub enum OpKind {
 /// an uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no
 /// double-advance, no duplicate commit). It carries the full bound identity the device-op signature binds,
 /// so a replay re-signs the identical frame. **Field-set pinned.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct OpRecord {
-    #[schemars(extend("const" = 1))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     /// The client-minted UUIDv4 (also the filename).
-    #[schemars(extend("format" = "uuid"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
     /// The workspace this op targets — part of the device-op bound identity.
     pub workspace_id: String,
@@ -243,10 +255,10 @@ pub struct OpRecord {
     /// reject).
     pub op: OpKind,
     /// The built commit (`version_id`) this op publishes / reverts / reviews — bound by the signature.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub candidate_commit: String,
     /// The candidate's byte-exact bundle digest (the consent hash) — bound by the signature.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.
     pub expected_generation: Generation,
@@ -254,7 +266,7 @@ pub struct OpRecord {
     /// server builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry
     /// it). `None` for every other op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub good: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]

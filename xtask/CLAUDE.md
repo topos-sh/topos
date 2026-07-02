@@ -28,7 +28,9 @@ cargo xtask conformance            # the store matrices (not yet implemented —
   with the same stale/missing/orphan discipline.
 - **`check-arch`** — the dependency-graph trust claims as a gate, via `cargo tree`:
   - the client (`topos`) carries no `plane-store` / `sqlx` / `libsqlite3-sys` / `tokio` / `reqwest` /
-    `hyper` edge (it is a thin sync tool, never an authority);
+    `hyper` edge (it is a thin sync tool, never an authority), and none of the contract-generation
+    machinery (`utoipa` / `utoipa-gen` / `schemars` / `schemars_derive` — `topos-types`' schema derives
+    are behind its default-off `contract-derives` feature, enabled only by xtask + `topos-plane`);
   - the kernel (`topos-core`) carries no wire DTOs, async/IO/storage/HTTP crates, or diff engines;
   - the test-only `test-fixtures` features stay OFF in the production graphs of `topos-plane` and `topos`;
   - the leaf crates stay lean (`topos-types` / `topos-harness` / `topos-gitstore` ban

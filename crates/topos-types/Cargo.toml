@@ -8,14 +8,19 @@ repository.workspace = true
 publish = false
 description = "The wire DTOs only — the --json envelope, terminal-outcome/action-code enums, receipt + error, the signed-current envelope. NO logic."
 
+[features]
+# The contract-GENERATION derive families, DEFAULT-OFF: `schemars` (the committed JSON-Schema contract)
+# AND `utoipa` (the plane's OpenAPI document, assembled where the routes live). Both are schema-time-only
+# derives — neither ever changes serde behavior — so only the two contract producers turn this on
+# (`xtask` for gen-schema, `topos-plane` for its OpenAPI); every other consumer (the client, the leaf
+# crates) gets pure-serde DTOs, and check-arch asserts the client tree resolves neither family.
+contract-derives = ["dep:schemars", "dep:utoipa"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-schemars.workspace = true
-# This leaf carries BOTH schema derives: `schemars` (the committed JSON-Schema contract) AND `utoipa`
-# (the plane's OpenAPI document, assembled where the routes live). `ToSchema` is an independent derive
-# alongside `JsonSchema` — it never changes serde behavior or the schemars output.
-utoipa.workspace = true
+schemars = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
 # NB: op_id is a wire String here (format: uuid in the schema); the uuid CRATE is a client dep
 # (it mints the v4), not a wire-DTO dep — so it is deliberately absent from this leaf.
 
@@ -23,6 +28,13 @@ utoipa.workspace = true
 # Test-only: a JSON-Schema 2020-12 validator, to prove our generated schemas actually REJECT bad
 # instances (the negative half of the contract oracle) — and that serde output matches schemars.
 jsonschema = "0.46"
+
+# The negative contract oracle needs the schemars derives, so it only builds when `contract-derives`
+# is on (a plain `cargo test -p topos-types` skips it; any workspace-wide build — clippy, `cargo test
+# --workspace` — unifies the feature on via xtask/topos-plane and compiles + runs it).
+[[test]]
+name = "schema_validation"
+required-features = ["contract-derives"]
 
 [lints]
 workspace = true

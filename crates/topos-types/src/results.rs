@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 // =================================================================================================
 
 /// `pull` result — per-skill currency state plus the reviewer-queue count. **PINNED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullData {
     pub skills: Vec<PullSkill>,
     /// Open proposals on your followed skills (v0 is single-approver — any rostered member may review, so
@@ -27,7 +28,8 @@ pub struct PullData {
 
 /// One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by
 /// name; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullSkill {
     pub skill: String,
     /// Highest authenticated `(epoch,seq)` seen — the anti-rollback floor.
@@ -46,7 +48,8 @@ pub struct PullSkill {
 
 /// What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the
 /// semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PullAction {
     /// State ① — already current; nothing to do.
@@ -71,41 +74,44 @@ pub enum PullAction {
 
 /// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the
 /// spec pins that the offer re-discloses + re-binds the digest, not its exact shape.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct Offer {
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
 }
 
 /// The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct Conflict {
     /// The remote version the draft diverged from.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub remote_version_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub local_version_id: Option<String>,
 }
 
 /// The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED
 /// fields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),
 /// not this exact shape.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct MergeReport {
     /// The three-way base (the draft's fork point).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_version_id: String,
     /// `current` (theirs) the draft was merged onto.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub theirs_version_id: String,
     /// The forward 1-parent commit carrying the merged (or conflict-marked) tree.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub result_version_id: String,
     /// The merged/conflict tree's `bundle_digest`.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub result_digest: String,
     /// Whether the merge was clean (`true` → draft-on-current, publishable) or blocked (`false`).
     pub clean: bool,
@@ -118,7 +124,8 @@ pub struct MergeReport {
 }
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ConflictPathReport {
     pub path: String,
     pub kind: crate::persisted::ConflictPathKind,
@@ -129,7 +136,8 @@ pub struct ConflictPathReport {
 // =================================================================================================
 
 /// `list` result — the four inventory buckets. **PINNED** (bucket set + per-entry identity).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ListData {
     pub followed: Vec<SkillEntry>,
     pub published_by_you: Vec<SkillEntry>,
@@ -143,7 +151,8 @@ pub struct ListData {
 }
 
 /// A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct UntrackedEntry {
     pub name: String,
     /// The harness dir it was found in.
@@ -152,14 +161,15 @@ pub struct UntrackedEntry {
 }
 
 /// A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SkillEntry {
     pub skill: String,
     /// The approvable `@` token (the commit SHA-256).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
     /// The byte-exact consent hash, shown alongside as evidence.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// Local edits ahead of the version this entry is on.
     pub draft: bool,
@@ -174,19 +184,21 @@ pub struct SkillEntry {
 
 /// `diff` result. `source` + `version_id` (+ the emitted digest) are **PINNED**; the diff *body*
 /// representation ("a plain unified diff") is the only INFERRED part.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct DiffData {
     pub source: DiffSource,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// A plain unified diff.
     pub diff: String,
 }
 
 /// Where the compared bytes came from: the local sidecar, or a plane-held proposal. **PINNED.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSource {
     Local,
@@ -199,14 +211,15 @@ pub enum DiffSource {
 // =================================================================================================
 
 /// `add` (local, offline — no plane op, `receipt: null`). **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AddData {
     pub skill_id: String,
     pub name: String,
     /// The base commit the local sidecar starts from.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     pub tracked: bool,
     /// The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain
@@ -224,7 +237,8 @@ pub struct AddData {
 /// **INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /
 /// `workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the
 /// enrollment surface landed; all are optional, so an old consumer ignores them.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct FollowData {
     pub workspace_id: String,
     pub enrolled: bool,
@@ -256,7 +270,8 @@ pub struct FollowData {
 
 /// A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which
 /// embeds the `user_code`), then the client re-polls. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct EnrollmentPending {
     /// The verification URL with the `user_code` embedded — the human opens it to approve the session.
     pub verification_uri_complete: String,
@@ -268,7 +283,8 @@ pub struct EnrollmentPending {
 }
 
 /// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct FollowOffer {
     pub skill_id: String,
     pub name: String,
@@ -276,7 +292,8 @@ pub struct FollowOffer {
 }
 
 /// `unfollow` (local — stop following `current`, keep the bytes as a frozen copy). **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct UnfollowData {
     pub skill_id: String,
     pub following: bool,
@@ -286,7 +303,8 @@ pub struct UnfollowData {
 
 /// `log` — local action events (and, with `--team`, partial plane records). The individual event
 /// fields are **not pinned by the spec**, so events stay open JSON. **INFERRED.**
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct LogData {
     /// Local action-event envelopes from `log.jsonl` (field set intentionally open).
     pub events: Vec<serde_json::Value>,
@@ -300,13 +318,17 @@ pub struct LogData {
 /// governance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by
 /// an owner, and `None` otherwise. Under `review-required` a direct publish instead returns
 /// `APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct PublishData {
     pub skill_id: String,
     /// The new commit.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// The pointer's new generation after the move.
     pub current_generation: Generation,
@@ -319,11 +341,15 @@ pub struct PublishData {
 
 /// `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns
 /// `NEEDS_REVIEW`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ProposeData {
     /// `<skill>@<version_id>` of the candidate.
     pub proposal: String,
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_version_id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,21 +358,29 @@ pub struct ProposeData {
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a
 /// pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct RevertData {
     pub skill_id: String,
     /// The good version named by `--to` (the bytes being restored).
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub reverted_to: String,
     /// The new forward-revert commit that carries those bytes.
-    #[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub new_version_id: String,
     pub current_generation: Generation,
 }
 
 /// `review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale
 /// base returns `CONFLICT`. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct ReviewData {
     /// `<skill>@<version_id>` of the reviewed proposal.
     pub proposal: String,
@@ -357,16 +391,10 @@ pub struct ReviewData {
 }
 
 /// A review verdict. **INFERRED.**
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-    utoipa::ToSchema,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
@@ -377,7 +405,11 @@ pub enum ReviewDecision {
 /// `invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never
 /// enrolls on its own. **INFERRED.** Also the `POST /v1/invites` success `data` shape (the OpenAPI body),
 /// hence the `utoipa::ToSchema` derive alongside `schemars`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
 pub struct InviteData {
     /// `/i/<token>`.
     pub invite_link: String,

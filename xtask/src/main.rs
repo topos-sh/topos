@@ -878,9 +878,12 @@ fn check_arch() -> Result<()> {
     // SQLite C lib, and no async runtime / async HTTP stack (`ureq` is blocking + self-contained). `tokio`
     // is the load-bearing one — a future `reqwest`/async-`ureq` transport would pull it in without touching
     // `plane-store`/`sqlx`, so the gate must name it explicitly to hold the documented tokio-free line.
-    // The last three hold the prebuilt-binary claim (static on musl, OS-libs-only on macOS, no
-    // system cert store): a transitive native-TLS/openssl edge would ship silently — a vendored
-    // static openssl links fine — so the gate names them, not just the storage/async bans.
+    // The openssl/native-tls three hold the prebuilt-binary claim (static on musl, OS-libs-only on
+    // macOS, no system cert store): a transitive native-TLS/openssl edge would ship silently — a
+    // vendored static openssl links fine — so the gate names them, not just the storage/async bans.
+    // The contract-GENERATION machinery is banned too: `topos-types` gates its schemars/utoipa derives
+    // behind the default-off `contract-derives` feature (only xtask + topos-plane turn it on), so the
+    // client's DTOs stay pure serde — "wire DTOs only, no logic" must hold in the dependency graph.
     assert_excludes(
         "topos",
         &[
@@ -893,6 +896,10 @@ fn check_arch() -> Result<()> {
             "openssl-sys",
             "native-tls",
             "rustls-native-certs",
+            "utoipa",
+            "utoipa-gen",
+            "schemars",
+            "schemars_derive",
         ],
     )?;
     // The kernel stays pure: no wire DTOs, no async/IO/storage/HTTP crates, no diff/merge engines — only

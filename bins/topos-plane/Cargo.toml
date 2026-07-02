@@ -30,7 +30,10 @@ acme = [
 
 [dependencies]
 topos-core.workspace = true
-topos-types.workspace = true
+# `contract-derives` turns on the `utoipa::ToSchema` impls this crate's OpenAPI assembly references at
+# compile time (and the schemars twins) — the plane is one of the two contract producers (with xtask);
+# the feature stays off everywhere else, so the client's DTOs stay pure serde.
+topos-types = { workspace = true, features = ["contract-derives"] }
 plane-store.workspace = true
 # The passcode mailer: blocking SMTP over rustls (no C/openssl). The send is fire-and-forget on
 # `spawn_blocking` from the handler, so the sync `SmtpTransport` never blocks the async runtime.
