@@ -14,7 +14,10 @@ check an item off in the same change that lands it.
 
 ## History hygiene (before the first public push)
 
-- [ ] **Scrub or squash the pre-branch mainline commit messages that name internal review processes.**
+- [x] **Scrub or squash the pre-branch mainline commit messages that name internal review processes.**
+      DONE (pre-publication history rewrite): every commit message and historical file revision was
+      swept for reviewer names, review-round labels, and roadmap tags — the head tree is byte-identical
+      — and the author identity was normalized. Re-audit only if commits land from an unswept branch.
       The published history must be self-contained: no commit message may reference internal reviewers,
       review-round labels, private planning documents, or internal roadmap/phase tags. Audit the shape,
       not just known strings — anything that reads as "who reviewed this and in which internal round"
