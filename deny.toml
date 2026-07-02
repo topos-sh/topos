@@ -19,8 +19,6 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    "0BSD",                # lettre → quoted_printable
-    "CDLA-Permissive-2.0", # ureq → webpki-roots (the bundled Mozilla root set)
 ]
 confidence-threshold = 0.9
 # All workspace crates are publish = false; don't license-check our own unpublished members.
