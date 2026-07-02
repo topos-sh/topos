@@ -39,6 +39,37 @@ the flag unset, sqlx's `query!` macros compile *live* against that database, so 
 fails the build with confusing errors. The flag only affects compilation — the runtime `#[sqlx::test]` still
 provisions a fresh database per test against `DATABASE_URL`.
 
+## Install
+
+```sh
+curl -fsSL https://github.com/topos-sh/topos/releases/latest/download/install.sh | sh
+```
+
+Installs the `topos` binary to `~/.local/bin` — no sudo. Supported platforms: macOS (Apple Silicon
+and Intel) and Linux (x86_64 and arm64; static musl binaries, any distro — no compiler, Node,
+Python, or git needed at runtime). On Windows, run it inside
+[WSL2](https://learn.microsoft.com/windows/wsl/install) — the Linux x86_64 binary works there;
+native Windows binaries are not yet published.
+
+Knobs (env var or flag):
+
+| Knob | Flag | Default | What it does |
+|---|---|---|---|
+| `TOPOS_VERSION` | `--version <tag>` | latest | pin a specific release tag |
+| `TOPOS_INSTALL_DIR` | `--to <dir>` | `~/.local/bin` | install directory |
+| `TOPOS_INSTALL_BASE_URL` | — | GitHub releases | alternate download base (mirrors, air-gapped proxies; same URL layout) |
+
+**What the checksum proves — and what it does not.** The installer downloads `SHA256SUMS` over TLS
+from the same origin as the binary, prints the expected and the locally computed sha256, and refuses
+to install on any mismatch (this check cannot be disabled). A match proves *transit* integrity — the
+bytes you received are the bytes the release published — but not *origin* integrity: whoever controls
+the release controls both files. For an origin-independent check, use GitHub artifact attestation,
+which validates the artifact was built by this repository's release workflow and is Sigstore-signed:
+
+```sh
+gh attestation verify topos-<target>.tar.gz --repo topos-sh/topos
+```
+
 ## Self-hosting the plane
 
 Self-hosting is one stateless plane container plus a Postgres. The bundled compose file runs both:
@@ -110,9 +141,34 @@ through the plane** at a fresh, higher generation before followers reconnect. Th
 because followers verify the *signed* pointer record (what `GET /v1/current` returns), not the database
 column — so a raw `UPDATE current SET epoch = …` does **not** work: it leaves the served signature unchanged
 (followers never see the bump) and makes every author's next write `CONFLICT` (the author signs the
-old served generation while the compare-and-set reads the bumped column). A standalone re-sign-on-restore
-helper is not yet shipped; until it is, treat an older-snapshot restore as requiring a re-publish of the
-affected pointers.
+old served generation while the compare-and-set reads the bumped column). The plane ships that re-sign
+as a subcommand, and an older-snapshot restore is these four steps:
+
+```sh
+# 1. stop the plane (leave the database up)
+docker compose stop plane
+# 2. restore BOTH pieces from the SAME backup set: the database (psql < topos-db.sql after
+#    recreating it) and the plane-data volume (untar plane-data.tgz back into the volume)
+# 3. re-issue every restored pointer at a bumped, freshly signed generation
+docker compose run --rm plane restore-bump-epoch --all-workspaces
+# 4. bring the plane back
+docker compose up -d
+```
+
+The helper re-signs each skill's `current` at a **bumped epoch** (same bytes, a strictly higher
+generation), so followers see an ordinary forward move — including followers that already raised the
+rollback alarm; they recover on their next pull. Re-running it is safe (each run is one more forward
+bump). Two things to watch:
+
+- **The database and the `plane-data` volume must come from the same backup set.** The helper signs
+  with `/data/plane.key`, and followers verify against the plane key they pinned when they first
+  followed. Every line the helper prints ends with the signing `key <key_id>` — compare it against
+  your pre-incident key id. A restored `/data` holding a *different* (or lost) seed changes the key
+  id and every follower fails closed; that is a key-rotation event, and no epoch bump fixes it.
+- **If you have restored before from an even older backup**, pass `--epoch-at-least <n>` with a
+  value above any epoch you have ever served (the helper takes the max of that floor and each
+  pointer's `epoch + 1`), so a repeated restore can never re-issue a generation followers already
+  recorded. Keep the helper's printed output with your backup records.
 
 ## License
 
