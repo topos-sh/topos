@@ -50,7 +50,7 @@ use crate::sidecar::SkillPaths;
 use crate::{doc, logfile};
 
 use super::sync_engine::{
-    DivergedWitness, WorkState, compute_work, first_placement, forwarded_sync, fsync_store,
+    DivergedWitness, WorkState, compute_work, first_placement, forwarded_sync, fsync_batch,
     lock_from_bundle, map_core, snapshot_draft,
 };
 
@@ -716,7 +716,8 @@ fn commit_result(
     store
         .commit(id, &[parent], &tree, &ctx.device_id, message)
         .map_err(|_| ClientError::Corrupt("merge result does not match its id".into()))?;
-    fsync_store(ctx, store)?;
+    // The result's own objects + ref — durable before any doc names it; never the whole store.
+    fsync_batch(ctx, &store.version_durability(&id)?)?;
     Ok(id)
 }
 

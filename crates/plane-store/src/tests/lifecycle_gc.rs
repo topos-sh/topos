@@ -32,6 +32,27 @@ async fn migrate_installs_durably_and_committed_lease_protects_from_gc(pool: PgP
 }
 
 #[sqlx::test]
+async fn workspaces_enumerates_exactly_the_workspaces_holding_objects(pool: PgPool) {
+    let fx = Fixture::new(pool, "e-ws-enum").await;
+    let a = &fx.authority;
+    // Nothing stored yet — the GC-scheduling enumeration is empty (a scheduler runs zero passes).
+    assert_eq!(a.workspaces().await.unwrap(), vec![]);
+
+    // Objects in two workspaces → both enumerated (ids only); one that never stored a byte stays absent.
+    ingest_migrate(a, &ws("w_acme"), "op1", vec![file("SKILL.md", b"a")], 100).await;
+    ingest_migrate(a, &ws("w_beta"), "op2", vec![file("SKILL.md", b"b")], 100).await;
+    let mut got: Vec<String> = a
+        .workspaces()
+        .await
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().to_owned())
+        .collect();
+    got.sort();
+    assert_eq!(got, ["w_acme", "w_beta"]);
+}
+
+#[sqlx::test]
 async fn gc_reclaims_an_abandoned_migrated_object_physically(pool: PgPool) {
     let fx = Fixture::new(pool, "e-abandon").await;
     let a = &fx.authority;

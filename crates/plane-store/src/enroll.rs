@@ -373,15 +373,17 @@ impl Role {
         }
     }
 
-    /// The `u8` bound into the invite/governance signing frame (owner = 1, reviewer = 2, member = 3). The
-    /// single mapping the client signer and the in-txn verify both use.
+    /// The `u8` bound into the invite/governance signing frame (owner = 1, reviewer = 2, member = 3) —
+    /// delegating to the kernel's `GovernanceRole`, the single mapping the client signer calls too, so
+    /// this signature-preimage input can never fork between the halves.
     #[must_use]
     pub fn signing_byte(self) -> u8 {
         match self {
-            Role::Owner => 1,
-            Role::Reviewer => 2,
-            Role::Member => 3,
+            Role::Owner => topos_core::sign::GovernanceRole::Owner,
+            Role::Reviewer => topos_core::sign::GovernanceRole::Reviewer,
+            Role::Member => topos_core::sign::GovernanceRole::Member,
         }
+        .signing_byte()
     }
 }
 
@@ -473,13 +475,13 @@ pub(crate) fn derive_token(secret: &[u8; 32], domain: &[u8], parts: &[&[u8]]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tag)
 }
 
-/// The server-derived device key id from a raw Ed25519 public key: `dk_<first 32 hex of sha256(pubkey)>`. The
-/// plane derives this ITSELF on enroll and re-derives it on redeem — a client-asserted id is never trusted,
-/// so a mismatch between a grant's bound key and the presented key is caught structurally.
+/// The server-derived device key id from a raw Ed25519 public key: `dk_<first 32 hex of sha256(pubkey)>`,
+/// via the ONE kernel derivation (`topos_core::sign::device_key_id` — the same fn the client signer
+/// calls). The plane derives this ITSELF on enroll and re-derives it on redeem — a client-asserted id is
+/// never trusted, so a mismatch between a grant's bound key and the presented key is caught structurally.
 #[must_use]
 pub(crate) fn device_key_id_for(device_public_key: &[u8; 32]) -> String {
-    let hex = topos_core::digest::to_hex(&topos_core::digest::sha256(device_public_key));
-    format!("dk_{}", &hex[..32])
+    topos_core::sign::device_key_id(device_public_key)
 }
 
 /// Map a sha256 over a credential's UTF-8 bytes (the one stored form of every opaque credential).
@@ -626,7 +628,12 @@ pub(crate) async fn create_invite(
     ids.dedup();
     let joined = ids.join("\n");
     let role_byte = [role.signing_byte()];
-    let expires_be = expires_at.unwrap_or(0).to_be_bytes();
+    // An absent expiry binds the shared no-expiry sentinel — the same value the client signs and the
+    // governance frame encodes (`expires_to_u64(None)`); 0i64 and 0u64 share the identical be-bytes.
+    let expires_be = expires_at.map_or(
+        topos_core::sign::INVITE_NO_EXPIRY.to_be_bytes(),
+        i64::to_be_bytes,
+    );
     let token = authority.derive_token(
         b"invite",
         &[

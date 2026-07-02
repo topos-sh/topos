@@ -68,9 +68,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   from what `follow` wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the raw 16 bytes
   via the ids seam — the canonical hyphenated UUID rides the wire, the plane re-parses it to the SAME bytes),
   builds the `GovernanceOpKind::Invite` frame, and **wires `sign_governance`** for the 64-byte signature. The
-  **cross-component agreement** is replicated byte-for-byte so the plane's re-derived frame verifies: the role
-  byte (`Owner=1, Reviewer=2, Member=3`, an omitted `--role` defaulting to **Member=3** to match the plane's
-  `role.unwrap_or(member)`), `expires_at = 0` (the plane's invite handler hardcodes no expiry), and the emails
+  **cross-component agreements live once, in the kernel**, and both halves call them: the role byte via
+  `topos_core::sign::GovernanceRole` (`Owner=1, Reviewer=2, Member=3`; an omitted `--role` is the enum's
+  shared Member default, matching the plane's `role.unwrap_or(member)`), the no-expiry sentinel
+  `topos_core::sign::INVITE_NO_EXPIRY` (the plane's invite handler hardcodes no expiry), and the emails
   + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant). The POST rides
   through the same creds-free `UreqEnroll` client behind a `GovernanceSource` seam (the 64-byte signature in
   the `Topos-Device-Signature` header), mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a

@@ -535,6 +535,125 @@ fn durability_set_names_the_whole_store_not_just_objects() {
     );
 }
 
+/// Every loose object file currently on disk under `<git_dir>/objects/` (the shard walk).
+fn loose_objects(git_dir: &std::path::Path) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    for shard in std::fs::read_dir(git_dir.join("objects"))
+        .expect("objects dir")
+        .flatten()
+    {
+        let p = shard.path();
+        if p.is_dir() {
+            for f in std::fs::read_dir(&p).expect("shard dir").flatten() {
+                if f.path().is_file() {
+                    out.insert(f.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn version_durability_names_exactly_the_versions_objects() {
+    // The per-write durability set: after committing v2 on v1 (fully distinct content), v2's set must
+    // name every loose object v2 created (its commit, its trees INCLUDING the nested subtree, its
+    // blobs) plus v2's version ref — and must NOT name v1's objects or v1's ref. That bound is the
+    // point: the per-op fsync cost is the written version, never the store's lifetime history.
+    let scratch = Scratch::new("verdur");
+    let store = Store::init(&scratch.0).expect("init");
+    let (v1, _d1) = commit_genesis(
+        &store,
+        &[ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"# v1\n",
+        }],
+    );
+    let before = loose_objects(&scratch.0);
+
+    // v2: a child of v1 with all-new content, including a nested path (so a subtree object is written).
+    let files = [
+        ImportFile {
+            path: "SKILL.md",
+            mode: FileMode::Regular,
+            bytes: b"# v2\n",
+        },
+        ImportFile {
+            path: "ref/notes.md",
+            mode: FileMode::Regular,
+            bytes: b"nested\n",
+        },
+    ];
+    let th = store.write_bundle(&files).expect("write_bundle");
+    let v2 = sign::commit_id(&Commit {
+        parents: &[v1],
+        tree: th.bundle_digest,
+        author: AUTHOR,
+        message: MESSAGE,
+    })
+    .expect("commit_id");
+    store
+        .commit(v2, &[v1], &th, AUTHOR, MESSAGE)
+        .expect("commit");
+
+    let new: std::collections::HashSet<PathBuf> = loose_objects(&scratch.0)
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    // v2 wrote: 2 blobs + the subtree + the root tree + the commit.
+    assert_eq!(new.len(), 5, "expected exactly v2's five objects: {new:?}");
+
+    let batch = store.version_durability(&v2).expect("version durability");
+    let objects_dir = scratch.0.join("objects");
+    let object_files: std::collections::HashSet<&PathBuf> = batch
+        .files
+        .iter()
+        .filter(|p| p.parent().is_some_and(|d| d.parent() == Some(&objects_dir)))
+        .collect();
+    // (a) complete: every object v2 created is named (fsyncing the batch makes the commit reachable).
+    for p in &new {
+        assert!(
+            object_files.contains(p),
+            "new object {p:?} not in the batch"
+        );
+    }
+    // (b) bounded: NOTHING historical is named — no v1-era loose object, and not v1's version ref.
+    for p in &before {
+        assert!(
+            !object_files.contains(p),
+            "historical object {p:?} must not be re-synced"
+        );
+    }
+    assert_eq!(
+        object_files.len(),
+        new.len(),
+        "the named object set is exactly v2's writes"
+    );
+    let v2_ref = format!("refs/topos/versions/{}", digest::to_hex(&v2));
+    let v1_ref = format!("refs/topos/versions/{}", digest::to_hex(&v1));
+    assert!(
+        batch.files.iter().any(|p| p.ends_with(&v2_ref)),
+        "v2's version ref must be named"
+    );
+    assert!(
+        !batch.files.iter().any(|p| p.ends_with(&v1_ref)),
+        "v1's version ref must not be named"
+    );
+    // (c) the dirs cover the changed namespace: each new object's shard, `objects/`, and the ref chain.
+    for p in &new {
+        let shard = p.parent().expect("shard").to_path_buf();
+        assert!(batch.dirs.contains(&shard), "shard {shard:?} missing");
+    }
+    assert!(batch.dirs.contains(&objects_dir));
+    assert!(
+        batch
+            .dirs
+            .iter()
+            .any(|d| d.ends_with("refs/topos/versions"))
+    );
+}
+
 #[test]
 fn fence_stage_install_commit_render_and_delete() {
     // The fence primitives in isolation: stage into a quarantine, install into main durably, record the

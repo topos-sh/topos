@@ -37,6 +37,15 @@ pub struct TreeHandle {
 /// The set of paths the client must fsync (through its own fault-injectable fs seam) to make a write
 /// durable **before** any JSON doc references it. `topos-gitstore` only *names* these — it never fsyncs,
 /// so durability stays injectable in the client and this crate keeps no `~/.topos/` policy.
+///
+/// **The crash-safety contract:** everything a commit makes reachable — its blobs, its trees, the commit
+/// object itself, and its version ref — must be durable before any sidecar doc records that version as
+/// applied/base (or otherwise relies on rendering it). Each write path names its OWN set — the versions
+/// it just wrote, via [`Store::version_durability`], accumulated across a multi-version op with
+/// [`WriteBatch::extend`] — so the per-op fsync cost is bounded by what the op wrote, never by the
+/// store's lifetime history. Over-syncing an already-durable path is a harmless no-op (duplicates in the
+/// batch are the fsync loop's to dedup); the full-tree [`Store::durability_set`] remains only for a
+/// fresh staging store, where the whole tree IS the op's writes.
 #[derive(Debug, Clone, Default)]
 pub struct WriteBatch {
     /// Loose object files + ref files whose contents must reach disk.
@@ -44,6 +53,16 @@ pub struct WriteBatch {
     /// Directories whose entries changed (object shards, the objects dir, the ref dirs) — fsync each so
     /// the new directory entries are durable, not just the file contents.
     pub dirs: Vec<PathBuf>,
+}
+
+impl WriteBatch {
+    /// Fold `other` into this batch — the accumulator a multi-write op (e.g. an ancestor backfill) uses
+    /// to name everything it created, fsynced once at the end. Duplicate paths are tolerated: re-syncing
+    /// is a harmless no-op, and the client's fsync loop dedups before paying for each call.
+    pub fn extend(&mut self, other: WriteBatch) {
+        self.files.extend(other.files);
+        self.dirs.extend(other.dirs);
+    }
 }
 
 /// A path-parameterized embedded-git object store (one bare repo per skill).
@@ -193,18 +212,56 @@ impl Store {
     }
 
     /// The full set of loose objects + topos version refs currently in the store, with their parent
-    /// directories — what the client fsyncs to make the latest write durable. Over-syncing an
-    /// already-durable object is a harmless no-op; this errs toward completeness for a fresh staging
-    /// store (the only place `add` writes this increment).
+    /// directories — what the client fsyncs to make a **fresh staging store** durable. Scope: ONLY a
+    /// just-created store (`add`'s staged import; the `follow` baseline's empty init), where the whole
+    /// tree IS this op's writes — including the repo metadata (`HEAD`, `config`, the `objects/`/`refs/`
+    /// dirs) `init_bare` created outside any fs seam (a doc that names a commit must not become durable
+    /// while the store it lives in can't even be opened). A store carrying history must NOT use this —
+    /// its cost grows with every version ever written; a write onto an open store names its own set via
+    /// [`Store::version_durability`] instead.
     ///
     /// # Errors
     /// [`GitstoreError::Io`] if the store directory cannot be read.
     pub fn durability_set(&self) -> Result<WriteBatch, GitstoreError> {
-        // The WHOLE git directory: not just the loose objects + version refs, but the repo metadata
-        // (`HEAD`, `config`, the `objects/`/`refs/` dirs) `init_bare` created outside any fs seam. A doc
-        // that names a commit must not become durable while the store it lives in can't even be opened.
         let mut batch = WriteBatch::default();
         collect_tree(&self.git_dir, &mut batch)?;
+        Ok(batch)
+    }
+
+    /// The durability set of ONE version this store holds: its version-ref file (+ the ref dir chain),
+    /// its commit object, and every tree + blob object reachable from its tree — with the parent dirs
+    /// whose entries changed. This is exactly what a [`Store::write_bundle`] + [`Store::commit`] pair
+    /// created for that version, so a write path onto an open store fsyncs THIS (accumulating one batch
+    /// per written version via [`WriteBatch::extend`]) instead of the whole store: the per-op fsync cost
+    /// is bounded by the versions the op wrote, never by lifetime history. Objects shared with older
+    /// versions are re-named (already durable — a harmless no-op), so the set is self-contained without
+    /// tracking write novelty; parents are NOT walked (a parent became durable before the doc that
+    /// recorded it, by this same contract).
+    ///
+    /// # Errors
+    /// [`GitstoreError::Gix`] if the version ref is absent (the write being made durable should have
+    /// just created it) or an object read fails.
+    pub fn version_durability(&self, version_id: &[u8; 32]) -> Result<WriteBatch, GitstoreError> {
+        let commit_oid = self
+            .resolve_version(version_id)
+            .map_err(|e| GitstoreError::Gix(format!("{e}")))?
+            .ok_or_else(|| {
+                GitstoreError::Gix("the version to make durable is not present".into())
+            })?;
+        let commit = self
+            .repo
+            .find_object(commit_oid)
+            .map_err(gix_err)?
+            .try_into_commit()
+            .map_err(gix_err)?;
+        let tree_oid = commit.tree_id().map_err(gix_err)?.detach();
+
+        let mut batch = WriteBatch::default();
+        let objects = self.git_dir.join("objects");
+        push_loose(&mut batch, &objects, commit_oid);
+        collect_tree_objects(&self.repo, tree_oid, &objects, true, 0, &mut batch)?;
+        batch.dirs.push(objects);
+        push_version_ref(&mut batch, &self.git_dir, version_id);
         Ok(batch)
     }
 
@@ -282,6 +339,88 @@ fn collect_tree(dir: &Path, batch: &mut WriteBatch) -> Result<(), GitstoreError>
         }
     }
     Ok(())
+}
+
+/// The tree-nesting bound for the durability walk — the same bound the read-side walks apply, so a
+/// version deep enough to be refused here was already unrenderable.
+const MAX_TREE_DEPTH: usize = 64;
+
+/// Recursively push every **tree** object reachable from `tree_oid` — and, when `include_blobs`, every
+/// blob's loose path too — into the batch. The walk covers ONE version's tree only, so its size bounds
+/// the durability set. (The server fence excludes blobs: their durability is the per-object install's;
+/// an offloaded blob's bytes are not in git at all. The client write path includes them.)
+pub(crate) fn collect_tree_objects(
+    repo: &gix::Repository,
+    tree_oid: gix::ObjectId,
+    objects: &Path,
+    include_blobs: bool,
+    depth: usize,
+    batch: &mut WriteBatch,
+) -> Result<(), GitstoreError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(GitstoreError::Gix("tree nesting too deep".into()));
+    }
+    push_loose(batch, objects, tree_oid);
+    let tree = repo
+        .find_object(tree_oid)
+        .map_err(gix_err)?
+        .try_into_tree()
+        .map_err(gix_err)?;
+    for entry in tree.iter() {
+        let entry = entry.map_err(gix_err)?;
+        let oid = entry.oid().to_owned();
+        match entry.mode().kind() {
+            EntryKind::Tree => {
+                collect_tree_objects(repo, oid, objects, include_blobs, depth + 1, batch)?;
+            }
+            _ if include_blobs => push_loose(batch, objects, oid),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Push one loose object's durability paths: the object file + its shard dir. (The `objects/` parent is
+/// pushed once by the caller.)
+pub(crate) fn push_loose(batch: &mut WriteBatch, objects: &Path, oid: gix::ObjectId) {
+    let path = loose_path_in(objects, oid.as_slice());
+    if let Some(shard) = path.parent() {
+        batch.dirs.push(shard.to_path_buf());
+    }
+    batch.files.push(path);
+}
+
+/// Push a version-ref file + every ref dir up to (and including) the git dir, so a freshly-created ref
+/// path (`refs/topos/versions/…`) is durable entry-by-entry.
+pub(crate) fn push_version_ref(batch: &mut WriteBatch, git_dir: &Path, version_id: &[u8; 32]) {
+    let ref_rel = version_ref_name(version_id); // refs/topos/versions/<hex>
+    let ref_file = git_dir.join(&ref_rel);
+    let mut dir = ref_file.parent();
+    while let Some(d) = dir {
+        batch.dirs.push(d.to_path_buf());
+        if d == git_dir {
+            break;
+        }
+        dir = d.parent();
+    }
+    batch.files.push(ref_file);
+}
+
+/// Build a loose-object path under an `objects/` dir from a raw git-oid byte slice.
+pub(crate) fn loose_path_in(objects: &Path, oid: &[u8]) -> PathBuf {
+    let hex = hex_lower(oid);
+    objects.join(&hex[0..2]).join(&hex[2..])
+}
+
+/// Lowercase hex of a byte slice (no dependency; the kernel's hex is sized for 32-byte ids).
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 pub(crate) fn gix_err<E: std::fmt::Display>(e: E) -> GitstoreError {

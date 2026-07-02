@@ -20,7 +20,10 @@ use gix::objs::tree::EntryKind;
 use topos_core::digest::{self, FileMode, ManifestEntry};
 
 use crate::error::GitstoreError;
-use crate::store::{ImportFile, Store, TreeHandle, gix_err, version_ref_name};
+use crate::store::{
+    ImportFile, Store, TreeHandle, collect_tree_objects, gix_err, loose_path_in, push_loose,
+    push_version_ref,
+};
 
 /// The width of a git object id (SHA-1), the locator the authority records for a fenced object.
 pub const GIT_OID_LEN: usize = 20;
@@ -269,7 +272,7 @@ impl Store {
             author,
             message,
         )?;
-        let batch = self.commit_durability(tree_oid, commit_oid, &version_id);
+        let batch = self.commit_durability(tree_oid, commit_oid, &version_id)?;
         fsync_batch(&batch)?;
         Ok(batch)
     }
@@ -299,11 +302,7 @@ impl Store {
 
     /// The loose-object path for a git id: `<git_dir>/objects/<first 2 hex>/<remaining 38 hex>`.
     fn loose_path(&self, git_oid: [u8; GIT_OID_LEN]) -> PathBuf {
-        let hex = hex_lower(&git_oid);
-        self.git_dir()
-            .join("objects")
-            .join(&hex[0..2])
-            .join(&hex[2..])
+        loose_path_in(&self.git_dir().join("objects"), &git_oid)
     }
 
     /// The durability set for a freshly-installed loose object: the object file, its shard dir, and the
@@ -320,45 +319,26 @@ impl Store {
         batch
     }
 
-    /// The durability set for a recorded commit: the new tree + commit loose objects and the version-ref
-    /// file, plus every parent dir whose entry changed.
+    /// The durability set for a recorded commit: the commit loose object, **every** tree object
+    /// (including the subtrees a nested path creates — syncing only the root tree could lose a subtree
+    /// while the version ref survives), and the version-ref file, plus every parent dir whose entry
+    /// changed. Blobs are excluded: their durability is [`Self::install_object_durable`]'s
+    /// responsibility, and an offloaded blob's bytes are not in git at all.
     fn commit_durability(
         &self,
         tree_oid: gix::ObjectId,
         commit_oid: gix::ObjectId,
         version_id: &[u8; 32],
-    ) -> crate::store::WriteBatch {
+    ) -> Result<crate::store::WriteBatch, GitstoreError> {
         let git_dir = self.git_dir();
         let objects = git_dir.join("objects");
         let mut batch = crate::store::WriteBatch::default();
-        for oid in [tree_oid, commit_oid] {
-            let path = loose_path_in(&objects, oid.as_slice());
-            if let Some(shard) = path.parent() {
-                batch.dirs.push(shard.to_path_buf());
-            }
-            batch.files.push(path);
-        }
+        push_loose(&mut batch, &objects, commit_oid);
+        collect_tree_objects(self.repo(), tree_oid, &objects, false, 0, &mut batch)?;
         batch.dirs.push(objects);
-        // The version ref file + its dir chain.
-        let ref_rel = version_ref_name(version_id); // refs/topos/versions/<hex>
-        let ref_file = git_dir.join(&ref_rel);
-        let mut dir = ref_file.parent();
-        while let Some(d) = dir {
-            batch.dirs.push(d.to_path_buf());
-            if d == git_dir {
-                break;
-            }
-            dir = d.parent();
-        }
-        batch.files.push(ref_file);
-        batch
+        push_version_ref(&mut batch, git_dir, version_id);
+        Ok(batch)
     }
-}
-
-/// Build a loose-object path under an `objects/` dir from a raw git-oid byte slice.
-fn loose_path_in(objects: &Path, oid: &[u8]) -> PathBuf {
-    let hex = hex_lower(oid);
-    objects.join(&hex[0..2]).join(&hex[2..])
 }
 
 /// fsync every file then every directory in the batch (file data first, then the dir entries that
@@ -381,17 +361,6 @@ fn fsync_path(path: &Path) -> Result<(), GitstoreError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(GitstoreError::Io(format!("{e}"))),
     }
-}
-
-/// Lowercase hex of a byte slice (no dependency; the kernel's hex is sized for 32-byte ids).
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 /// A git [`gix::ObjectId`] from a 20-byte locator. A wrong width (e.g. a sha256-OID repo) is a typed

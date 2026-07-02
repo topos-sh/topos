@@ -25,6 +25,12 @@
 //! op, neither as a commit); the pointer is a JSON object — a different leading byte (`{`) entirely —
 //! and binds its algorithm. No signature under one preimage can verify under another.
 //!
+//! The **cross-component identity derivations these frames bind** also live here, once: the
+//! pubkey-derived [`device_key_id`], the governance [`GovernanceRole`] signing byte, and the invite
+//! no-expiry sentinel [`INVITE_NO_EXPIRY`]. Each is a signature-preimage input the client computes at
+//! sign time and the plane independently re-derives at verify time — a second implementation of any of
+//! them could silently fork the two halves, so neither half may re-implement one.
+//!
 //! ## Why a hand-specified binary frame, not a serialization crate
 //!
 //! A signing preimage is a cryptographic commitment: its bytes must be reproducible *forever* and
@@ -82,6 +88,30 @@ pub fn verify_ed25519(message: &[u8], signature: &[u8; 64], public_key: &[u8; 32
     };
     let signature = Signature::from_bytes(signature);
     verifying_key.verify_strict(message, &signature).is_ok()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cross-component identity: the device key id every signed frame binds.
+// ---------------------------------------------------------------------------------------------
+
+/// The `dk_`-prefixed hex length of a [`device_key_id`] (the first 32 hex chars of the sha256).
+const DEVICE_KEY_ID_HEX_LEN: usize = 32;
+
+/// The device key id derived from a raw Ed25519 device public key: `dk_` + the first
+/// 32 hex chars of `sha256(public_key)`.
+///
+/// A **cross-component identity**: the client binds this id into every frame it signs (device-op,
+/// enroll, governance) and the plane RE-DERIVES it server-side from the registered public key — a
+/// client-asserted id is never trusted — so it is a signature-preimage input, written once here and
+/// called by both halves (a divergent derivation would make every signature fail). Stable across
+/// restarts (derived from the persisted key, never random) and public (it does not reveal the key).
+#[must_use]
+pub fn device_key_id(public_key: &[u8; 32]) -> String {
+    let hex = to_hex(&sha256(public_key));
+    let mut id = String::with_capacity(3 + DEVICE_KEY_ID_HEX_LEN);
+    id.push_str("dk_");
+    id.push_str(&hex[..DEVICE_KEY_ID_HEX_LEN]);
+    id
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -320,6 +350,39 @@ pub fn verify_enroll(
 // device revoke. The frame binds `op_type` plus the op's full parameter set, so an invite signature
 // can never replay as a revoke, and the plane can use `sha256(preimage)` as a request-replay identity.
 // ---------------------------------------------------------------------------------------------
+
+/// The `expires_at` value the Invite frame binds for "never expires" — v0 invites carry no expiry, so
+/// BOTH halves (the client's invite signer and the plane's invite handler + token derivation) bind this
+/// one sentinel. A disagreement here is a signature-preimage fork: every invite would verify DENIED.
+pub const INVITE_NO_EXPIRY: u64 = 0;
+
+/// The workspace governance role whose byte the invite / roster-set frames bind — `Owner` = 1,
+/// `Reviewer` = 2, `Member` = 3, via [`GovernanceRole::signing_byte`]. ONE mapping: the client signer
+/// and the plane's in-transaction verify both map their own role types onto this enum, so a
+/// signature-preimage input can never fork between the halves. An **omitted** role means `Member` on
+/// both halves too — that shared convention is this enum's `Default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GovernanceRole {
+    /// Full governance authority (invite, roster, revoke). Byte 1.
+    Owner,
+    /// Review-gate authority (no governance authority in v0). Byte 2.
+    Reviewer,
+    /// An ordinary member (no governance authority) — the omitted-role default. Byte 3.
+    #[default]
+    Member,
+}
+
+impl GovernanceRole {
+    /// The `u8` bound into the invite / roster-set signing frame (owner = 1, reviewer = 2, member = 3).
+    #[must_use]
+    pub fn signing_byte(self) -> u8 {
+        match self {
+            GovernanceRole::Owner => 1,
+            GovernanceRole::Reviewer => 2,
+            GovernanceRole::Member => 3,
+        }
+    }
+}
 
 /// The closed set of governance operations an owner signs. Each variant carries its full parameter
 /// set, which the frame binds — so a signature for one operation can never be replayed as another (the
@@ -1380,6 +1443,36 @@ mod tests {
             &arr64(DEVICEOP_SIG),
             &pk
         ));
+    }
+
+    // ---- Cross-component identity derivations (the shared impls both halves call) ----
+
+    #[test]
+    fn device_key_id_known_answer() {
+        // The frozen device key (seed 00..1f → DEVICE_PK) derives this exact id — the SAME value the
+        // client signer binds into its frames and the plane re-derives from the registered key.
+        assert_eq!(
+            device_key_id(&arr32(DEVICE_PK)),
+            "dk_56475aa75463474c0285df5dbf2bcab7"
+        );
+        // Shape: the `dk_` prefix + exactly the first 32 hex chars of sha256(pubkey).
+        let full = to_hex(&sha256(&arr32(DEVICE_PK)));
+        assert_eq!(
+            device_key_id(&arr32(DEVICE_PK)),
+            alloc::format!("dk_{}", &full[..32])
+        );
+    }
+
+    #[test]
+    fn governance_role_bytes_and_default_are_frozen() {
+        // The exact bytes the invite / roster-set frames bind (Owner=1, Reviewer=2, Member=3) and the
+        // shared omitted-role default (Member). A change here re-keys every governance signature.
+        assert_eq!(GovernanceRole::Owner.signing_byte(), 1);
+        assert_eq!(GovernanceRole::Reviewer.signing_byte(), 2);
+        assert_eq!(GovernanceRole::Member.signing_byte(), 3);
+        assert_eq!(GovernanceRole::default(), GovernanceRole::Member);
+        // The invite no-expiry sentinel both halves bind for "never expires".
+        assert_eq!(INVITE_NO_EXPIRY, 0);
     }
 
     // ---- Signed current pointer (JCS) ----

@@ -456,15 +456,12 @@ fn lay_first_receive_baseline(
         ctx.fs.remove_dir_all(&staging_base)?;
     }
     ctx.fs.create_dir_all(&sp.store)?;
-    // An empty embedded-git store the first received version is later written into.
+    // An empty embedded-git store the first received version is later written into. The full-tree
+    // durability set is exactly right HERE (and only here + `add`'s staging import): the store is a
+    // fresh `init_bare`, so the whole tree IS this op's writes (the repo scaffolding — HEAD / config /
+    // objects/ / refs/) and never carries history.
     let store = Store::init(&sp.store)?;
-    let batch = store.durability_set()?;
-    for f in &batch.files {
-        ctx.fs.fsync_file(f)?;
-    }
-    for d in &batch.dirs {
-        ctx.fs.fsync_dir(d)?;
-    }
+    super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
 
     // The adapter keeps a `&str` seam; the id here is the validated newtype, honoring its "callers pass
     // an already-validated id" contract.

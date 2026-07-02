@@ -100,14 +100,10 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
     let tree = store.write_bundle(&import)?;
     store.commit(version_id, &[], &tree, &ctx.device_id, ADD_MESSAGE)?;
 
-    // Make the git objects durable BEFORE any doc references them (the ordering invariant).
-    let batch = store.durability_set()?;
-    for file in &batch.files {
-        ctx.fs.fsync_file(file)?;
-    }
-    for dir in &batch.dirs {
-        ctx.fs.fsync_dir(dir)?;
-    }
+    // Make the git objects durable BEFORE any doc references them (the ordering invariant). The
+    // full-tree durability set is exactly right HERE (and only here + the `follow` baseline's empty
+    // init): a fresh staging store's whole tree IS this op's writes — it never carries history.
+    super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
 
     // Write the docs (sync → map → lock), lock LAST as the commit marker.
     let version_hex = to_hex(&version_id);

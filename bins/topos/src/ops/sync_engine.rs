@@ -19,7 +19,7 @@ use std::path::Path;
 use topos_core::digest::{self, to_hex};
 use topos_core::sign::{self, Commit};
 use topos_core::sync::{self, ApplyClass, Generation as KGen};
-use topos_gitstore::{ImportFile, Store};
+use topos_gitstore::{ImportFile, Store, WriteBatch};
 use topos_types::Generation;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, RecordedTuple, SyncState};
 use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
@@ -213,12 +213,16 @@ pub(crate) fn sync_one(
     // A failed integrity check is a loud per-skill ALARM, not a silent skip.
     let target_commit = recorded_commit(&sync, sync.observed)?;
     let store = Store::open(&sp.store)?;
-    let target_digest = match ensure_local(ctx, &store, skill_id, target_commit, 0) {
+    let mut written = WriteBatch::default();
+    let target_digest = match ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written) {
         Ok(d) => d,
         Err(e) if is_integrity_error(&e) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
         Err(e) => return Err(e),
     };
-    fsync_store(ctx, &store)?; // once, after the whole backfill — git bytes durable before any JSON
+    // Once, after the whole backfill — exactly the versions THIS op wrote (plus the target's own set when
+    // already local), durable before any JSON records the target. Never the whole store: the per-pull
+    // fsync cost is bounded by the fetched bytes, not lifetime history.
+    fsync_batch(ctx, &written)?;
     let bundle = match store.render_verified(target_commit, target_digest) {
         Ok(b) => b,
         // A digest mismatch on the rendered bytes is an integrity stop, not a transient error.
@@ -364,7 +368,11 @@ pub(crate) fn go_back(
         }
     })?;
     let bundle = store.render_verified(target, target_digest)?;
-    fsync_store(ctx, &store)?;
+    // The go-back writes nothing new into the store (the draft snapshot above synced its own set), but the
+    // docs below re-record `target` as applied — make ITS objects + ref durable first (a version fetched
+    // by a pull that crashed before its fsync can be present-and-renderable yet not durable). Bounded by
+    // one version's tree, never the whole store.
+    fsync_batch(ctx, &store.version_durability(&target)?)?;
     let target_digest_hex = to_hex(&target_digest);
 
     // `ExplicitLocalPull` → `MaterializeLocal`: a direct local command authorizes installing these bytes;
@@ -628,7 +636,8 @@ pub(crate) fn snapshot_draft(
         &ctx.device_id,
         DRAFT_SNAPSHOT_MESSAGE,
     )?;
-    fsync_store(ctx, &store)?;
+    // The snapshot's own objects + ref — durable before the draft id is surfaced or recorded anywhere.
+    fsync_batch(ctx, &store.version_durability(&draft_id)?)?;
     Ok(to_hex(&draft_id))
 }
 
@@ -636,12 +645,19 @@ pub(crate) fn snapshot_draft(
 /// diff, or log can render it. Recursively backfills absent parents (the fixture serves each) so
 /// `Store::commit`'s parent-present precondition holds across a multi-generation gap. Returns the version's
 /// `bundle_digest` (recomputed over the fetched bytes — the integrity tree hash).
+///
+/// Every version this call WRITES adds its own durability set to `written` (accumulated across the
+/// backfill; the caller fsyncs once at the end, before any JSON records the target) — so the fsync cost
+/// is bounded by this op's writes, never the store's lifetime history. An already-present target adds
+/// its set too: present-and-renderable does not imply durable (a prior pull may have crashed between its
+/// write and its fsync), and the caller is about to record it.
 fn ensure_local(
     ctx: &Ctx<'_>,
     store: &Store,
     skill_id: &str,
     version_id: [u8; 32],
     depth: usize,
+    written: &mut WriteBatch,
 ) -> Result<[u8; 32], ClientError> {
     if depth > MAX_BACKFILL {
         return Err(ClientError::Corrupt(
@@ -649,13 +665,14 @@ fn ensure_local(
         ));
     }
     if let Some(existing) = store_bundle_digest_opt(store, version_id)? {
+        written.extend(store.version_durability(&version_id)?);
         return Ok(existing);
     }
     let fetched = fetch(ctx, skill_id, version_id)?;
     // Backfill any missing ancestors first (so `commit` sees its parents).
     for parent in &fetched.parents {
         if store_bundle_digest_opt(store, *parent)?.is_none() {
-            ensure_local(ctx, store, skill_id, *parent, depth + 1)?;
+            ensure_local(ctx, store, skill_id, *parent, depth + 1, written)?;
         }
     }
     let import: Vec<ImportFile<'_>> = fetched
@@ -684,8 +701,9 @@ fn ensure_local(
                 to_hex(&version_id)
             ))
         })?;
-    // No fsync here — the caller fsyncs the store ONCE after the whole backfill, so durability cost is
-    // proportional to the bytes written, not re-syncing the growing store per ancestor commit.
+    // No fsync here — name what this commit created and let the caller fsync ONCE after the whole
+    // backfill, so durability cost is proportional to the bytes written, not paid per ancestor commit.
+    written.extend(store.version_durability(&version_id)?);
     Ok(tree.bundle_digest)
 }
 
@@ -910,15 +928,24 @@ fn kernel_recorded(sync: &SyncState) -> Result<Vec<sync::RecordedTuple>, ClientE
 }
 
 /// Reject a `recorded` list with a duplicate generation naming different commits (local corruption — the
-/// reused-tuple ALARM relies on a unique generation → commit map).
+/// reused-tuple ALARM relies on a unique generation → commit map). Runs per followed skill at the top of
+/// every pull, so it is O(n log n), not all-pairs: sort a copy by `(generation, commit)` — any duplicate
+/// generation naming two commits then has a differing adjacent pair inside its equal-generation run.
+/// Semantics are identical to the quadratic scan (exact-duplicate tuples stay tolerated).
 fn validate_recorded_unique(recorded: &[RecordedTuple]) -> Result<(), ClientError> {
-    for (i, a) in recorded.iter().enumerate() {
-        for b in &recorded[i + 1..] {
-            if a.generation == b.generation && a.commit_id != b.commit_id {
-                return Err(ClientError::Corrupt(
-                    "recorded history has a duplicate generation naming two commits".into(),
-                ));
-            }
+    let mut sorted: Vec<&RecordedTuple> = recorded.iter().collect();
+    sorted.sort_unstable_by(|a, b| {
+        (a.generation.epoch, a.generation.seq, &a.commit_id).cmp(&(
+            b.generation.epoch,
+            b.generation.seq,
+            &b.commit_id,
+        ))
+    });
+    for pair in sorted.windows(2) {
+        if pair[0].generation == pair[1].generation && pair[0].commit_id != pair[1].commit_id {
+            return Err(ClientError::Corrupt(
+                "recorded history has a duplicate generation naming two commits".into(),
+            ));
         }
     }
     Ok(())
@@ -1012,12 +1039,17 @@ fn is_integrity_error(e: &ClientError) -> bool {
     matches!(e, ClientError::Corrupt(_) | ClientError::Verify(_))
 }
 
-pub(crate) fn fsync_store(ctx: &Ctx<'_>, store: &Store) -> Result<(), ClientError> {
-    let batch = store.durability_set()?;
-    for f in &batch.files {
+/// fsync a named durability batch through the fault-injectable fs seam — files first, then the dirs
+/// whose entries changed. Paths are deduped first (insertion order kept), so a multi-version
+/// accumulation (an ancestor backfill naming a shared object twice) never pays twice for one path —
+/// macOS `F_FULLFSYNC` is roughly milliseconds per call.
+pub(crate) fn fsync_batch(ctx: &Ctx<'_>, batch: &WriteBatch) -> Result<(), ClientError> {
+    let mut seen = std::collections::HashSet::new();
+    for f in batch.files.iter().filter(|p| seen.insert(*p)) {
         ctx.fs.fsync_file(f)?;
     }
-    for d in &batch.dirs {
+    seen.clear();
+    for d in batch.dirs.iter().filter(|p| seen.insert(*p)) {
         ctx.fs.fsync_dir(d)?;
     }
     Ok(())

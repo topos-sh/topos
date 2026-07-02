@@ -1,17 +1,20 @@
 //! `invite` — an OWNER mints an `/i/<token>` invite link by signing the governance Invite op + POSTing it.
 //!
 //! Requires prior enrollment: the pinned plane (`base_url`), the workspace (`workspace_id`), and the device
-//! key all come from the sidecar `follow` wrote. The client SIGNS the governance frame the plane RE-DERIVES
-//! + verifies, so a single disagreement on the bytes ⇒ every invite DENIED. The load-bearing agreements:
+//! key all come from the sidecar `follow` wrote. The client SIGNS the governance frame the plane
+//! RE-DERIVES + verifies, so a single disagreement on the bytes ⇒ every invite DENIED. The load-bearing
+//! agreements live ONCE, in the kernel, and both halves call them:
 //!
-//! - **the role byte** — `Owner=1, Reviewer=2, Member=3`, byte-for-byte the plane's `Role::signing_byte`,
-//!   and an OMITTED `--role` defaults to **Member (=3)** (the plane's handler signs `role.unwrap_or(member)`);
-//! - **`expires_at = 0`** — the plane's invite handler hardcodes `expires_at: None`, and the authority binds
-//!   `expires_to_u64(None) == 0`, so the client must sign `0` (an invite never expires in v0);
+//! - **the role byte** — `topos_core::sign::GovernanceRole::signing_byte` (`Owner=1, Reviewer=2,
+//!   Member=3`; the plane's `Role::signing_byte` delegates to the same enum), and an OMITTED `--role`
+//!   is the enum's shared default **Member** (the plane's handler signs `role.unwrap_or(member)`);
+//! - **`expires_at`** — the shared no-expiry sentinel `topos_core::sign::INVITE_NO_EXPIRY` (the plane's
+//!   invite handler hardcodes `expires_at: None`, which its frame binds as the same sentinel — an
+//!   invite never expires in v0);
 //! - **emails + skill IDS as SETS** — the kernel `governance_op_preimage` sorts + dedups both in-frame, so
 //!   the order is irrelevant; the skill **ids** (never names) are what the frame binds.
 
-use topos_core::sign::{GovernanceOpFields, GovernanceOpKind};
+use topos_core::sign::{GovernanceOpFields, GovernanceOpKind, GovernanceRole, INVITE_NO_EXPIRY};
 use topos_types::requests::{InviteRequest, InviteSkill, WorkspaceRole};
 use topos_types::results::InviteData;
 
@@ -26,15 +29,18 @@ use crate::plane::GovernanceSource;
 /// Production wires `UreqEnroll`; the tests wire a fake (no HTTP).
 pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
 
-/// Map a [`WorkspaceRole`] (omitted ⇒ Member) to the governance signing byte — **the same mapping the plane's
-/// `Role::signing_byte` uses: Owner=1, Reviewer=2, Member=3** — and the omitted-default Member the plane's
-/// invite handler signs (`role.unwrap_or(member)`). A divergence here would make every invite DENIED.
+/// Map the wire [`WorkspaceRole`] onto the kernel's [`GovernanceRole`] and take ITS signing byte — the
+/// one mapping the plane's `Role::signing_byte` also delegates to, so the byte can never fork between
+/// the halves. An omitted `--role` is the kernel enum's shared default (Member), matching the plane's
+/// invite handler (`role.unwrap_or(member)`).
 fn role_signing_byte(role: Option<WorkspaceRole>) -> u8 {
-    match role.unwrap_or(WorkspaceRole::Member) {
-        WorkspaceRole::Owner => 1,
-        WorkspaceRole::Reviewer => 2,
-        WorkspaceRole::Member => 3,
+    match role {
+        Some(WorkspaceRole::Owner) => GovernanceRole::Owner,
+        Some(WorkspaceRole::Reviewer) => GovernanceRole::Reviewer,
+        Some(WorkspaceRole::Member) => GovernanceRole::Member,
+        None => GovernanceRole::default(),
     }
+    .signing_byte()
 }
 
 /// Mint an `/i/<token>` invite: sign the governance Invite op with this device's key, then POST it.
@@ -88,7 +94,7 @@ pub(crate) fn invite(
         device_key_id: signer.device_key_id(),
         op: GovernanceOpKind::Invite {
             role: role_signing_byte(role),
-            expires_at: 0,
+            expires_at: INVITE_NO_EXPIRY,
             emails: &email_refs,
             skills: &skill_refs,
         },
@@ -491,8 +497,8 @@ mod tests {
 
     #[test]
     fn role_byte_mapping_matches_the_plane() {
-        // The exact mapping the plane's Role::signing_byte uses (Owner=1, Reviewer=2, Member=3), plus the
-        // omitted-default (Member=3).
+        // Pins the SHARED kernel mapping (`GovernanceRole::signing_byte`: Owner=1, Reviewer=2, Member=3)
+        // plus the omitted-default (Member=3) — the same impl the plane's Role::signing_byte delegates to.
         assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Owner)), 1);
         assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Reviewer)), 2);
         assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Member)), 3);

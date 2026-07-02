@@ -5,10 +5,11 @@
 //! `zeroize` feature), the raw public key, and a stable, pubkey-derived `device_key_id` — it **never**
 //! retains the raw seed, and its `Debug` is hand-written so a key seed can never reach a log or panic.
 //!
-//! **Cross-component agreement.** `device_key_id` is derived byte-for-byte the way the plane derives it
-//! server-side — `dk_` + the first 32 hex chars of `sha256(public_key)`. The client SIGNS the enroll /
-//! governance / device-op frames binding this id, and the plane re-derives the SAME id from the registered
-//! public key and verifies; a divergent derivation would make every signature fail.
+//! **Cross-component agreement.** `device_key_id` (`dk_` + the first 32 hex chars of
+//! `sha256(public_key)`) is the ONE kernel derivation — `topos_core::sign::device_key_id` — which the
+//! plane's server-side re-derivation also calls. The client SIGNS the enroll / governance / device-op
+//! frames binding this id, and the plane re-derives the SAME id from the registered public key and
+//! verifies; a second implementation could silently fork the halves, so neither side carries one.
 //!
 //! **One signer.** `topos-core` builds every signing preimage and verifies; the concrete `sign` is the
 //! caller's — here — over the same `ed25519-dalek` crate. This file never re-implements a preimage: it
@@ -66,7 +67,9 @@ impl DeviceSigner {
     fn from_seed(seed: &[u8; SEED_LEN]) -> Self {
         let signing_key = SigningKey::from_bytes(seed);
         let public_key = signing_key.verifying_key().to_bytes();
-        let device_key_id = derive_device_key_id(&public_key);
+        // The ONE kernel derivation (`dk_` + first 32 hex of sha256(pubkey)) — the plane re-derives the
+        // SAME id from the registered key via the same fn, so the halves cannot drift.
+        let device_key_id = topos_core::sign::device_key_id(&public_key);
         Self {
             signing_key,
             public_key,
@@ -136,15 +139,6 @@ fn preimage_err(e: PreimageError) -> ClientError {
     ClientError::Corrupt(format!(
         "could not build the device signing preimage: {e:?}"
     ))
-}
-
-/// Derive the device key id from the public key — **byte-identical to the plane's server-side derivation**
-/// (`dk_` + the first 32 hex chars of `sha256(public_key)`). The client signs frames binding this id and
-/// the plane re-derives + verifies it; a mismatch would make every signature fail. Stable across restarts
-/// (derived from the persisted key, never random), and it does not leak the secret.
-fn derive_device_key_id(public_key: &[u8; 32]) -> String {
-    let hex = topos_core::digest::to_hex(&topos_core::digest::sha256(public_key));
-    format!("dk_{}", &hex[..32])
 }
 
 /// Load (or, on first run, generate + persist `0600`) the raw 32-byte device seed, serialized under the

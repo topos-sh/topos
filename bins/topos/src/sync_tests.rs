@@ -1880,3 +1880,248 @@ fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
         "no directory materialized outside the home"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The per-op durability bound: a pull fsyncs the fetched version's objects + ref — and ONLY those —
+// before any doc records the applied version (the fetch-then-record contract).
+// ---------------------------------------------------------------------------------------------
+
+/// Wraps [`RealFs`] and records every mutating op (label + the affected path) in call order, so a test
+/// can pin WHAT a pull made durable, that the set is bounded (no historical object re-synced), and that
+/// the store fsyncs precede the doc writes recording the result. Reads/locks are not recorded.
+struct RecordingFs {
+    inner: RealFs,
+    ops: std::cell::RefCell<Vec<(&'static str, PathBuf)>>,
+}
+impl RecordingFs {
+    fn new() -> Self {
+        Self {
+            inner: RealFs,
+            ops: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+    fn record(&self, label: &'static str, path: &Path) {
+        self.ops.borrow_mut().push((label, path.to_path_buf()));
+    }
+    fn ops(&self) -> Vec<(&'static str, PathBuf)> {
+        self.ops.borrow().clone()
+    }
+}
+impl FsOps for RecordingFs {
+    fn write_temp(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        self.record("write_temp", path);
+        self.inner.write_temp(path, bytes)
+    }
+    fn fsync_file(&self, path: &Path) -> std::io::Result<()> {
+        self.record("fsync_file", path);
+        self.inner.fsync_file(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.record("rename", to);
+        self.inner.rename(from, to)
+    }
+    fn fsync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        self.record("fsync_dir", dir);
+        self.inner.fsync_dir(dir)
+    }
+    fn rename_dir_noreplace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.record("rename_dir_noreplace", to);
+        self.inner.rename_dir_noreplace(from, to)
+    }
+    fn create_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+        self.record("create_dir_all", dir);
+        self.inner.create_dir_all(dir)
+    }
+    fn append_fsync(&self, path: &Path, line: &[u8]) -> std::io::Result<()> {
+        self.record("append_fsync", path);
+        self.inner.append_fsync(path, line)
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.record("remove_file", path);
+        self.inner.remove_file(path)
+    }
+    fn remove_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.record("remove_dir_all", path);
+        self.inner.remove_dir_all(path)
+    }
+    fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> std::io::Result<()> {
+        self.record("write_staged", path);
+        self.inner.write_staged(path, bytes, executable)
+    }
+    fn write_private(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        self.record("write_private", path);
+        self.inner.write_private(path, bytes)
+    }
+    fn exchange_dir(&self, a: &Path, b: &Path) -> std::io::Result<()> {
+        self.record("exchange_dir", b);
+        self.inner.exchange_dir(a, b)
+    }
+    fn read_opt(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        self.inner.read_opt(path)
+    }
+    fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.inner.read_dir(dir)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path)
+    }
+    fn path_kind(&self, path: &Path) -> std::io::Result<Option<crate::fs_seam::PathKind>> {
+        self.inner.path_kind(path)
+    }
+    fn private_perms_ok(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.private_perms_ok(path)
+    }
+    fn lock_exclusive(&self, path: &Path) -> std::io::Result<crate::fs_seam::LockGuard> {
+        self.inner.lock_exclusive(path)
+    }
+    fn try_lock_exclusive(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<Option<crate::fs_seam::LockGuard>> {
+        self.inner.try_lock_exclusive(path)
+    }
+}
+
+/// Every loose object file currently under `<store>/objects/` (the shard walk).
+fn store_loose_objects(store_dir: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    let objects = store_dir.join("objects");
+    for shard in std::fs::read_dir(&objects).unwrap().flatten() {
+        let p = shard.path();
+        if p.is_dir() {
+            for f in std::fs::read_dir(&p).unwrap().flatten() {
+                if f.path().is_file() {
+                    out.insert(f.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn pull_fsyncs_exactly_the_fetched_version_never_the_whole_store() {
+    let rig = Rig::new("fsyncset");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let store_dir = rig.layout().published(&sid(&id)).store;
+    let before = store_loose_objects(&store_dir);
+    assert!(!before.is_empty(), "adopt left genesis objects");
+
+    let fs = RecordingFs::new();
+    let data = pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::FastForwarded);
+
+    let ops_log = fs.ops();
+    let store_fsyncs: Vec<(usize, &PathBuf)> = ops_log
+        .iter()
+        .enumerate()
+        .filter(|(_, (label, p))| *label == "fsync_file" && p.starts_with(&store_dir))
+        .map(|(i, (_, p))| (i, p))
+        .collect();
+    let synced: std::collections::HashSet<&PathBuf> =
+        store_fsyncs.iter().map(|&(_, p)| p).collect();
+
+    // (a) COMPLETE: every loose object the fetch wrote — and v1's version ref — was fsynced before the
+    // pull returned (the crash-safety contract: reachable ⇒ durable before recorded).
+    let new: Vec<PathBuf> = store_loose_objects(&store_dir)
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    assert!(!new.is_empty(), "the fetch wrote v1's objects");
+    for p in &new {
+        assert!(synced.contains(p), "fetched object {p:?} was not fsynced");
+    }
+    let v1_ref = store_dir.join("refs/topos/versions").join(to_hex(&v1.id));
+    assert!(synced.contains(&v1_ref), "v1's version ref was not fsynced");
+
+    // (b) BOUNDED: no genesis-era (historical) object was re-fsynced — the per-pull durability set is
+    // the fetched version's own writes, never the store's lifetime history.
+    for p in &before {
+        assert!(
+            !synced.contains(p),
+            "historical object {p:?} was re-fsynced — the durability set is unbounded"
+        );
+    }
+
+    // (c) ORDERED: every store fsync precedes the first doc write that records the applied version
+    // (map/lock are written only by the post-swap doc commit; sync.json's floor raise is earlier by
+    // design and names no local bytes).
+    let last_store_fsync = store_fsyncs.iter().map(|&(i, _)| i).max().unwrap();
+    let first_apply_doc = ops_log
+        .iter()
+        .enumerate()
+        .find(|(_, (label, p))| {
+            *label == "write_temp"
+                && p.file_name()
+                    .is_some_and(|f| f.to_string_lossy().starts_with("map.json"))
+        })
+        .map(|(i, _)| i)
+        .expect("the apply committed its docs");
+    assert!(
+        last_store_fsync < first_apply_doc,
+        "a store fsync ({last_store_fsync}) landed after the doc commit began ({first_apply_doc})"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// validate_recorded_unique — identical semantics at O(n log n).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn duplicate_generation_naming_two_commits_is_refused_as_corrupt() {
+    let rig = Rig::new("dupgen");
+    let (id, _name, _genesis) = rig.adopt(BASE);
+    let plane = FixturePlane::default();
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Forge local corruption: the SAME generation recorded under two DIFFERENT commits (non-adjacent in
+    // list order — the sorted neighbour check must still pair them).
+    rig.patch_sync(&id, |s| {
+        let g = Generation { epoch: 5, seq: 5 };
+        s.recorded.push(RecordedTuple {
+            generation: g,
+            commit_id: "11".repeat(32),
+        });
+        s.recorded.push(RecordedTuple {
+            generation: Generation { epoch: 9, seq: 9 },
+            commit_id: "33".repeat(32),
+        });
+        s.recorded.push(RecordedTuple {
+            generation: g,
+            commit_id: "22".repeat(32),
+        });
+    });
+
+    let out = ops::pull(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert!(out.data.skills.is_empty(), "no row for the corrupt skill");
+    assert_eq!(out.warnings.len(), 1);
+    assert!(
+        out.warnings[0].contains("CORRUPT_STATE"),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn exact_duplicate_recorded_tuples_stay_tolerated() {
+    // The pre-existing semantics: a byte-identical duplicate tuple (same generation AND commit) is not
+    // corruption — the neighbour scan must not turn it into a refusal.
+    let rig = Rig::new("dupsame");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let plane = FixturePlane::default();
+    let foll = follow(&id, FollowMode::Auto);
+    rig.patch_sync(&id, |s| {
+        let dup = s.recorded[0].clone();
+        s.recorded.push(dup);
+    });
+    let _ = genesis;
+
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::UpToDate);
+}

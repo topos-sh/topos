@@ -34,8 +34,16 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   sha256)`; the authority's render dispatches here for a leaf the DB locates in git. A missing object is the
   typed `MissingObject` (it never *infers* offload from absence — location is the DB's fact).
 - `log` / `list_versions` — first-parent history + the ref-set reverse map, with duplicate-lineage rejected.
-- `durability_set` — the loose objects + version refs + their parent dirs the client fsyncs to make a write
-  durable *before* any JSON references it.
+- `durability_set` — the WHOLE-tree walk (every loose object + version ref + the repo scaffolding + parent
+  dirs) a client fsyncs to make a **fresh staging store** durable *before* any JSON references it. Scoped
+  to just-created stores (`add`'s staged import; the `follow` baseline's empty init) — there the whole tree
+  IS the op's writes. A store carrying history uses `version_durability` instead.
+- `version_durability` — the per-write durability set of ONE version: its commit object, every tree + blob
+  reachable from its tree, and its version ref (+ the parent dirs whose entries changed) — exactly what a
+  `write_bundle` + `commit` pair created, accumulated per written version via `WriteBatch::extend` across a
+  multi-version op. Keeps the client's per-op fsync cost bounded by what the op wrote, never lifetime
+  history (the client never packs, so a full-tree sync would grow forever). The crash-safety contract
+  (reachable ⇒ durable before any doc records it) is documented on `WriteBatch`.
 - `unified_diff` (`diff`) — a byte-stable line-oriented unified-diff renderer over two bundles (`DiffFile`
   views). The diff **algorithm** is `imara-diff` (histogram); the unified-diff **formatting** (hunk headers,
   mode-change, binary detection, the no-newline marker) is **owned here**, so the committed `diff` golden
@@ -55,7 +63,8 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   `bundle_digest`); `install_object_durable` copies one staged blob into the main store and **fsyncs** it (the
   object + its parent dirs) so the authority may mark it present only after the bytes are durable;
   `commit_durable` builds a migrated version's tree from already-installed ids (`write_tree`, **never**
-  re-writing a blob) and records the commit + version ref durably; `delete_loose_object` is the GC unlink;
+  re-writing a blob) and records the commit + version ref durably (its synced set walks EVERY tree object,
+  subtrees included — blobs stay the install's responsibility); `delete_loose_object` is the GC unlink;
   `read_staged_blob` reads one staged blob's bytes from a quarantine (the large-install path's byte fetch);
   `object_exists` is an idempotency belt only. Unlike the client write path (which names a durability set for
   the client to fsync), these server-side ops are self-durable and **return the path set they synced**.

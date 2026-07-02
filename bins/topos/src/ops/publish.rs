@@ -245,7 +245,8 @@ fn build_publish_op(
         .collect();
     let tree = store.write_bundle(&import)?;
     store.commit(commit_id, &parents, &tree, &ctx.device_id, PUBLISH_MESSAGE)?;
-    sync_engine::fsync_store(ctx, &store)?;
+    // The candidate's own objects + ref — durable before the WAL names it; never the whole store.
+    sync_engine::fsync_batch(ctx, &store.version_durability(&commit_id)?)?;
 
     let op_id_bytes = ctx.ids.new_op_id();
     let op_id = uuid::Uuid::from_bytes(op_id_bytes)
