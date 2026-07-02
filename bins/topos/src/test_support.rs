@@ -338,7 +338,7 @@ impl PullHarness {
                     .unwrap_or_else(|e| panic!("test_support: bad go-back version id: {e}"));
                 ops::PullScope::One {
                     name,
-                    mode: ops::TargetMode::GoBack(hash),
+                    mode: ops::TargetMode::GoBack(ops::VersionRef::Full(hash)),
                 }
             }
         };
@@ -793,9 +793,9 @@ impl FollowHarness {
                 version_id_hex,
             } => ops::PullScope::One {
                 name,
-                mode: ops::TargetMode::GoBack(
+                mode: ops::TargetMode::GoBack(ops::VersionRef::Full(
                     ops::parse_hex32(&version_id_hex).expect("go-back id is 32-byte hex"),
-                ),
+                )),
             },
         };
         // Production's `Command::Pull` arm loads (or mints) the device id — a draft snapshot authors under it.
@@ -1163,7 +1163,9 @@ impl ContributeHarness {
             plane_key,
             follow: &follow,
         };
-        let data = ops::list(&ctx, Some(&self.skill_id), false).expect("list");
+        let data = ops::list(&ctx, Some(&self.skill_id), false)
+            .expect("list")
+            .data;
         data.tracked
             .into_iter()
             .flat_map(|e| e.pending_proposals)

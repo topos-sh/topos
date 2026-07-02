@@ -577,7 +577,7 @@ fn go_back_then_resume() {
         &ctx,
         ops::PullScope::One {
             name: name.clone(),
-            mode: ops::TargetMode::GoBack(genesis),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
     .unwrap();
@@ -626,6 +626,52 @@ fn go_back_then_resume() {
         "resumed to v1"
     );
     assert!(!rig.read_sync(&id).held);
+}
+
+#[test]
+fn go_back_resolves_a_unique_short_prefix_and_refuses_a_no_match() {
+    // Same shape as `go_back_then_resume`, but the target rides as a pasted 12-char short form — the
+    // exact string every TTY surface renders — resolved against the skill's recorded history.
+    let rig = Rig::new("gobackprefix");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, signed(WS, &id, v1.id, 1, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let ctx = rig.ctx(&plane, &foll);
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+
+    let ctx = rig.ctx(&plane, &foll);
+    let data = pull_data(
+        &ctx,
+        ops::PullScope::One {
+            name: name.clone(),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Prefix(to_hex(&genesis)[..12].into())),
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&data).action, PullAction::Held);
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(BASE)),
+        "the short prefix installed the same bytes the full id would"
+    );
+
+    // A prefix matching nothing in the recorded history is the SAME typed error an unknown full id
+    // reports — never a fabricated floor, never a silent name fallback.
+    let ctx = rig.ctx(&plane, &foll);
+    let err = pull_data(
+        &ctx,
+        ops::PullScope::One {
+            name,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Prefix("ffffffffffff".into())),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "UNKNOWN_GOBACK_VERSION");
 }
 
 #[test]
@@ -912,7 +958,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
         &ctx,
         ops::PullScope::One {
             name,
-            mode: ops::TargetMode::GoBack(genesis),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
     .unwrap();
@@ -1790,7 +1836,7 @@ fn go_back_is_plane_independent_and_spends_no_network_call() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name,
-            mode: ops::TargetMode::GoBack(genesis),
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
     .unwrap();

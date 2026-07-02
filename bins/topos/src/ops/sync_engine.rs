@@ -307,14 +307,16 @@ pub(crate) fn sync_one(
     }
 }
 
-/// `topos pull <skill>@<hash>` — install an older version's exact bytes locally (a deliberate go-back),
+/// `topos pull <skill>@<ref>` — install an older version's exact bytes locally (a deliberate go-back),
 /// set `held` to suppress the next auto fast-forward, and **do NOT lower the `observed` floor** (a held
 /// copy still rejects downgrades). The target must be in this skill's recorded history (so its generation
-/// is known — never a fabricated floor).
+/// is known — never a fabricated floor); a short prefix resolves against that same recorded history (the
+/// list this function requires anyway), so a no-match prefix reports the same typed go-back error a
+/// full unknown id does.
 pub(crate) fn go_back(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
-    target: [u8; 32],
+    vref: &super::VersionRef,
 ) -> Result<PullSkill, ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
@@ -325,6 +327,11 @@ pub(crate) fn go_back(
     validate_recorded_unique(&sync.recorded)?;
     let name = lock.name.clone();
 
+    let target = super::resolve_version_ref(&sync.recorded, vref)?.ok_or_else(|| {
+        ClientError::UnknownGoBackVersion {
+            version: vref.shown(),
+        }
+    })?;
     let target_hex = to_hex(&target);
     // The go-back generation must be a real recorded one — refuse a version with no known generation.
     let target_gen = sync

@@ -29,6 +29,7 @@ use crate::plane::{FetchedVersion, KnownCurrent, PlaneError, PlaneSource, Pointe
 use super::sync_engine;
 
 /// What a `pull` invocation targets.
+#[derive(Debug)]
 pub(crate) enum PullScope {
     /// The bare session-start sweep — every followed skill.
     AllFollowed,
@@ -37,14 +38,17 @@ pub(crate) enum PullScope {
 }
 
 /// How a targeted single-skill pull behaves.
+#[derive(Debug)]
 pub(crate) enum TargetMode {
     /// `topos pull <skill>` — accept a pending update / resume a held skill / resolve a divergence (no `@hash`).
     AcceptPending,
     /// `topos pull <skill> --onto-current` — the disclosed escape: commit MY bytes on top of `current`,
     /// dropping the merge (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging.
     OntoCurrent,
-    /// `topos pull <skill>@<hash>` — install an older version's bytes locally (a deliberate go-back).
-    GoBack([u8; 32]),
+    /// `topos pull <skill>@<ref>` — install an older version's bytes locally (a deliberate go-back).
+    /// The ref is the full 64-hex id or a short prefix, resolved against the skill's recorded history
+    /// inside [`sync_engine::go_back`] (where that history is already loaded and validated).
+    GoBack(super::VersionRef),
 }
 
 /// A `pull` run's typed result: the per-skill rows PLUS the per-skill hard failures the sweep isolated.
@@ -119,7 +123,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
             let row = match mode {
-                TargetMode::GoBack(hash) => sync_engine::go_back(ctx, &skill_id, hash)?,
+                TargetMode::GoBack(vref) => sync_engine::go_back(ctx, &skill_id, &vref)?,
                 TargetMode::AcceptPending | TargetMode::OntoCurrent => {
                     let inv = match mode {
                         TargetMode::OntoCurrent => sync_engine::Invocation::Escape,

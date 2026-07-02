@@ -34,11 +34,17 @@ pub(crate) fn review(
     approve: bool,
 ) -> Result<ReviewData, ClientError> {
     // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
-    // (a malformed target is a usage error however un-enrolled the machine is).
+    // (a malformed target is a usage error however un-enrolled the machine is). Unlike the go-back /
+    // revert / diff refs, this hash stays FULL-64 only: an open proposal's candidate id exists on the
+    // plane, never in the local recorded history short prefixes resolve against, and fetching the
+    // proposals listing at parse time would put a network read inside argv validation. The full hash is
+    // what the flow already hands the reviewer — `publish --propose` prints the ready-to-run command and
+    // `list <skill>` prints each open proposal as `<skill>@<full hash>`.
     let (skill_name, proposal_hex) = split_target(target)?;
     let proposal_commit = parse_hex32_arg(
         &proposal_hex,
-        "the review target's `@<hash>` must be a 64-char lowercase hex version id",
+        "the review target's `@<hash>` must be a 64-char lowercase hex version id (copy it from \
+         `publish --propose` output or `topos list <skill>`)",
     )?;
 
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {

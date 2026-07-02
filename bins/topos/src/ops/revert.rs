@@ -15,7 +15,7 @@ use topos_types::results::RevertData;
 use topos_types::{SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
-use super::{parse_hex32_arg, resolve_skill};
+use super::{VersionRef, resolve_skill, resolve_version_ref};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -39,10 +39,19 @@ pub(crate) fn revert(
     confirm: bool,
 ) -> Result<RevertData, ClientError> {
     // Argv is validated FIRST (a malformed hash or token is a usage error however un-enrolled the
-    // machine is). `--approve <skill>@<hash>` binds the GOOD version id (revert's consent is the hash,
-    // not a digest); it must name the same good version as `--to`, and the same skill as any positional.
-    let good_commit = parse_hex32_arg(to, "`--to` must be a 64-char lowercase hex version id")?;
+    // machine is). Both `--to` and the `--approve` hash accept the full 64-hex id OR a short prefix
+    // (resolved below against the skill's recorded history, once the skill is known); they must name the
+    // SAME good version, and `--approve` the same skill as any positional.
+    let to_ref = VersionRef::parse_arg(
+        to,
+        "`--to` must be a 64-char lowercase hex version id (or a unique prefix of at least 8 chars)",
+    )?;
     let (approve_skill, approve_hash) = split_skill_at(approve)?;
+    let approve_ref = VersionRef::parse_arg(
+        &approve_hash,
+        "`--approve` must be `<skill>@<hash>` naming the good version — a 64-char lowercase hex id \
+         (or a unique prefix of at least 8 chars)",
+    )?;
 
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -55,13 +64,6 @@ pub(crate) fn revert(
                     .into(),
             )
         })?;
-    if approve_hash != to {
-        return Err(ClientError::ApprovalMismatch {
-            skill: approve_skill,
-            expected: format!("good version {to} (from --to)"),
-            got: format!("approved version {approve_hash}"),
-        });
-    }
     let skill_name = match skill_arg {
         Some(s) if s != approve_skill => {
             return Err(ClientError::ApprovalMismatch {
@@ -78,6 +80,28 @@ pub(crate) fn revert(
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
+    // Resolve both refs against the skill's recorded pointer history (a revert target is a version that
+    // was `current` at some point this client verified — exactly what `recorded` holds). The resolved
+    // FULL hex is what every downstream surface carries (`good`, the WAL, `reverted_to` — whose schema
+    // pins 64 hex), so a prefix never leaks into a document or the wire.
+    let recorded = super::recorded_history(ctx, &sp)?;
+    let good_commit = resolve_version_ref(&recorded, &to_ref)?.ok_or_else(|| {
+        ClientError::InvalidArgument(format!(
+            "--to '{}' matches no locally recorded version of '{skill_name}'; use the full \
+             64-char version id",
+            to_ref.shown()
+        ))
+    })?;
+    let good_hex = to_hex(&good_commit);
+    let approve_commit = resolve_version_ref(&recorded, &approve_ref)?;
+    if approve_commit != Some(good_commit) {
+        return Err(ClientError::ApprovalMismatch {
+            skill: approve_skill,
+            expected: format!("good version {good_hex} (from --to)"),
+            got: format!("approved version {}", approve_ref.shown()),
+        });
+    }
+
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
     let transport = connect(&instance.base_url);
 
@@ -92,7 +116,7 @@ pub(crate) fn revert(
         // Replay a crashed prior revert ONLY if it targets the SAME good version as this command; a
         // different `--to` must settle the in-flight revert first.
         Some(pending) => {
-            if pending.good.as_deref() != Some(to) {
+            if pending.good.as_deref() != Some(good_hex.as_str()) {
                 return Err(ClientError::PendingOp {
                     skill: skill_name.to_owned(),
                     detail: format!(
@@ -131,14 +155,14 @@ pub(crate) fn revert(
                 candidate_commit: to_hex(&forward),
                 bundle_digest: to_hex(&good_digest),
                 expected_generation: expected,
-                good: Some(to.to_owned()),
+                good: Some(good_hex.clone()),
                 last_receipt: None,
             }
         }
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &signer, &sp, &rec)?;
-    map_outcome(ctx, &sp, &rec, &receipt, skill_name, to)
+    map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex)
 }
 
 fn map_outcome(

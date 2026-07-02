@@ -161,11 +161,10 @@ pub fn run() -> ExitCode {
             render::invite_tty,
             &diag,
         ),
-        Command::List { skill, footprint } => finish(
+        Command::List { skill, footprint } => finish_list(
             json,
             cmd_name,
             ops::list(&ctx, skill.as_deref(), footprint),
-            render::list_tty,
             &diag,
         ),
         Command::Diff { skill, r#ref } => finish(
@@ -306,9 +305,9 @@ fn finish<T: Serialize>(
 }
 
 /// `pull`'s finisher — like [`finish`], but a bare sweep's isolated per-skill failures ride the
-/// envelope's `warnings` (one stable-shape line per failed skill), so an agent driving `pull --json`
-/// sees a wedged skill machine-visibly. Isolation semantics hold: `ok` stays `true`, exit stays 0 (each
-/// failure also reached stderr inside the sweep, which covers the TTY presentation).
+/// envelope's `warnings` (one stable-shape line per failed skill) AND the TTY summary, so a wedged
+/// skill is visible on both surfaces. Isolation semantics hold: `ok` stays `true`, exit stays 0 (each
+/// failure also reached stderr inside the sweep).
 fn finish_pull(
     json: bool,
     command: &str,
@@ -323,7 +322,30 @@ fn finish_pull(
                 envelope.warnings = out.warnings;
                 println!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::pull_tty(&out.data));
+                println!("{}", render::pull_tty(&out.data, &out.warnings));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `list`'s finisher — the `--json` envelope carries exactly the schema-pinned `ListData`; the TTY
+/// additionally renders the enrollment header + per-row follow annotations the outcome carries alongside
+/// (TTY-only disclosure — `ListData`'s pinned shape has no enrollment fields).
+fn finish_list(
+    json: bool,
+    command: &str,
+    result: Result<ops::ListOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(out) => {
+            if json {
+                let value = serde_json::to_value(&out.data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::list_tty(&out));
             }
             ExitCode::SUCCESS
         }
@@ -431,14 +453,16 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 }
 
 /// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
-/// pending update; `<name>@<hash>` = go back to that version's bytes; `--onto-current` = the escape.
+/// pending update; `<name>@<ref>` = go back to that version's bytes; `--onto-current` = the escape.
 ///
-/// A go-back suffix is recognized only when the part after the LAST `@` is a valid 64-char lowercase-hex
-/// version id; otherwise the whole argument is the skill name. So a skill whose name contains `@` (e.g.
-/// `team@cli`) is accepted as a name, and `team@cli@<hash>` still goes back correctly.
+/// A go-back suffix is recognized when the part after the LAST `@` is a version reference — the full
+/// 64-char lowercase-hex id, or a short prefix of at least 8 hex chars (resolved against the skill's
+/// recorded history, so a pasted 12-char short form from any topos output works). Otherwise the whole
+/// argument is the skill name: `team@cli` is accepted as a name, and `team@cli@<ref>` still goes back
+/// correctly. A hex suffix SHORTER than 8 chars stays part of the name (never a silent go-back).
 ///
 /// `--onto-current` (the escape) requires a `<skill>` target (clap enforces that half via `requires`)
-/// and is mutually exclusive with `@<hash>` (a runtime usage error — the suffix shape is only known
+/// and is mutually exclusive with `@<ref>` (a runtime usage error — the suffix shape is only known
 /// after parsing).
 fn build_pull_scope(
     skill: Option<String>,
@@ -455,16 +479,16 @@ fn build_pull_scope(
         return Ok(ops::PullScope::AllFollowed);
     };
     if let Some((name, suffix)) = arg.rsplit_once('@')
-        && let Ok(hash) = ops::parse_hex32(suffix)
+        && let Some(vref) = ops::VersionRef::recognize(suffix)
     {
         if onto_current {
             return Err(ClientError::InvalidArgument(
-                "--onto-current is not valid with @<hash>".into(),
+                "--onto-current is not valid with @<ref>".into(),
             ));
         }
         return Ok(ops::PullScope::One {
             name: name.to_owned(),
-            mode: ops::TargetMode::GoBack(hash),
+            mode: ops::TargetMode::GoBack(vref),
         });
     }
     Ok(ops::PullScope::One {
@@ -540,4 +564,37 @@ fn resolve_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".topos")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_pull_scope;
+    use crate::ops::{PullScope, TargetMode, VersionRef};
+
+    #[test]
+    fn pull_target_recognizes_full_ids_and_short_prefixes() {
+        // The full 64-hex suffix goes back (the long-standing shape).
+        let full = format!("docs@{}", "ab".repeat(32));
+        assert!(matches!(
+            build_pull_scope(Some(full), false).unwrap(),
+            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Full(_)) } if name == "docs"
+        ));
+        // A pasted 12-char short form is a go-back too — no more silent NO_SUCH_SKILL degradation.
+        assert!(matches!(
+            build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), false).unwrap(),
+            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Prefix(p)) }
+                if name == "docs" && p == "ab12cd34ef56"
+        ));
+        // A hex-ish suffix SHORTER than the prefix floor stays part of the name (a name may contain `@`),
+        // as does any non-hex suffix.
+        for name in ["docs@ab12", "team@cli"] {
+            assert!(matches!(
+                build_pull_scope(Some(name.to_owned()), false).unwrap(),
+                PullScope::One { name: n, mode: TargetMode::AcceptPending } if n == name
+            ));
+        }
+        // The escape never combines with a go-back ref.
+        let err = build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), true).unwrap_err();
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+    }
 }

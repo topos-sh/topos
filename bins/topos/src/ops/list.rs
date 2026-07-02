@@ -1,7 +1,12 @@
-//! `list [<skill>] [--footprint]` — inventory this machine. This increment populates only the
-//! **tracked** bucket (followed / published-by-you / untracked need the plane + adapters and render
-//! empty). `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree plus
-//! any harness config the currency hook lives in (disclosed, never deleted).
+//! `list [<skill>] [--footprint]` — inventory this machine. Populates the **tracked** bucket (every
+//! skill with a local sidecar record) and, once enrolled, the **followed** bucket (the tracked subset
+//! `follows.json` says is following its workspace `current`) plus a TTY enrollment header (workspace,
+//! plane, currency-hook state) — the one-command answer to "am I enrolled, what am I following, is the
+//! hook armed". `published_by_you` stays empty: the client keeps no durable record of its own settled
+//! publishes (the op-WAL is deleted once an op settles; `lock.json` records no author), so that bucket
+//! honestly waits for the plane-side `log --team` read. `untracked` needs harness discovery wiring and
+//! renders empty. `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree
+//! plus any harness config the currency hook lives in (disclosed, never deleted).
 
 use std::path::Path;
 
@@ -10,10 +15,46 @@ use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{ListData, SkillEntry};
 
 use crate::ctx::Ctx;
+use crate::enroll::{self, FollowModeDoc};
 use crate::error::ClientError;
 use crate::scan;
 use crate::sidecar;
 use crate::{doc, scan::ScannedBundle};
+
+/// A `list` run's typed result: the schema-pinned envelope payload plus the TTY-only enrollment
+/// disclosure. `ListData` is PINNED (its buckets carry `SkillEntry` rows only), so the enrollment header
+/// and the per-row follow annotations ride alongside for the TTY renderer — mirroring how `pull`'s
+/// warnings ride outside `PullData`.
+#[derive(Debug)]
+pub(crate) struct ListOutcome {
+    pub data: ListData,
+    /// `Some` iff enrolled (`instance.json` present — the same presence rule `load_enrollment` uses).
+    pub enrollment: Option<ListEnrollment>,
+}
+
+/// The enrolled-state disclosure for the TTY header + row annotations.
+#[derive(Debug)]
+pub(crate) struct ListEnrollment {
+    /// The workspace display name (falling back to the enrolled workspace id).
+    pub workspace: String,
+    /// The pinned plane's base URL.
+    pub base_url: String,
+    /// Whether the harness session-start currency hook is currently installed (read from the adapter's
+    /// managed-entry disclosure — it names its config path only while the managed entry is present).
+    pub hook_active: bool,
+    /// One entry per `data.tracked` row, same order: the follow-state note, or `None` for a purely
+    /// local (never-followed) skill.
+    pub notes: Vec<Option<FollowNote>>,
+}
+
+/// One tracked row's follow state, from `follows.json`.
+#[derive(Debug)]
+pub(crate) struct FollowNote {
+    /// `"auto"` / `"confirm-each"`.
+    pub mode: &'static str,
+    /// `false` = the entry is retained but unfollowed (`topos follow` resumes it).
+    pub following: bool,
+}
 
 /// Inventory the tracked skills, optionally narrowed to one name and/or with the footprint.
 ///
@@ -24,8 +65,9 @@ pub(crate) fn list(
     ctx: &Ctx<'_>,
     skill: Option<&str>,
     want_footprint: bool,
-) -> Result<ListData, ClientError> {
-    // Carry the stable skill id alongside each entry — the proposals read route is keyed by id, not name.
+) -> Result<ListOutcome, ClientError> {
+    // Carry the stable skill id alongside each entry — the proposals read route and the follow-state
+    // are keyed by id, not name.
     let mut tracked: Vec<(String, SkillEntry)> = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
@@ -92,6 +134,57 @@ pub(crate) fn list(
             }
         }
     }
+
+    // The enrolled-state disclosure + the followed bucket, from the same docs the pull engine reads.
+    // `instance.json` present = enrolled (its presence is what `follow` writes); `follows.json` may be
+    // absent (a membership-only enrollment). A followed skill always has a sidecar record (`follow` lays
+    // the first-receive baseline), so the followed bucket is the tracked subset its ids select; a
+    // follows entry with no local record (a foreign/partial state) is simply not listable yet.
+    let enrollment = match enroll::read_instance(ctx.fs, &ctx.layout)? {
+        None => None,
+        Some(instance) => {
+            let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
+                .map(|f| f.follows)
+                .unwrap_or_default();
+            let notes: Vec<Option<FollowNote>> = tracked
+                .iter()
+                .map(|(id, _)| {
+                    follows
+                        .iter()
+                        .find(|f| f.skill_id == *id)
+                        .map(|f| FollowNote {
+                            mode: match f.mode {
+                                FollowModeDoc::Auto => "auto",
+                                FollowModeDoc::ConfirmEach => "confirm-each",
+                            },
+                            following: f.following,
+                        })
+                })
+                .collect();
+            let workspace = match instance.workspace_display_name {
+                Some(name) => name,
+                // The display name is optional disclosure; the enrolled workspace id is in user.json.
+                None => enroll::read_user(ctx.fs, &ctx.layout)?
+                    .map(|u| u.workspace_id)
+                    .unwrap_or_else(|| "workspace".to_owned()),
+            };
+            Some(ListEnrollment {
+                workspace,
+                base_url: instance.base_url,
+                hook_active: !ctx.harness.uninstall_footprint().is_empty(),
+                notes,
+            })
+        }
+    };
+    let followed: Vec<SkillEntry> = match &enrollment {
+        Some(e) => tracked
+            .iter()
+            .zip(&e.notes)
+            .filter(|(_, n)| n.as_ref().is_some_and(|n| n.following))
+            .map(|((_, entry), _)| entry.clone())
+            .collect(),
+        None => Vec::new(),
+    };
     let tracked: Vec<SkillEntry> = tracked.into_iter().map(|(_, e)| e).collect();
 
     let footprint = if want_footprint {
@@ -110,12 +203,15 @@ pub(crate) fn list(
         None
     };
 
-    Ok(ListData {
-        followed: Vec::new(),
-        published_by_you: Vec::new(),
-        tracked,
-        untracked: Vec::new(),
-        footprint,
+    Ok(ListOutcome {
+        data: ListData {
+            followed,
+            published_by_you: Vec::new(),
+            tracked,
+            untracked: Vec::new(),
+            footprint,
+        },
+        enrollment,
     })
 }
 

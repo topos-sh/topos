@@ -13,7 +13,7 @@ use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{DiffData, DiffSource};
 
 use super::contribute;
-use super::{parse_hex32, parse_hex32_arg, resolve_skill};
+use super::{VersionRef, parse_hex32, resolve_skill, resolve_version_ref};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
@@ -57,8 +57,8 @@ pub(crate) fn diff(
         None => ("current".to_owned(), reference.to_owned()),
     };
 
-    let base = resolve_endpoint(ctx, id.as_str(), &from)?;
-    let target = resolve_endpoint(ctx, id.as_str(), &to)?;
+    let base = resolve_endpoint(ctx, &id, &from)?;
+    let target = resolve_endpoint(ctx, &id, &to)?;
 
     let diff = unified_diff(&diff_files(&base.files), &diff_files(&target.files));
     Ok(DiffData {
@@ -118,25 +118,41 @@ fn diff_draft_vs_current(
 
 /// Resolve a plane-backed diff endpoint to its verified bytes. `current` = the PLANE's live signed current
 /// (authenticated; so a behind reviewer diffs against the real trunk a proposal lands on, not a stale local
-/// view); a 64-hex id = that version (a proposal IS a version). Either way the bytes are fetched ONCE and
-/// re-verified to reproduce the version id — the SAME bytes are returned for display, never a second,
-/// unverified fetch (so a tampered plane cannot show benign bytes while the id commits to other bytes).
+/// view); a 64-hex id = that version (a proposal IS a version); a short (≥8 char) prefix resolves against
+/// the skill's locally recorded pointer history — which never holds an OPEN proposal's candidate id, so a
+/// proposal review still pastes the full hash `publish --propose` / `list <skill>` already print. Either
+/// way the bytes are fetched ONCE and re-verified to reproduce the version id — the SAME bytes are
+/// returned for display, never a second, unverified fetch (so a tampered plane cannot show benign bytes
+/// while the id commits to other bytes).
 fn resolve_endpoint(
     ctx: &Ctx<'_>,
-    skill_id: &str,
+    id: &crate::id::SkillId,
     endpoint: &str,
 ) -> Result<Endpoint, ClientError> {
+    let skill_id = id.as_str();
     let ep = endpoint.strip_prefix('@').unwrap_or(endpoint);
     let version_id = if ep == "current" {
         let workspace_id = workspace_of(ctx, skill_id)?;
         contribute::fresh_current(ctx, skill_id, &workspace_id)?.0
     } else {
         // The endpoint is user-typed argv — a malformed hash is a usage error, never CORRUPT_STATE
-        // (the draft-vs-current path's lock-field parses above keep the corruption classification).
-        parse_hex32_arg(
+        // (the draft-vs-current path's lock-field parses keep the corruption classification).
+        let vref = VersionRef::parse_arg(
             ep,
-            "a diff <ref> endpoint must be `current` or a 64-char lowercase hex version id",
+            "a diff <ref> endpoint must be `current`, a 64-char lowercase hex version id, or a \
+             unique prefix of at least 8 chars",
+        )?;
+        resolve_version_ref(
+            &super::recorded_history(ctx, &ctx.layout.published(id))?,
+            &vref,
         )?
+        .ok_or_else(|| {
+            ClientError::InvalidArgument(format!(
+                "'{}' matches no locally recorded version of this skill; use the full 64-char \
+                     id (an open proposal's id is only known in full — `list <skill>` prints it)",
+                vref.shown()
+            ))
+        })?
     };
     let (digest, fetched) = contribute::fetch_verified_bundle(ctx, skill_id, version_id)?;
     Ok(Endpoint {
