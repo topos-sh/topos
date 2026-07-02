@@ -9,3 +9,4 @@ Cargo.lock.bak
 # Local tooling — not tracked (editor config, Claude Code skills/agents)
 .vscode/
 .claude/
+/target-musl/

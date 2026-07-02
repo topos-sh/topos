@@ -30,6 +30,17 @@ private = { ignore = true }
 crate = "ring"
 allow = ["OpenSSL"]
 
+# The WebPKI trust-store data (pulled in by the rustls stack via ureq + lettre) ships under the
+# Community Data License Agreement — permissive, data-only, scoped to this one crate.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+# lettre's quoted-printable codec is 0BSD (public-domain-equivalent) — scoped, not globally allowed.
+[[licenses.exceptions]]
+crate = "quoted_printable"
+allow = ["0BSD"]
+
 [bans]
 multiple-versions = "warn"
 

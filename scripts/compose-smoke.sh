@@ -30,6 +30,15 @@ done
 
 if [ "$code" = "404" ]; then
   echo "PASS: an unknown read token 404'd — the plane is up, migrated, and querying Postgres."
+  # The 404 proves first boot completed, so the key + secret exist — now assert the stated custody
+  # posture (0600, owned by the unprivileged uid) instead of trusting the docs. GNU-stat syntax: fine
+  # on the debian-slim runtime; revisit if the base image ever changes family.
+  echo "== verifying first-boot key hardening (mode 0600, owner uid 10001) =="
+  keys="$(compose exec -T plane stat -c '%a %u %n' /data/plane.key /data/enroll.key)"
+  echo "$keys"
+  echo "$keys" | grep -q '^600 10001 /data/plane.key$'  || { echo "FAIL: plane.key is not 0600 uid 10001"; exit 1; }
+  echo "$keys" | grep -q '^600 10001 /data/enroll.key$' || { echo "FAIL: enroll.key is not 0600 uid 10001"; exit 1; }
+  echo "PASS: signing key + enrollment secret are 0600, owned by the unprivileged user."
   exit 0
 fi
 echo "FAIL: expected 404 from $PROBE, got '$code'"

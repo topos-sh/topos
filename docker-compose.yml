@@ -9,7 +9,10 @@
 
 services:
   db:
-    image: postgres:18
+    # Pinned by the multi-arch index digest for reproducibility. To track Postgres patch releases on
+    # `pull` instead, drop the `@sha256:…` and keep `postgres:18` — both are safe, the plane migrates
+    # its own schema. Refresh the pin: docker buildx imagetools inspect postgres:18
+    image: postgres:18@sha256:4aabea78cf39b90e834caf3af7d602a18565f6fe2508705c8d01aa63245c2e20
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-topos}

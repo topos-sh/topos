@@ -7,16 +7,24 @@
 # the runtime carries no database client library.
 
 # ── builder ──────────────────────────────────────────────────────────────────────────────────────────
-FROM rust:1.96-bookworm AS builder
+# Base images are pinned by the multi-arch INDEX digest (not a per-platform manifest) so one immutable
+# pin serves both linux/amd64 and linux/arm64 builds. Bumps are deliberate: re-resolve with
+#   docker buildx imagetools inspect rust:1.96-bookworm    (take the top-level "Digest:")
+# edit the pin, rebuild, and re-run scripts/compose-smoke.sh.
+FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
 WORKDIR /build
 # The compile-time-checked queries read the committed `crates/plane-store/.sqlx` metadata, so the build
 # needs no live database.
 ENV SQLX_OFFLINE=true
 COPY . .
-RUN cargo build --release --locked -p topos-plane
+# Optional cargo features for the plane build (e.g. --build-arg FEATURES=acme). Empty (the default,
+# and what the published image is built with) compiles exactly the standard plane.
+ARG FEATURES=""
+RUN cargo build --release --locked -p topos-plane ${FEATURES:+--features "$FEATURES"}
 
 # ── runtime ──────────────────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# Refresh: docker buildx imagetools inspect debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
