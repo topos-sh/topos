@@ -89,6 +89,15 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] } # to
 lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] } # topos-plane: passcode mailer (blocking SMTP + rustls)
 oauth2 = "5"                  # topos-plane enrollment OIDC (feature-gated, default-off; reqwest + rustls by default)
 openidconnect = "4"           # topos-plane enrollment OIDC (feature-gated, default-off; wraps oauth2; reqwest + rustls)
+# The built-in ACME TLS serve path (topos-plane ONLY, behind the default-off `acme` feature — bin-side
+# composition code, never the lib surface). ring-only: `default-features = false` drops rustls-acme's
+# default aws-lc-rs provider so the plane keeps ONE crypto backend; its `axum` feature carries the
+# axum-server acceptor glue that answers tls-alpn-01 inside the TLS accept.
+rustls-acme = { version = "0.15.3", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
+axum-server = "0.8"           # topos-plane acme: the TLS listener rustls-acme's AxumAcceptor plugs into
+webpki-roots = "1"            # topos-plane acme: the WebPKI roots the ACME client's trust store starts from
+rustls-pki-types = { version = "1", features = ["std"] } # topos-plane acme: parse the --acme-extra-root PEM (`pem_file_iter` is std-gated)
+futures-util = { version = "0.3", default-features = false } # topos-plane acme: drain the ACME event stream into tracing
 
 [workspace.lints.rust]
 unsafe_code = "forbid"        # no unsafe in our crates (deps may use it internally)

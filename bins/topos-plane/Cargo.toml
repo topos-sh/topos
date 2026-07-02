@@ -16,6 +16,17 @@ enroll-oidc = ["dep:oauth2", "dep:openidconnect"]
 # The test-only mailer-injection shim (`PlaneState::with_mailer` + the in-crate `FakeMailer`). Mirrors
 # `plane-store/test-fixtures`: gated OUT of the production build (a check-arch guard asserts it stays off).
 test-fixtures = []
+# The built-in ACME TLS listener (tls-alpn-01 via rustls-acme + axum-server). DEFAULT-OFF and
+# EXPERIMENTAL: bin-side composition only (the lib's public surface gains nothing), armed at runtime only
+# by a non-empty --acme-domain — a build with the feature but no domains serves exactly like a default
+# build. ring-only, so aws-lc-rs never enters this graph.
+acme = [
+    "dep:rustls-acme",
+    "dep:axum-server",
+    "dep:webpki-roots",
+    "dep:rustls-pki-types",
+    "dep:futures-util",
+]
 
 [dependencies]
 topos-core.workspace = true
@@ -28,6 +39,13 @@ lettre.workspace = true
 # id/access token is consumed SERVER-SIDE and never returned to the agent.
 oauth2 = { workspace = true, optional = true }
 openidconnect = { workspace = true, optional = true }
+# The built-in ACME TLS serve path — feature-gated (`acme`, default-off), BIN-SIDE composition only (the
+# module hangs off main.rs; lib.rs never references it). A default build resolves none of these.
+rustls-acme = { workspace = true, optional = true }
+axum-server = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 thiserror.workspace = true # the mailer / OIDC typed error (creds never reach its Debug/Display)
 # The HTTP surface: axum (default features cover json/http1/tokio/query; matchit is built-in), the OpenAPI
 # generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.

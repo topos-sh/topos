@@ -10,6 +10,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router};
 
+// The optional built-in ACME TLS serve path — bin-side composition only, behind the default-off `acme`
+// feature (the library surface gains nothing; a default build resolves none of its dependencies).
+#[cfg(feature = "acme")]
+mod acme_serve;
+
 /// The CLI surface: the runtime configuration plus an optional operator subcommand. A bare invocation
 /// (`command = None` — the container ENTRYPOINT, every existing flag/env unchanged) serves the plane
 /// exactly as before; a subcommand runs an operator task over the same configuration and exits.
@@ -96,6 +101,45 @@ struct Config {
     /// `PUT /v1/workspaces/{ws}/policy/review-required` toggle; unset, that route answers 404.
     #[arg(long, env = "TOPOS_PLANE_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+    /// The ACME TLS domain list (repeatable flag; comma-delimited in the env var). NON-EMPTY turns the
+    /// EXPERIMENTAL built-in ACME TLS listener on; empty (the default) serves plain HTTP exactly like a
+    /// build without the feature (terminate TLS at a reverse proxy — the recommended posture).
+    #[cfg(feature = "acme")]
+    #[arg(
+        long = "acme-domain",
+        env = "TOPOS_PLANE_ACME_DOMAINS",
+        value_delimiter = ','
+    )]
+    acme_domain: Vec<String>,
+    /// The ACME account contact (e.g. `mailto:ops@example.com`). Required when the ACME listener is on.
+    #[cfg(feature = "acme")]
+    #[arg(long, env = "TOPOS_PLANE_ACME_CONTACT")]
+    acme_contact: Option<String>,
+    /// The persistent ACME cache root (the account key + issued certificates; put it on the data volume,
+    /// e.g. `/data/acme`, so both survive a container restart). Required when the ACME listener is on.
+    #[cfg(feature = "acme")]
+    #[arg(long, env = "TOPOS_PLANE_ACME_CACHE")]
+    acme_cache: Option<PathBuf>,
+    /// The ACME directory URL. Defaults to the Let's Encrypt PRODUCTION directory; point it at the
+    /// staging directory (`https://acme-staging-v02.api.letsencrypt.org/directory`) or a local ACME test
+    /// server while rehearsing — production imposes strict rate limits.
+    #[cfg(feature = "acme")]
+    #[arg(
+        long,
+        env = "TOPOS_PLANE_ACME_DIRECTORY",
+        default_value = rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
+    )]
+    acme_directory: String,
+    /// The address the ACME TLS listener binds. tls-alpn-01 answers on this same port, so map your
+    /// public 443 to it (e.g. the container operator publishes host 443 -> container 8443).
+    #[cfg(feature = "acme")]
+    #[arg(long, env = "TOPOS_PLANE_ACME_BIND", default_value = "0.0.0.0:8443")]
+    acme_bind: SocketAddr,
+    /// An extra PEM root added to the ACME CLIENT's trust store — for reaching a private/test ACME
+    /// directory over TLS (test directories only; never needed for a public CA).
+    #[cfg(feature = "acme")]
+    #[arg(long, env = "TOPOS_PLANE_ACME_EXTRA_ROOT")]
+    acme_extra_root: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -121,7 +165,16 @@ async fn main() -> Result<()> {
 }
 
 /// The bare invocation: open the plane state, bind, and serve — exactly the pre-subcommand behavior.
+/// (With the `acme` feature compiled AND a non-empty `--acme-domain`, the ACME branch serves the same
+/// plain listener PLUS a TLS one; off — or not compiled — the path below runs untouched.)
 async fn serve(cfg: Config) -> Result<()> {
+    #[cfg(feature = "acme")]
+    if let Some(acme) = acme_serve::AcmeSettings::from_config(&cfg)? {
+        let bind = cfg.bind;
+        let state = open_state(cfg).await?;
+        return acme_serve::serve_with_tls(bind, acme, state).await;
+    }
+
     let bind = cfg.bind;
     let state = open_state(cfg).await?;
 

@@ -95,8 +95,12 @@ issuance decision (every credential/identity decision is `plane-store::Authority
 **Planned (lands later):** the **verification-page HTML** (the routes above are the JSON surface a composing
 web layer renders; the page itself is a separate surface); the **device-signed `PUT /policy` variant** (the
 admin-token operator route is built — see above; a device-op-signed governance route over the same policy
-needs a new kernel frame, still later work); the **audit outbox** read via durable cursors; **TLS
-termination** (loopback HTTP today — terminate at a reverse proxy).
+needs a new kernel frame, still later work); the **audit outbox** read via durable cursors. **TLS
+termination**: terminate at a reverse proxy (the recommended, documented path); the BIN also carries an
+optional, default-off `acme` cargo feature — an EXPERIMENTAL built-in ACME (tls-alpn-01) TLS listener,
+composition-root code in `main.rs`/`acme_serve.rs` only (never the lib surface), armed at runtime solely by
+a non-empty `--acme-domain`, and rehearsed against a local test ACME server (`scripts/acme-rehearsal.sh`) —
+a real box (public DNS, Let's Encrypt staging→prod, rate limits, renewal timing) remains unproven.
 
 ## bin
 
