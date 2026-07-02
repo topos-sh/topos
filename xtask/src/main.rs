@@ -865,11 +865,37 @@ fn check_toolchain_pins() -> Result<()> {
         println!(
             "ok: Dockerfile builder `rust:{tag}` matches rust-toolchain.toml channel `{channel}`"
         );
-        Ok(())
     } else {
         bail!(
             "toolchain-pin drift: Dockerfile builds on `rust:{tag}` but rust-toolchain.toml pins \
              `{channel}` — bump them together"
+        );
+    }
+    // The cargo-deny action runs in its own container, which cannot honor rust-toolchain.toml unless the
+    // workflow passes the pinned version explicitly (`rust-version:` in ci.yml) — the third leg of the
+    // same pin pair. A missing line is drift too: the action would fail on the toolchain override.
+    let ci_path = root.join(".github/workflows/ci.yml");
+    let ci =
+        fs::read_to_string(&ci_path).with_context(|| format!("reading {}", ci_path.display()))?;
+    let ci_pin = ci
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("rust-version:")?
+                .trim()
+                .trim_matches('"')
+                .split_whitespace()
+                .next()
+                .map(str::to_owned)
+        })
+        .context("ci.yml has no `rust-version: \"…\"` line for the cargo-deny action")?;
+    if ci_pin == channel {
+        println!("ok: ci.yml cargo-deny `rust-version: {ci_pin}` matches rust-toolchain.toml");
+        Ok(())
+    } else {
+        bail!(
+            "toolchain-pin drift: ci.yml pins the cargo-deny toolchain at `{ci_pin}` but \
+             rust-toolchain.toml pins `{channel}` — bump them together"
         );
     }
 }

@@ -29,7 +29,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS is TEMPORARILY off while the repo is private: private-repo macOS minutes bill at a 10x
+        # multiplier against the free-plan allowance, and the macOS leg was proven green on this repo's
+        # very first Actions run. Restore `macos-latest` here at the public flip (Actions minutes are
+        # free on public repos).
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # Honors rust-toolchain.toml (pinned channel + rustfmt/clippy components) — do NOT pin a
@@ -92,6 +96,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          # The action's container ships its own default toolchain, and rustup fails on this repo's
+          # rust-toolchain.toml override unless the pinned version is installed. Pin-pair with
+          # rust-toolchain.toml — `check-arch` asserts the two stay in lockstep.
+          rust-version: "1.96.0"
 
   # The self-host packaging gets the same regression protection as the code: build the image, start the
   # compose stack, prove the plane answers a DATABASE-BACKED request, tear it down. Push-to-main only —

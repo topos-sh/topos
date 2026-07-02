@@ -38,7 +38,8 @@ cargo xtask conformance            # the store matrices (not yet implemented —
   - the DEFAULT (production-features) `topos-plane` build resolves neither `oauth2` nor `openidconnect`
     nor `reqwest` (the OIDC connector is feature-gated default-off) — a production-tree check;
   - every workspace member opts into the shared `[workspace.lints]` (incl. `unsafe_code = forbid`);
-  - the Dockerfile's builder image tag matches `rust-toolchain.toml`'s pinned channel.
+  - the Dockerfile's builder image tag AND ci.yml's cargo-deny `rust-version` both match
+    `rust-toolchain.toml`'s pinned channel (one toolchain, three pin sites, bumped together).
 - **`ci`** — the contributor's pre-push loop: runs the full NON-DB gate sequence in the same order as the
   CI `gate` job, failing fast with a per-gate banner — `cargo fmt --all --check`, `cargo clippy --workspace
   --all-targets --locked -- -D warnings`, `cargo doc --workspace --no-deps --locked` (with
