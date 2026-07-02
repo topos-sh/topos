@@ -16,6 +16,11 @@ utoipa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# `dist` — deterministic release tarballs + the SHA256SUMS manifest (CI packaging only; the
+# shipped binaries gain nothing from these).
+sha2.workspace = true
+tar = "0.4"
+flate2 = "1"
 
 [lints]
 workspace = true

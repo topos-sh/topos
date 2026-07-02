@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A tag push triggers neither event above, so release.yml runs this whole gate as a
+  # reusable workflow instead — zero duplicated gate logic on the release path.
+  workflow_call:
 
 permissions:
   contents: read
@@ -50,6 +53,10 @@ jobs:
         run: cargo run -p xtask --locked -- gen-fixtures --check
       - name: architectural layering
         run: cargo run -p xtask --locked -- check-arch
+      # `acme` is a default-off feature of the plane bin; no other job compiles it, so lint it
+      # here explicitly to keep the feature-gated code from rotting.
+      - name: clippy (topos-plane, acme feature)
+        run: cargo clippy -p topos-plane --features acme --all-targets --locked -- -D warnings
 
   # The suite is split from the matrix `gate` because `#[sqlx::test]` provisions a fresh database per test at
   # runtime — that needs a live Postgres, and a service container is Linux-only. Compilation stays offline

@@ -1,0 +1,343 @@
+# Tag-triggered release: the full CI gate, then prebuilt CLI tarballs (versionless asset
+# names, so `releases/latest/download/…` URLs stay stable), the multi-arch server image on
+# GHCR, SBOMs, build-provenance attestations, and the GitHub release itself.
+#
+# `workflow_dispatch` is the dry-run path: everything builds, but every step that PUBLISHES
+# (GHCR push, manifest merge, attestation, the release) is guarded on the tag ref.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege by default; each job elevates only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Compile-time-checked queries read the committed `.sqlx` metadata — no database in this workflow.
+  SQLX_OFFLINE: "true"
+
+jobs:
+  # The entire PR/main gate, reused — a release never ships what CI wouldn't pass.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  build-cli:
+    name: cli (${{ matrix.target }})
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    # A best-effort target failing must not sink the release; the `release` job still
+    # hard-asserts the blocking artifacts below.
+    continue-on-error: ${{ !matrix.blocking }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            blocking: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            blocking: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            blocking: true
+          - target: x86_64-apple-darwin
+            runner: macos-15
+            blocking: false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Honors rust-toolchain.toml's pinned channel; the `target` input adds the cross std.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: ${{ matrix.target }}
+      - name: install the musl linker (Linux)
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          # ring's build script wants a C compiler; the linker env keys are per-target.
+          cc_var="CC_$(echo "$TARGET" | tr '-' '_')"
+          linker_var="CARGO_TARGET_$(echo "$TARGET" | tr 'a-z-' 'A-Z_')_LINKER"
+          {
+            echo "${cc_var}=musl-gcc"
+            echo "${linker_var}=musl-gcc"
+          } >> "$GITHUB_ENV"
+      - name: build (release, locked)
+        run: cargo build --release --locked -p topos --bin topos --target ${{ matrix.target }}
+      - name: smoke (--version)
+        # x86_64-apple-darwin is cross-compiled on the arm64 macOS runner and cannot exec there.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: ./target/${{ matrix.target }}/release/topos --version
+      - name: package (deterministic tarball)
+        run: cargo run -p xtask --locked -- dist package --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # Per-arch image builds on NATIVE runners (no QEMU), pushed by digest; the merge job below
+  # assembles the one multi-arch manifest list.
+  image:
+    name: image (${{ matrix.platform }})
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: sanitize the platform for the artifact name
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push by digest
+        id: build
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Keep the per-arch push a plain manifest; provenance for the merged list is
+          # attested explicitly in the merge job.
+          provenance: false
+          outputs: type=image,name=ghcr.io/topos-sh/topos-plane,push-by-digest=true,name-canonical=true,push=true
+      - name: build only (dry run, no push)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          push: false
+      - name: export the per-arch digest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p digests
+          printf '%s\n' "$DIGEST" > "digests/digest-${PLATFORM_SLUG}.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: digest-${{ env.PLATFORM_SLUG }}
+          path: digests/*.txt
+          if-no-files-found: error
+
+  # Merge the per-arch digests into ONE multi-arch manifest list, tag it, attest it, SBOM it.
+  image-merge:
+    name: image (merge + attest)
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - name: create the multi-arch manifest list
+        run: |
+          refs=()
+          for f in digests/*.txt; do
+            refs+=("ghcr.io/topos-sh/topos-plane@$(cat "$f")")
+          done
+          docker buildx imagetools create \
+            -t "ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}" \
+            -t ghcr.io/topos-sh/topos-plane:latest \
+            "${refs[@]}"
+      - name: capture the immutable manifest-list digest
+        id: digest
+        run: |
+          digest="$(docker buildx imagetools inspect \
+            "ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}" \
+            --format '{{.Manifest.Digest}}')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "ghcr.io/topos-sh/topos-plane@${digest}"
+            echo "# = tag ${GITHUB_REF_NAME}"
+          } > topos-plane-image-digest.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: topos-plane-image-digest
+          path: topos-plane-image-digest.txt
+          if-no-files-found: error
+      - name: attest the image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/topos-sh/topos-plane
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+      - name: image SBOM (spdx-json)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/topos-sh/topos-plane@${{ steps.digest.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: topos-plane-image.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: topos-plane-image-sbom
+          path: topos-plane-image.spdx.json
+          if-no-files-found: error
+
+  # Assemble every asset, checksum + attest them, and publish the release.
+  release:
+    name: publish the release
+    needs: [build-cli, image-merge]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # xtask (the `dist sums` tool) compiles from source here.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: topos-plane-image-*
+          path: dist
+          merge-multiple: true
+      - name: assert the blocking targets; warn on missing best-effort ones
+        run: |
+          # The blocking targets MUST have produced a tarball — no release without them.
+          for t in aarch64-apple-darwin x86_64-unknown-linux-musl; do
+            if [ ! -f "dist/topos-${t}.tar.gz" ]; then
+              echo "::error::missing blocking release asset topos-${t}.tar.gz"
+              exit 1
+            fi
+          done
+          # Best-effort targets may be absent; say so loudly and note it in the release.
+          : > missing-targets.md
+          for t in aarch64-unknown-linux-musl x86_64-apple-darwin; do
+            if [ ! -f "dist/topos-${t}.tar.gz" ]; then
+              echo "::warning::best-effort target ${t} produced no asset — not published this release"
+              echo "- \`topos-${t}.tar.gz\`: build failed — not published this release" >> missing-targets.md
+            fi
+          done
+      # The installer ships as a release asset so `releases/latest/download/install.sh` is a stable
+      # URL (and SHA256SUMS covers it like every other asset).
+      - name: stage the installer as a release asset
+        run: cp scripts/install.sh dist/install.sh
+      # ONE source SBOM: the builds are --locked, so Cargo.lock IS the dependency set of every
+      # binary (per-binary scans of stripped executables would find nothing).
+      - name: source SBOM (spdx-json)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/topos-source.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: checksums (write, then verify)
+        run: |
+          cargo run -p xtask --locked -- dist sums --dir dist
+          cargo run -p xtask --locked -- dist sums --dir dist --check
+      - name: attest the CLI tarballs + checksums
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+      - name: generate the release notes
+        run: |
+          image_ref="$(head -n 1 dist/topos-plane-image-digest.txt)"
+          {
+            cat <<'EOF'
+          ## Assets
+
+          | asset | what it is |
+          | --- | --- |
+          EOF
+            for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do
+              if [ -f "dist/topos-${t}.tar.gz" ]; then
+                echo "| \`topos-${t}.tar.gz\` | the \`topos\` CLI (${t}) |"
+              fi
+            done
+            cat <<'EOF'
+          | `install.sh` | the checksummed installer (`curl -fsSL …/latest/download/install.sh \| sh`) |
+          | `SHA256SUMS` | checksums over every asset |
+          | `topos-plane-image-digest.txt` | the immutable multi-arch server-image digest |
+          | `topos-plane-image.spdx.json` | SBOM of the server image |
+          | `topos-source.spdx.json` | SBOM of the source tree (the `--locked` Cargo.lock is the dependency set of every binary) |
+
+          ## Server image
+
+          Pull by immutable digest (recommended) or by tag:
+
+          ```
+          EOF
+            echo "docker pull ${image_ref}"
+            echo "docker pull ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}"
+            cat <<'EOF'
+          ```
+
+          ## Verify
+
+          ```
+          shasum -a 256 -c SHA256SUMS
+          gh attestation verify <asset> --repo topos-sh/topos
+          ```
+          EOF
+            if [ -s missing-targets.md ]; then
+              echo
+              echo "## Not published this release"
+              echo
+              cat missing-targets.md
+            fi
+          } > notes.md
+      - name: create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md

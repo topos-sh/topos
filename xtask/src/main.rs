@@ -6,6 +6,7 @@
 //! `cargo xtask gen-fixtures --check`→ the fixture drift gate.
 //! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in gate.
 //! `cargo xtask conformance`         → the store matrices (not yet implemented).
+//! `cargo xtask dist …`              → offline release packaging (deterministic tarball + SHA256SUMS) — see `dist.rs`.
 //!
 //! `gen-schema` also (re)generates + checks the plane OpenAPI (`contracts/openapi/openapi.json`, from
 //! `topos_plane::openapi()`) under the same drift discipline. There is no formal-model subcommand — the
@@ -18,6 +19,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+
+mod dist;
 
 /// The committed JSON-Schema artifacts (the per-loop contract oracle). One entry per top-level wire type.
 fn schemas() -> Vec<(&'static str, String)> {
@@ -852,9 +855,10 @@ fn main() -> Result<()> {
         "gen-fixtures" => gen_fixtures(check)?,
         "check-arch" => check_arch()?,
         "conformance" => println!("conformance: not yet implemented"),
+        "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | check-arch | conformance>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | check-arch | conformance | dist …>"
             );
             std::process::exit(2);
         }
