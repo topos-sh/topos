@@ -242,6 +242,38 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > against a real local Hermes Agent v0.17.0; the pilot build's per-turn injection + consent flow stay a
 > documented MUST-VERIFY (a failed probe degrades the report — no code rework).
 >
+> **The release engineering + self-host packaging lands — the install-it, run-it, back-it-up layer;
+> it alters no trust rule.** A tag-triggered release workflow cross-builds the client CLI for four
+> targets (Linux musl x86_64 + macOS arm64 blocking; Linux arm64-musl + macOS x86_64 best-effort),
+> packages them with the new offline, **deterministic `cargo xtask dist`** (versionless tarballs; a
+> `SHA256SUMS` manifest with a self-verifying `--check`), attaches an SPDX source SBOM + build-
+> provenance attestations, and publishes the plane image per-arch by digest, merging one multi-arch
+> manifest whose **immutable digest ships as a release asset** so operators pin `@sha256:…`; every
+> third-party action is pinned by full commit SHA, ci.yml is reused as the release gate, and publish
+> steps are tag-guarded (a manual dispatch is a dry run). The **`curl | sh` installer** always prints
+> the expected AND the locally computed sha256 and **refuses on mismatch** (the check cannot be
+> disabled), installs to `~/.local/bin` with no sudo via an atomic staged rename, fails loudly on
+> unsupported platforms (native Windows → WSL2), and is proven by a committed local rehearsal — a
+> **toolchain-free container** (no compiler / Node / Python / git) installs the static musl binary
+> and a tampered tarball is refused leaving nothing behind (the macOS-native path ran green by
+> hand). The container hardened: base images + the compose Postgres **digest-pinned**, an optional
+> `FEATURES` build arg, and compose-smoke now **asserts the first-boot key custody** (0600, the
+> unprivileged uid). **Backup/restore became real:** `topos-plane restore-bump-epoch` re-issues each
+> restored skill's `current` at `max(epoch+1, --epoch-at-least)` with the same commit and seq,
+> signed by the **existing** plane signer over the frozen preimage in one serializable row-locked
+> transaction touching only the `current` table (the bare invocation still serves, byte-identically)
+> — rehearsed by a new e2e proving a raw-restore re-publish trips the client's reused-tuple ALARM
+> with the old bytes kept and heals after the bump, while helper-first is an ordinary forward move
+> the real client verifies; the README documents the real four-step restore (including the /data
+> signing-seed coupling and the repeated-restore epoch floor). And TLS: an optional, **default-off
+> `acme` cargo feature** adds an experimental tls-alpn-01 ACME TLS listener beside the untouched
+> plain one (rustls-acme, ring-only; the cert + account cache lives on /data and survives restarts),
+> rehearsed green against a real local ACME test server — real issuance, serving over verified TLS,
+> and the cached cert persisting across a plane restart with the ACME server down; the copy claims
+> exactly that and no more, and the reverse proxy stays the recommended, first-documented TLS path.
+> The dependency gate went green again (scoped webpki-roots / quoted_printable license exceptions;
+> the anyhow unsoundness advisory cleared by a lockfile bump).
+>
 > Still to come: the large-object store's **S3-compatible remote backend + online backfill** (additive,
 > client-invisible); the **hosted verification-page HTML +
 > cloud preview render** (the Rust completion API is built; the page is a TS surface); **SSO breadth** (managed
@@ -252,8 +284,10 @@ consent, signing, and sync algorithm. Nothing proprietary lives here.
 > needs a new kernel frame) + the
 > client **key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **genesis-publish cloud
 > workspace standup** (`admin-claim` stands up self-host today; the per-skill roster standup at a genesis
-> publish is now built — what remains is the cloud seating a signup's owner); **TLS termination** at the plane (loopback HTTP
-> today — terminate at a reverse proxy); the **audit outbox**; at-rest key encryption (the plane signing key +
+> publish is now built — what remains is the cloud seating a signup's owner); the built-in ACME TLS path's
+> **real-estate rehearsal** (public DNS · Let's Encrypt staging→prod · rate limits · renewal timing — the
+> experimental label stands and no one-command auto-TLS claim is made until it passes; a reverse proxy
+> remains the documented default); the **audit outbox**; at-rest key encryption (the plane signing key +
 > the enrollment secret are plaintext `0600` seeds for now); the two **pilot-build readiness probes**
 > (both sibling adapters are built — see above; OpenClaw's concrete config bytes and Hermes's per-turn
 > injection + consent flow stay provisional until each pilot's exact build is probed); and harness

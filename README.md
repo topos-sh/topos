@@ -107,6 +107,47 @@ A one-command sanity check that the image builds, starts, and reaches its databa
 ./scripts/compose-smoke.sh
 ```
 
+### TLS: reverse proxy (recommended) or built-in ACME (experimental)
+
+**Reverse proxy (recommended).** The plane serves plain HTTP on `:8787` and is designed to sit
+behind a TLS-terminating reverse proxy (Caddy, nginx, Traefik, or your platform's load balancer).
+Point the proxy at `http://plane:8787`, set `TOPOS_PLANE_BASE_URL` to your public `https://…`
+address (the invite + verification links are built on it), and let the proxy own certificates and
+renewal — the best-understood, most operable setup.
+
+**Built-in ACME (experimental).** The image can also be built with an optional, default-off `acme`
+feature that adds a second, TLS listener with automatic certificates via the ACME tls-alpn-01
+challenge (rustls-acme, ring-only):
+
+```sh
+docker build --build-arg FEATURES=acme -t topos-plane:acme .
+```
+
+The feature alone changes nothing — a non-empty domain list is the on-switch:
+
+```sh
+TOPOS_PLANE_ACME_DOMAINS=plane.example.com      # non-empty = ACME on
+TOPOS_PLANE_ACME_CONTACT=mailto:ops@example.com # required when on
+TOPOS_PLANE_ACME_CACHE=/data/acme               # required when on; on the volume, so the
+                                                # account + certs survive restarts
+# optional:
+TOPOS_PLANE_ACME_DIRECTORY=…    # default: Let's Encrypt production — try staging first
+TOPOS_PLANE_ACME_BIND=0.0.0.0:8443
+TOPOS_PLANE_ACME_EXTRA_ROOT=…   # extra PEM trust root, for TEST ACME directories only
+```
+
+Map public 443 to the container's 8443 — the challenge is answered inside the TLS acceptor on that
+same port, so no separate port 80 is needed. The plain HTTP listener on 8787 keeps serving
+unchanged beside it (healthchecks and loopback keep working).
+
+**What "experimental" means.** The mechanism is rehearsed end to end against a local ACME test
+server (`scripts/acme-rehearsal.sh`: a real tls-alpn-01 issuance, serving over verified TLS, and
+the certificate surviving a plane restart from the cache with the ACME server down). What only a
+real box proves: public DNS for your domain, Let's Encrypt staging → production, CA rate limits,
+renewal timing over weeks, and IPv4/IPv6 reachability of your 443. Start against the staging
+directory (`https://acme-staging-v02.api.letsencrypt.org/directory`) — production rate limits are
+strict. If any of this is friction, use the reverse proxy.
+
 ### Backups & restore
 
 There are two independent pieces of state to back up: the **Postgres metadata database** and the plane's
