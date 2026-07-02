@@ -92,4 +92,4 @@ a second impl of this same trait.
 The S3-compatible remote large-object backend (a no-op extraction behind the `LargeObjectStore` trait).
 
 Dependencies: `gix` (plumbing-only: `sha1` + `tree-editor`), `imara-diff` (the diff engine), `diffy`
-(pinned exact — the diff3 merge engine), `topos-core`, `topos-types`, `thiserror`.
+(pinned exact — the diff3 merge engine), `topos-core`, `thiserror`.

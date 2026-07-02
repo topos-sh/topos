@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The HarnessAdapter trait + its 3 impls (Claude Code reference · OpenClaw · Hermes) — the ONE real client-side port. Discovery + byte-exact placement + currency-trigger install. Content-blind: no translate/project. All platform/harness-version deps live here."
+description = "The HarnessAdapter trait + the Claude Code reference impl (other harnesses land later) — the ONE real client-side port. Discovery + byte-exact placement + currency-trigger install. Content-blind: no translate/project. All platform/harness-version deps live here."
 
 [dependencies]
 topos-core.workspace = true

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The ONE codegen + conformance entrypoint (a cargo-xtask bin, not a prod dep). v0: `cargo xtask gen-schema` → JSON-Schema (from topos-types) + the plane OpenAPI; `gen-schema --check` = the CI drift gate. No `model` subcommand — formal verification is out of v0."
+description = "The ONE codegen + invariant-gate entrypoint (a cargo-xtask bin, not a prod dep): `gen-schema` (JSON-Schema + the plane OpenAPI; `--check` = the drift gate), `gen-fixtures` (the golden --json envelopes; `--check`), `check-arch` (dependency-graph + lint-opt-in + toolchain-pin invariants), `ci` (the full non-DB gate sequence, in CI's order). No formal-model subcommand — the integration interleaving tests are the correctness net."
 
 [dependencies]
 topos-types.workspace = true

@@ -4,13 +4,16 @@
 //! `cargo xtask gen-schema --check`  → the CI drift gate (stale / missing / orphan schemas all fail).
 //! `cargo xtask gen-fixtures`        → (re)generate the golden `--json` fixtures under `contracts/fixtures/`.
 //! `cargo xtask gen-fixtures --check`→ the fixture drift gate.
-//! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in gate.
+//! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in + toolchain-pin gate.
+//! `cargo xtask ci`                  → the full non-DB gate sequence, in CI's order (fmt, clippy, doc,
+//!                                     both drift gates, check-arch) — the contributor's pre-push loop.
 //! `cargo xtask conformance`         → the store matrices (not yet implemented).
 //! `cargo xtask dist …`              → offline release packaging (deterministic tarball + SHA256SUMS) — see `dist.rs`.
 //!
 //! `gen-schema` also (re)generates + checks the plane OpenAPI (`contracts/openapi/openapi.json`, from
 //! `topos_plane::openapi()`) under the same drift discipline. There is no formal-model subcommand — the
-//! integration interleaving tests are the correctness net.
+//! integration interleaving tests are the correctness net. (The `cargo xtask` alias lives in the committed
+//! `.cargo/config.toml`; `cargo run -p xtask --` works identically.)
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -799,6 +802,76 @@ fn lints_opt_in(toml: &str) -> bool {
     false
 }
 
+/// Fail if any banned crate is reachable in `pkg`'s PRODUCTION (default-features) normal dependency tree —
+/// the graph a real `cargo build -p {pkg}` resolves. This is the gate for a "default-off" claim about a
+/// feature-gated dependency, which [`assert_excludes`] structurally cannot express (it deliberately runs
+/// `--all-features`, where the gated dep is always present).
+fn assert_production_excludes(pkg: &str, banned: &[&str]) -> Result<()> {
+    let tree: BTreeSet<String> = production_dep_lines(pkg)?
+        .iter()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect();
+    let hits: Vec<&str> = banned
+        .iter()
+        .copied()
+        .filter(|b| tree.contains(*b))
+        .collect();
+    if hits.is_empty() {
+        println!("ok: the production (default-features) `{pkg}` carries none of {banned:?}");
+        Ok(())
+    } else {
+        bail!(
+            "default-off violated: the production (default-features) build of `{pkg}` resolves {hits:?}"
+        );
+    }
+}
+
+/// The Dockerfile's builder image and `rust-toolchain.toml` must pin the SAME toolchain — otherwise a
+/// toolchain bump silently leaves the self-host image building on the old compiler. The Dockerfile tag may
+/// be the minor-series alias of the toolchain's full version (`rust:1.96-…` for channel `1.96.0`).
+fn check_toolchain_pins() -> Result<()> {
+    let root = workspace_root();
+    let toolchain_path = root.join("rust-toolchain.toml");
+    let toolchain = fs::read_to_string(&toolchain_path)
+        .with_context(|| format!("reading {}", toolchain_path.display()))?;
+    let channel = toolchain
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("channel")?
+                .trim()
+                .strip_prefix('=')?
+                .trim()
+                .strip_prefix('"')?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .context("rust-toolchain.toml has no `channel = \"…\"` line")?;
+    let dockerfile_path = root.join("Dockerfile");
+    let dockerfile = fs::read_to_string(&dockerfile_path)
+        .with_context(|| format!("reading {}", dockerfile_path.display()))?;
+    let tag = dockerfile
+        .lines()
+        .find_map(|l| {
+            let version = l.trim().strip_prefix("FROM rust:")?;
+            // `FROM rust:1.96-bookworm AS builder` → the version component before the distro suffix.
+            version.split('-').next().map(str::to_owned)
+        })
+        .context("Dockerfile has no `FROM rust:<version>-…` builder line")?;
+    if channel == tag || channel.starts_with(&format!("{tag}.")) {
+        println!(
+            "ok: Dockerfile builder `rust:{tag}` matches rust-toolchain.toml channel `{channel}`"
+        );
+        Ok(())
+    } else {
+        bail!(
+            "toolchain-pin drift: Dockerfile builds on `rust:{tag}` but rust-toolchain.toml pins \
+             `{channel}` — bump them together"
+        );
+    }
+}
+
 /// The architectural invariants the dependency graph must hold — the central trust claims, as a gate.
 fn check_arch() -> Result<()> {
     // The client is never an authority and stays a thin SYNC tool: no edge to the server store, SQL, or a
@@ -847,8 +920,107 @@ fn check_arch() -> Result<()> {
     assert_test_fixtures_off("topos-plane", "plane-store")?;
     assert_test_fixtures_off("topos-plane", "topos-plane")?;
     assert_test_fixtures_off("topos", "topos")?;
+    // The leaf crates stay lean: no async runtime, no HTTP stack, no SQL — and the two pure-port leaves
+    // carry no git mechanics either (`topos-gitstore` IS the git mechanics crate, so `gix` is its point).
+    // These are `--all-features` checks: no feature of a leaf may smuggle a heavy edge in.
+    assert_excludes(
+        "topos-types",
+        &["tokio", "axum", "sqlx", "ureq", "hyper", "gix"],
+    )?;
+    assert_excludes(
+        "topos-harness",
+        &["tokio", "axum", "sqlx", "ureq", "hyper", "gix"],
+    )?;
+    assert_excludes(
+        "topos-gitstore",
+        &["tokio", "axum", "sqlx", "ureq", "hyper"],
+    )?;
+    // The workspace manifest's documented claim, enforced: a DEFAULT `cargo build -p topos-plane` pulls in
+    // NEITHER oauth2 nor openidconnect (nor their reqwest HTTP-client stack) — only `--features enroll-oidc`
+    // does. A production-tree check, not `--all-features` (where the gated deps are always present).
+    assert_production_excludes("topos-plane", &["oauth2", "openidconnect", "reqwest"])?;
     // No member silently escapes the shared lint floor (incl. unsafe_code = forbid).
     check_member_lints()?;
+    // The self-host image and the workspace must build on the same pinned compiler.
+    check_toolchain_pins()?;
+    Ok(())
+}
+
+/// Run a cargo subcommand from the workspace root as a gate step, with optional extra env.
+fn cargo_gate(args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(workspace_root()).args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .with_context(|| format!("running `cargo {}`", args.join(" ")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("`cargo {}` failed", args.join(" "));
+    }
+}
+
+/// One named `ci` gate: its banner label + the closure that runs it.
+type Gate = (&'static str, Box<dyn FnOnce() -> Result<()>>);
+
+/// `cargo xtask ci` — the full NON-DB gate sequence, in the same order CI runs it, failing fast at the
+/// first red gate. One local command == the CI `gate` job, so a contributor's pre-push loop matches CI
+/// exactly. The DB-backed gates still run separately: `cargo test --workspace` (needs a Postgres via
+/// `DATABASE_URL`), `cargo deny check` (needs cargo-deny), and the sqlx offline-metadata drift job.
+fn ci() -> Result<()> {
+    let gates: Vec<Gate> = vec![
+        (
+            "format (cargo fmt --all --check)",
+            Box::new(|| cargo_gate(&["fmt", "--all", "--check"], &[])),
+        ),
+        (
+            "clippy (warnings are errors)",
+            Box::new(|| {
+                cargo_gate(
+                    &[
+                        "clippy",
+                        "--workspace",
+                        "--all-targets",
+                        "--locked",
+                        "--",
+                        "-D",
+                        "warnings",
+                    ],
+                    &[],
+                )
+            }),
+        ),
+        (
+            "docs (rustdoc warnings are errors)",
+            Box::new(|| {
+                cargo_gate(
+                    &["doc", "--workspace", "--no-deps", "--locked"],
+                    &[("RUSTDOCFLAGS", "-D warnings")],
+                )
+            }),
+        ),
+        (
+            "contract drift gate (schemas + openapi)",
+            Box::new(|| gen_schema(true)),
+        ),
+        (
+            "contract drift gate (fixtures)",
+            Box::new(|| gen_fixtures(true)),
+        ),
+        ("architectural layering", Box::new(check_arch)),
+    ];
+    let total = gates.len();
+    for (i, (name, run)) in gates.into_iter().enumerate() {
+        println!("\n=== ci gate {}/{total}: {name} ===", i + 1);
+        run().with_context(|| format!("ci gate {}/{total} FAILED: {name}", i + 1))?;
+    }
+    println!("\n=== ci: all {total} gates green ===");
+    println!(
+        "(not covered here: `cargo test --workspace` [needs DATABASE_URL], `cargo deny check`, the sqlx offline-metadata drift job)"
+    );
     Ok(())
 }
 
@@ -860,11 +1032,12 @@ fn main() -> Result<()> {
         "gen-schema" => gen_schema(check)?,
         "gen-fixtures" => gen_fixtures(check)?,
         "check-arch" => check_arch()?,
+        "ci" => ci()?,
         "conformance" => println!("conformance: not yet implemented"),
         "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | check-arch | conformance | dist …>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | check-arch | ci | conformance | dist …>"
             );
             std::process::exit(2);
         }

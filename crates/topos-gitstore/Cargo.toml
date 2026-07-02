@@ -10,7 +10,6 @@ description = "Shared dumb gix object mechanics: read/write, dedup, tree→empty
 
 [dependencies]
 topos-core.workspace = true
-topos-types.workspace = true
 thiserror.workspace = true
 # Plumbing-only: object read/write + the tree editor + sha1 hashing + ref edits. Dropping the default
 # features keeps the heavy worktree/index/status/blame/submodule trees out. (The `gix` umbrella still

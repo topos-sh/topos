@@ -48,6 +48,18 @@ services:
       # reachable address behind a reverse proxy (which also terminates TLS).
       TOPOS_PLANE_BASE_URL: ${TOPOS_PLANE_BASE_URL:-http://localhost:8787}
       TOPOS_PLANE_MODE: self_host
+      # ── optional operator features (uncomment to enable; full reference in the README) ──────────
+      # The operator admin bearer token (only its sha256 is retained). Enables the review-required
+      # policy toggle — `PUT /v1/workspaces/{ws}/policy/review-required`; while unset, that route
+      # answers 404.
+      # TOPOS_PLANE_ADMIN_TOKEN: change-me-to-a-long-random-secret
+      # Emailed-passcode enrollment: set ALL FIVE to enable it (otherwise the plane advertises the
+      # device-code method). Credentials are never logged.
+      # TOPOS_PLANE_SMTP_HOST: smtp.example.com
+      # TOPOS_PLANE_SMTP_PORT: "587"
+      # TOPOS_PLANE_SMTP_USER: postmaster@example.com
+      # TOPOS_PLANE_SMTP_PASS: change-me
+      # TOPOS_PLANE_SMTP_FROM: topos@example.com
     ports:
       - "8787:8787"
     volumes:

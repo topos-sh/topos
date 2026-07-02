@@ -1,0 +1,13 @@
+# Workspace-local cargo configuration (committed — part of the reproducible contributor setup).
+
+[alias]
+# The standard cargo-xtask pattern: makes every documented `cargo xtask <subcommand>` invocation real.
+# `cargo xtask ci` runs the full non-DB gate sequence; see xtask/CLAUDE.md for all subcommands.
+xtask = "run -p xtask --"
+
+[env]
+# Compile against the committed `crates/plane-store/.sqlx` query metadata by default, so a plain
+# `cargo build` / `clippy` / `doc` never needs a live database — even with DATABASE_URL exported for the
+# tests. NON-forced: a variable already set in the process environment wins (CI's sqlx-drift job sets
+# SQLX_OFFLINE=false explicitly to regenerate the metadata, and a developer can do the same).
+SQLX_OFFLINE = "true"

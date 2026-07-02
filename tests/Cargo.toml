@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Workspace-level end-to-end integration tests — the HERO loopback (the real client pull engine over loopback HTTP against the real plane). No production code; the lib is an empty anchor so the integration tests in tests/ are a workspace member that `cargo test --workspace` runs."
+description = "Workspace-level end-to-end integration tests — the loopback-HTTP e2e suites (the distribute HERO, the real-Claude-Code-adapter HERO, the real `follow` enrollment, the contribute write verbs) driving the genuine client engine against the real plane. No production code; the lib is an empty anchor so the integration tests in tests/ are a workspace member that `cargo test --workspace` runs."
 
 # The HERO drives BOTH sides through their feature-gated test-fixtures surfaces: the client's `test_support`
 # (set up `~/.topos/` + run the real pull engine over the real `ureq` transport) and plane-store's seed

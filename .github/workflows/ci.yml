@@ -93,6 +93,20 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
 
+  # The self-host packaging gets the same regression protection as the code: build the image, start the
+  # compose stack, prove the plane answers a DATABASE-BACKED request, tear it down. Push-to-main only —
+  # the job docker-builds the whole workspace in release mode (minutes), which would dominate PR latency,
+  # and the packaging surface changes rarely, so post-merge coverage is the right trade. (The Dockerfile's
+  # rust tag is separately pinned to rust-toolchain.toml by `check-arch`, which DOES run on every PR.)
+  compose-smoke:
+    name: compose smoke (self-host packaging)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + start the stack, probe a database-backed read, tear down
+        run: ./scripts/compose-smoke.sh
+
   sqlx-drift:
     name: sqlx offline-metadata drift gate
     runs-on: ubuntu-latest
