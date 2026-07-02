@@ -1,0 +1,43 @@
+//! `GET /i/{token}` — the unauthenticated TOFU bootstrap.
+
+use topos_types::SignatureAlg;
+use topos_types::bootstrap::{BootstrapData, ConsentMode};
+
+use super::*;
+
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_false(pool: PgPool) {
+    let ctx = enroll_setup(pool, "enroll-bootstrap").await;
+    let env = create_invite(
+        &ctx,
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        &[ALICE_EMAIL],
+        SKILL,
+    )
+    .await;
+    let token = token_from_link(env.data["invite_link"].as_str().unwrap());
+
+    let (status, _, bytes) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let data: BootstrapData = serde_json::from_slice(&bytes).expect("the body is a BootstrapData");
+    // The plane signing key is pinned (the trust root the device TOFU-pins).
+    assert_eq!(data.plane.signing_key.alg, SignatureAlg::Ed25519);
+    assert!(!data.plane.signing_key.key_id.is_empty());
+    assert!(!data.plane.signing_key.value.is_empty());
+    // No role; a first-received skill is never silently landed; the offered skill is disclosed.
+    assert!(!data.invite.first_receive_auto_land);
+    assert_eq!(data.invite.consent, ConsentMode::DirectHumanFirstReceive);
+    assert_eq!(data.workspace.workspace_id, WS);
+    assert_eq!(
+        data.plane.deployment_mode,
+        topos_types::bootstrap::DeploymentMode::Cloud
+    );
+    assert!(data.offered_skills.iter().any(|s| s.skill_id == SKILL));
+    // The bootstrap carries no role anywhere.
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(raw.get("role").is_none() && raw["invite"].get("role").is_none());
+
+    // A bad/unknown token ⇒ the indistinguishable 404.
+    let (s404, _, _) = send(ctx.app(), get("/i/not-a-real-token", &[])).await;
+    assert_eq!(s404, StatusCode::NOT_FOUND);
+}

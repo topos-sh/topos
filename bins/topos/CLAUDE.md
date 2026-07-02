@@ -40,7 +40,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
   `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).
-- **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqEnroll`) — the two-call device-flow
+- **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqDeviceClient`) — the two-call device-flow
   enrollment + first-receive. `follow <link>` reads the unauthenticated `/i/` **TOFU bootstrap**, pins the
   plane key (I-TOFU: absent → first pin; same base-url different key → `KEY_REPIN_REQUIRED`; cross-base-url
   → refused — one plane per install; the `alg` is a CLOSED enum, so a non-Ed25519 trust root fails the
@@ -59,10 +59,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
   degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
   `follow --approve <skill>[@<hash>]` drives the existing pull engine to
-  place a disclosed first-receive offer (the I-TOFU "one --approve"). The enrollment transports (`UreqEnroll`
+  place a disclosed first-receive offer (the I-TOFU "one --approve"). The enrollment transports (`UreqDeviceClient`
   + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lands with the test member next).
-- **The `invite` verb** (`ops/invite`, `plane_http::UreqEnroll`) — an OWNER mints an `/i/<token>` invite link
+- **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
   by signing the governance Invite op and POSTing it. Requires prior enrollment: the pinned plane (`base_url`
   from `instance.json`), the workspace (`workspace_id` from `identity/user.json`), and the device key all come
   from what `follow` wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the raw 16 bytes
@@ -73,7 +73,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   shared Member default, matching the plane's `role.unwrap_or(member)`), the no-expiry sentinel
   `topos_core::sign::INVITE_NO_EXPIRY` (the plane's invite handler hardcodes no expiry), and the emails
   + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant). The POST rides
-  through the same creds-free `UreqEnroll` client behind a `GovernanceSource` seam (the 64-byte signature in
+  through the same creds-free `UreqDeviceClient` client behind a `GovernanceSource` seam (the 64-byte signature in
   the `Topos-Device-Signature` header), mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a
   role-DENIED `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the client
   signature **verifies via `topos_core::sign::verify_governance_op`** over the frame the plane rebuilds — the
@@ -152,7 +152,7 @@ are asserted byte-equal in tests.
 
 - **The contribute write verbs** (`ops/{publish,review,revert}` + `ops/contribute` + `op_wal` + the plane
   half of `ops/diff`) — the client device-signed writes that WIRE `sign_device_op`. A new creds-free
-  **`ContributeSource`** transport seam (mirroring `GovernanceSource` on `UreqEnroll`) POSTs the four write
+  **`ContributeSource`** transport seam (mirroring `GovernanceSource` on `UreqDeviceClient`) POSTs the four write
   routes; `map_write_envelope` maps the **all-outcome 200 envelope** to a typed `WriteReceipt` (every
   protocol outcome — OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`;
   only a transport/non-200/malformed body is an `Err`; the signed pointer is parsed leniently because an OK

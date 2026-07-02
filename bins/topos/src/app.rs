@@ -16,7 +16,7 @@ use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{ContributeSource, EnrollSource, GovernanceSource, PlaneSource};
-use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
+use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, logfile, ops, render};
 
@@ -268,19 +268,19 @@ pub fn run() -> ExitCode {
 }
 
 /// The shared per-base-URL wire connectors: the enroll / governance / contribute seams all box the SAME
-/// creds-free `ureq` client (`UreqEnroll` implements every one of those source traits) — only the trait
+/// creds-free `ureq` client (`UreqDeviceClient` implements every one of those source traits) — only the trait
 /// object type differs, so each is one coercion of one constructor (a `&connect_*` fn reference coerces
 /// to the seam's `&dyn Fn`).
 fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
-    Box::new(UreqEnroll::new(base_url.to_owned()))
+    Box::new(UreqDeviceClient::new(base_url.to_owned()))
 }
 
 fn connect_governance(base_url: &str) -> Box<dyn GovernanceSource> {
-    Box::new(UreqEnroll::new(base_url.to_owned()))
+    Box::new(UreqDeviceClient::new(base_url.to_owned()))
 }
 
 fn connect_contribute(base_url: &str) -> Box<dyn ContributeSource> {
-    Box::new(UreqEnroll::new(base_url.to_owned()))
+    Box::new(UreqDeviceClient::new(base_url.to_owned()))
 }
 
 fn finish<T: Serialize>(

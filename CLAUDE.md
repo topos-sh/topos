@@ -142,6 +142,7 @@ a default build resolves none of it.
 ## Conventions
 
 - Match the surrounding code's idiom, comment density, and naming.
+- Unit tests live inline (`#[cfg(test)] mod tests`); multi-file suites live in `src/tests/`.
 - Keep `topos-core` pure: no I/O, no `tokio`/`sqlx`/`axum`/`gix`/`std::fs`, no ambient clock or RNG (time is
   a `now` parameter; keys/signatures are byte parameters).
 - `plane-store` keeps raw SQL + raw git reads private (`pub(crate)`); only authorized authority operations

@@ -26,7 +26,7 @@ use crate::plane::GovernanceSource;
 
 /// Builds the owner's governance-write transport for a plane base URL — known only after reading
 /// `instance.json`, so it can't be pre-built in the composition root (mirrors `follow`'s enroll connector).
-/// Production wires `UreqEnroll`; the tests wire a fake (no HTTP).
+/// Production wires `UreqDeviceClient`; the tests wire a fake (no HTTP).
 pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
 
 /// Map the wire [`WorkspaceRole`] onto the kernel's [`GovernanceRole`] and take ITS signing byte — the

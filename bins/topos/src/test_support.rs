@@ -37,7 +37,7 @@ use crate::plane::{
     ContributeSource, EnrollSource, FollowContext, FollowMode, FollowSource, GovernanceSource,
     InertFollow, InertPlane, PlaneSource,
 };
-use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
+use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
 use crate::sidecar::Layout;
 use crate::{doc, ops, scan};
 
@@ -531,7 +531,7 @@ impl FollowHarness {
         opts: ops::FollowOpts,
     ) -> Result<topos_types::results::FollowData, String> {
         let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqEnroll::new(base_url.to_owned()))
+            Box::new(UreqDeviceClient::new(base_url.to_owned()))
         };
         let plane_connect =
             |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
@@ -1069,10 +1069,12 @@ impl ContributeHarness {
             plane_key,
             follow: &follow,
         };
-        let contribute =
-            |b: &str| -> Box<dyn ContributeSource> { Box::new(UreqEnroll::new(b.to_owned())) };
-        let governance =
-            |b: &str| -> Box<dyn GovernanceSource> { Box::new(UreqEnroll::new(b.to_owned())) };
+        let contribute = |b: &str| -> Box<dyn ContributeSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
         op(&ctx, &contribute, &governance)
     }
 

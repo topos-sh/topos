@@ -3,7 +3,7 @@
 //!
 //! Each mirrors the [`crate::fs_seam::FsOps`] / `ConfigStore` precedent: a narrow trait the engine
 //! consumes, a real production impl, and a fixture test double. The production impls live in
-//! [`crate::plane_http`] — the blocking `ureq` transports (`UreqPlane` for the read side, `UreqEnroll`
+//! [`crate::plane_http`] — the blocking `ureq` transports (`UreqPlane` for the read side, `UreqDeviceClient`
 //! for the creds-free writes) — and are wired by the composition root whenever enrollment exists on disk
 //! (`instance.json`; the follow-state comes from `follows.json`, written by `follow`). Before enrollment
 //! the inert impls at the bottom of this file keep every verb honest (nothing followed, nothing served).
@@ -146,7 +146,7 @@ pub(crate) trait FollowSource {
 // The enrollment seam — the device-flow CLIENT's read/write side, behind a port so the `follow`
 // tests run against a fake WITHOUT HTTP. Creds-free (it holds no read token): the device code + the
 // grant are the only secrets it carries, and they are redacted from every `Debug`. The real impl is
-// `crate::plane_http::UreqEnroll`; the fake lives in the follow tests.
+// `crate::plane_http::UreqDeviceClient`; the fake lives in the follow tests.
 // ---------------------------------------------------------------------------------------------
 
 /// The RFC-8628 device-authorization grant from `device/authorize`.
@@ -245,7 +245,7 @@ pub(crate) struct Redeem {
 /// The creds-free enrollment transport (device-flow). The follow op drives it: read the TOFU bootstrap,
 /// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
 /// redeem the grant (the enroll possession signature rides a header) into per-skill read creds. The real
-/// impl is `UreqEnroll`; the fake is the follow tests'.
+/// impl is `UreqDeviceClient`; the fake is the follow tests'.
 pub(crate) trait EnrollSource {
     /// `GET /i/{token}` — the unauthenticated TOFU bootstrap (the workspace + the plane signing root).
     ///
@@ -291,7 +291,7 @@ pub(crate) trait EnrollSource {
 // The governance-write seam — the OWNER's signed-op write side (invite today), behind a port so the
 // `invite` tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte governance signature rides a
 // header, not a read token; the base URL is baked in when the connector builds it from `instance.json`.
-// The real impl is `crate::plane_http::UreqEnroll` (the same client that speaks enrollment); the fake
+// The real impl is `crate::plane_http::UreqDeviceClient` (the same client that speaks enrollment); the fake
 // lives in the invite tests.
 // ---------------------------------------------------------------------------------------------
 
@@ -317,7 +317,7 @@ pub(crate) trait GovernanceSource {
 // The contribute-write seam — the device-signed write side (publish / propose / revert / review),
 // behind a port so the contribute tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte
 // device-op signature is the auth, riding a header, not a read token; the base URL is baked in when
-// the connector builds it from `instance.json`. The real impl is `crate::plane_http::UreqEnroll` (the
+// the connector builds it from `instance.json`. The real impl is `crate::plane_http::UreqDeviceClient` (the
 // same creds-free client that speaks enrollment + governance); the fake lives in the contribute tests.
 // ---------------------------------------------------------------------------------------------
 
@@ -354,7 +354,7 @@ impl WriteReceipt {
 /// kind is derived from the route server-side, so the transport ships only the body + the signature and is
 /// op-agnostic. EVERY terminal protocol outcome (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED)
 /// is an `Ok(WriteReceipt)`; only a transport / non-200 / malformed-body fault is an `Err`. The real impl is
-/// [`crate::plane_http::UreqEnroll`].
+/// [`crate::plane_http::UreqDeviceClient`].
 pub(crate) trait ContributeSource {
     /// `POST /v1/publish` — a direct publish that moves `current` (or genesis).
     ///

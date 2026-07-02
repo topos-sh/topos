@@ -11,7 +11,11 @@ directory is for what only a cross-crate loopback run can prove.
 - **`src/lib.rs`** — an intentionally-empty anchor so the package is a real workspace member that
   `cargo test --workspace` discovers.
 - **`tests/common/`** — the shared harness: per-test Postgres provisioning (`provision_pg` creates a
-  uniquely-named database on `$DATABASE_URL` and runs the production migrations). Each e2e runs a blocking
+  uniquely-named database on `$DATABASE_URL` and runs the production migrations) plus the loopback-plane
+  scaffold every suite stands on — `Scratch` / `Plane` / `start_plane` (bind-first, optional enrollment
+  config, then serve `router(state)`), the shared seeding helpers (`seed_genesis_plane`, the
+  governance-signed `mint_invite`), and the placement-expectation builders. Each suite keeps only its
+  scenario-specific seeding (a seed closure handed to `start_plane`). Each e2e runs a blocking
   `ureq` client on a plain thread beside a live `axum` server on a self-owned **multi-thread** runtime —
   which is why these tests cannot use `#[sqlx::test]` (its current-thread runtime would deadlock).
 - **`tests/hero.rs`** — the distribute HERO: the real pull engine over loopback HTTP. First pull

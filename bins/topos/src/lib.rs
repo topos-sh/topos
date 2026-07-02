@@ -43,12 +43,6 @@ pub(crate) mod sidecar;
 pub mod test_support;
 
 #[cfg(test)]
-mod durability_tests;
-#[cfg(test)]
-mod follow_tests;
-#[cfg(test)]
-mod sync_tests;
-#[cfg(test)]
-mod verb_tests;
+mod tests;
 
 pub use app::run;

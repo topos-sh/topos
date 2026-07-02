@@ -1,38 +1,28 @@
 //! CONTRIBUTE e2e — the client device-signed write verbs over loopback HTTP against the real plane.
 //!
 //! One real `plane-store` [`Authority`] (seeded through the feature-gated fixtures) served by the composed
-//! [`topos_plane::router`] on a real loopback socket. A PUBLISHER drives the GENUINE write verbs
-//! (`publish`/`review`/`revert`/`diff` via `topos::test_support::ContributeHarness`) over the GENUINE `ureq`
-//! transport; a separate FOLLOWER drives the GENUINE pull engine ([`topos::test_support::PullHarness`]) and
-//! must receive the shipped bytes byte-exact. The publisher's device key is minted by the harness and
-//! registered on the plane (the realistic flow), so the plane verifies its device-op signatures against the
-//! key it enrolled. These cover the review_required-OFF loop; the review_required gate + the proposals-list
-//! route are exercised in their own tests.
-
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+//! [`topos_plane::router`] on a real loopback socket, via the shared `common` harness. A PUBLISHER drives
+//! the GENUINE write verbs (`publish`/`review`/`revert`/`diff` via `topos::test_support::ContributeHarness`)
+//! over the GENUINE `ureq` transport; a separate FOLLOWER drives the GENUINE pull engine
+//! ([`topos::test_support::PullHarness`]) and must receive the shipped bytes byte-exact. The publisher's
+//! device key is minted by the harness and registered on the plane (the realistic flow), so the plane
+//! verifies its device-op signatures against the key it enrolled. These cover the review_required-OFF loop;
+//! the review_required gate + the proposals-list route are exercised in their own tests.
 
 mod common;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use ed25519_dalek::SigningKey;
-use plane_store::{
-    Authority, CommitId, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
-};
+use common::{Plane, SKILL, WS, expected};
+use plane_store::{Authority, FileMode, Principal, SkillId, UploadedFile};
 use topos::test_support::{ContributeHarness, Follow, PublishResult, PullHarness, Scope};
+use topos_types::Generation;
 use topos_types::results::{DiffSource, PullAction};
-use topos_types::{Generation, TerminalOutcome};
 
-const WS: &str = "w_acme";
-const SKILL: &str = "s_deploy";
 const GENESIS_DKID: &str = "dk_genesis";
 const PRINCIPAL: &str = "p_dev";
 const READ_TOKEN: &str = "rt_contribute_secret";
 const AUTHOR: &str = "d_genesis";
 const MESSAGE: &str = "topos: add";
 const CREATED_AT: &str = "2026-06-30T00:00:00Z";
-const NOW: i64 = 1_000_000;
 const GENESIS_SEED: [u8; 32] = [9u8; 32];
 const GENESIS_OP: &str = "b0000000-0000-4000-8000-000000000001";
 
@@ -61,79 +51,83 @@ const DRAFT: &[(&str, bool, &[u8])] = &[
     ("run.sh", true, b"#!/bin/sh\necho v2\n"),
 ];
 
-// ── the loopback plane ──────────────────────────────────────────────────────────────────────────────
+// ── the loopback plane (the shared harness + this suite's scenario seeding) ─────────────────────────
 
-struct Scratch(PathBuf);
-impl Scratch {
-    fn new(tag: &str) -> Self {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("topos-contrib-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create plane scratch");
-        Self(dir)
-    }
+/// Seed a real authority (genesis device → roster → signed genesis → read token) + serve `router(state)`
+/// on a loopback socket via the shared harness. The publisher registers its OWN device key afterward via
+/// [`register_device`].
+fn start_plane(tag: &str) -> Plane {
+    common::start_plane(
+        "topos-contrib",
+        tag,
+        false,
+        async |authority: &Authority| {
+            let genesis = common::seed_genesis_plane(
+                authority,
+                common::GenesisSpec {
+                    dkid: GENESIS_DKID,
+                    device_seed: &GENESIS_SEED,
+                    op_id: GENESIS_OP,
+                    files: genesis_files(),
+                    principal: PRINCIPAL,
+                    author: AUTHOR,
+                    message: MESSAGE,
+                    created_at: CREATED_AT,
+                    read_token: READ_TOKEN,
+                },
+            )
+            .await;
+            common::Seeded {
+                genesis: Some(genesis),
+                ..Default::default()
+            }
+        },
+    )
 }
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+
+/// Register a contribute client's minted device key under `principal` (rostered), so the plane verifies
+/// its device-op signatures (the realistic enrollment outcome).
+fn register_device(plane: &Plane, device_key_id: &str, device_pubkey: &[u8; 32], principal: &str) {
+    let ws = plane.ws();
+    let principal = Principal::parse(principal).unwrap();
+    plane.rt.block_on(async {
+        plane
+            .authority
+            .seed_device(&ws, device_key_id, device_pubkey, &principal, false)
+            .await
+            .expect("seed device");
+    });
 }
 
-struct Plane {
-    rt: tokio::runtime::Runtime,
-    authority: Arc<Authority>,
-    base_url: String,
-    plane_key: [u8; 32],
-    genesis: CommitId,
-    _dir: Scratch,
+/// Turn the workspace `review_required` gate on/off (the anti-poisoning policy).
+fn set_review_required(plane: &Plane, on: bool) {
+    let ws = plane.ws();
+    plane.rt.block_on(async {
+        plane
+            .authority
+            .seed_review_required(&ws, on)
+            .await
+            .expect("set review_required");
+    });
 }
 
-impl Plane {
-    fn ws(&self) -> WorkspaceId {
-        WorkspaceId::parse(WS).unwrap()
-    }
-    /// Register a contribute client's minted device key under `principal` (rostered), so the plane verifies
-    /// its device-op signatures (the realistic enrollment outcome).
-    fn register_device(&self, device_key_id: &str, device_pubkey: &[u8; 32], principal: &str) {
-        let ws = self.ws();
-        let principal = Principal::parse(principal).unwrap();
-        self.rt.block_on(async {
-            self.authority
-                .seed_device(&ws, device_key_id, device_pubkey, &principal, false)
-                .await
-                .expect("seed device");
-        });
-    }
-
-    /// Turn the workspace `review_required` gate on/off (the anti-poisoning policy).
-    fn set_review_required(&self, on: bool) {
-        let ws = self.ws();
-        self.rt.block_on(async {
-            self.authority
-                .seed_review_required(&ws, on)
-                .await
-                .expect("set review_required");
-        });
-    }
-
-    /// Roster a second principal + mint its read token (a distinct reviewer for four-eyes).
-    fn seed_reviewer_principal(&self) {
-        let ws = self.ws();
-        let skill = SkillId::parse(SKILL).unwrap();
-        let principal = Principal::parse(P_REVIEWER).unwrap();
-        self.rt.block_on(async {
-            self.authority
-                .seed_roster(&ws, &skill, &principal)
-                .await
-                .unwrap();
-            self.authority
-                .mint_read_token(&ws, &skill, &principal, RT_REVIEWER)
-                .await
-                .unwrap();
-        });
-    }
+/// Roster a second principal + mint its read token (a distinct reviewer for four-eyes).
+fn seed_reviewer_principal(plane: &Plane) {
+    let ws = plane.ws();
+    let skill = SkillId::parse(SKILL).unwrap();
+    let principal = Principal::parse(P_REVIEWER).unwrap();
+    plane.rt.block_on(async {
+        plane
+            .authority
+            .seed_roster(&ws, &skill, &principal)
+            .await
+            .unwrap();
+        plane
+            .authority
+            .mint_read_token(&ws, &skill, &principal, RT_REVIEWER)
+            .await
+            .unwrap();
+    });
 }
 
 const P_REVIEWER: &str = "p_reviewer";
@@ -143,8 +137,8 @@ const RT_REVIEWER: &str = "rt_reviewer_secret";
 /// registered + a read token — able to `review` a proposal.
 fn enrolled_reviewer(plane: &Plane, tag: &str) -> ContributeHarness {
     let mut h = ContributeHarness::new(tag);
-    plane.seed_reviewer_principal();
-    plane.register_device(&h.device_key_id(), &h.device_pubkey(), P_REVIEWER);
+    seed_reviewer_principal(plane);
+    register_device(plane, &h.device_key_id(), &h.device_pubkey(), P_REVIEWER);
     h.enroll(
         &plane.base_url,
         plane.plane_key,
@@ -157,92 +151,16 @@ fn enrolled_reviewer(plane: &Plane, tag: &str) -> ContributeHarness {
     h
 }
 
-/// Seed a real authority (genesis device → roster → signed genesis → read token) + serve `router(state)` on
-/// a loopback socket. The publisher registers its OWN device key afterward via [`Plane::register_device`].
-fn start_plane(tag: &str) -> Plane {
-    let dir = Scratch::new(tag);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-
-    let (authority, genesis, plane_key) = rt.block_on(async {
-        let authority = Authority::from_pool(
-            common::provision_pg().await,
-            &dir.0.join("git"),
-            &dir.0.join("large"),
-        )
-        .expect("open authority")
-        .with_plane_key(&dir.0.join("plane.key"))
-        .expect("plane key");
-        let ws = WorkspaceId::parse(WS).unwrap();
-        let skill = SkillId::parse(SKILL).unwrap();
-        let principal = Principal::parse(PRINCIPAL).unwrap();
-        let genesis_pubkey = SigningKey::from_bytes(&GENESIS_SEED)
-            .verifying_key()
-            .to_bytes();
-        authority
-            .seed_device(&ws, GENESIS_DKID, &genesis_pubkey, &principal, false)
-            .await
-            .expect("seed genesis device");
-        authority
-            .seed_roster(&ws, &skill, &principal)
-            .await
-            .expect("seed roster");
-        let receipt = authority
-            .seed_published_genesis(
-                &ws,
-                &skill,
-                GENESIS_DKID,
-                &GENESIS_SEED,
-                &OpId::parse(GENESIS_OP).unwrap(),
-                genesis_files(),
-                AUTHOR,
-                MESSAGE,
-                CREATED_AT,
-                NOW,
-            )
-            .await
-            .expect("seed genesis");
-        assert_eq!(receipt.outcome, TerminalOutcome::Ok);
-        let genesis = receipt.version_id.expect("genesis id");
-        authority
-            .mint_read_token(&ws, &skill, &principal, READ_TOKEN)
-            .await
-            .expect("mint read token");
-        let plane_key = authority.plane_public_key().expect("plane key");
-        (authority, genesis, plane_key)
-    });
-
-    let authority = Arc::new(authority);
-    let state = topos_plane::PlaneState::new(authority.clone());
-    let listener = rt
-        .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("addr");
-    rt.spawn(async move {
-        let _ = axum::serve(
-            listener,
-            topos_plane::router(state).into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-
-    Plane {
-        rt,
-        authority,
-        base_url: format!("http://{addr}"),
-        plane_key,
-        genesis,
-        _dir: dir,
-    }
-}
-
 /// An enrolled publisher with its device key registered on `plane`, sitting at `current` (pulled), with
 /// `DRAFT` staged as a local edit.
 fn drafting_publisher(plane: &Plane, tag: &str) -> ContributeHarness {
     let mut pub_h = ContributeHarness::new(tag);
-    plane.register_device(&pub_h.device_key_id(), &pub_h.device_pubkey(), PRINCIPAL);
+    register_device(
+        plane,
+        &pub_h.device_key_id(),
+        &pub_h.device_pubkey(),
+        PRINCIPAL,
+    );
     pub_h.enroll(
         &plane.base_url,
         plane.plane_key,
@@ -272,22 +190,6 @@ fn follower(tag: &str) -> PullHarness {
     let mut f = PullHarness::new(tag);
     f.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, PLACEHOLDER);
     f
-}
-
-/// The expected placement snapshot for a `(path, exec, bytes)` set: regular 0o644 / executable 0o755.
-fn expected(files: &[(&str, bool, &[u8])]) -> Vec<(String, u32, Vec<u8>)> {
-    let mut out: Vec<(String, u32, Vec<u8>)> = files
-        .iter()
-        .map(|(p, exec, b)| {
-            (
-                (*p).to_owned(),
-                if *exec { 0o755 } else { 0o644 },
-                b.to_vec(),
-            )
-        })
-        .collect();
-    out.sort();
-    out
 }
 
 // ── scenario 1: publish-direct → the follower auto-applies byte-exact ──────────────────────────────────
@@ -377,7 +279,7 @@ fn revert_rolls_a_follower_forward_to_the_good_bytes() {
         .expect("publish v2");
 
     // Revert to the GOOD genesis version — a forward move (current → (1,3)) restoring the v1 bytes.
-    let good = hex::encode(plane.genesis.0);
+    let good = hex::encode(plane.genesis().0);
     let reverted = pub_h
         .revert(plane.plane_key, &good, &approve_token(SKILL, &good), false)
         .expect("revert succeeds");
@@ -475,7 +377,7 @@ fn a_mismatched_approve_digest_is_refused() {
 #[test]
 fn a_direct_publish_under_review_required_is_typed_refused() {
     let plane = start_plane("approvalreq");
-    plane.set_review_required(true);
+    set_review_required(&plane, true);
     let pub_h = drafting_publisher(&plane, "approvalreq");
 
     // A direct publish is refused closed — the verb surfaces the `publish --propose` next-action; it never
@@ -500,7 +402,7 @@ fn a_direct_publish_under_review_required_is_typed_refused() {
 #[test]
 fn four_eyes_blocks_a_self_approve_under_review_required() {
     let plane = start_plane("foureyes");
-    plane.set_review_required(true);
+    set_review_required(&plane, true);
     let pub_h = drafting_publisher(&plane, "foureyes");
 
     let digest = pub_h.draft_digest();
@@ -529,7 +431,7 @@ fn four_eyes_blocks_a_self_approve_under_review_required() {
 #[test]
 fn delegated_consent_lands_on_a_follower_under_review_required() {
     let plane = start_plane("delegated");
-    plane.set_review_required(true);
+    set_review_required(&plane, true);
     let pub_h = drafting_publisher(&plane, "delegated");
 
     let digest = pub_h.draft_digest();

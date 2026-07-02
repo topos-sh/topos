@@ -360,29 +360,34 @@ impl FollowSource for FileFollow {
 }
 
 // =================================================================================================
-// UreqEnroll — the real creds-free device-flow transport (sibling of `UreqPlane`). It speaks the plane's
-// enrollment routes: `GET /i/{token}`, `POST /v1/device/authorize`, `POST /v1/device/token`, and
-// `POST /v1/workspaces/{ws}/devices` (the enroll sig in the `Topos-Device-Signature` header). The
+// UreqDeviceClient — the real creds-free DEVICE-SIGNED transport (sibling of the read-credentialed
+// `UreqPlane`). One client speaks every route a device key (not a read token) authenticates: the
+// enrollment flow (`GET /i/{token}`, `POST /v1/device/authorize`, `POST /v1/device/token`, the redeem
+// `POST /v1/workspaces/{ws}/devices`), the governance Invite POST, and the four contribute writes
+// (publish / propose / revert / review) — the signature rides the `Topos-Device-Signature` header, and
+// every terminal protocol outcome of a write comes back as the all-outcome **200 envelope**. The
 // `/i/{token}` URL, the device code, and the grant are sensitive — never logged or put in an error.
 // =================================================================================================
 
-/// The blocking `ureq` enrollment transport. Holds the base URL + one configured agent (no credential
-/// map — enrollment is creds-free until the redeem mints the read tokens).
-pub(crate) struct UreqEnroll {
+/// The blocking `ureq` device-signed transport (`EnrollSource` + `GovernanceSource` +
+/// `ContributeSource`). Holds the base URL + one configured agent and NO credential map — it is
+/// creds-free: authentication is the per-request device-op signature in the `Topos-Device-Signature`
+/// header (enrollment starts unauthenticated; the redeem mints the read tokens `UreqPlane` then holds).
+pub(crate) struct UreqDeviceClient {
     base_url: String,
     agent: ureq::Agent,
 }
 
-impl std::fmt::Debug for UreqEnroll {
+impl std::fmt::Debug for UreqDeviceClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The agent is not Debug; the base_url alone is safe (the secret /i/ token is never stored here).
-        f.debug_struct("UreqEnroll")
+        f.debug_struct("UreqDeviceClient")
             .field("base_url", &self.base_url)
             .finish_non_exhaustive()
     }
 }
 
-impl UreqEnroll {
+impl UreqDeviceClient {
     /// Build the transport against `base_url` (trailing slash trimmed), over the same agent
     /// configuration as [`UreqPlane`] (status-as-error OFF + the connect/recv/body timeouts).
     pub(crate) fn new(base_url: String) -> Self {
@@ -441,7 +446,7 @@ impl UreqEnroll {
     }
 }
 
-impl EnrollSource for UreqEnroll {
+impl EnrollSource for UreqDeviceClient {
     fn fetch_bootstrap(&self, token: &str) -> Result<BootstrapData, ClientError> {
         // The `/i/{token}` URL is SECRET (the token grants the bootstrap read) — error text names no URL.
         let url = format!("{}/i/{}", self.base_url, token);
@@ -604,12 +609,12 @@ fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
 }
 
 // =================================================================================================
-// The governance-write side of `UreqEnroll` — the owner's signed Invite POST. Creds-free (the 64-byte
+// The governance-write side of `UreqDeviceClient` — the owner's signed Invite POST. Creds-free (the 64-byte
 // governance signature is the auth, riding the `Topos-Device-Signature` header); mirrors `redeem`'s
 // all-outcome 200 envelope mapping.
 // =================================================================================================
 
-impl GovernanceSource for UreqEnroll {
+impl GovernanceSource for UreqDeviceClient {
     fn create_invite(
         &self,
         body: InviteRequest,
@@ -647,13 +652,13 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
 }
 
 // =================================================================================================
-// The contribute-write side of `UreqEnroll` — the device-signed publish / propose / revert / review
+// The contribute-write side of `UreqDeviceClient` — the device-signed publish / propose / revert / review
 // POSTs. Creds-free (the 64-byte device-op signature rides the `Topos-Device-Signature` header). UNLIKE
 // `map_invite_envelope`, a `!ok` body is NOT an error: CONFLICT / APPROVAL_REQUIRED / DENIED are terminal
 // protocol outcomes the verb branches on (carrying `current_generation` + `next_actions`).
 // =================================================================================================
 
-impl ContributeSource for UreqEnroll {
+impl ContributeSource for UreqDeviceClient {
     fn publish(
         &self,
         body: PublishRequest,
