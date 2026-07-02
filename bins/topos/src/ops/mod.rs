@@ -86,9 +86,18 @@ pub(crate) fn parse_hex32(hex_str: &str) -> Result<[u8; 32], ClientError> {
     Ok(out)
 }
 
+/// The ARGV-boundary wrapper over [`parse_hex32`]: a user-typed hash that fails to parse is a usage
+/// error (`INVALID_ARGUMENT`, with `usage` shown verbatim on both surfaces), never `CORRUPT_STATE` —
+/// that family stays reserved for the sidecar-document call sites, where the same malformed bytes
+/// genuinely mean a corrupt persisted doc. `usage` describes the expected shape; it never echoes the
+/// raw input (the caller names the argument, not its bytes).
+pub(crate) fn parse_hex32_arg(hex_str: &str, usage: &str) -> Result<[u8; 32], ClientError> {
+    parse_hex32(hex_str).map_err(|_| ClientError::InvalidArgument(usage.to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_hex32;
+    use super::{parse_hex32, parse_hex32_arg};
 
     #[test]
     fn parse_hex32_is_lowercase_only_and_length_checked() {
@@ -99,5 +108,20 @@ mod tests {
         // Wrong length and non-hex are rejected by the codec.
         assert!(parse_hex32("abc").is_err());
         assert!(parse_hex32(&"g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn argv_and_document_boundaries_classify_the_same_bytes_differently() {
+        // The SAME malformed hash: a usage error from argv, corruption from a persisted doc.
+        let arg = parse_hex32_arg("abc", "`--to` must be a 64-char lowercase hex version id")
+            .unwrap_err();
+        assert_eq!(arg.code(), "INVALID_ARGUMENT");
+        assert_eq!(
+            arg.to_string(),
+            "`--to` must be a 64-char lowercase hex version id"
+        );
+        assert_eq!(parse_hex32("abc").unwrap_err().code(), "CORRUPT_STATE");
+        // A good hash parses identically through the wrapper.
+        assert!(parse_hex32_arg(&"abcdef0123456789".repeat(4), "unused").is_ok());
     }
 }

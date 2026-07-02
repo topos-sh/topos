@@ -153,15 +153,21 @@ pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
 }
 
 /// A clean, leak-free summary for a user surface — variants whose `Display` could embed a raw serde / io
-/// / git string or a host path get a fixed message; the inner detail stays in logs only.
+/// / git string or a host path get a fixed message. The inner detail is NOT lost: every top-level error
+/// path appends the full `Display` chain ([`ClientError::detail`]) to the append-only diagnostics log
+/// (`~/.topos/log.jsonl`) and prints it on stderr under `TOPOS_DEBUG=1`; the TTY error line points there
+/// (`details: …`).
 pub(crate) fn safe_message(err: &ClientError) -> String {
     match err {
-        ClientError::Io(_) => "a filesystem operation failed".to_owned(),
+        ClientError::Io(_) | ClientError::IoKind { .. } => {
+            "a filesystem operation failed".to_owned()
+        }
         ClientError::Gitstore(_) => "the embedded git store reported an error".to_owned(),
         ClientError::Verify(_) => "an integrity check failed".to_owned(),
         ClientError::Corrupt(_) => "a sidecar document is corrupt".to_owned(),
         ClientError::Scan(_) => "the skill directory was rejected".to_owned(),
-        // The remaining Display strings are fixed text or a user-supplied name — safe to show verbatim.
+        // The remaining Display strings are fixed text, a user-supplied name, or (InvalidArgument)
+        // usage guidance written by this code — safe to show verbatim.
         other => other.to_string(),
     }
 }

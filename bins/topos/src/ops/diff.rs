@@ -13,7 +13,7 @@ use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{DiffData, DiffSource};
 
 use super::contribute;
-use super::{parse_hex32, resolve_skill};
+use super::{parse_hex32, parse_hex32_arg, resolve_skill};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
@@ -131,7 +131,12 @@ fn resolve_endpoint(
         let workspace_id = workspace_of(ctx, skill_id)?;
         contribute::fresh_current(ctx, skill_id, &workspace_id)?.0
     } else {
-        parse_hex32(ep)?
+        // The endpoint is user-typed argv — a malformed hash is a usage error, never CORRUPT_STATE
+        // (the draft-vs-current path's lock-field parses above keep the corruption classification).
+        parse_hex32_arg(
+            ep,
+            "a diff <ref> endpoint must be `current` or a 64-char lowercase hex version id",
+        )?
     };
     let (digest, fetched) = contribute::fetch_verified_bundle(ctx, skill_id, version_id)?;
     Ok(Endpoint {

@@ -15,7 +15,7 @@ use topos_types::results::RevertData;
 use topos_types::{SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
-use super::{parse_hex32, resolve_skill};
+use super::{parse_hex32_arg, resolve_skill};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -38,6 +38,12 @@ pub(crate) fn revert(
     approve: &str,
     confirm: bool,
 ) -> Result<RevertData, ClientError> {
+    // Argv is validated FIRST (a malformed hash or token is a usage error however un-enrolled the
+    // machine is). `--approve <skill>@<hash>` binds the GOOD version id (revert's consent is the hash,
+    // not a digest); it must name the same good version as `--to`, and the same skill as any positional.
+    let good_commit = parse_hex32_arg(to, "`--to` must be a 64-char lowercase hex version id")?;
+    let (approve_skill, approve_hash) = split_skill_at(approve)?;
+
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
@@ -49,10 +55,6 @@ pub(crate) fn revert(
                     .into(),
             )
         })?;
-
-    // `--approve <skill>@<hash>` binds the GOOD version id (revert's consent is the hash, not a digest); it
-    // must name the same good version as `--to`, and the same skill as any positional.
-    let (approve_skill, approve_hash) = split_skill_at(approve)?;
     if approve_hash != to {
         return Err(ClientError::ApprovalMismatch {
             skill: approve_skill,
@@ -102,7 +104,6 @@ pub(crate) fn revert(
             pending
         }
         None => {
-            let good_commit = parse_hex32(to)?;
             // The forward commit parents on (and `expected` targets) the FRESH live current — the server
             // builds + signature-checks the forward commit against its live parent before the CAS.
             let (current_commit, expected) =
@@ -176,13 +177,14 @@ fn map_outcome(
     }
 }
 
-/// Split a `<skill>@<hash>` token on its first `@`.
+/// Split a `<skill>@<hash>` token on its first `@`. A malformed shape is a usage error
+/// (`INVALID_ARGUMENT` — the token is the user's own argv, echoed back as clap would).
 fn split_skill_at(token: &str) -> Result<(String, String), ClientError> {
     match token.split_once('@') {
         Some((skill, rest)) if !skill.is_empty() && !rest.is_empty() => {
             Ok((skill.to_owned(), rest.to_owned()))
         }
-        _ => Err(ClientError::Corrupt(format!(
+        _ => Err(ClientError::InvalidArgument(format!(
             "--approve must be `<skill>@<hash>`, got `{token}`"
         ))),
     }

@@ -10,9 +10,27 @@ use topos_core::digest::RejectReason;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub(crate) enum ClientError {
-    /// A filesystem operation failed.
+    /// A filesystem operation failed, wrapped with call-site context only (the OS `ErrorKind` was not
+    /// retained, so it classifies retryable). Where the `io::Error` is in hand, prefer the `?`-ridden
+    /// [`ClientError::IoKind`] path so permanence can be told apart.
     #[error("filesystem error: {0}")]
     Io(String),
+    /// A filesystem operation failed, carrying the OS [`std::io::ErrorKind`] — so `outcome()` can tell a
+    /// permanent local failure (permission denied / read-only filesystem / disk full) from a transient
+    /// one instead of inviting the agent to retry-loop forever. Every `std::io::Error` that rides `?`
+    /// lands here via `From`; the wire code stays `IO_ERROR` (the kind refines only the outcome).
+    #[error("filesystem error: {context}")]
+    IoKind {
+        kind: std::io::ErrorKind,
+        context: String,
+    },
+    /// A malformed command-line argument (a bad hash shape, a malformed `<skill>@<hash>` target, an
+    /// invalid flag combination). The message is usage guidance this code wrote — it describes the
+    /// expected shape (or echoes the user's own argv token, never wire/document bytes) and is shown
+    /// VERBATIM on both surfaces: a usage error is the one family where redaction would hide exactly
+    /// what the user needs. Sidecar-document parse failures stay [`ClientError::Corrupt`].
+    #[error("{0}")]
+    InvalidArgument(String),
     /// A write-side git store failure.
     #[error("git store error: {0}")]
     Gitstore(#[from] GitstoreError),
@@ -136,7 +154,10 @@ impl ClientError {
     /// The stable, machine-branchable wire code (an open vocabulary).
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            ClientError::Io(_) => "IO_ERROR",
+            // One wire code for both filesystem shapes — the kind refines `outcome()`, never the code
+            // set (which is closed on the client side; agents branch on `outcome`/`retryable`).
+            ClientError::Io(_) | ClientError::IoKind { .. } => "IO_ERROR",
+            ClientError::InvalidArgument(_) => "INVALID_ARGUMENT",
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
@@ -176,6 +197,16 @@ impl ClientError {
             ClientError::Io(_)
             | ClientError::Gitstore(GitstoreError::Io(_))
             | ClientError::Plane(_) => TerminalOutcome::RetryableFailure,
+            // With the OS kind in hand, permanence is decidable: permission-denied, a read-only
+            // filesystem, and disk-full will NOT heal on a retry — the retryable bit is the load-bearing
+            // part of the machine contract, so it must not steer the agent into a loop. Everything else
+            // keeps the transient-until-proven-otherwise default above.
+            ClientError::IoKind { kind, .. } => match kind {
+                std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::ReadOnlyFilesystem
+                | std::io::ErrorKind::StorageFull => TerminalOutcome::PermanentFailure,
+                _ => TerminalOutcome::RetryableFailure,
+            },
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::ApprovalRequired { .. } => TerminalOutcome::ApprovalRequired,
@@ -200,16 +231,106 @@ impl ClientError {
             _ => None,
         }
     }
+
+    /// The FULL diagnostic detail: the `Display` chain — this error, then each `source()` link that adds
+    /// text (a `#[from]` source the top `Display` already embeds is not repeated). This is what the
+    /// append-only diagnostics log (and stderr under `TOPOS_DEBUG=1`) receives; user surfaces show the
+    /// redacted [`crate::render::safe_message`] instead. Error `Display`s are secret-free by
+    /// construction (tokens/keys are redacted at their type), so the chain is safe to persist.
+    pub(crate) fn detail(&self) -> String {
+        let mut out = self.to_string();
+        let mut source = std::error::Error::source(self);
+        while let Some(e) = source {
+            let text = e.to_string();
+            if !out.contains(&text) {
+                out.push_str(": ");
+                out.push_str(&text);
+            }
+            source = e.source();
+        }
+        out
+    }
 }
 
 impl From<std::io::Error> for ClientError {
     fn from(e: std::io::Error) -> Self {
-        ClientError::Io(e.to_string())
+        // Keep the kind — it is the only signal that lets `outcome()` refuse to call EACCES/ENOSPC
+        // retryable. (The Display carries the OS message; call sites that want a path add context via
+        // `map_err` before the conversion.)
+        ClientError::IoKind {
+            kind: e.kind(),
+            context: e.to_string(),
+        }
     }
 }
 
 impl From<RejectReason> for ClientError {
     fn from(r: RejectReason) -> Self {
         ClientError::Scan(format!("{r:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error as IoError, ErrorKind};
+
+    use topos_types::TerminalOutcome;
+
+    use super::ClientError;
+
+    #[test]
+    fn io_kind_classifies_permanent_local_failures() {
+        // The three kinds that will not heal on a retry are PERMANENT — the agent must not loop.
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::ReadOnlyFilesystem,
+            ErrorKind::StorageFull,
+        ] {
+            let err = ClientError::from(IoError::new(kind, "refused"));
+            assert_eq!(err.outcome(), TerminalOutcome::PermanentFailure, "{kind:?}");
+            assert_eq!(err.code(), "IO_ERROR");
+        }
+        // Everything else keeps the transient-until-proven-otherwise default.
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::Interrupted,
+            ErrorKind::TimedOut,
+            ErrorKind::Other,
+        ] {
+            let err = ClientError::from(IoError::new(kind, "flaky"));
+            assert_eq!(err.outcome(), TerminalOutcome::RetryableFailure, "{kind:?}");
+        }
+        // The kindless context wrapper stays retryable (the kind is unknown by construction).
+        assert_eq!(
+            ClientError::Io("read /x: gone".into()).outcome(),
+            TerminalOutcome::RetryableFailure
+        );
+    }
+
+    #[test]
+    fn invalid_argument_is_a_permanent_usage_error_shown_verbatim() {
+        let err = ClientError::InvalidArgument(
+            "`--to` must be a 64-char lowercase hex version id".into(),
+        );
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.outcome(), TerminalOutcome::PermanentFailure);
+        // Usage guidance is the one family never redacted — the surfaces show it verbatim.
+        assert_eq!(
+            crate::render::safe_message(&err),
+            "`--to` must be a 64-char lowercase hex version id"
+        );
+    }
+
+    #[test]
+    fn detail_carries_the_context_the_surfaces_redact() {
+        let err = ClientError::from(IoError::new(
+            ErrorKind::PermissionDenied,
+            "open /home/x/.topos/skills: denied",
+        ));
+        assert!(err.detail().contains("/home/x/.topos/skills"));
+        assert_eq!(
+            crate::render::safe_message(&err),
+            "a filesystem operation failed"
+        );
     }
 }

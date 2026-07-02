@@ -81,8 +81,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                 let sid = match SkillId::parse(&skill_id) {
                     Ok(sid) => sid,
                     Err(e) => {
-                        eprintln!("topos pull: skill {skill_id}: {e}");
-                        warnings.push(skill_warning(&skill_id, &e));
+                        note_skill_failure(ctx, &mut warnings, &skill_id, &e);
                         continue;
                     }
                 };
@@ -94,12 +93,9 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                 ) {
                     Ok(row) => skills.push(row),
                     // A hard per-skill failure (corrupt docs, store/io) must not abort the whole sweep —
-                    // diagnose on stderr (never stdout, which the hook injects), surface a typed warning
-                    // on the envelope, and leave that skill put.
-                    Err(e) => {
-                        eprintln!("topos pull: skill {skill_id}: {e}");
-                        warnings.push(skill_warning(&skill_id, &e));
-                    }
+                    // disclose it (stderr + a typed warning; never stdout, which the hook injects) and
+                    // leave that skill put.
+                    Err(e) => note_skill_failure(ctx, &mut warnings, &skill_id, &e),
                 }
             }
             // The proposals count runs AFTER the sweep (it is disclosure, not currency) and is skipped
@@ -168,6 +164,25 @@ fn skill_warning(skill_id: &str, e: &ClientError) -> String {
         e.code(),
         crate::render::safe_message(e)
     )
+}
+
+/// Disclose one isolated per-skill sweep failure under the same redaction policy as the top-level error
+/// path: the SAFE message on stderr (the hook surface — never stdout), the FULL `Display` chain to the
+/// append-only diagnostics log (best-effort), and a stable-shape envelope warning.
+fn note_skill_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, skill_id: &str, e: &ClientError) {
+    let _ = crate::logfile::append_error_event(
+        ctx.fs,
+        &ctx.layout.log_path(),
+        "pull",
+        e.code(),
+        &format!("skill {skill_id}: {}", e.detail()),
+        ctx.clock.now_unix_millis(),
+    );
+    eprintln!(
+        "topos pull: skill {skill_id}: {}",
+        crate::render::safe_message(e)
+    );
+    warnings.push(skill_warning(skill_id, e));
 }
 
 /// A shallow copy of `ctx` with the plane source swapped (the breaker wraps the real transport for the

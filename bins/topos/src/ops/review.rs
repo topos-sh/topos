@@ -13,7 +13,7 @@ use topos_types::results::{ReviewData, ReviewDecision};
 use topos_types::{SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect};
-use super::{parse_hex32, resolve_skill};
+use super::{parse_hex32_arg, resolve_skill};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -33,6 +33,14 @@ pub(crate) fn review(
     target: &str,
     approve: bool,
 ) -> Result<ReviewData, ClientError> {
+    // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
+    // (a malformed target is a usage error however un-enrolled the machine is).
+    let (skill_name, proposal_hex) = split_target(target)?;
+    let proposal_commit = parse_hex32_arg(
+        &proposal_hex,
+        "the review target's `@<hash>` must be a 64-char lowercase hex version id",
+    )?;
+
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
@@ -44,10 +52,6 @@ pub(crate) fn review(
                     .into(),
             )
         })?;
-
-    // `<skill>@<hash>` — the proposal's skill + its candidate commit id.
-    let (skill_name, proposal_hex) = split_target(target)?;
-    let proposal_commit = parse_hex32(&proposal_hex)?;
     let (id, _lock) = resolve_skill(ctx, &skill_name)?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
@@ -160,13 +164,14 @@ fn map_outcome(
     }
 }
 
-/// Split a `<skill>@<hash>` review target on its first `@`.
+/// Split a `<skill>@<hash>` review target on its first `@`. A malformed shape is a usage error
+/// (`INVALID_ARGUMENT` — the target is the user's own argv token, echoed back as clap would).
 fn split_target(target: &str) -> Result<(String, String), ClientError> {
     match target.split_once('@') {
         Some((skill, hash)) if !skill.is_empty() && !hash.is_empty() => {
             Ok((skill.to_owned(), hash.to_owned()))
         }
-        _ => Err(ClientError::Corrupt(format!(
+        _ => Err(ClientError::InvalidArgument(format!(
             "a review target must be `<skill>@<hash>`, got `{target}`"
         ))),
     }
@@ -177,4 +182,23 @@ fn skill_of(target: &str) -> String {
         .split_once('@')
         .map(|(s, _)| s.to_owned())
         .unwrap_or_else(|| target.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_target;
+
+    #[test]
+    fn a_malformed_review_target_is_a_usage_error_not_corruption() {
+        for bad in ["docs", "@abc12", "docs@", ""] {
+            let err = split_target(bad).unwrap_err();
+            assert_eq!(err.code(), "INVALID_ARGUMENT", "{bad:?}");
+            // The written guidance reaches the surface verbatim (safe_message passes it through).
+            assert!(
+                crate::render::safe_message(&err).contains("`<skill>@<hash>`"),
+                "{bad:?}"
+            );
+        }
+        assert!(split_target("docs@abc12").is_ok());
+    }
 }

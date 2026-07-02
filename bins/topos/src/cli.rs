@@ -99,7 +99,9 @@ pub(crate) enum Command {
     },
     /// Resolve a proposal (the `gh pr review --approve` model). `--approve` moves `current` to the candidate
     /// (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer) or
-    /// withdraws your own (proposer). Exactly one of `--approve` / `--reject` is required. Device-signed.
+    /// withdraws your own (proposer). Exactly one of `--approve` / `--reject` is required — enforced by
+    /// clap (the `verdict` group), so a violation is a standard usage error at exit 2. Device-signed.
+    #[command(group(clap::ArgGroup::new("verdict").required(true).args(["approve", "reject"])))]
     Review {
         /// The proposal to resolve, as `<skill>@<hash>`.
         target: String,
@@ -140,8 +142,9 @@ pub(crate) enum Command {
         /// `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill.
         skill: Option<String>,
         /// Resolve a diverged draft via the escape: commit YOUR bytes on top of `current`, dropping the
-        /// merge (the dropped changes are disclosed). Requires a `<skill>` target; not valid with `@<hash>`.
-        #[arg(long = "onto-current")]
+        /// merge (the dropped changes are disclosed). Requires a `<skill>` target (enforced by clap);
+        /// not valid with `@<hash>`.
+        #[arg(long = "onto-current", requires = "skill")]
         onto_current: bool,
         /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
         /// still go to stderr with a non-zero exit. Overrides `--json`.
@@ -198,5 +201,40 @@ impl Command {
             Command::Pull { .. } => "pull",
             Command::Uninstall { .. } => "uninstall",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser};
+
+    use super::Cli;
+
+    #[test]
+    fn cli_is_internally_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn review_verdict_is_a_clap_usage_error_at_exit_2() {
+        // Both flags is a conflict; neither is missing-required — both are STANDARD usage errors
+        // (help hint, exit code 2), never a CORRUPT_STATE envelope.
+        let both = Cli::try_parse_from(["topos", "review", "docs@abc", "--approve", "--reject"])
+            .unwrap_err();
+        assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(both.exit_code(), 2);
+        let neither = Cli::try_parse_from(["topos", "review", "docs@abc"]).unwrap_err();
+        assert_eq!(neither.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(neither.exit_code(), 2);
+    }
+
+    #[test]
+    fn pull_onto_current_requires_a_skill_target_in_clap() {
+        let err = Cli::try_parse_from(["topos", "pull", "--onto-current"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.exit_code(), 2);
+        // With the target present it parses (the `@<hash>` exclusivity stays a runtime usage error).
+        assert!(Cli::try_parse_from(["topos", "pull", "docs", "--onto-current"]).is_ok());
     }
 }

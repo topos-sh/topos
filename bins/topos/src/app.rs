@@ -18,7 +18,7 @@ use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{ContributeSource, EnrollSource, GovernanceSource, PlaneSource};
 use crate::plane_http::{FileFollow, SkillCred, UreqEnroll, UreqPlane};
 use crate::sidecar::{Layout, recover};
-use crate::{enroll, identity, ops, render};
+use crate::{enroll, identity, logfile, ops, render};
 
 /// Run the CLI; returns the process exit code.
 pub fn run() -> ExitCode {
@@ -31,6 +31,13 @@ pub fn run() -> ExitCode {
     let ids = RealIds;
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
+    // The error-side diagnostics channel: every failure that reaches a finisher below lands its full
+    // detail in the append-only log the redacted user surfaces point at.
+    let diag = Diag {
+        fs: &fs,
+        clock: &clock,
+        log_path: layout.log_path(),
+    };
     // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
     // adapter touches its config home only when adopting a recognized skill, arming currency, or on
     // uninstall.
@@ -40,7 +47,7 @@ pub fn run() -> ExitCode {
     // enrollment WAL against the real wall clock).
     let now_millis = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
     if let Err(e) = recover(&fs, &layout, now_millis) {
-        return emit_err(json, cmd_name, &e);
+        return emit_err(json, cmd_name, &e, &diag);
     }
 
     // The plane + follow-state sources. When enrollment has been written (`instance.json` present —
@@ -52,7 +59,7 @@ pub fn run() -> ExitCode {
     let inert_follow = crate::plane::InertFollow;
     let enrollment = match load_enrollment(&fs, &layout) {
         Ok(e) => e,
-        Err(e) => return emit_err(json, cmd_name, &e),
+        Err(e) => return emit_err(json, cmd_name, &e, &diag),
     };
     let (plane, follow, plane_key): (
         &dyn crate::plane::PlaneSource,
@@ -77,7 +84,7 @@ pub fn run() -> ExitCode {
         | Command::Publish { .. }
         | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
             Ok(d) => d,
-            Err(e) => return emit_err(json, cmd_name, &e),
+            Err(e) => return emit_err(json, cmd_name, &e, &diag),
         },
         _ => String::new(),
     };
@@ -94,7 +101,13 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Add { path } => finish(json, cmd_name, ops::add(&ctx, &path), render::add_tty),
+        Command::Add { path } => finish(
+            json,
+            cmd_name,
+            ops::add(&ctx, &path),
+            render::add_tty,
+            &diag,
+        ),
         Command::Follow {
             link,
             manual,
@@ -102,16 +115,14 @@ pub fn run() -> ExitCode {
             approve,
         } => {
             // The transports are built per-base-URL (known only after the op parses the link / reads the
-            // WAL): a creds-free `ureq` enroll client + the read transport for the offer disclosure.
-            let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
+            // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer
+            // disclosure (the one connector that carries per-skill creds, so it stays a local closure).
             let plane_connect =
                 |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
                     Box::new(UreqPlane::new(base_url.to_owned(), creds))
                 };
             let connectors = ops::FollowConnectors {
-                enroll: &enroll_connect,
+                enroll: &connect_enroll,
                 plane: &plane_connect,
             };
             let opts = ops::FollowOpts {
@@ -119,103 +130,82 @@ pub fn run() -> ExitCode {
                 resume,
                 approve,
             };
-            finish_follow(json, cmd_name, ops::follow(&ctx, &connectors, link, opts))
+            finish_follow(
+                json,
+                cmd_name,
+                ops::follow(&ctx, &connectors, link, opts),
+                &diag,
+            )
         }
         Command::Unfollow { skill } => finish(
             json,
             cmd_name,
             ops::unfollow(&ctx, &skill),
             render::unfollow_tty,
+            &diag,
         ),
         Command::Invite {
             emails,
             role,
             skills,
-        } => {
-            // The owner's governance-write transport, built per the enrolled plane's base URL (read inside
-            // the op from `instance.json`) — the same creds-free `ureq` client that speaks enrollment.
-            let gov_connect = |base_url: &str| -> Box<dyn GovernanceSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
-            finish(
-                json,
-                cmd_name,
-                ops::invite(
-                    &ctx,
-                    &gov_connect,
-                    emails,
-                    role.map(RoleArg::to_workspace_role),
-                    skills,
-                ),
-                render::invite_tty,
-            )
-        }
+        } => finish(
+            json,
+            cmd_name,
+            ops::invite(
+                &ctx,
+                &connect_governance,
+                emails,
+                role.map(RoleArg::to_workspace_role),
+                skills,
+            ),
+            render::invite_tty,
+            &diag,
+        ),
         Command::List { skill, footprint } => finish(
             json,
             cmd_name,
             ops::list(&ctx, skill.as_deref(), footprint),
             render::list_tty,
+            &diag,
         ),
         Command::Diff { skill, r#ref } => finish(
             json,
             cmd_name,
             ops::diff(&ctx, &skill, r#ref.as_deref()),
             render::diff_tty,
+            &diag,
         ),
         Command::Publish {
             skill,
             propose,
             approve,
-        } => {
-            // The device-signed contribute transport, built per the enrolled plane's base URL (read inside
-            // the op from `instance.json`) — the same creds-free `ureq` client that speaks enrollment. The
-            // governance connector is the same client (a genesis publish folds in an owner-signed invite).
-            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
-            let gov_connect = |base_url: &str| -> Box<dyn GovernanceSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
-            finish_publish(
-                json,
-                cmd_name,
-                ops::publish(
-                    &ctx,
-                    &contribute_connect,
-                    &gov_connect,
-                    skill.as_deref(),
-                    propose,
-                    &approve,
-                ),
-            )
-        }
+        } => finish_publish(
+            json,
+            cmd_name,
+            ops::publish(
+                &ctx,
+                &connect_contribute,
+                &connect_governance,
+                skill.as_deref(),
+                propose,
+                &approve,
+            ),
+            &diag,
+        ),
         Command::Review {
             target,
             approve,
             reject,
         } => {
-            // Exactly one of --approve / --reject (clap leaves both bool; the verdict is mutually exclusive).
-            let resolved = match (approve, reject) {
-                (true, false) => true,
-                (false, true) => false,
-                _ => {
-                    return emit_err(
-                        json,
-                        cmd_name,
-                        &ClientError::Corrupt(
-                            "exactly one of --approve / --reject is required".into(),
-                        ),
-                    );
-                }
-            };
-            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
+            // clap's `verdict` ArgGroup guarantees exactly one flag (a violation was a standard usage
+            // error at exit 2 before this point) — the verdict IS `approve`.
+            debug_assert!(approve ^ reject, "clap enforces exactly one verdict flag");
             finish(
                 json,
                 cmd_name,
-                ops::review(&ctx, &contribute_connect, &target, resolved),
+                ops::review(&ctx, &connect_contribute, &target, approve),
                 render::review_tty,
+                &diag,
             )
         }
         Command::Revert {
@@ -223,25 +213,27 @@ pub fn run() -> ExitCode {
             to,
             approve,
             confirm,
-        } => {
-            let contribute_connect = |base_url: &str| -> Box<dyn ContributeSource> {
-                Box::new(UreqEnroll::new(base_url.to_owned()))
-            };
-            finish(
-                json,
-                cmd_name,
-                ops::revert(
-                    &ctx,
-                    &contribute_connect,
-                    skill.as_deref(),
-                    &to,
-                    &approve,
-                    confirm,
-                ),
-                render::revert_tty,
-            )
-        }
-        Command::Log { skill } => finish(json, cmd_name, ops::log(&ctx, &skill), render::log_tty),
+        } => finish(
+            json,
+            cmd_name,
+            ops::revert(
+                &ctx,
+                &connect_contribute,
+                skill.as_deref(),
+                &to,
+                &approve,
+                confirm,
+            ),
+            render::revert_tty,
+            &diag,
+        ),
+        Command::Log { skill } => finish(
+            json,
+            cmd_name,
+            ops::log(&ctx, &skill),
+            render::log_tty,
+            &diag,
+        ),
         Command::Pull {
             skill,
             onto_current,
@@ -252,17 +244,15 @@ pub fn run() -> ExitCode {
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
-                // stdout, even under `--json` (which `--quiet` overrides for the hook path). Isolated
-                // per-skill failures already reached stderr inside the sweep; the exit stays 0 (isolation).
+                // stdout, even under `--json` (which `--quiet` overrides for the hook path — hence the
+                // forced TTY presentation below). Isolated per-skill failures already reached stderr
+                // inside the sweep; the exit stays 0 (isolation).
                 match result {
                     Ok(_) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("{}", render::err_tty(&e));
-                        ExitCode::FAILURE
-                    }
+                    Err(e) => emit_err(false, cmd_name, &e, &diag),
                 }
             } else {
-                finish_pull(json, cmd_name, result)
+                finish_pull(json, cmd_name, result, &diag)
             }
         }
         Command::Uninstall { footprint } => {
@@ -272,9 +262,26 @@ pub fn run() -> ExitCode {
                 cmd_name,
                 ops::uninstall(&ctx, footprint, binary.as_deref()),
                 render::uninstall_tty,
+                &diag,
             )
         }
     }
+}
+
+/// The shared per-base-URL wire connectors: the enroll / governance / contribute seams all box the SAME
+/// creds-free `ureq` client (`UreqEnroll` implements every one of those source traits) — only the trait
+/// object type differs, so each is one coercion of one constructor (a `&connect_*` fn reference coerces
+/// to the seam's `&dyn Fn`).
+fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
+    Box::new(UreqEnroll::new(base_url.to_owned()))
+}
+
+fn connect_governance(base_url: &str) -> Box<dyn GovernanceSource> {
+    Box::new(UreqEnroll::new(base_url.to_owned()))
+}
+
+fn connect_contribute(base_url: &str) -> Box<dyn ContributeSource> {
+    Box::new(UreqEnroll::new(base_url.to_owned()))
 }
 
 fn finish<T: Serialize>(
@@ -282,6 +289,7 @@ fn finish<T: Serialize>(
     command: &str,
     result: Result<T, ClientError>,
     tty: impl Fn(&T) -> String,
+    diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -293,7 +301,7 @@ fn finish<T: Serialize>(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => emit_err(json, command, &e),
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 
@@ -305,6 +313,7 @@ fn finish_pull(
     json: bool,
     command: &str,
     result: Result<ops::PullOutcome, ClientError>,
+    diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(out) => {
@@ -318,7 +327,7 @@ fn finish_pull(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => emit_err(json, command, &e),
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 
@@ -328,6 +337,7 @@ fn finish_follow(
     json: bool,
     command: &str,
     result: Result<topos_types::results::FollowData, ClientError>,
+    diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -341,7 +351,7 @@ fn finish_follow(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => emit_err(json, command, &e),
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 
@@ -353,6 +363,7 @@ fn finish_publish(
     json: bool,
     command: &str,
     result: Result<ops::PublishOutcome, ClientError>,
+    diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(ops::PublishOutcome::Published(data)) => {
@@ -373,15 +384,48 @@ fn finish_publish(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => emit_err(json, command, &e),
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 
-fn emit_err(json: bool, command: &str, err: &ClientError) -> ExitCode {
+/// The error-side diagnostics channel — where the redacted user surfaces send the detail they withhold.
+/// `safe_message` keeps stdout/TTY leak-free; the FULL `Display` chain has to land SOMEWHERE, and this
+/// is it: the append-only `~/.topos/log.jsonl` (plus stderr when `TOPOS_DEBUG=1`).
+struct Diag<'a> {
+    fs: &'a dyn FsOps,
+    clock: &'a dyn Clock,
+    log_path: PathBuf,
+}
+
+impl Diag<'_> {
+    /// Record `err` for `command`: best-effort append of the structured error event (returns whether it
+    /// landed — the TTY `details:` pointer prints only then), and the full chain on stderr under
+    /// `TOPOS_DEBUG=1` (stderr only — stdout stays the clean envelope).
+    fn note(&self, command: &str, err: &ClientError) -> bool {
+        if std::env::var_os("TOPOS_DEBUG").is_some_and(|v| v == "1") {
+            eprintln!("topos {command} [{}]: {}", err.code(), err.detail());
+        }
+        logfile::append_error_event(
+            self.fs,
+            &self.log_path,
+            command,
+            err.code(),
+            &err.detail(),
+            self.clock.now_unix_millis(),
+        )
+    }
+}
+
+fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> ExitCode {
+    let logged = diag.note(command, err);
     if json {
         println!("{}", render::to_json(&render::err_envelope(command, err)));
     } else {
         eprintln!("{}", render::err_tty(err));
+        // Point a human at the detail the fixed message withheld — only when it actually landed.
+        if logged {
+            eprintln!("details: {}", diag.log_path.display());
+        }
     }
     ExitCode::FAILURE
 }
@@ -393,16 +437,20 @@ fn emit_err(json: bool, command: &str, err: &ClientError) -> ExitCode {
 /// version id; otherwise the whole argument is the skill name. So a skill whose name contains `@` (e.g.
 /// `team@cli`) is accepted as a name, and `team@cli@<hash>` still goes back correctly.
 ///
-/// `--onto-current` (the escape) requires a `<skill>` target and is mutually exclusive with `@<hash>`.
+/// `--onto-current` (the escape) requires a `<skill>` target (clap enforces that half via `requires`)
+/// and is mutually exclusive with `@<hash>` (a runtime usage error — the suffix shape is only known
+/// after parsing).
 fn build_pull_scope(
     skill: Option<String>,
     onto_current: bool,
 ) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
         if onto_current {
-            return Err(ClientError::PlacementUnsupported {
-                reason: "--onto-current requires a <skill> target".into(),
-            });
+            // Unreachable through clap (`--onto-current` requires the <skill> positional) — kept as a
+            // defensive usage error for a direct caller.
+            return Err(ClientError::InvalidArgument(
+                "--onto-current requires a <skill> target".into(),
+            ));
         }
         return Ok(ops::PullScope::AllFollowed);
     };
@@ -410,9 +458,9 @@ fn build_pull_scope(
         && let Ok(hash) = ops::parse_hex32(suffix)
     {
         if onto_current {
-            return Err(ClientError::PlacementUnsupported {
-                reason: "--onto-current is not valid with @<hash>".into(),
-            });
+            return Err(ClientError::InvalidArgument(
+                "--onto-current is not valid with @<hash>".into(),
+            ));
         }
         return Ok(ops::PullScope::One {
             name: name.to_owned(),
