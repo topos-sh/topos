@@ -60,13 +60,17 @@
 //                 candidate assembly; no SQL);
 //   src/db/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write transaction plus its
 //                 pool reads (no `sqlx` type ever crosses out of `mod db`).
-// Exceptions: `gc`'s SQL lives in `db/lifecycle` (one fence, one file), and the proposals' orchestration
-// lives in `set_current` (propose/approve are arms of the one pointer-move write; `db/proposals` holds
-// their SQL).
+// The twins today: `enroll` (enrollment issuance), `governance` (the owner-signed governance ops + the
+// admin claim), and `set_current` (the pointer-move). Exceptions: `gc`'s SQL lives in `db/lifecycle` (one
+// fence, one file); the proposals' orchestration lives in `set_current` (propose/approve are arms of the
+// one pointer-move write; `db/proposals` holds their SQL); and `db/receipts` is SQL-half-only (the receipt
+// read/insert/replay machinery + terminal-outcome writers both `db/set_current` paths call — no
+// orchestration twin).
 mod authority;
 mod db;
 mod enroll;
 mod error;
+mod governance;
 mod id;
 mod lineage;
 mod read;
@@ -82,17 +86,25 @@ mod upload;
 mod gc;
 mod lifecycle;
 
+// The feature-gated `impl Authority` test-fixtures shims (seed roster/device/workspace, drive a real genesis
+// publish, tamper a signature) — split out of `authority.rs` so the facade reads as exactly the production
+// API. Same gate as the shims always had: the production build never compiles it.
+#[cfg(feature = "test-fixtures")]
+mod fixtures;
+
 #[cfg(test)]
 mod tests;
 
 pub use authority::{Authority, PoolConfig};
 pub use enroll::{
-    ConfirmOutcome, CreateInviteOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart,
-    EnrollmentConfig, EnrollmentRedeemed, GovernanceOp, GovernanceOutcome, GovernanceSignedOp,
-    GrantIssued, InviteBootstrap, InviteCreated, MintedReadToken, PasscodeComplete, PasscodeStart,
-    RedeemOutcome, Role, VerificationContext,
+    ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
+    EnrollmentRedeemed, GrantIssued, InviteBootstrap, MintedReadToken, PasscodeComplete,
+    PasscodeStart, RedeemOutcome, VerificationContext,
 };
 pub use error::{AuthorityError, Result};
+pub use governance::{
+    CreateInviteOutcome, GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteCreated, Role,
+};
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};

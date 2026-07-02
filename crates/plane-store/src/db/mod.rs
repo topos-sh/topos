@@ -599,14 +599,21 @@ pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus}
 // The operator backup/restore epoch bump (re-sign `current` one epoch forward; touches ONLY `current`).
 mod restore;
 
-// The pointer-move transaction (the `set-current` write) + its receipt/policy/device-registry helpers.
+// The pointer-move transaction (the `set-current` write) + its policy/device-registry helpers.
 mod set_current;
+
+// The durable all-outcome receipt machinery (read/insert/replay, the terminal-outcome writers, the outcome
+// codecs) — shared by `set_current`'s promote and reject paths.
+mod receipts;
 
 // The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
 mod proposals;
 
-// The enrollment + governance issuance SQL (invites / device-auth / passcodes / grants / redeem / governance).
+// The enrollment issuance SQL (invites / device-auth / passcodes / grants / redeem).
 mod enroll;
+
+// The governance + admin-claim SQL (owner-signed create-invite + roster/revoke mutations; the first-boot claim).
+mod governance;
 
 // Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
 // `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them

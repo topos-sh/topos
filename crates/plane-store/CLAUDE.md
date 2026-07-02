@@ -12,7 +12,34 @@ construction. (This is misuse-prevention by encapsulation; it is not isolation a
 same-process code.) The error type holds this line too: internal faults carry a **boxed** source, so no
 `sqlx` or git-store type appears in any public signature.
 
-## Implemented (each behind a test in `src/tests.rs` + the module unit tests)
+## File map (the orchestration/db twin convention — the full rule is the `Layout` comment in `src/lib.rs`)
+
+Each write domain X splits into `src/X.rs` (orchestration, outside the transaction — no SQL) and
+`src/db/X.rs` (the raw-SQL `SERIALIZABLE` half; no `sqlx` type crosses out of `mod db`):
+
+- `authority.rs` — the sealed facade: `Authority` + `PoolConfig`, exactly the production API (the
+  feature-gated test-fixtures shims live in `fixtures.rs`, split out so this file reads as what ships).
+- `enroll.rs` / `db/enroll.rs` — enrollment issuance (invites-bootstrap read, device-auth, passcodes,
+  grants, the central redeem). The shared credential derivations (HMAC mint, sha256 storage form, the
+  server-derived device key id) and the cross-domain in-txn helpers (`read_device`, `blob32`) live here.
+- `governance.rs` / `db/governance.rs` — the role-gated governance surface, split from `enroll` so it is
+  independently reviewable: `GovernanceOp`/`Role` modeling, the owner-signed create-invite +
+  roster/revoke mutations (the `govern_preamble` authz, the last-owner-lockout guard, the
+  `workspace_events` audit + idempotency), and the self-host first-boot `admin_claim`.
+- `set_current.rs` / `db/set_current.rs` — the pointer-move: `db/set_current.rs` keeps `run`'s ordered
+  arms (replay → authz → CAS → availability → lineage → the op tails) as its single story, plus the reject
+  transaction; the proposals' orchestration lives here too (propose/approve are arms of the one write).
+- `db/receipts.rs` — SQL-half-only (no orchestration twin): the durable receipt read/insert/replay
+  machinery, the terminal-outcome writers, and the outcome codecs both `db/set_current.rs` paths call.
+- `db/proposals.rs` — the contribute tables' SQL; `db/lifecycle.rs` + `lifecycle.rs`/`gc.rs` — the
+  object-lifecycle fence (one fence, one file — `gc`'s SQL lives in `db/lifecycle`); `db/seed.rs` —
+  test-only staging; `db/mod.rs` — the pool, `run_serializable!`, and the authorization joins.
+- `read.rs`, `lineage.rs`, `upload.rs`, `id.rs`, `signer.rs`, `error.rs` — the read surface, the lineage
+  predicate, the candidate DTOs, the validated id newtypes, the in-process signer, the boxed-source error.
+- `fixtures.rs` — the `feature = "test-fixtures"` `impl Authority` shims (never in a production build);
+  `src/tests/` — the in-crate suite, one named module per concern.
+
+## Implemented (each behind a test in `src/tests/` + the module unit tests)
 
 - **Per-workspace storage + hard tenant binding.** One `topos-gitstore` repo per workspace under a
   confined root, plus a Postgres database whose every row carries `workspace_id` and whose every query
