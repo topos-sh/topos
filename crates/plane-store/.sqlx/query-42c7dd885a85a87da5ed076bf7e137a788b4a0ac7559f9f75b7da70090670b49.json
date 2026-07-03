@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT workspace_id AS \"workspace_id!\", display_name AS \"display_name?\"\n               FROM admin_claim\n               WHERE token_sha256 = $1 AND consumed_at IS NULL\n                 AND (expires_at IS NULL OR expires_at >= $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workspace_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "42c7dd885a85a87da5ed076bf7e137a788b4a0ac7559f9f75b7da70090670b49"
+}

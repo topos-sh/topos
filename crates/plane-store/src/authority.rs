@@ -6,13 +6,17 @@ use std::time::Duration;
 use topos_gitstore::{LocalLargeStore, Store};
 
 use crate::db::Db;
+use crate::enroll::DeploymentMode;
 use crate::enroll::{
     ConfirmOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentState,
     InviteBootstrap, NoEnrollmentConfig, PasscodeComplete, PasscodeStart, RedeemOutcome,
     VerificationContext,
 };
 use crate::error::{AuthorityError, Result};
-use crate::governance::{CreateInviteOutcome, GovernanceOp, GovernanceOutcome, GovernanceSignedOp};
+use crate::governance::{
+    ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
+    GovernanceOutcome, GovernanceSignedOp, MintClaimOutcome,
+};
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
@@ -619,6 +623,32 @@ impl Authority {
         .await
     }
 
+    /// Start a **STANDUP** device-authorization flow — no invite, no workspace: the session is born
+    /// `pending` with `intent = 'standup'`, and a signed-in human's [`approve_standup`](Self::approve_standup)
+    /// later creates the workspace it confirms into. CLOUD planes only: on a self-host plane this is the
+    /// single indistinguishable [`AuthorityError::NotFound`] (self-host stands up via the operator's
+    /// one-time claim link). The standup `user_code` is HIGH-ENTROPY (16 chars vs enroll's 8) because the
+    /// approval CREATES ownership — see the generator's rationale.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a self-host plane; [`AuthorityError::Internal`] on a fault.
+    pub async fn start_standup_device_auth(
+        &self,
+        device_public_key: &[u8; 32],
+        machine_name: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<DeviceAuthStart> {
+        crate::enroll::start_standup_device_auth(
+            self,
+            device_public_key,
+            machine_name,
+            now,
+            created_at,
+        )
+        .await
+    }
+
     /// Poll a device-authorization session — `Pending`/`SlowDown`/`Denied`/`Expired`, or `Granted` with the
     /// single-use enrollment grant (a re-poll re-derives the SAME grant). An unknown device code is the
     /// indistinguishable [`AuthorityError::NotFound`].
@@ -692,9 +722,12 @@ impl Authority {
         .await
     }
 
-    /// **Admin claim** (self-host first-boot standup) — consume the one-time claim token, create the
-    /// (self-host) workspace, seat its first owner (a server-derived device-rooted principal), and register
-    /// the claiming device. Returns an [`EnrollmentRedeemed`](crate::EnrollmentRedeemed)-shaped result.
+    /// **Admin claim** (the one-time first-boot bearer: self-host standup + the cloud break-glass) —
+    /// consume the claim token, create the workspace (THE PLANE'S deployment mode; the display name + owner
+    /// from the mint-time row, never a request), seat its first owner, and register the claiming device.
+    /// Returns an [`EnrollmentRedeemed`](crate::EnrollmentRedeemed)-shaped result. A SAME-DEVICE replay of
+    /// an already-consumed claim deterministically re-returns `Redeemed` (lost-200 recovery); every other
+    /// dead-claim case is the uniform static denial.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -702,19 +735,119 @@ impl Authority {
         &self,
         claim_token: &str,
         device_public_key: [u8; 32],
-        display_name: &str,
         now: i64,
         created_at: &str,
     ) -> Result<RedeemOutcome> {
-        crate::governance::admin_claim(
+        crate::governance::admin_claim(self, claim_token, device_public_key, now, created_at).await
+    }
+
+    /// **Mint** a one-time admin-claim token for a workspace that does not exist yet (typed refusal if it
+    /// does). On a CLOUD-mode plane an `owner_email` is REQUIRED (the seated owner must be a governable
+    /// human identity); self-host may omit it (the claiming device roots the owner). The plaintext token is
+    /// returned ONCE — only its sha256 is stored, and the result's `Debug` redacts it; the caller must
+    /// never log or trace it. Re-minting for the same absent workspace is allowed (first redeem wins).
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route): the bin's `mint-claim` subcommand and a
+    /// composing plane's admin surface call it.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mint_admin_claim(
+        &self,
+        ws: &WorkspaceId,
+        display_name: Option<&str>,
+        owner_email: Option<&str>,
+        plane_mode: DeploymentMode,
+        ttl_ms: i64,
+        now: i64,
+        created_at: &str,
+    ) -> Result<MintClaimOutcome> {
+        crate::governance::mint_admin_claim(
             self,
-            claim_token,
-            device_public_key,
+            ws,
             display_name,
+            owner_email,
+            plane_mode,
+            ttl_ms,
             now,
             created_at,
         )
         .await
+    }
+
+    /// **Create a workspace** for an already-verified owner email (the self-serve door a composing web
+    /// surface drives; the caller MUST have proven the email). ONE transaction: the `request_id` idempotency
+    /// probe (same request + same owner replays the SAME workspace and self-invite link; a different owner
+    /// is denied), the per-identity creation cap, a fresh server-minted `w_…` id, the workspace + confirmed
+    /// owner seat (with the freemail-aware domain claim), and the owner's deterministic self-invite.
+    /// `display_name = None` takes the server default (the email's local part + "'s workspace").
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
+    /// threaded by the composing caller — never a request field.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn create_workspace(
+        &self,
+        request_id: &str,
+        display_name: Option<&str>,
+        owner_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<CreateWorkspaceOutcome> {
+        crate::governance::create_workspace(
+            self,
+            request_id,
+            display_name,
+            owner_email,
+            plane_mode,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Approve a standup session** with a web-verified email (the human leg of the un-enrolled publish
+    /// door; the caller MUST have proven the email). ONE transaction: resolve the live standup session by
+    /// `user_code`, run the same creation body as [`create_workspace`](Self::create_workspace) (cap → fresh
+    /// id → seat), and CAS the session pending→confirmed with the fresh workspace — the session CAS is the
+    /// idempotency (a same-email re-click is `AlreadyApproved`; a different email, an unknown/expired code,
+    /// or an enroll-intent session is the single indistinguishable [`AuthorityError::NotFound`]).
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
+    pub async fn approve_standup(
+        &self,
+        user_code: &str,
+        verified_email: &str,
+        display_name: Option<&str>,
+        plane_mode: DeploymentMode,
+        now: i64,
+        created_at: &str,
+    ) -> Result<ApproveStandupOutcome> {
+        crate::governance::approve_standup(
+            self,
+            user_code,
+            verified_email,
+            display_name,
+            plane_mode,
+            now,
+            created_at,
+        )
+        .await
+    }
+
+    /// Resolve an admin-claim link token to its **bootstrap payload** (the `/i/` claim branch): the
+    /// workspace-to-be's identity from the claim row, no skills, `enrollment_method = "admin_claim"`, and
+    /// the plane signing root to TOFU-pin. A consumed/expired/unknown claim is the single indistinguishable
+    /// [`AuthorityError::NotFound`]. Claim resolution never touches the invites table (nor vice versa).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on a dead/unknown claim; [`AuthorityError::Internal`] on a fault.
+    pub async fn read_claim_bootstrap(&self, token: &str, now: i64) -> Result<InviteBootstrap> {
+        crate::governance::read_claim_bootstrap(self, token, now).await
     }
 
     /// **Set** a principal's workspace role (owner-only governance op, with the last-owner-lockout guard).

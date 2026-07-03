@@ -355,6 +355,12 @@ impl EnrollCtx {
 }
 
 async fn enroll_setup(pool: PgPool, tag: &str) -> EnrollCtx {
+    enroll_setup_mode(pool, tag, DeploymentMode::Cloud).await
+}
+
+/// An [`EnrollCtx`] whose plane runs at the given deployment mode (the standup tests need a self-host
+/// plane, whose standup start must be the uniform 404).
+async fn enroll_setup_mode(pool: PgPool, tag: &str, mode: DeploymentMode) -> EnrollCtx {
     let dir = unique_dir(tag);
     let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
@@ -363,7 +369,8 @@ async fn enroll_setup(pool: PgPool, tag: &str) -> EnrollCtx {
         .with_enrollment_config(EnrollmentConfig {
             secret_path: dir.join("enroll.secret"),
             base_url: ENROLL_BASE_URL.to_owned(),
-            deployment_mode: DeploymentMode::Cloud,
+            verify_base_url: None,
+            deployment_mode: mode,
             enrollment_method: "passcode".to_owned(),
         })
         .expect("enrollment config");
@@ -400,7 +407,9 @@ async fn enroll_setup(pool: PgPool, tag: &str) -> EnrollCtx {
         })
         .with_enroll_config(crate::state::EnrollConfig {
             base_url: ENROLL_BASE_URL.to_owned(),
-            deployment_mode: DeploymentMode::Cloud,
+            verify_base_url: ENROLL_BASE_URL.to_owned(),
+            strict_deployment_mode: Some(mode),
+            deployment_mode: mode,
             enrollment_method: "passcode".to_owned(),
             smtp: None,
         })

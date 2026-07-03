@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT device_code_sha256 AS \"device_code_sha256!: Vec<u8>\" FROM device_auth_sessions\n               WHERE user_code = $1 AND status IN ('pending', 'confirmed') LIMIT 1",
+  "query": "SELECT device_code_sha256 AS \"device_code_sha256!: Vec<u8>\" FROM device_auth_sessions\n               WHERE user_code = $1 AND intent = 'enroll' AND status IN ('pending', 'confirmed') LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "2227ec0cf28ce427a08ab2ab6d0b837a8008cfb5a65f1d7ae3727c3022d29234"
+  "hash": "d00a82c65527e2d7fa1e51f79672c07111c3269489ff1a342b6f80eae61d4238"
 }

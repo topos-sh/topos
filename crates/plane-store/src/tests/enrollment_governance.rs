@@ -15,12 +15,12 @@ use crate::{
 const NOW: i64 = 1_000;
 
 /// A canonical lowercase-hyphenated UUID op id seeded by `n`.
-fn op_id(n: u64) -> String {
+pub(super) fn op_id(n: u64) -> String {
     format!("00000000-0000-4000-8000-{n:012x}")
 }
 
 /// The raw Ed25519 public key for a seed.
-fn device_pub(seed: &[u8; 32]) -> [u8; 32] {
+pub(super) fn device_pub(seed: &[u8; 32]) -> [u8; 32] {
     SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
@@ -91,7 +91,7 @@ fn sign_governance(
 }
 
 /// Sign an enrollment possession proof the way the enrolling device would.
-fn sign_enroll(
+pub(super) fn sign_enroll(
     device_seed: &[u8; 32],
     ws: &str,
     grant_hash: [u8; 32],
@@ -116,7 +116,11 @@ fn sign_enroll(
 
 /// Seat an owner: a workspace row, an `owner`/`confirmed` member, and the owner's registered device.
 /// Returns `(owner_seed, owner_principal, owner_device_key_id)`.
-async fn seat_owner(a: &Authority, w: &WorkspaceId, mode: &str) -> ([u8; 32], Principal, String) {
+pub(super) async fn seat_owner(
+    a: &Authority,
+    w: &WorkspaceId,
+    mode: &str,
+) -> ([u8; 32], Principal, String) {
     a.db()
         .seed_workspace(w, "Acme", "verified", mode)
         .await
@@ -137,7 +141,7 @@ async fn seat_owner(a: &Authority, w: &WorkspaceId, mode: &str) -> ([u8; 32], Pr
 }
 
 /// Owner-create an invite offering `skill` to `invitee`; return its opaque token.
-async fn make_invite(
+pub(super) async fn make_invite(
     a: &Authority,
     w: &WorkspaceId,
     owner_seed: &[u8; 32],
@@ -204,7 +208,7 @@ async fn cloud_flow_to_grant(
 }
 
 /// Redeem a grant with the (honest) enrolling device.
-async fn redeem(
+pub(super) async fn redeem(
     a: &Authority,
     grant: &GrantIssued,
     device_seed: &[u8; 32],
@@ -964,8 +968,9 @@ async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn admin_claim_stands_up_a_self_host_workspace_once(pool: PgPool) {
-    let fx = Fixture::new(pool, "enr-admin").await;
+async fn admin_claim_stands_up_a_workspace_and_replays_only_for_the_same_device(pool: PgPool) {
+    // A SELF-HOST plane: the claim seats a device-rooted owner and the workspace takes the PLANE's mode.
+    let fx = Fixture::with_mode(pool, "enr-admin", DeploymentMode::SelfHost).await;
     let a = &fx.authority;
     let w = ws("w_local");
     a.db().seed_admin_claim(&w, "claim-secret").await.unwrap();
@@ -973,7 +978,7 @@ async fn admin_claim_stands_up_a_self_host_workspace_once(pool: PgPool) {
     let dpub = device_pub(&device_seed);
 
     let RedeemOutcome::Redeemed(r) = a
-        .admin_claim("claim-secret", dpub, "Local", NOW, "t0")
+        .admin_claim("claim-secret", dpub, NOW, "t0")
         .await
         .unwrap()
     else {
@@ -981,9 +986,24 @@ async fn admin_claim_stands_up_a_self_host_workspace_once(pool: PgPool) {
     };
     assert_eq!(r.workspace_id.as_str(), "w_local");
     assert!(r.principal.as_str().starts_with("dev."));
-    // The one-time token is now consumed — a second claim is denied.
+    let created = a.db().read_workspace(&w).await.unwrap().expect("workspace");
+    assert_eq!(created.deployment_mode, "self_host");
+
+    // The SAME device's replay (a lost-200 retry) deterministically re-returns Redeemed.
+    let RedeemOutcome::Redeemed(replay) = a
+        .admin_claim("claim-secret", dpub, NOW, "t0")
+        .await
+        .unwrap()
+    else {
+        panic!("same-device replay must be Redeemed");
+    };
+    assert_eq!(replay.workspace_id.as_str(), "w_local");
+    assert_eq!(replay.principal.as_str(), r.principal.as_str());
+
+    // A DIFFERENT device presenting the consumed token is denied.
+    let other = device_pub(&[44u8; 32]);
     let again = a
-        .admin_claim("claim-secret", dpub, "Local", NOW, "t0")
+        .admin_claim("claim-secret", other, NOW, "t0")
         .await
         .unwrap();
     assert!(matches!(again, RedeemOutcome::Denied(_)));

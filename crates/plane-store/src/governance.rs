@@ -9,8 +9,11 @@
 //! sha256 storage form, the server-derived device key id) stay in ONE home, [`crate::enroll`].
 
 use crate::authority::Authority;
-use crate::enroll::{RedeemOutcome, device_key_id_for, parse_op_id, sha256_token};
-use crate::error::Result;
+use crate::enroll::{
+    DeploymentMode, InviteBootstrap, RedeemOutcome, device_key_id_for, parse_op_id,
+    random_claim_token, sha256_token,
+};
+use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
 
 // ── governance op modeling (an owned mirror of the kernel's borrowed GovernanceOpKind) ─────────────────
@@ -170,6 +173,93 @@ impl Role {
     }
 }
 
+/// A freshly-minted one-time admin claim. The `token` is the bearer plaintext, returned ONCE (only its
+/// sha256 is stored); `Debug` REDACTS it so it can never reach a log or trace through a formatted value.
+#[derive(Clone)]
+pub struct MintedClaim {
+    /// The claim-token plaintext (shown once by the minting surface; never logged, never stored).
+    pub token: String,
+    /// The claim's expiry (epoch-ms) — enforced on the FIRST consumption only.
+    pub expires_at: i64,
+}
+
+impl std::fmt::Debug for MintedClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedClaim")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// The outcome of [`Authority::mint_admin_claim`](crate::Authority::mint_admin_claim).
+#[derive(Debug, Clone)]
+pub enum MintClaimOutcome {
+    /// The claim was minted (the plaintext token is returned once, redacted in `Debug`).
+    Minted(MintedClaim),
+    /// The mint was refused (a typed reason for the minting operator/surface — this is a privileged
+    /// operator/composition op, so the reason is not an oracle).
+    Denied(&'static str),
+}
+
+/// The db-half's typed mint refusal (mapped onto [`MintClaimOutcome::Denied`] by the orchestration).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MintClaimDenied {
+    /// The named workspace already exists — a claim is a genesis capability, never a door into a live one.
+    WorkspaceExists,
+}
+
+/// A created (or replayed) workspace — what both create-workspace outcomes carry: the fresh id, the display
+/// name actually stored, and the owner's deterministic self-invite token (the `/i/` link tail a replay
+/// re-derives byte-identically).
+#[derive(Debug, Clone)]
+pub struct WorkspaceCreated {
+    /// The fresh server-minted workspace id.
+    pub workspace_id: WorkspaceId,
+    /// The stored display name (the caller's, or the server default from the owner email's local part).
+    pub display_name: String,
+    /// The owner's self-invite token (compose `<base_url>/i/<token>` to show it; deterministic per request).
+    pub invite_token: String,
+}
+
+/// The outcome of [`Authority::create_workspace`](crate::Authority::create_workspace).
+#[derive(Debug, Clone)]
+pub enum CreateWorkspaceOutcome {
+    /// A fresh workspace was created and its owner seated.
+    Created(WorkspaceCreated),
+    /// The SAME request (same id, same owner) already created a workspace — the identical result replays.
+    Replayed(WorkspaceCreated),
+    /// The request was denied (a static, typed reason — the cap, a reused request id, a bad email).
+    Denied(&'static str),
+}
+
+/// The outcome of [`Authority::approve_standup`](crate::Authority::approve_standup). An unknown / expired /
+/// raced / re-bound `user_code` is the uniform [`AuthorityError::NotFound`], not a variant — indistinguishable
+/// misses stay indistinguishable.
+#[derive(Debug, Clone)]
+pub enum ApproveStandupOutcome {
+    /// The session was approved: the workspace exists and the session's next poll yields a grant.
+    Approved {
+        /// The fresh workspace's id.
+        workspace_id: WorkspaceId,
+        /// The stored display name.
+        display_name: String,
+    },
+    /// The SAME email already approved this session (an idempotent re-click).
+    AlreadyApproved {
+        /// The workspace the earlier approval created.
+        workspace_id: WorkspaceId,
+    },
+    /// The approval was denied (the per-owner workspace cap).
+    Denied(&'static str),
+}
+
+/// An unconsumed, unexpired admin-claim row's disclosure facts (the `/i/` bootstrap read's db half).
+pub(crate) struct ClaimBootstrapRow {
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) display_name: Option<String>,
+}
+
 /// The server-trusted inputs to a governance transaction (create-invite or a roster/revoke mutation).
 pub(crate) struct GovernanceInput<'a> {
     /// The target workspace.
@@ -278,26 +368,275 @@ pub(crate) async fn governance_mutation(
     authority.db().governance_mutation_txn(&input).await
 }
 
-/// Consume a self-host admin-claim token (the orchestration half of [`Authority::admin_claim`]).
+/// Consume a one-time admin-claim token (the orchestration half of [`Authority::admin_claim`]). The seated
+/// workspace's name and owner come from the CLAIM ROW (minted facts, never the request); its deployment
+/// mode is THE PLANE'S own (threaded from the enrollment config — a cloud plane's break-glass claim stands
+/// up a cloud-mode workspace).
 pub(crate) async fn admin_claim(
     authority: &Authority,
     claim_token: &str,
     device_public_key: [u8; 32],
-    display_name: &str,
     now: i64,
     created_at: &str,
 ) -> Result<RedeemOutcome> {
     let claim_sha256 = sha256_token(claim_token);
     let server_device_key_id = device_key_id_for(&device_public_key);
+    let plane_mode = authority.enrollment()?.config.deployment_mode;
     authority
         .db()
         .admin_claim_txn(
             &claim_sha256,
             &server_device_key_id,
             &device_public_key,
-            display_name,
+            plane_mode.as_str(),
             now,
             created_at,
         )
         .await
+}
+
+/// Mint a one-time admin-claim link token (the orchestration half of
+/// [`Authority::mint_admin_claim`]). Refuses a workspace that already exists (typed) and — on a CLOUD-mode
+/// plane — a mint with no owner email (the claim would otherwise seat a device-rooted owner no human
+/// identity can govern). The plaintext token is returned ONCE; only its sha256 is stored, and
+/// [`MintedClaim`]'s `Debug` redacts it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mint_admin_claim(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    display_name: Option<&str>,
+    owner_email: Option<&str>,
+    plane_mode: DeploymentMode,
+    ttl_ms: i64,
+    now: i64,
+    created_at: &str,
+) -> Result<MintClaimOutcome> {
+    if plane_mode == DeploymentMode::Cloud && owner_email.is_none() {
+        return Ok(MintClaimOutcome::Denied(
+            "a cloud-mode claim requires an owner email",
+        ));
+    }
+    let owner = match owner_email {
+        Some(email) => match Principal::parse(email) {
+            Ok(p) => Some(p),
+            Err(_) => return Ok(MintClaimOutcome::Denied("invalid owner email")),
+        },
+        None => None,
+    };
+    let token = random_claim_token()?;
+    let token_sha256 = sha256_token(&token);
+    let expires_at = now.saturating_add(ttl_ms.max(0));
+    match authority
+        .db()
+        .mint_admin_claim_txn(
+            &token_sha256,
+            ws,
+            display_name,
+            owner.as_ref().map(Principal::as_str),
+            expires_at,
+            created_at,
+        )
+        .await?
+    {
+        Ok(()) => Ok(MintClaimOutcome::Minted(MintedClaim { token, expires_at })),
+        Err(MintClaimDenied::WorkspaceExists) => {
+            Ok(MintClaimOutcome::Denied("workspace already exists"))
+        }
+    }
+}
+
+/// Create a workspace for an already-verified owner email (the orchestration half of
+/// [`Authority::create_workspace`] — door 2, the web "Create workspace" page). Parses the email INSIDE the
+/// op, applies the server-side display-name default and the freemail-aware domain claim, and runs the one
+/// genesis transaction (idempotency probe → cap → seat → self-invite → request ledger).
+pub(crate) async fn create_workspace(
+    authority: &Authority,
+    request_id: &str,
+    display_name: Option<&str>,
+    owner_email: &str,
+    plane_mode: DeploymentMode,
+    created_at: &str,
+) -> Result<CreateWorkspaceOutcome> {
+    let Ok(owner) = Principal::parse(owner_email) else {
+        return Ok(CreateWorkspaceOutcome::Denied("invalid owner email"));
+    };
+    let request_sha256 = topos_core::digest::sha256(request_id.as_bytes());
+    let name = resolved_display_name(display_name, owner_email);
+    let (domain, domain_status) = email_domain_claim(owner_email);
+    let secret = authority.enrollment()?.secret.as_bytes();
+    authority
+        .db()
+        .create_workspace_txn(
+            &request_sha256,
+            &name,
+            &owner,
+            plane_mode.as_str(),
+            domain.as_deref(),
+            domain_status,
+            secret,
+            created_at,
+        )
+        .await
+}
+
+/// Approve a STANDUP device-auth session with a web-verified email (the orchestration half of
+/// [`Authority::approve_standup`] — door 1's human leg). Parses the email INSIDE the op (a malformed one is
+/// the uniform miss), applies the same name default + domain claim as create-workspace, and runs the one
+/// approve transaction (session probe → cap → seat → session CAS).
+pub(crate) async fn approve_standup(
+    authority: &Authority,
+    user_code: &str,
+    verified_email: &str,
+    display_name: Option<&str>,
+    plane_mode: DeploymentMode,
+    now: i64,
+    created_at: &str,
+) -> Result<ApproveStandupOutcome> {
+    let principal = Principal::parse(verified_email).map_err(|_| AuthorityError::NotFound)?;
+    let name = resolved_display_name(display_name, verified_email);
+    let (domain, domain_status) = email_domain_claim(verified_email);
+    authority
+        .db()
+        .approve_standup_txn(
+            user_code,
+            &principal,
+            &name,
+            plane_mode.as_str(),
+            domain.as_deref(),
+            domain_status,
+            now,
+            created_at,
+        )
+        .await
+}
+
+/// Resolve an admin-claim link token to its bootstrap payload (the orchestration half of
+/// [`Authority::read_claim_bootstrap`]) — the `/i/` claim branch. Unconsumed ∧ unexpired ⇒ the claim's own
+/// disclosure (its display name; NO skills — a claim offers membership, not bytes) with the plane signing
+/// root and `enrollment_method = "admin_claim"`; consumed/expired/unknown is the single indistinguishable
+/// `NotFound`. Claim resolution never touches the invites table (and invite resolution never touches this).
+pub(crate) async fn read_claim_bootstrap(
+    authority: &Authority,
+    token: &str,
+    now: i64,
+) -> Result<InviteBootstrap> {
+    let token_sha256 = sha256_token(token);
+    let Some(row) = authority
+        .db()
+        .read_claim_bootstrap_row(&token_sha256, now)
+        .await?
+    else {
+        return Err(AuthorityError::NotFound);
+    };
+    let plane_public_key = authority.plane_public_key()?;
+    let plane_key_id = authority.plane_key_id()?;
+    let config = &authority.enrollment()?.config;
+    let display_name = row
+        .display_name
+        .unwrap_or_else(|| row.workspace_id.as_str().to_owned());
+    Ok(InviteBootstrap {
+        workspace_id: row.workspace_id,
+        display_name,
+        // The workspace does not exist yet; at redeem it is seated with THE PLANE'S mode, so that is the
+        // honest posture to disclose.
+        deployment_mode: config.deployment_mode,
+        verified_domain: None,
+        verified_domain_status: "unverified".to_owned(),
+        skills: Vec::new(),
+        plane_public_key,
+        plane_key_id,
+        base_url: config.base_url.clone(),
+        enrollment_method: "admin_claim".to_owned(),
+    })
+}
+
+/// The stored display name: the caller's, or the server-side default `"<email local part>'s workspace"`.
+fn resolved_display_name(display_name: Option<&str>, owner_email: &str) -> String {
+    match display_name {
+        Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ => {
+            let local = owner_email.split('@').next().unwrap_or(owner_email);
+            format!("{local}'s workspace")
+        }
+    }
+}
+
+/// Freemail providers whose domain says nothing about an organization — a workspace created under one gets
+/// NO domain claim. Deliberately small and static: a miss only means a claim stays `unverified`.
+const FREEMAIL_DOMAINS: &[&str] = &[
+    "gmail.com",
+    "googlemail.com",
+    "yahoo.com",
+    "hotmail.com",
+    "outlook.com",
+    "live.com",
+    "msn.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "gmx.com",
+    "gmx.net",
+    "mail.com",
+    "yandex.com",
+    "yandex.ru",
+    "zoho.com",
+    "fastmail.com",
+    "hey.com",
+    "qq.com",
+    "163.com",
+    "126.com",
+];
+
+/// The workspace's domain claim from its owner's email: a non-freemail domain is recorded with status
+/// `verified` (the owner PROVED control of an address on it via the web sign-in — that proof is the
+/// verification); a freemail or unparseable address yields no claim (`unverified`).
+fn email_domain_claim(owner_email: &str) -> (Option<String>, &'static str) {
+    let Some((local, domain)) = owner_email.rsplit_once('@') else {
+        return (None, "unverified");
+    };
+    if local.is_empty() || domain.is_empty() {
+        return (None, "unverified");
+    }
+    let domain = domain.to_ascii_lowercase();
+    if FREEMAIL_DOMAINS.contains(&domain.as_str()) {
+        (None, "unverified")
+    } else {
+        (Some(domain), "verified")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{email_domain_claim, resolved_display_name};
+
+    #[test]
+    fn display_name_defaults_to_the_email_local_part() {
+        assert_eq!(
+            resolved_display_name(None, "robert@acme.com"),
+            "robert's workspace"
+        );
+        assert_eq!(
+            resolved_display_name(Some("  "), "robert@acme.com"),
+            "robert's workspace"
+        );
+        assert_eq!(
+            resolved_display_name(Some("Acme"), "robert@acme.com"),
+            "Acme"
+        );
+    }
+
+    #[test]
+    fn domain_claim_is_verified_only_for_non_freemail() {
+        assert_eq!(
+            email_domain_claim("robert@acme.com"),
+            (Some("acme.com".to_owned()), "verified")
+        );
+        assert_eq!(email_domain_claim("robert@GMAIL.com"), (None, "unverified"));
+        assert_eq!(email_domain_claim("not-an-email"), (None, "unverified"));
+        assert_eq!(email_domain_claim("@acme.com"), (None, "unverified"));
+    }
 }

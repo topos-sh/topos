@@ -41,6 +41,21 @@ impl Fixture {
     }
 
     async fn build(pool: PgPool, tag: &str, limits: Option<(u64, u64)>) -> Self {
+        Self::build_with_mode(pool, tag, limits, DeploymentMode::Cloud).await
+    }
+
+    /// A fixture whose ENROLLMENT CONFIG carries the given plane deployment mode — the standup tests need a
+    /// self-host plane (whose standup start must be the uniform miss).
+    async fn with_mode(pool: PgPool, tag: &str, mode: DeploymentMode) -> Self {
+        Self::build_with_mode(pool, tag, None, mode).await
+    }
+
+    async fn build_with_mode(
+        pool: PgPool,
+        tag: &str,
+        limits: Option<(u64, u64)>,
+        mode: DeploymentMode,
+    ) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("topos-ps-{tag}-{}-{n}", std::process::id()));
@@ -57,7 +72,8 @@ impl Fixture {
             .with_enrollment_config(EnrollmentConfig {
                 secret_path: dir.join("enroll.key"),
                 base_url: "https://plane.test".to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
+                verify_base_url: None,
+                deployment_mode: mode,
                 enrollment_method: "device_code".to_owned(),
             })
             .expect("load enrollment secret");
@@ -658,3 +674,4 @@ mod read_access;
 mod read_surface;
 mod restore;
 mod set_current;
+mod standup;

@@ -476,8 +476,12 @@ impl EnrollSource for UreqDeviceClient {
         device_public_key: [u8; 32],
         machine_name: &str,
     ) -> Result<DeviceAuthorize, ClientError> {
+        // MECHANICAL wire-widening fix: `invite_token` became optional (+ an `intent` field) for the
+        // plane's standup flow; this enroll path still always sends the invite token. The client-side
+        // standup verbs are separate work.
         let body = serde_json::to_value(DeviceAuthorizeRequest {
-            invite_token: token.to_owned(),
+            invite_token: Some(token.to_owned()),
+            intent: None,
             device_public_key: b64(&device_public_key),
             machine_name: machine_name.to_owned(),
         })

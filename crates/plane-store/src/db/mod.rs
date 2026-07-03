@@ -456,7 +456,10 @@ impl Db {
 
 /// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a transient class the SERIALIZABLE runner
 /// retries: a serialization failure (`40001`) or deadlock (`40P01`), OR a unique-violation (`23505`) on one
-/// of the three CONVERGENT constraints — the two idempotency-key PKs plus the one-open-proposal index.
+/// of the four CONVERGENT constraints — the two idempotency-key PKs, the one-open-proposal index, and the
+/// create-workspace request ledger (`genesis_requests_pkey`: two racing creates of the SAME request both
+/// pass the replay probe; the loser's ledger INSERT aborts here, and its retry's probe replays the winner's
+/// workspace — the same shape as the `workspace_events` idempotency slot).
 ///
 /// All three restore what SQLite's global writer lock gave for free: a losing racer of an idempotent write
 /// converges to the winner's outcome instead of a spurious `Internal`/500. Two same-`op_id` writes can BOTH
@@ -480,7 +483,12 @@ pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
         Some("40001" | "40P01") => true,
         Some("23505") => matches!(
             db.constraint(),
-            Some("op_receipts_pkey" | "workspace_events_pkey" | "proposals_one_open")
+            Some(
+                "op_receipts_pkey"
+                    | "workspace_events_pkey"
+                    | "proposals_one_open"
+                    | "genesis_requests_pkey"
+            )
         ),
         _ => false,
     }
@@ -691,6 +699,23 @@ mod retry_classification_tests {
         assert!(
             is_serialization_failure_sqlx(&dup),
             "a 23505 on proposals_one_open must be retryable (it converges to the winner's NEEDS_REVIEW)"
+        );
+
+        // genesis_requests_pkey → the create-workspace request ledger: a racing same-request loser converges
+        // to the winner's workspace on retry, so it is retryable.
+        let genesis = "INSERT INTO genesis_requests (request_sha256, owner_principal, workspace_id, created_at) \
+            VALUES (decode(repeat('aa', 32), 'hex'), 'o@x.com', 'w_a', '2026-07-03T00:00:00Z')";
+        sqlx::query(genesis)
+            .execute(&pool)
+            .await
+            .expect("first genesis request insert");
+        let dup = sqlx::query(genesis)
+            .execute(&pool)
+            .await
+            .expect_err("a duplicate genesis request must raise a unique violation");
+        assert!(
+            is_serialization_failure_sqlx(&dup),
+            "a 23505 on genesis_requests_pkey must be retryable"
         );
 
         // roster_pkey → an ordinary unique violation the runner must NOT retry.

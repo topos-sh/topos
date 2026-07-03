@@ -19,7 +19,7 @@
           {
             "name": "token",
             "in": "path",
-            "description": "The opaque `/i/<token>` invite token.",
+            "description": "The opaque `/i/<token>` invite or admin-claim token.",
             "required": true,
             "schema": {
               "type": "string"
@@ -28,7 +28,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The invite bootstrap payload (workspace + plane signing root; no bytes, no role).",
+            "description": "The bootstrap payload (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38,7 +38,7 @@
             }
           },
           "404": {
-            "description": "No such invite, or it is revoked/expired.",
+            "description": "No such invite or claim, or it is revoked/consumed/expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -236,7 +236,7 @@
         },
         "responses": {
           "200": {
-            "description": "The device-authorization grant (device_code / user_code / verification_uri).",
+            "description": "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block to TOFU-pin).",
             "content": {
               "application/json": {
                 "schema": {
@@ -246,7 +246,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or device public key.",
+            "description": "Malformed body, device public key, or intent/invite combination.",
             "content": {
               "application/json": {
                 "schema": {
@@ -256,7 +256,7 @@
             }
           },
           "404": {
-            "description": "No such invite (or it is revoked/expired).",
+            "description": "No such invite (or it is revoked/expired), or a standup start on a plane that does not offer it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1870,9 +1870,8 @@
       },
       "DeviceAuthorizeRequest": {
         "type": "object",
-        "description": "`POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow against an invite. The\nserver SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).",
+        "description": "`POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With an `invite_token`\n(the default `enroll` intent) the device enrolls against that invite; with `intent = \"standup\"` — or no\ninvite token at all — it starts a STANDUP session (no workspace yet; hosted planes only). The server\nSERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).",
         "required": [
-          "invite_token",
           "device_public_key",
           "machine_name"
         ],
@@ -1881,9 +1880,23 @@
             "type": "string",
             "description": "The device's raw 32-byte Ed25519 public key, base64url-unpadded. The server derives the device key id\nfrom it (never a client-asserted id) and binds it into the enrollment possession frame."
           },
+          "intent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionIntent",
+                "description": "The session intent. Absent defaults to `enroll` when an invite token is present, `standup` otherwise."
+              }
+            ]
+          },
           "invite_token": {
-            "type": "string",
-            "description": "The opaque `/i/<token>` invite token the device enrolls against."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The opaque `/i/<token>` invite token the device enrolls against. Absent ⇒ a standup start (no invite\nexists before the workspace does)."
           },
           "machine_name": {
             "type": "string",
@@ -1918,6 +1931,17 @@
             "description": "The minimum poll interval, in seconds (RFC-8628 `interval`).",
             "minimum": 0
           },
+          "plane": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BootstrapPlane",
+                "description": "The plane block a STANDUP start carries (base URL, deployment posture, and the signing key to\nTOFU-pin) — a standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start."
+              }
+            ]
+          },
           "user_code": {
             "type": "string",
             "description": "The short code a human types on the verification page."
@@ -1925,6 +1949,13 @@
           "verification_uri": {
             "type": "string",
             "description": "The verification URL a human visits to approve the session."
+          },
+          "verification_uri_complete": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The verification URL with the user code already embedded (RFC-8628 `verification_uri_complete`) —\nthe one link to open; a client uses it VERBATIM when present."
           }
         }
       },
@@ -1986,6 +2017,17 @@
           "status": {
             "$ref": "#/components/schemas/DeviceTokenStatus",
             "description": "The poll status."
+          },
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeviceTokenWorkspace",
+                "description": "The granted session's workspace context — present when `status` is `granted`."
+              }
+            ]
           }
         }
       },
@@ -1999,6 +2041,24 @@
           "expired",
           "granted"
         ]
+      },
+      "DeviceTokenWorkspace": {
+        "type": "object",
+        "description": "The workspace context a `granted` poll carries — the id + display name a STANDUP client (which never\nread an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined.",
+        "required": [
+          "workspace_id",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The workspace display name (a disclosure aid; `\"\"` if the plane no longer has one)."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace the grant is scoped to."
+          }
+        }
       },
       "Generation": {
         "type": "object",
@@ -2567,6 +2627,13 @@
             "type": "string",
             "description": "The server-derived device key id now registered."
           },
+          "principal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the\nclient persists and prints so a hijacked standup is visible (\"workspace X — owner Y\")."
+          },
           "read_creds": {
             "type": "array",
             "items": {
@@ -2810,6 +2877,14 @@
           }
         }
       },
+      "SessionIntent": {
+        "type": "string",
+        "description": "A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace through\nan invite; `standup` starts with NO workspace (a signed-in human's approval creates one and seats the\napprover as its first owner).",
+        "enum": [
+          "enroll",
+          "standup"
+        ]
+      },
       "Signature": {
         "type": "object",
         "required": [
@@ -2894,6 +2969,17 @@
           "device_fingerprint": {
             "type": "string",
             "description": "A short hex fingerprint of the device's public key — a human cross-checks it against the device. A\ndisplay aid only, never an authority input."
+          },
+          "intent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionIntent",
+                "description": "The session's intent — `enroll` (join an existing workspace) or `standup` (approving CREATES one).\nAbsent from older planes ⇒ `enroll`; the page branches its copy on it."
+              }
+            ]
           },
           "machine_name": {
             "type": "string",

@@ -121,17 +121,19 @@ impl Db {
     }
 
     /// Insert a fresh device-auth session (cloud starts `pending`; self-host starts `confirmed` with a
-    /// server-derived device-rooted principal). Stores ONLY the device code's sha256; the user code plaintext.
+    /// server-derived device-rooted principal; a STANDUP session starts `pending` with NO workspace and no
+    /// invite — the approval supplies both). Stores ONLY the device code's sha256; the user code plaintext.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn insert_device_auth_session(
         &self,
         device_code_sha256: &[u8; 32],
         user_code: &str,
-        ws: &WorkspaceId,
-        invite_sha256: &[u8; 32],
+        ws: Option<&WorkspaceId>,
+        invite_sha256: Option<&[u8; 32]>,
         device_pubkey: &[u8; 32],
         device_key_id: &str,
         machine_name: &str,
+        intent: &str,
         status: &str,
         confirmed_principal: Option<&str>,
         expires_at: i64,
@@ -140,15 +142,15 @@ impl Db {
     ) -> Result<()> {
         let (dc, ws_s, inv, pk) = (
             device_code_sha256.as_slice(),
-            ws.as_str(),
-            invite_sha256.as_slice(),
+            ws.map(WorkspaceId::as_str),
+            invite_sha256.map(<[u8; 32]>::as_slice),
             device_pubkey.as_slice(),
         );
         sqlx::query!(
             "INSERT INTO device_auth_sessions \
                (device_code_sha256, user_code, workspace_id, invite_sha256, device_pubkey, device_key_id, \
-                machine_name, status, confirmed_principal, expires_at, interval_secs, last_polled_at, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
+                machine_name, intent, status, confirmed_principal, expires_at, interval_secs, last_polled_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, $13)",
             dc,
             user_code,
             ws_s,
@@ -156,6 +158,7 @@ impl Db {
             pk,
             device_key_id,
             machine_name,
+            intent,
             status,
             confirmed_principal,
             expires_at,
@@ -191,7 +194,9 @@ impl Db {
 
 struct SessionRow {
     user_code: String,
-    workspace_id: String,
+    /// `None` only for a not-yet-approved STANDUP session (the schema CHECK pins every confirmed/issued
+    /// session to a workspace, so the grant-issue path always sees `Some`).
+    workspace_id: Option<String>,
     invite_sha256: Option<Vec<u8>>,
     device_pubkey: Vec<u8>,
     device_key_id: String,
@@ -208,7 +213,7 @@ async fn read_session(
 ) -> Result<Option<SessionRow>> {
     let dc = device_code_sha256.as_slice();
     let row = sqlx::query!(
-        r#"SELECT user_code AS "user_code!", workspace_id AS "workspace_id!",
+        r#"SELECT user_code AS "user_code!", workspace_id AS "workspace_id?",
                   invite_sha256 AS "invite_sha256?: Vec<u8>", device_pubkey AS "device_pubkey!: Vec<u8>",
                   device_key_id AS "device_key_id!", status AS "status!",
                   confirmed_principal AS "confirmed_principal?", expires_at AS "expires_at!: i64",
@@ -300,10 +305,20 @@ async fn issue_grant(
     created_at: &str,
     secret: &[u8; 32],
 ) -> Result<GrantIssued> {
-    let ws = WorkspaceId::parse(&session.workspace_id).map_err(AuthorityError::integrity)?;
+    // A confirmed/issued session always has a workspace (the schema CHECK; a standup approval sets it).
+    let ws_str = session.workspace_id.as_deref().ok_or_else(|| {
+        AuthorityError::integrity(EnrollCorrupt("confirmed session without workspace"))
+    })?;
+    let ws = WorkspaceId::parse(ws_str).map_err(AuthorityError::integrity)?;
     let principal = session.confirmed_principal.as_deref().ok_or_else(|| {
         AuthorityError::integrity(EnrollCorrupt("confirmed session without principal"))
     })?;
+    // The workspace display name rides with the grant — a standup client has no `/i/` bootstrap to learn it
+    // from ("" if the row vanished; the grant's authority fields never depend on it).
+    let workspace_display_name = read_workspace_in_tx(tx, &ws)
+        .await?
+        .map(|w| w.display_name)
+        .unwrap_or_default();
 
     // The grant token: derive_token(b"grant", [device_code_sha256, ws]); store only its sha256.
     let grant_token = enroll::derive_token(
@@ -386,6 +401,7 @@ async fn issue_grant(
     Ok(GrantIssued {
         grant_token,
         workspace_id: ws,
+        workspace_display_name,
         device_auth_id,
         device_key_id,
         offered_skills: offered,
@@ -397,9 +413,11 @@ async fn issue_grant(
 
 /// A LIVE device-auth session resolved by `user_code` for the verification-page disclosure (no secret).
 pub(crate) struct VerificationSessionRow {
+    pub(crate) intent: String,
     pub(crate) machine_name: String,
     pub(crate) device_pubkey: [u8; 32],
-    pub(crate) workspace_id: WorkspaceId,
+    /// `None` for a not-yet-approved STANDUP session (there is no workspace to disclose yet).
+    pub(crate) workspace_id: Option<WorkspaceId>,
     pub(crate) invite_sha256: Option<[u8; 32]>,
 }
 
@@ -413,8 +431,9 @@ impl Db {
         now: i64,
     ) -> Result<Option<VerificationSessionRow>> {
         let row = sqlx::query!(
-            r#"SELECT machine_name AS "machine_name!", device_pubkey AS "device_pubkey!: Vec<u8>",
-                      workspace_id AS "workspace_id!", invite_sha256 AS "invite_sha256?: Vec<u8>"
+            r#"SELECT intent AS "intent!", machine_name AS "machine_name!",
+                      device_pubkey AS "device_pubkey!: Vec<u8>",
+                      workspace_id AS "workspace_id?", invite_sha256 AS "invite_sha256?: Vec<u8>"
                FROM device_auth_sessions
                WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2
                LIMIT 1"#,
@@ -427,9 +446,14 @@ impl Db {
         match row {
             None => Ok(None),
             Some(r) => Ok(Some(VerificationSessionRow {
+                intent: r.intent,
                 machine_name: r.machine_name,
                 device_pubkey: blob32(&r.device_pubkey)?,
-                workspace_id: WorkspaceId::parse(&r.workspace_id)
+                workspace_id: r
+                    .workspace_id
+                    .as_deref()
+                    .map(WorkspaceId::parse)
+                    .transpose()
                     .map_err(AuthorityError::integrity)?,
                 invite_sha256: r.invite_sha256.map(|b| blob32(&b)).transpose()?,
             })),
@@ -458,10 +482,15 @@ async fn confirm_external_identity_run(
     principal: &Principal,
     now: i64,
 ) -> Result<ConfirmOutcome> {
-    // The live session this user code names (pending/confirmed), non-expired. Absent ⇒ the uniform miss.
+    // The live ENROLL session this user code names (pending/confirmed), non-expired. Absent ⇒ the uniform
+    // miss. The `intent = 'enroll'` guard keeps a STANDUP session out of this path entirely: a standup
+    // session is only ever advanced by the approve op (which creates the workspace it confirms into).
     let row = sqlx::query!(
-        r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
-           WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
+        r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>", status AS "status!",
+                  confirmed_principal AS "confirmed_principal?"
+           FROM device_auth_sessions
+           WHERE user_code = $1 AND intent = 'enroll'
+             AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
         user_code,
         now,
     )
@@ -472,34 +501,49 @@ async fn confirm_external_identity_run(
         return Err(AuthorityError::NotFound);
     };
     let device_code_sha256 = blob32(&row.device_code_sha256)?;
+    // FIRST-WRITER-WINS: a confirmation is a pending→confirmed CAS, never an overwrite. A session already
+    // confirmed for the SAME principal replays idempotently; one confirmed for a DIFFERENT principal is the
+    // uniform miss — a later identity leg (a second passcode/OIDC round) can never re-bind the session.
+    if row.status == "confirmed" {
+        return if row.confirmed_principal.as_deref() == Some(principal.as_str()) {
+            Ok(ConfirmOutcome::Confirmed)
+        } else {
+            Err(AuthorityError::NotFound)
+        };
+    }
     let dc = device_code_sha256.as_slice();
     let prin = principal.as_str();
     // Confirm the (externally-proven) principal — the device may now poll a grant. No code check: the OIDC
     // module already validated the id_token, so this is `complete_passcode`'s confirm half, minus the verify.
-    sqlx::query!(
+    // The `status = 'pending'` arm makes the write itself the CAS (a raced confirm loses cleanly).
+    let updated = sqlx::query!(
         "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = $2 \
-         WHERE device_code_sha256 = $1",
+         WHERE device_code_sha256 = $1 AND status = 'pending'",
         dc,
         prin,
     )
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
+    if updated.rows_affected() == 0 {
+        return Err(AuthorityError::NotFound);
+    }
     Ok(ConfirmOutcome::Confirmed)
 }
 
 // ── passcode: start (upsert) + complete (verify under cap), the verification-page second factor ────────
 
 impl Db {
-    /// Resolve the LIVE session a `user_code` names (pending/confirmed), returning its device-code sha256.
-    /// `None` ⇒ no live session (the uniform miss).
+    /// Resolve the LIVE **enroll** session a `user_code` names (pending/confirmed), returning its
+    /// device-code sha256. `None` ⇒ no live enroll session (the uniform miss). The intent guard keeps a
+    /// STANDUP session out of the passcode flow — its only identity leg is the web approve.
     pub(crate) async fn live_session_device_code(
         &self,
         user_code: &str,
     ) -> Result<Option<[u8; 32]>> {
         let row = sqlx::query!(
             r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
-               WHERE user_code = $1 AND status IN ('pending', 'confirmed') LIMIT 1"#,
+               WHERE user_code = $1 AND intent = 'enroll' AND status IN ('pending', 'confirmed') LIMIT 1"#,
             user_code,
         )
         .fetch_optional(self.pool())
@@ -566,12 +610,16 @@ async fn complete_passcode_run(
     code: &str,
     now: i64,
 ) -> Result<PasscodeComplete> {
-    // The live, NON-EXPIRED session this user code names (pending/confirmed). Absent/expired ⇒ the uniform
-    // miss — an expired session is the indistinguishable NotFound at every confirm entry point (matching the
-    // poll + read_verification_session), not only at poll time.
+    // The live, NON-EXPIRED **enroll** session this user code names (pending/confirmed). Absent/expired ⇒
+    // the uniform miss — an expired session is the indistinguishable NotFound at every confirm entry point
+    // (matching the poll + read_verification_session), not only at poll time. The `intent = 'enroll'` guard
+    // keeps a STANDUP session out (its only identity leg is the web approve).
     let row = sqlx::query!(
-        r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
-           WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
+        r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>", status AS "status!",
+                  confirmed_principal AS "confirmed_principal?"
+           FROM device_auth_sessions
+           WHERE user_code = $1 AND intent = 'enroll'
+             AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
         user_code,
         now,
     )
@@ -581,6 +629,12 @@ async fn complete_passcode_run(
     let Some(row) = row else {
         return Err(AuthorityError::NotFound);
     };
+    // FIRST-WRITER-WINS: a session already confirmed for a DIFFERENT principal is the uniform miss BEFORE
+    // any code is checked — a second identity leg can never re-bind it (nor probe its passcode).
+    if row.status == "confirmed" && row.confirmed_principal.as_deref() != Some(principal.as_str()) {
+        return Err(AuthorityError::NotFound);
+    }
+    let already_confirmed_same = row.status == "confirmed";
     let device_code_sha256 = blob32(&row.device_code_sha256)?;
     let dc = device_code_sha256.as_slice();
     let prin = principal.as_str();
@@ -609,16 +663,20 @@ async fn complete_passcode_run(
     }
     let stored = blob32(&pc.passcode_sha256)?;
     if digest::sha256(code.as_bytes()) == stored {
-        // Confirm the session's identity (the proven principal) — the device may now poll a grant.
-        sqlx::query!(
-            "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = $2 \
-             WHERE device_code_sha256 = $1",
-            dc,
-            prin,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
+        // Confirm the session's identity (the proven principal) — the device may now poll a grant. The
+        // pending→confirmed CAS is the first-writer-wins write; a session already confirmed for the SAME
+        // principal (checked above) replays idempotently with no re-write.
+        if !already_confirmed_same {
+            sqlx::query!(
+                "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = $2 \
+                 WHERE device_code_sha256 = $1 AND status = 'pending'",
+                dc,
+                prin,
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthorityError::internal)?;
+        }
         Ok(PasscodeComplete::Confirmed)
     } else {
         let attempts = pc.attempts + 1;

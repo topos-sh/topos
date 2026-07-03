@@ -44,8 +44,16 @@ pub struct PlaneState {
 /// [`PlaneState::open`] from the leak-free [`PlaneConfig`]; a downstream plane never constructs it.
 #[derive(Debug, Clone)]
 pub(crate) struct EnrollConfig {
-    /// The plane's public base URL (the verification + invite links are built on it).
+    /// The plane's public base URL (the `/i/` invite/claim links are built on it).
     pub base_url: String,
+    /// The HUMAN-facing verification base (already resolved: `verify_base_url` else `base_url`). The
+    /// passcode mail body points at `{this}/verify`; the authority builds the device-auth
+    /// `verification_uri`(+`_complete`) from its own copy of the same value.
+    pub verify_base_url: String,
+    /// The deployment posture parsed STRICTLY (`None` ⇒ the configured mode string was unrecognized and
+    /// `deployment_mode` below is the warn-fallback). The standup/create/mint wrappers REFUSE to run off a
+    /// fallback — they fail closed on `None` instead of inheriting it.
+    pub strict_deployment_mode: Option<DeploymentMode>,
     /// This plane's deployment posture. The **authority** holds the authoritative copy the bootstrap serves;
     /// this is the construction record (built by [`PlaneState::open`], asserted by tests). Production
     /// reads only `base_url` + `smtp` from here — hence `allow(dead_code)` off-test (mirrors the [`enroll`]
@@ -81,6 +89,11 @@ pub struct PlaneConfig {
     /// The plane's public base URL (the invite + verification links are built on it). Already resolved — the
     /// OSS bin defaults it to `http://<bind>`.
     pub base_url: String,
+    /// The HUMAN-facing verification base URL, when it differs from `base_url` (a hosted plane whose
+    /// verification pages live on another host). `None` ⇒ `base_url`. Only the device-auth
+    /// `verification_uri`(+`_complete`) and the passcode mail link are built on it; `/i/` links stay on
+    /// `base_url` (they are client API links).
+    pub verify_base_url: Option<String>,
     /// The deployment posture — `"self_host"` or `"cloud"`. Parsed internally (an unknown value warns and
     /// falls back to `self_host`), so no `plane_store::DeploymentMode` crosses the boundary.
     pub mode: String,
@@ -96,6 +109,8 @@ impl Default for EnrollConfig {
     fn default() -> Self {
         Self {
             base_url: String::new(),
+            verify_base_url: String::new(),
+            strict_deployment_mode: Some(DeploymentMode::SelfHost),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
             smtp: None,
@@ -173,6 +188,7 @@ impl PlaneState {
     ///     plane_key_path: "plane.key".into(),
     ///     enroll_secret_path: "enroll.key".into(),
     ///     base_url: "https://plane.example".to_owned(),
+    ///     verify_base_url: None,
     ///     mode: "cloud".to_owned(),
     ///     enrollment_method: None,
     ///     smtp: None,
@@ -197,8 +213,11 @@ impl PlaneState {
     pub async fn open(cfg: PlaneConfig) -> anyhow::Result<PlaneState> {
         // The deployment posture crosses the boundary as a String; parse it here (an unknown value warns +
         // falls back to self_host, exactly as the bin did), so no `plane_store::DeploymentMode` is named by a
-        // caller. Mirrors the previous main.rs construction verbatim (the one home, no drift).
-        let deployment_mode = DeploymentMode::parse(&cfg.mode).unwrap_or_else(|| {
+        // caller. Mirrors the previous main.rs construction verbatim (the one home, no drift). The STRICT
+        // parse is retained beside the fallback: the standup/create/mint wrappers refuse to run off a
+        // fallback (fail closed), while the pre-existing surfaces keep their lenient behavior.
+        let strict_deployment_mode = DeploymentMode::parse(&cfg.mode);
+        let deployment_mode = strict_deployment_mode.unwrap_or_else(|| {
             tracing::warn!(mode = %cfg.mode, "unknown plane mode; defaulting to self_host");
             DeploymentMode::SelfHost
         });
@@ -212,6 +231,10 @@ impl PlaneState {
             }
             .to_owned()
         });
+        let verify_base_url = cfg
+            .verify_base_url
+            .clone()
+            .unwrap_or_else(|| cfg.base_url.clone());
         let authority = Authority::open_with_pool(
             &cfg.database_url,
             &cfg.git_root,
@@ -225,6 +248,7 @@ impl PlaneState {
         .with_enrollment_config(EnrollmentConfig {
             secret_path: cfg.enroll_secret_path,
             base_url: cfg.base_url.clone(),
+            verify_base_url: cfg.verify_base_url,
             deployment_mode,
             enrollment_method: enrollment_method.clone(),
         })
@@ -233,6 +257,8 @@ impl PlaneState {
         Ok(
             PlaneState::new(Arc::new(authority)).with_enroll_config(EnrollConfig {
                 base_url: cfg.base_url,
+                verify_base_url,
+                strict_deployment_mode,
                 deployment_mode,
                 enrollment_method,
                 smtp: cfg.smtp,

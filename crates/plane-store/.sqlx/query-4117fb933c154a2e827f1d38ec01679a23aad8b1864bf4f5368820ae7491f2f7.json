@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO admin_claim (token_sha256, workspace_id, consumed_at, created_at, display_name, expires_at, owner_email) VALUES ($1, $2, NULL, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4117fb933c154a2e827f1d38ec01679a23aad8b1864bf4f5368820ae7491f2f7"
+}

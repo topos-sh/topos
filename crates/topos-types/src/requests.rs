@@ -278,16 +278,39 @@ pub struct WireProposalList {
 // header on redeem, NOT the body. Field names are snake_case as written.
 // =================================================================================================
 
-/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow against an invite. The
-/// server SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).
+/// A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace through
+/// an invite; `standup` starts with NO workspace (a signed-in human's approval creates one and seats the
+/// approver as its first owner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionIntent {
+    /// Join an existing workspace (the invite-anchored flow — the default when the field is absent).
+    Enroll,
+    /// Create a workspace on approval (the hosted self-serve first-boot flow).
+    Standup,
+}
+
+/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With an `invite_token`
+/// (the default `enroll` intent) the device enrolls against that invite; with `intent = "standup"` — or no
+/// invite token at all — it starts a STANDUP session (no workspace yet; hosted planes only). The server
+/// SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthorizeRequest {
-    /// The opaque `/i/<token>` invite token the device enrolls against.
-    pub invite_token: String,
+    /// The opaque `/i/<token>` invite token the device enrolls against. Absent ⇒ a standup start (no invite
+    /// exists before the workspace does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_token: Option<String>,
+    /// The session intent. Absent defaults to `enroll` when an invite token is present, `standup` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<SessionIntent>,
     /// The device's raw 32-byte Ed25519 public key, base64url-unpadded. The server derives the device key id
     /// from it (never a client-asserted id) and binds it into the enrollment possession frame.
     pub device_public_key: String,
@@ -308,10 +331,18 @@ pub struct DeviceAuthorizeResponse {
     pub user_code: String,
     /// The verification URL a human visits to approve the session.
     pub verification_uri: String,
+    /// The verification URL with the user code already embedded (RFC-8628 `verification_uri_complete`) —
+    /// the one link to open; a client uses it VERBATIM when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
     /// The session lifetime, in seconds (RFC-8628 `expires_in`).
     pub expires_in: u64,
     /// The minimum poll interval, in seconds (RFC-8628 `interval`).
     pub interval: u64,
+    /// The plane block a STANDUP start carries (base URL, deployment posture, and the signing key to
+    /// TOFU-pin) — a standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<crate::bootstrap::BootstrapPlane>,
 }
 
 /// `POST /v1/device/token` body — poll a device-authorization session for its grant.
@@ -346,6 +377,20 @@ pub enum DeviceTokenStatus {
     Granted,
 }
 
+/// The workspace context a `granted` poll carries — the id + display name a STANDUP client (which never
+/// read an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct DeviceTokenWorkspace {
+    /// The workspace the grant is scoped to.
+    pub workspace_id: String,
+    /// The workspace display name (a disclosure aid; `""` if the plane no longer has one).
+    pub display_name: String,
+}
+
 /// `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
 /// when `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +404,9 @@ pub struct DeviceTokenResponse {
     /// The opaque single-use enrollment grant — present ONLY when `status` is `granted` (the redeem credential).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+    /// The granted session's workspace context — present when `status` is `granted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<DeviceTokenWorkspace>,
 }
 
 /// `GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before
@@ -369,6 +417,10 @@ pub struct DeviceTokenResponse {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct VerificationContextResponse {
+    /// The session's intent — `enroll` (join an existing workspace) or `standup` (approving CREATES one).
+    /// Absent from older planes ⇒ `enroll`; the page branches its copy on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<SessionIntent>,
     /// The human-readable machine name the device offered at start.
     pub machine_name: String,
     /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. A
@@ -498,6 +550,10 @@ pub struct RedeemResponse {
     pub workspace_id: String,
     /// The server-derived device key id now registered.
     pub device_key_id: String,
+    /// The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the
+    /// client persists and prints so a hijacked standup is visible ("workspace X — owner Y").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
     /// The minted per-skill read credentials (returned ONCE; only their sha256 is stored server-side).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_creds: Vec<RedeemedSkillCred>,
@@ -764,22 +820,89 @@ mod tests {
             serde_json::to_string(&DeviceTokenStatus::SlowDown).unwrap(),
             "\"slow_down\""
         );
-        // A pending poll carries only the status (no grant).
+        // A pending poll carries only the status (no grant, no workspace).
         let pending = DeviceTokenResponse {
             status: DeviceTokenStatus::Pending,
             grant: None,
+            workspace: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
         assert!(v.get("grant").is_none(), "no grant unless granted");
-        // A granted poll carries the opaque grant.
+        assert!(v.get("workspace").is_none(), "no workspace unless granted");
+        // A granted poll carries the opaque grant + the workspace context.
         let granted = DeviceTokenResponse {
             status: DeviceTokenStatus::Granted,
             grant: Some("g_opaque".to_owned()),
+            workspace: Some(DeviceTokenWorkspace {
+                workspace_id: "w_acme".to_owned(),
+                display_name: "Acme".to_owned(),
+            }),
         };
         let v = serde_json::to_value(&granted).unwrap();
         assert_eq!(v["status"], "granted");
         assert_eq!(v["grant"], "g_opaque");
+        assert_eq!(v["workspace"]["workspace_id"], "w_acme");
+        assert_eq!(v["workspace"]["display_name"], "Acme");
+        // An OLD response without the workspace block still deserializes (additive-compat).
+        let old: DeviceTokenResponse =
+            serde_json::from_value(serde_json::json!({ "status": "granted", "grant": "g" }))
+                .unwrap();
+        assert!(old.workspace.is_none());
+    }
+
+    #[test]
+    fn device_authorize_request_intent_and_optional_invite_are_additive() {
+        assert_eq!(
+            serde_json::to_string(&SessionIntent::Standup).unwrap(),
+            "\"standup\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionIntent::Enroll).unwrap(),
+            "\"enroll\""
+        );
+        // The OLD enroll body (invite_token only) still parses; intent defaults to absent.
+        let old: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
+            "invite_token": "tok",
+            "device_public_key": "AAAA",
+            "machine_name": "laptop",
+        }))
+        .unwrap();
+        assert_eq!(old.invite_token.as_deref(), Some("tok"));
+        assert!(old.intent.is_none());
+        // The STANDUP body: no invite token, intent standup.
+        let standup: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
+            "intent": "standup",
+            "device_public_key": "AAAA",
+            "machine_name": "laptop",
+        }))
+        .unwrap();
+        assert!(standup.invite_token.is_none());
+        assert_eq!(standup.intent, Some(SessionIntent::Standup));
+        // An unknown intent is a CLOSED-enum parse failure, not a silent default.
+        assert!(
+            serde_json::from_value::<DeviceAuthorizeRequest>(serde_json::json!({
+                "intent": "takeover",
+                "device_public_key": "AAAA",
+                "machine_name": "laptop",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn device_authorize_response_standup_extras_are_optional() {
+        // An OLD response (no complete URI, no plane block) still deserializes.
+        let old: DeviceAuthorizeResponse = serde_json::from_value(serde_json::json!({
+            "device_code": "dc",
+            "user_code": "AAAA-BBBB",
+            "verification_uri": "https://plane.test/verify",
+            "expires_in": 900,
+            "interval": 5,
+        }))
+        .unwrap();
+        assert!(old.verification_uri_complete.is_none());
+        assert!(old.plane.is_none());
     }
 
     #[test]
@@ -807,6 +930,7 @@ mod tests {
         let resp = RedeemResponse {
             workspace_id: "w_acme".to_owned(),
             device_key_id: "dk_abc".to_owned(),
+            principal: Some("alice@acme.com".to_owned()),
             read_creds: vec![RedeemedSkillCred {
                 skill_id: "s_deploy".to_owned(),
                 read_token: "rt_secret".to_owned(),
@@ -815,11 +939,19 @@ mod tests {
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["read_creds"][0]["skill_id"], "s_deploy");
+        assert_eq!(v["principal"], "alice@acme.com");
         // NO user token field, ever.
         assert!(v.get("user_token").is_none());
         assert!(v.get("token").is_none());
         let back: RedeemResponse = serde_json::from_value(v).unwrap();
         assert_eq!(back.read_creds.len(), 1);
+        // An OLD response without the principal still deserializes (additive-compat).
+        let old: RedeemResponse = serde_json::from_value(serde_json::json!({
+            "workspace_id": "w_acme",
+            "device_key_id": "dk_abc",
+        }))
+        .unwrap();
+        assert!(old.principal.is_none());
     }
 
     #[test]

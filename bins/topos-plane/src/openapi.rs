@@ -16,13 +16,13 @@ use topos_types::bootstrap::{
 };
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
-    DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, InviteRequest, InviteSkill,
-    PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest, PasscodeConfirmResponse,
-    PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest, ProposeRequest,
-    PublishRequest, RedeemRequest, RedeemResponse, RedeemedSkillCred, RevertRequest, ReviewRequest,
-    RosterRemoveRequest, RosterSetRequest, VerificationContextResponse, WireCandidate, WireFile,
-    WireFileMode, WireOpenProposal, WireProposalList, WireVersionFile, WireVersionMeta,
-    WorkspaceRole,
+    DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
+    InviteRequest, InviteSkill, PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest,
+    PasscodeConfirmResponse, PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest,
+    ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RedeemedSkillCred,
+    RevertRequest, ReviewRequest, RosterRemoveRequest, RosterSetRequest, SessionIntent,
+    VerificationContextResponse, WireCandidate, WireFile, WireFileMode, WireOpenProposal,
+    WireProposalList, WireVersionFile, WireVersionMeta, WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
@@ -121,6 +121,8 @@ use topos_types::{
         DeviceTokenRequest,
         DeviceTokenResponse,
         DeviceTokenStatus,
+        DeviceTokenWorkspace,
+        SessionIntent,
         VerificationContextResponse,
         PasscodeRequest,
         PasscodeAck,

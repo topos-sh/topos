@@ -31,8 +31,17 @@
   handler.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
   unauthenticated TOFU bootstrap `GET /i/{token}` (the workspace + the plane signing root to pin; **no bytes,
-  no role**; a dead invite ⇒ 404); the enrollment flow `POST /v1/device/authorize`, `POST /v1/device/token`,
-  `GET /v1/enroll/verify/{user_code}`, `POST /v1/enroll/passcode` (the returned code is sent fire-and-forget on
+  no role**; a dead invite ⇒ 404 — and the route now ALSO serves one-time admin-CLAIM links, probed after
+  the invite table: `enrollment_method: "admin_claim"`, no skills, the same uniform 404 for
+  consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors); the
+  enrollment flow `POST /v1/device/authorize` (now intent-dispatching: an `enroll` start needs its
+  `invite_token`; a `standup` start — explicit intent, or no invite at all — opens a workspace-less session
+  on a hosted plane [self-host ⇒ 404], answers with the high-entropy code + `verification_uri_complete` +
+  the plane block to TOFU-pin, and a contradictory intent/invite body is a 400), `POST /v1/device/token`
+  (a granted poll now carries the `{workspace_id, display_name}` context a standup client lacks),
+  `GET /v1/enroll/verify/{user_code}` (now disclosing the session's `intent`, so a web page renders
+  join-copy vs create-copy; a standup session's workspace name is `""` until approval),
+  `POST /v1/enroll/passcode` (the returned code is sent fire-and-forget on
   `spawn_blocking`, so the constant-shaped ack never leaks whether an address was rostered),
   `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the enroll
   possession sig rides the `Topos-Device-Signature` header; mints per-skill read creds, **never a user
@@ -88,6 +97,23 @@
   parsed at this edge) over `Authority::restore_bump_epochs`, which re-signs every selected `current`
   pointer one epoch forward (same commit, same seq) so followers roll forward after a database restore
   instead of alarming on a reused generation.
+- **The workspace-standup wrappers** (`standup_cmd.rs`) — the leak-free, deliberately LIB-ONLY surface for
+  the PRIVILEGED genesis ops (there is NO OSS HTTP route for any of them; the bin's `mint-claim`
+  subcommand and a downstream composition's authenticated admin routes are the callers):
+  `PlaneState::mint_admin_claim` (returns the full one-time `/i/` claim link ONCE — the bearer owner
+  capability is never logged and every `Debug` redacts it; a cloud-mode plane requires `--owner-email`),
+  `create_workspace` (a `CreateWorkspaceSummary`: Created/Replayed with the deterministic self-invite
+  link, or a typed Denied — the cap, a reused request id), `approve_standup` (an
+  `ApproveStandupSummary`: Approved / idempotent AlreadyApproved / typed Denied / the uniform NotFound),
+  and `approve_session` (the member/owner web-approve leg over an enroll session, with the
+  first-writer-wins semantics surfaced: same-email re-approve ⇒ Confirmed, anything else ⇒ NotFound).
+  Every wrapper parses the plane's deployment mode STRICTLY — a mode string the constructor could only
+  warn-fallback is a typed refusal here (fail closed), so an operator typo can never decide what mode a
+  workspace is born with.
+- **The verification base seam**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
+  `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
+  `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`); the
+  `/i/` invite/claim links stay on `base_url` (client API links).
 
 **Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
 issuance decision (every credential/identity decision is `plane-store::Authority`'s):
@@ -136,12 +162,15 @@ running the passes out-of-band), and serves `router(state)`. Under
 `enroll-oidc` it reads `TOPOS_PLANE_OIDC_*` and loads the connector onto `PlaneState` (`with_oidc_config`) so
 the `/v1/enroll/oidc/*` routes can drive it.
 
-One operator subcommand: **`topos-plane restore-bump-epoch --workspace <id> … | --all-workspaces
+Two operator subcommands: **`topos-plane restore-bump-epoch --workspace <id> … | --all-workspaces
 [--epoch-at-least <n>]`** — opens the same state serve does (never binding the listen socket), runs the
 epoch bump, prints one line per re-signed pointer plus a `re-signed <N> pointer(s) with key <key_id>`
 summary (the key id is the operator's tripwire that the restored data dir still holds the pre-incident
-signing seed), and refuses to run without an explicit selection. The **bare invocation still serves**,
-byte-identically — the container ENTRYPOINT and every existing flag/env are unchanged.
+signing seed), and refuses to run without an explicit selection. And **`topos-plane mint-claim
+--workspace <id> [--display-name <name>] [--owner-email <email>] [--ttl 72h]`** — mints the one-time
+workspace-standup claim and prints the `/i/` link as the ONLY stdout line (a shown-once warning goes to
+stderr; the token never enters tracing). The **bare invocation still serves**, byte-identically — the
+container ENTRYPOINT and every existing flag/env are unchanged.
 
 ## The litmus for what belongs in this lib
 

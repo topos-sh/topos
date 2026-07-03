@@ -3,7 +3,12 @@
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
 ([`results`]), the frozen terminal-outcome enum, the closed `SignatureAlg`, the signed-`current`-record
 envelope, the error taxonomy, the HTTP wire request/response DTOs ([`requests`]: the write bodies + the
-version metadata + the **enrollment** device-flow/passcode/redeem/admin-claim DTOs + the **governance**
+version metadata + the **enrollment** device-flow/passcode/redeem/admin-claim DTOs — now intent-aware for
+the workspace-standup flow, all additive: `DeviceAuthorizeRequest` made `invite_token` optional and gained
+the closed `SessionIntent` (`enroll`/`standup`); `DeviceAuthorizeResponse` gained the optional
+`verification_uri_complete` + the standup `plane` TOFU block; `DeviceTokenResponse` the optional granted
+`workspace {workspace_id, display_name}`; `RedeemResponse` the optional seated `principal`;
+`VerificationContextResponse` the optional `intent` — + the **governance**
 invite/roster/revoke bodies), the unauthenticated invite-**bootstrap** payload ([`bootstrap`]: the
 pre-enrollment TOFU read — workspace + the plane signing root to pin; no bytes, no role), and the on-disk
 client documents ([`persisted`]: sync / lock / map / op / conflict — the last records an unresolved author

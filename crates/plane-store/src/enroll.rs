@@ -70,8 +70,12 @@ pub struct DeviceAuthStart {
     pub device_code: String,
     /// The short code a human types on the verification page.
     pub user_code: String,
-    /// The verification URL (built from the plane base URL).
+    /// The verification URL (built from the plane's verification base — `verify_base_url` when configured,
+    /// else `base_url`).
     pub verification_uri: String,
+    /// The verification URL with the user code embedded (`{verification_uri}/{user_code}`) — the one link a
+    /// human opens; the client uses it VERBATIM (RFC-8628 `verification_uri_complete`).
+    pub verification_uri_complete: String,
     /// The session expiry (epoch-ms).
     pub expires_at: i64,
     /// The minimum poll interval (seconds).
@@ -85,6 +89,9 @@ pub struct GrantIssued {
     pub grant_token: String,
     /// The workspace the grant is scoped to.
     pub workspace_id: WorkspaceId,
+    /// The workspace display name — the context a standup client lacks (it never read an `/i/` bootstrap),
+    /// surfaced with the grant so the wire can put it beside `workspace_id` ("" if the row is gone).
+    pub workspace_display_name: String,
     /// The non-secret device-auth id bound into the enroll frame.
     pub device_auth_id: String,
     /// The server-derived device key id.
@@ -141,12 +148,16 @@ pub enum PasscodeComplete {
 /// **no secret** — no device code, no grant, no token.
 #[derive(Debug, Clone)]
 pub struct VerificationContext {
+    /// The session's intent — `enroll` (join an existing workspace) or `standup` (create one on approval).
+    /// The verification page branches its copy on this.
+    pub intent: SessionIntent,
     /// The human-readable machine name the device offered at start.
     pub machine_name: String,
     /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. NOT
     /// the `device_key_id` (no `dk_` prefix, shorter); a display aid only, never an authority input.
     pub device_fingerprint: String,
-    /// The workspace display name the device would join.
+    /// The workspace display name the device would join. A REQUIRED field kept wire-stable: a standup
+    /// session has no workspace yet, so it carries `""` (the page renders the standup copy from `intent`).
     pub workspace_display_name: String,
     /// The org-domain claim (if any).
     pub verified_domain: Option<String>,
@@ -232,6 +243,39 @@ impl DeploymentMode {
     }
 }
 
+/// A device-auth session's intent: `enroll` joins an existing workspace through an invite; `standup` starts
+/// with NO workspace — a signed-in human's approval creates one and seats the session's identity as its
+/// first owner. A standup session is only ever advanced by that approval (the passcode/OIDC confirm paths
+/// refuse it), and the enrollment flows refuse to start one on a self-host plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIntent {
+    /// Join an existing workspace (the invite-anchored flow).
+    Enroll,
+    /// Create a workspace on approval (the cloud self-serve first-boot flow).
+    Standup,
+}
+
+impl SessionIntent {
+    /// The stored discriminant (`device_auth_sessions.intent`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionIntent::Enroll => "enroll",
+            SessionIntent::Standup => "standup",
+        }
+    }
+
+    /// Parse a stored discriminant. `None` on an unknown value (store corruption at a read site).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "enroll" => Some(SessionIntent::Enroll),
+            "standup" => Some(SessionIntent::Standup),
+            _ => None,
+        }
+    }
+}
+
 /// The enrollment subsystem's static configuration — held on the [`Authority`](crate::Authority) so
 /// `read_invite_bootstrap` / `start_device_auth` can return the plane's signing root, the verification base
 /// URL, and the offered enrollment method without re-plumbing them per call. The `secret_path` is consumed
@@ -242,10 +286,21 @@ pub struct EnrollmentConfig {
     pub secret_path: PathBuf,
     /// The plane's public base URL (the `/i/<token>` link + the device-auth `verification_uri` are built on it).
     pub base_url: String,
+    /// The HUMAN-facing verification base URL, when it differs from `base_url` (a hosted plane whose web
+    /// pages live on another host). `None` ⇒ `base_url`. Only the device-auth `verification_uri`(+`_complete`)
+    /// are built on it; the `/i/` links stay on `base_url` (they are client API links).
+    pub verify_base_url: Option<String>,
     /// This plane's deployment posture (the default for a workspace this plane stands up).
     pub deployment_mode: DeploymentMode,
     /// The enrollment method offered to a bootstrapping device (e.g. `"device_code"`), surfaced in the bootstrap.
     pub enrollment_method: String,
+}
+
+impl EnrollmentConfig {
+    /// The base the human-facing verification links are built on (`verify_base_url` else `base_url`).
+    pub(crate) fn verify_base(&self) -> &str {
+        self.verify_base_url.as_deref().unwrap_or(&self.base_url)
+    }
 }
 
 /// The 32-byte HMAC enrollment secret — the root every opaque credential is derived from. Wrapped so it
@@ -388,19 +443,44 @@ pub(crate) fn random_device_code() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>()?))
 }
 
-/// A fresh user code: 8 chars from an unambiguous alphabet (no vowels — no accidental words — and no
-/// `0/O/1/I`), grouped `XXXX-XXXX`. Short and low-value (the device-code is the real secret).
+/// A fresh, high-entropy one-time admin-claim token — the same 32-random-byte base64url shape as the device
+/// code (a bearer capability; only its sha256 is ever stored).
+pub(crate) fn random_claim_token() -> Result<String> {
+    random_device_code()
+}
+
+/// The unambiguous user-code alphabet (no vowels — no accidental words — and no `0/O/1/I`).
+const USER_CODE_ALPHABET: &[u8; 28] = b"BCDFGHJKLMNPQRSTVWXZ23456789";
+
+/// `n` fresh chars from the user-code alphabet, grouped 4-at-a-time with `-`.
+fn random_code_chars(n: usize) -> Result<String> {
+    let mut raw = vec![0u8; n];
+    getrandom::getrandom(&mut raw).map_err(|_| AuthorityError::internal(EnrollEntropy))?;
+    let mut out = String::with_capacity(n + n / 4);
+    for (i, b) in raw.iter().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push('-');
+        }
+        out.push(USER_CODE_ALPHABET[usize::from(*b) % USER_CODE_ALPHABET.len()] as char);
+    }
+    Ok(out)
+}
+
+/// A fresh ENROLL user code: 8 chars grouped `XXXX-XXXX`. Short and low-value — the invite-anchored flow's
+/// approval only confirms an identity onto a session the roster gate still guards at redeem, so the code
+/// needs to be typed by a human, not to be unguessable.
 pub(crate) fn random_user_code() -> Result<String> {
-    const ALPHABET: &[u8; 28] = b"BCDFGHJKLMNPQRSTVWXZ23456789";
-    let raw = random_bytes::<8>()?;
-    let chars: Vec<char> = raw
-        .iter()
-        .map(|&b| ALPHABET[usize::from(b) % ALPHABET.len()] as char)
-        .collect();
-    Ok(format!(
-        "{}{}{}{}-{}{}{}{}",
-        chars[0], chars[1], chars[2], chars[3], chars[4], chars[5], chars[6], chars[7]
-    ))
+    random_code_chars(8)
+}
+
+/// A fresh STANDUP user code: 16 chars grouped `XXXX-XXXX-XXXX-XXXX` (~76 bits over the 28-char alphabet).
+/// HIGH-ENTROPY on purpose: approving a standup session CREATES a workspace and seats the approver as its
+/// owner — there is no roster gate behind it — so a signed-in stranger must not be able to find or guess a
+/// live code within its TTL. Entropy is the dial RFC 8628 (section 6.1) offers for exactly this; the
+/// semantics are unchanged (the code still
+/// rides inside `verification_uri_complete`, so no human ever types it).
+pub(crate) fn random_standup_user_code() -> Result<String> {
+    random_code_chars(16)
 }
 
 /// A fresh 6-digit numeric passcode.
@@ -484,23 +564,44 @@ pub(crate) async fn read_verification_context(
     else {
         return Err(AuthorityError::NotFound);
     };
-    let Some(workspace) = authority.db().read_workspace(&session.workspace_id).await? else {
-        return Err(AuthorityError::NotFound);
-    };
+    let intent = SessionIntent::parse(&session.intent)
+        .ok_or_else(|| AuthorityError::integrity(EnrollCorruptIntent))?;
+    // A STANDUP session has no workspace yet: the required display fields stay wire-stable ("" / empty),
+    // and the page renders the standup copy from `intent`.
+    let (workspace_display_name, verified_domain, verified_domain_status) =
+        match &session.workspace_id {
+            Some(ws) => {
+                let Some(workspace) = authority.db().read_workspace(ws).await? else {
+                    return Err(AuthorityError::NotFound);
+                };
+                (
+                    workspace.display_name,
+                    workspace.verified_domain,
+                    workspace.verified_domain_status,
+                )
+            }
+            None => (String::new(), None, "unverified".to_owned()),
+        };
     // The offered skills are the session invite's (a self-host device-rooted session has no invite ⇒ none).
     let offered_skills = match &session.invite_sha256 {
         Some(invite_sha256) => authority.db().read_invite_skills(invite_sha256).await?,
         None => Vec::new(),
     };
     Ok(VerificationContext {
+        intent,
         machine_name: session.machine_name,
         device_fingerprint: device_fingerprint(&session.device_pubkey),
-        workspace_display_name: workspace.display_name,
-        verified_domain: workspace.verified_domain,
-        verified_domain_status: workspace.verified_domain_status,
+        workspace_display_name,
+        verified_domain,
+        verified_domain_status,
         offered_skills,
     })
 }
+
+/// A stored `device_auth_sessions.intent` did not parse — store corruption (a CHECK should forbid it).
+#[derive(Debug, thiserror::Error)]
+#[error("stored device-auth session has an invalid intent")]
+struct EnrollCorruptIntent;
 
 /// Start a device-authorization flow (the orchestration half of [`Authority::start_device_auth`]). Resolves
 /// the invite, SERVER-derives the device key id (a client-asserted id is ignored), generates a fresh secret
@@ -539,7 +640,7 @@ pub(crate) async fn start_device_auth(
 
     let device_code = random_device_code()?;
     let device_code_sha256 = sha256_token(&device_code);
-    let user_code = unique_user_code(authority).await?;
+    let user_code = unique_user_code(authority, random_user_code).await?;
     let expires_at = now.saturating_add(DEVICE_AUTH_TTL_MS);
 
     authority
@@ -547,11 +648,12 @@ pub(crate) async fn start_device_auth(
         .insert_device_auth_session(
             &device_code_sha256,
             &user_code,
-            &invite.workspace_id,
-            &token_sha256,
+            Some(&invite.workspace_id),
+            Some(&token_sha256),
             device_public_key,
             &device_key_id,
             machine_name,
+            SessionIntent::Enroll.as_str(),
             status,
             confirmed_principal_owned.as_ref().map(Principal::as_str),
             expires_at,
@@ -560,20 +662,81 @@ pub(crate) async fn start_device_auth(
         )
         .await?;
 
+    device_auth_start(authority, device_code, user_code, expires_at)
+}
+
+/// Start a STANDUP device-authorization flow (the orchestration half of
+/// [`Authority::start_standup_device_auth`]): no invite, no workspace — the session is born `pending` with
+/// `intent = 'standup'`, and a signed-in human's approval later creates the workspace. CLOUD planes only: on
+/// a self-host plane this is the single indistinguishable `NotFound` (self-host stands up via the operator's
+/// one-time claim link instead — there is no web identity to approve with).
+pub(crate) async fn start_standup_device_auth(
+    authority: &Authority,
+    device_public_key: &[u8; 32],
+    machine_name: &str,
+    now: i64,
+    created_at: &str,
+) -> Result<DeviceAuthStart> {
+    if authority.enrollment()?.config.deployment_mode != DeploymentMode::Cloud {
+        return Err(AuthorityError::NotFound);
+    }
+    let device_key_id = device_key_id_for(device_public_key);
+    let device_code = random_device_code()?;
+    let device_code_sha256 = sha256_token(&device_code);
+    // The HIGH-ENTROPY standup code (see `random_standup_user_code` for why the length differs).
+    let user_code = unique_user_code(authority, random_standup_user_code).await?;
+    let expires_at = now.saturating_add(DEVICE_AUTH_TTL_MS);
+
+    authority
+        .db()
+        .insert_device_auth_session(
+            &device_code_sha256,
+            &user_code,
+            None,
+            None,
+            device_public_key,
+            &device_key_id,
+            machine_name,
+            SessionIntent::Standup.as_str(),
+            "pending",
+            None,
+            expires_at,
+            DEVICE_AUTH_INTERVAL_SECS,
+            created_at,
+        )
+        .await?;
+
+    device_auth_start(authority, device_code, user_code, expires_at)
+}
+
+/// Assemble the [`DeviceAuthStart`] a start op returns: the verification URIs are built on the plane's
+/// HUMAN-facing verification base (`verify_base_url` else `base_url`) as `{base}/verify` and
+/// `{base}/verify/{user_code}` — the client uses the complete form verbatim.
+fn device_auth_start(
+    authority: &Authority,
+    device_code: String,
+    user_code: String,
+    expires_at: i64,
+) -> Result<DeviceAuthStart> {
+    let verify_base = authority.enrollment()?.config.verify_base();
+    let verification_uri = format!("{verify_base}/verify");
+    let verification_uri_complete = format!("{verification_uri}/{user_code}");
     Ok(DeviceAuthStart {
         device_code,
         user_code,
-        verification_uri: format!("{}/device", authority.enrollment()?.config.base_url),
+        verification_uri,
+        verification_uri_complete,
         expires_at,
         interval_secs: DEVICE_AUTH_INTERVAL_SECS,
     })
 }
 
 /// A user code that no LIVE session already holds (the partial-unique index forbids a clash). Astronomically
-/// unlikely to need more than one try; bounded retries keep it total.
-async fn unique_user_code(authority: &Authority) -> Result<String> {
+/// unlikely to need more than one try; bounded retries keep it total. `mint` is the shape-specific generator
+/// (the short enroll code, or the high-entropy standup code).
+async fn unique_user_code(authority: &Authority, mint: fn() -> Result<String>) -> Result<String> {
     for _ in 0..8 {
-        let code = random_user_code()?;
+        let code = mint()?;
         if !authority.db().live_user_code_exists(&code).await? {
             return Ok(code);
         }

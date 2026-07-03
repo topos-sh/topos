@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status AS \"status!\", confirmed_principal AS \"confirmed_principal?\",\n                  workspace_id AS \"workspace_id?\", expires_at AS \"expires_at!: i64\"\n           FROM device_auth_sessions\n           WHERE user_code = $1 AND intent = 'standup' AND status IN ('pending', 'confirmed')\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "confirmed_principal?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "workspace_id?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "7d96fdc9261b8709969d8698ddd0eedacc1c6efb9f9dcca7603ff1519faae3f3"
+}

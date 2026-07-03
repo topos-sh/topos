@@ -25,7 +25,9 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
 - `governance.rs` / `db/governance.rs` — the role-gated governance surface, split from `enroll` so it is
   independently reviewable: `GovernanceOp`/`Role` modeling, the owner-signed create-invite +
   roster/revoke mutations (the `govern_preamble` authz, the last-owner-lockout guard, the
-  `workspace_events` audit + idempotency), and the self-host first-boot `admin_claim`.
+  `workspace_events` audit + idempotency), and the **workspace-standup genesis ops** — the one-time
+  `admin_claim` mint/redeem, `create_workspace`, `approve_standup`, and the shared
+  `seat_workspace_and_owner` genesis seat.
 - `set_current.rs` / `db/set_current.rs` — the pointer-move: `db/set_current.rs` keeps `run`'s ordered
   arms (replay → authz → CAS → availability → lineage → the op tails) as its single story, plus the reject
   transaction; the proposals' orchestration lives here too (propose/approve are arms of the one write).
@@ -54,7 +56,12 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   (`0002`/`0003`); and the **contribute tables** (`0004`): `proposals` (`status ∈ {open,accepted,rejected}`;
   PK `(workspace_id, id)` where `id` IS the opening op_id; a **partial-unique** "one open per
   (skill,commit,base)"; `base_commit_id` = the approve's authoritative first parent), `proposal_object` (the
-  **gated** retention/read root for a pending proposal), and `approvals` (the audit log).
+  **gated** retention/read root for a pending proposal), and `approvals` (the audit log). Later migrations:
+  `0005` (`read_token`), `0006` (the enrollment/governance schema — see the issuance bullet below), `0007`
+  (the `object_presence (workspace_id, git_oid)` index the version-metadata read resolves tree leaves
+  through), and `0008` (the workspace-standup schema: session `intent` + a nullable session `workspace_id`
+  CHECK-bound to unapproved standups, the claim row's mint-time facts, and the `genesis_requests`
+  create-workspace idempotency ledger).
 - **`Authority::read_object`** — the skill-scoped read. One join authorizes on rostered ∧ reachable —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
@@ -247,6 +254,40 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   disclosure, and the external-identity confirm-then-grant — **no HTTP** (the verification-page HTML, the
   OIDC/magic-link transport + the mailer, and active read-token rotation land in `topos-plane`). Test-fixture
   shims gain `seed_workspace` / `seed_workspace_member`.
+- **Workspace standup (the first-boot genesis authority).** Three doors onto ONE shared genesis seat
+  (`seat_workspace_and_owner`: the workspace INSERT's `ON CONFLICT DO NOTHING … RETURNING` probe is the
+  created-or-exists witness, and the confirmed-`owner` member INSERT runs ONLY on Created — no genesis path
+  can seat an owner into a live workspace; the deployment mode is a PARAMETER threaded from the plane's
+  config, never a request). (1) **The standup device flow** — `start_standup_device_auth` (CLOUD planes
+  only; self-host ⇒ the uniform `NotFound`) opens a session with `intent = 'standup'` and NO workspace,
+  minting a HIGH-entropy 16-char user code (approval CREATES ownership, so the code must be unguessable;
+  enroll codes keep the short 8-char shape); `approve_standup` (lib-only, for a composing web leg with an
+  already-verified email) runs cap → fresh-`w_<hex32>`-id seat → the session's pending→confirmed CAS in ONE
+  txn — the CAS is the idempotency (same-email re-click ⇒ `AlreadyApproved`; different email / unknown /
+  expired / enroll-intent ⇒ the single indistinguishable `NotFound`). The granted poll now carries the
+  workspace's `{id, display name}` and the redeem outcome its `principal`. (2) **`create_workspace`**
+  (lib-only) — the same genesis body for a verified email, idempotent per `request_id` via
+  `genesis_requests` (same request + same owner replays the SAME workspace + the SAME deterministic
+  self-invite, minted through the signature-free `mint_invite_row` the owner-signed `create_invite` also
+  writes through; a different owner is denied; `genesis_requests_pkey` joined the serializable runner's
+  convergent-23505 set so racing same-request creates converge). Both doors share the per-identity creation
+  cap (3 confirmed-owner memberships), the freemail-aware domain claim (a non-freemail owner domain is
+  recorded `verified` — the sign-in proved an address on it), and the server-side display-name default.
+  (3) **The hardened one-time claim** — `mint_admin_claim` (typed refusals: an existing workspace; a
+  cloud-mode mint without an owner email) stores mint-time facts (display name / owner email / expiry) the
+  redeem trusts (the request's display name is disclosure-only); the refactored `admin_claim` orders
+  consumed-replay-probe FIRST (a SAME-device replay of a consumed claim deterministically re-returns
+  `Redeemed` — lost-200 recovery; expiry gates only the FIRST consumption) → expiry → anti-squat → seat (at
+  THE PLANE'S mode) → register → consume, all checks before any write; `read_claim_bootstrap` serves the
+  `/i/` claim branch (`enrollment_method: "admin_claim"`, no skills; consumed/expired/unknown = the uniform
+  `NotFound`; claims and invites live in disjoint tables so a token never crosses doors). **First-writer-wins
+  confirmations**: passcode + external-identity confirms are pending→confirmed CASes with an
+  `intent = 'enroll'` guard (idempotent same-principal replay; different principal = the uniform miss; a
+  confirmed principal is never overwritten; a standup session is only ever advanced by its approval). The
+  claim-token plaintext is returned once and `MintedClaim`'s `Debug` redacts it. Driven in-process by the
+  standup suite (`src/tests/standup.rs`): the full standup chain through the genesis-publish gate, the
+  same-device replay + racing double redeem (exactly one owner row), the cap at the 4th create, the
+  cross-door token separation, and the intent/first-writer-wins guards.
 
 ## Backend shape (Postgres-only)
 

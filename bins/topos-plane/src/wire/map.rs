@@ -6,17 +6,18 @@ use base64::Engine as _;
 use plane_store::{
     CandidateUpload, CommitId, CreateInviteOutcome, DeploymentMode as StoreDeploymentMode,
     DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, OpenProposalSummary,
-    PasscodeComplete, RedeemOutcome, SetCurrentReceipt, UploadedFile, VerificationContext,
-    VersionMeta,
+    PasscodeComplete, RedeemOutcome, SessionIntent as StoreSessionIntent, SetCurrentReceipt,
+    UploadedFile, VerificationContext, VersionMeta,
 };
 use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
     BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 use topos_types::requests::{
-    DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, PasscodeConfirmResponse,
-    PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred, VerificationContextResponse,
-    WireCandidate, WireOpenProposal, WireProposalList, WireVersionFile, WireVersionMeta,
+    DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
+    PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred,
+    SessionIntent, VerificationContextResponse, WireCandidate, WireOpenProposal, WireProposalList,
+    WireVersionFile, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{
@@ -279,31 +280,74 @@ pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapDat
 
 /// Map a [`DeviceAuthStart`] to the wire [`DeviceAuthorizeResponse`]. `now` (the server clock the start was
 /// stamped with) converts the absolute `expires_at` (epoch-ms) into the RFC-8628 relative `expires_in` (s).
-pub(crate) fn device_auth_to_wire(s: DeviceAuthStart, now: i64) -> DeviceAuthorizeResponse {
+/// `plane` is the TOFU block a STANDUP start carries (`None` on an enroll start — `/i/` already served it).
+pub(crate) fn device_auth_to_wire(
+    s: DeviceAuthStart,
+    now: i64,
+    plane: Option<BootstrapPlane>,
+) -> DeviceAuthorizeResponse {
     DeviceAuthorizeResponse {
         device_code: s.device_code,
         user_code: s.user_code,
         verification_uri: s.verification_uri,
+        verification_uri_complete: Some(s.verification_uri_complete),
         expires_in: u64::try_from((s.expires_at - now) / 1000).unwrap_or(0),
         interval: u64::try_from(s.interval_secs).unwrap_or(0),
+        plane,
     }
 }
 
-/// Map a [`DeviceAuthPoll`] to the wire [`DeviceTokenResponse`]. Only `Granted` carries the opaque grant.
+/// The plane block a STANDUP `device/authorize` response carries — the base URL, deployment posture,
+/// enrollment method, and the signing key to TOFU-pin (exactly what the `/i/` bootstrap serves an invited
+/// device; a standup device has no `/i/` link to fetch it from).
+pub(crate) fn standup_plane_block(
+    state: &crate::state::PlaneState,
+) -> Result<BootstrapPlane, PlaneHttpError> {
+    let enroll = state.enroll();
+    Ok(BootstrapPlane {
+        base_url: enroll.base_url.clone(),
+        deployment_mode: deployment_mode_to_wire(enroll.deployment_mode),
+        enrollment_method: enroll.enrollment_method.clone(),
+        signing_key: BootstrapSigningKey {
+            alg: SignatureAlg::Ed25519,
+            key_id: state.authority().plane_key_id()?,
+            value: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(state.authority().plane_public_key()?),
+        },
+    })
+}
+
+/// Map a [`DeviceAuthPoll`] to the wire [`DeviceTokenResponse`]. Only `Granted` carries the opaque grant
+/// (plus the workspace context a standup client lacks).
 pub(crate) fn device_poll_to_wire(poll: DeviceAuthPoll) -> DeviceTokenResponse {
-    let (status, grant) = match poll {
-        DeviceAuthPoll::Pending => (DeviceTokenStatus::Pending, None),
-        DeviceAuthPoll::SlowDown => (DeviceTokenStatus::SlowDown, None),
-        DeviceAuthPoll::Denied => (DeviceTokenStatus::Denied, None),
-        DeviceAuthPoll::Expired => (DeviceTokenStatus::Expired, None),
-        DeviceAuthPoll::Granted(g) => (DeviceTokenStatus::Granted, Some(g.grant_token)),
+    let (status, grant, workspace) = match poll {
+        DeviceAuthPoll::Pending => (DeviceTokenStatus::Pending, None, None),
+        DeviceAuthPoll::SlowDown => (DeviceTokenStatus::SlowDown, None, None),
+        DeviceAuthPoll::Denied => (DeviceTokenStatus::Denied, None, None),
+        DeviceAuthPoll::Expired => (DeviceTokenStatus::Expired, None, None),
+        DeviceAuthPoll::Granted(g) => (
+            DeviceTokenStatus::Granted,
+            Some(g.grant_token),
+            Some(DeviceTokenWorkspace {
+                workspace_id: g.workspace_id.as_str().to_owned(),
+                display_name: g.workspace_display_name,
+            }),
+        ),
     };
-    DeviceTokenResponse { status, grant }
+    DeviceTokenResponse {
+        status,
+        grant,
+        workspace,
+    }
 }
 
 /// Map a [`VerificationContext`] to the wire [`VerificationContextResponse`] (the verification-page disclosure).
 pub(crate) fn verification_to_wire(v: VerificationContext) -> VerificationContextResponse {
     VerificationContextResponse {
+        intent: Some(match v.intent {
+            StoreSessionIntent::Enroll => SessionIntent::Enroll,
+            StoreSessionIntent::Standup => SessionIntent::Standup,
+        }),
         machine_name: v.machine_name,
         device_fingerprint: v.device_fingerprint,
         workspace_display_name: v.workspace_display_name,
@@ -334,6 +378,7 @@ pub(crate) fn redeem_envelope(command: &str, outcome: RedeemOutcome) -> JsonEnve
             let resp = RedeemResponse {
                 workspace_id: r.workspace_id.as_str().to_owned(),
                 device_key_id: r.device_key_id,
+                principal: Some(r.principal.as_str().to_owned()),
                 read_creds: r
                     .read_tokens
                     .into_iter()

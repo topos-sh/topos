@@ -39,6 +39,7 @@ mod rate_limit;
 mod restore_cmd;
 mod router;
 mod routes;
+mod standup_cmd;
 mod state;
 mod wire;
 
@@ -54,6 +55,7 @@ pub use openapi::openapi;
 pub use rate_limit::Limits;
 pub use restore_cmd::EpochBumpSummary;
 pub use router::router;
+pub use standup_cmd::{ApproveSessionSummary, ApproveStandupSummary, CreateWorkspaceSummary};
 pub use state::{PlaneConfig, PlaneState};
 
 /// The OIDC enrollment connector's config (feature-gated — `enroll-oidc`, default-off). Re-exported so the

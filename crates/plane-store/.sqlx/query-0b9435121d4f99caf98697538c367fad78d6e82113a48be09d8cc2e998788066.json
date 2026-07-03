@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT device_code_sha256 AS \"device_code_sha256!: Vec<u8>\", status AS \"status!\",\n                  confirmed_principal AS \"confirmed_principal?\"\n           FROM device_auth_sessions\n           WHERE user_code = $1 AND intent = 'enroll'\n             AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "device_code_sha256!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "confirmed_principal?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0b9435121d4f99caf98697538c367fad78d6e82113a48be09d8cc2e998788066"
+}

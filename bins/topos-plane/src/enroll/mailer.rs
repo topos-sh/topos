@@ -57,8 +57,8 @@ impl std::fmt::Debug for Passcode {
 pub(crate) struct MailContext {
     /// The workspace display name (for the subject + body).
     pub(crate) workspace_display_name: String,
-    /// The plane's public base URL (for the verification link in the body).
-    pub(crate) base_url: String,
+    /// The HUMAN-facing verification base URL (for the `{base}/verify` link in the body).
+    pub(crate) verify_base_url: String,
 }
 
 /// A mail-send failure. Deliberately COARSE — a static stage label, never the relay address, credentials, or
@@ -142,11 +142,11 @@ impl Mailer for SmtpMailer {
     fn send_passcode(&self, to: &str, code: &Passcode, ctx: &MailContext) -> Result<(), MailError> {
         let to: Mailbox = to.parse().map_err(|_| MailError::Build)?;
         let body = format!(
-            "Your Topos verification code for {} is {}.\n\nEnter it at {}/device to finish connecting your agent.\n\
+            "Your Topos verification code for {} is {}.\n\nEnter it at {}/verify to finish connecting your agent.\n\
              If you didn't request this, you can ignore this email.\n",
             ctx.workspace_display_name,
             code.as_str(),
-            ctx.base_url,
+            ctx.verify_base_url,
         );
         let message = Message::builder()
             .from(self.from.clone())
@@ -245,7 +245,7 @@ mod tests {
         let mailer = FakeMailer::default();
         let ctx = MailContext {
             workspace_display_name: "Acme".to_owned(),
-            base_url: "https://plane.test".to_owned(),
+            verify_base_url: "https://plane.test".to_owned(),
         };
         mailer.send_passcode("alice@acme.com", &code, &ctx).unwrap();
         let sent = mailer.sent();

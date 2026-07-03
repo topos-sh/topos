@@ -46,6 +46,42 @@ enum Command {
         #[arg(long)]
         epoch_at_least: Option<u64>,
     },
+    /// Mint a ONE-TIME claim link that stands up a workspace and seats its first owner on redeem — the
+    /// operator path for a fresh plane's first workspace (and the hosted break-glass). Prints the link
+    /// EXACTLY ONCE to stdout; it is a bearer owner capability, so store it like a secret. On a cloud-mode
+    /// plane --owner-email is required.
+    MintClaim {
+        /// The workspace id to stand up (must not exist yet).
+        #[arg(long)]
+        workspace: String,
+        /// The workspace display name (defaults to the workspace id at redeem).
+        #[arg(long)]
+        display_name: Option<String>,
+        /// The owner email the redeem seats (required on a cloud-mode plane; omitted on self-host the
+        /// claiming device roots the owner).
+        #[arg(long)]
+        owner_email: Option<String>,
+        /// How long the UNREDEEMED claim stays valid — seconds, or a suffixed duration (`30m`, `72h`, `7d`).
+        #[arg(long, default_value = "72h")]
+        ttl: String,
+    },
+}
+
+/// Parse a claim TTL: a bare integer is seconds; `s`/`m`/`h`/`d` suffixes scale it.
+fn parse_ttl_secs(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (digits, scale) = match s.as_bytes().last() {
+        Some(b's') => (&s[..s.len() - 1], 1),
+        Some(b'm') => (&s[..s.len() - 1], 60),
+        Some(b'h') => (&s[..s.len() - 1], 3600),
+        Some(b'd') => (&s[..s.len() - 1], 86_400),
+        _ => (s, 1),
+    };
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid --ttl `{s}` (use seconds or e.g. 30m / 72h / 7d)"))?;
+    Ok(n.saturating_mul(scale))
 }
 
 /// The self-hostable plane's runtime configuration (flags or env).
@@ -75,6 +111,11 @@ struct Config {
     /// `http://<bind>` (fine for a single-box self-host; set it explicitly behind a reverse proxy).
     #[arg(long, env = "TOPOS_PLANE_BASE_URL")]
     base_url: Option<String>,
+    /// The HUMAN-facing verification base URL, when it differs from the base URL (a hosted plane whose
+    /// verification pages live on another host). Defaults to the base URL. Only the device-auth
+    /// verification links + the passcode mail link are built on it; `/i/` links stay on the base URL.
+    #[arg(long, env = "TOPOS_PLANE_VERIFY_BASE_URL")]
+    verify_base_url: Option<String>,
     /// The deployment posture — `cloud` or `self_host` (default `self_host`).
     #[arg(long, env = "TOPOS_PLANE_MODE", default_value = "self_host")]
     mode: String,
@@ -167,7 +208,42 @@ async fn main() -> Result<()> {
             all_workspaces,
             epoch_at_least,
         }) => restore_bump_epoch(cli.config, workspaces, all_workspaces, epoch_at_least).await,
+        Some(Command::MintClaim {
+            workspace,
+            display_name,
+            owner_email,
+            ttl,
+        }) => mint_claim(cli.config, workspace, display_name, owner_email, &ttl).await,
     }
+}
+
+/// The `mint-claim` subcommand: open the SAME plane state serve does (never the listen socket), mint the
+/// one-time claim, and print the `/i/` link as the ONLY stdout line (scripts capture stdout; the shown-once
+/// warning goes to stderr). The token never enters tracing — the state, the authority, and this fn never
+/// log it.
+async fn mint_claim(
+    cfg: Config,
+    workspace: String,
+    display_name: Option<String>,
+    owner_email: Option<String>,
+    ttl: &str,
+) -> Result<()> {
+    let ttl_secs = parse_ttl_secs(ttl)?;
+    let state = open_state(cfg).await?;
+    let link = state
+        .mint_admin_claim(
+            &workspace,
+            display_name.as_deref(),
+            owner_email.as_deref(),
+            ttl_secs,
+        )
+        .await?;
+    eprintln!(
+        "This link stands up workspace {workspace} and makes whoever redeems it FIRST its owner.\n\
+         It is shown ONCE and never logged — deliver it over a trusted channel and treat it like a secret."
+    );
+    println!("{link}");
+    Ok(())
 }
 
 /// The bare invocation: open the plane state, bind, and serve — exactly the pre-subcommand behavior.
@@ -281,6 +357,7 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
         plane_key_path: cfg.plane_key,
         enroll_secret_path: cfg.enroll_secret,
         base_url,
+        verify_base_url: cfg.verify_base_url,
         mode: cfg.mode,
         enrollment_method: cfg.enrollment_method,
         smtp,

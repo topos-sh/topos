@@ -183,6 +183,7 @@ pub(crate) fn start_plane(
                 .with_enrollment_config(EnrollmentConfig {
                     secret_path: dir.0.join("enroll.key"),
                     base_url: base_url.clone(),
+                    verify_base_url: None,
                     deployment_mode: DeploymentMode::Cloud,
                     enrollment_method: "device_code".to_owned(),
                 })

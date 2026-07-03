@@ -20,8 +20,11 @@ use super::blob32;
 use super::enroll::{EnrollCorrupt, read_device};
 use crate::enroll::{self, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
-use crate::governance::{GovernanceInput, GovernanceOp, GovernanceOutcome, Role};
-use crate::id::{Principal, WorkspaceId};
+use crate::governance::{
+    ApproveStandupOutcome, ClaimBootstrapRow, CreateWorkspaceOutcome, GovernanceInput,
+    GovernanceOp, GovernanceOutcome, MintClaimDenied, Role, WorkspaceCreated,
+};
+use crate::id::{Principal, SkillId, WorkspaceId};
 
 // ── governance: create-invite + roster/revoke mutations (owner-signed, in-txn authorized) ──────────────
 
@@ -200,17 +203,50 @@ async fn create_invite_run(
         return Ok(GovernanceOutcome::Denied("invite requires the owner role"));
     }
 
-    let ws_s = input.ws.as_str();
-    let actor = signer.principal.as_str();
+    mint_invite_row(
+        tx,
+        input.ws,
+        invite_token_sha256,
+        *expires_at,
+        signer.principal.as_str(),
+        *role,
+        emails,
+        skills,
+        input.created_at,
+    )
+    .await?;
+    let details = serde_json::json!({ "emails": emails.len(), "skills": skills.len() }).to_string();
+    record_event(tx, input, &signer.request_sha256, "OK", Some(&details)).await?;
+    Ok(GovernanceOutcome::Ok)
+}
+
+/// The signature-free invite ROW-WRITER: store the (hash-only) invite + its offered skills and UPSERT the
+/// invited members. Shared by the owner-signed [`create_invite_run`] (which authorizes FIRST — its
+/// governance-signature check stays exactly where it was) and the create-workspace genesis (which mints the
+/// owner's self-invite inside the same transaction that seats that owner — no device signature exists yet;
+/// the caller's own gate is the authorization). Idempotent per row.
+#[allow(clippy::too_many_arguments)]
+async fn mint_invite_row(
+    tx: &mut Transaction<'_, Postgres>,
+    ws: &WorkspaceId,
+    invite_token_sha256: &[u8; 32],
+    expires_at: Option<i64>,
+    created_by: &str,
+    role: Role,
+    emails: &[Principal],
+    skills: &[(SkillId, Option<String>)],
+    created_at: &str,
+) -> Result<()> {
+    let ws_s = ws.as_str();
     let tok = invite_token_sha256.as_slice();
     sqlx::query!(
         "INSERT INTO invites (token_sha256, workspace_id, expires_at, created_by, revoked, created_at) \
          VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT (token_sha256) DO NOTHING",
         tok,
         ws_s,
-        *expires_at,
-        actor,
-        input.created_at,
+        expires_at,
+        created_by,
+        created_at,
     )
     .execute(&mut **tx)
     .await
@@ -235,7 +271,8 @@ async fn create_invite_run(
         // their role. An invite is an ADD; re-inviting a member who already joined must not re-role them — and
         // in particular must not silently demote the last owner to a member (which would orphan the workspace,
         // the exact case roster_set guards with would_orphan_owner). Only a NEW/still-invited row takes the
-        // invite's role.
+        // invite's role. (The genesis self-invite leans on exactly this: the owner is seated `confirmed`
+        // first, so its own invite row never demotes it.)
         sqlx::query!(
             "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
              VALUES ($1, $2, $3, 'invited', $4, $5) \
@@ -246,16 +283,14 @@ async fn create_invite_run(
             ws_s,
             em,
             role_s,
-            actor,
-            input.created_at,
+            created_by,
+            created_at,
         )
         .execute(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
     }
-    let details = serde_json::json!({ "emails": emails.len(), "skills": skills.len() }).to_string();
-    record_event(tx, input, &signer.request_sha256, "OK", Some(&details)).await?;
-    Ok(GovernanceOutcome::Ok)
+    Ok(())
 }
 
 async fn governance_mutation_run(
@@ -410,75 +445,52 @@ async fn would_orphan_owner(
     Ok(row.n <= 1)
 }
 
-// ── admin claim (self-host first-boot standup) ─────────────────────────────────────────────────────────
+// ── the ONE genesis seat (shared by admin-claim redeem, create-workspace, and the standup approve) ─────
 
-impl Db {
-    /// Consume a one-time admin-claim token: stand up the workspace (self-host), seat its first owner, and
-    /// register the claiming device. One `SERIALIZABLE` (`run_serializable!`) txn. An absent/consumed token is the uniform denial.
-    pub(crate) async fn admin_claim_txn(
-        &self,
-        claim_sha256: &[u8; 32],
-        server_device_key_id: &str,
-        device_public_key: &[u8; 32],
-        display_name: &str,
-        now: i64,
-        created_at: &str,
-    ) -> Result<RedeemOutcome> {
-        run_serializable!(self, tx, {
-            admin_claim_run(
-                &mut tx,
-                claim_sha256,
-                server_device_key_id,
-                device_public_key,
-                display_name,
-                now,
-                created_at,
-            )
-            .await
-        })
-    }
+/// The outcome of [`seat_workspace_and_owner`]: `Created` seated a FRESH workspace + its first owner;
+/// `Exists` means the workspace id was already taken — the caller denies (or, for the random-id mint loop,
+/// re-mints). The owner-member INSERT runs ONLY on `Created`, so no genesis path can ever seat an owner
+/// into a live workspace.
+enum GenesisSeat {
+    Created,
+    Exists,
 }
 
+/// Insert the workspace row and — ONLY if this call created it — its first `owner`/`confirmed` member, in
+/// the caller's transaction. The `ON CONFLICT DO NOTHING … RETURNING` probe is the atomic created-or-exists
+/// witness (0 rows ⇒ Exists); a true concurrent race pair serializes under `SERIALIZABLE` (the loser
+/// retries and reads the winner's committed row ⇒ Exists). The deployment mode is a PARAMETER threaded from
+/// the plane's own config by every caller — never from a request.
 #[allow(clippy::too_many_arguments)]
-async fn admin_claim_run(
+async fn seat_workspace_and_owner(
     tx: &mut Transaction<'_, Postgres>,
-    claim_sha256: &[u8; 32],
-    server_device_key_id: &str,
-    device_public_key: &[u8; 32],
+    ws: &WorkspaceId,
     display_name: &str,
-    now: i64,
+    deployment_mode: &str,
+    verified_domain: Option<&str>,
+    verified_domain_status: &str,
+    owner: &Principal,
     created_at: &str,
-) -> Result<RedeemOutcome> {
-    let cs = claim_sha256.as_slice();
-    let claim = sqlx::query!(
-        r#"SELECT workspace_id AS "workspace_id!", consumed_at AS "consumed_at?: i64"
-           FROM admin_claim WHERE token_sha256 = $1"#,
-        cs,
+) -> Result<GenesisSeat> {
+    let (ws_s, prin) = (ws.as_str(), owner.as_str());
+    let created = sqlx::query!(
+        r#"INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (workspace_id) DO NOTHING
+           RETURNING workspace_id AS "workspace_id!""#,
+        ws_s,
+        display_name,
+        verified_domain,
+        verified_domain_status,
+        deployment_mode,
+        created_at,
     )
     .fetch_optional(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-    let Some(claim) = claim else {
-        return Ok(RedeemOutcome::Denied("no such claim token"));
-    };
-    if claim.consumed_at.is_some() {
-        return Ok(RedeemOutcome::Denied("claim token already consumed"));
+    if created.is_none() {
+        return Ok(GenesisSeat::Exists);
     }
-    let ws = WorkspaceId::parse(&claim.workspace_id).map_err(AuthorityError::integrity)?;
-    let principal = enroll::device_rooted_principal(server_device_key_id)?;
-    let (ws_s, prin) = (ws.as_str(), principal.as_str());
-
-    sqlx::query!(
-        "INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) \
-         VALUES ($1, $2, NULL, 'unverified', 'self_host', $3) \
-         ON CONFLICT (workspace_id) DO NOTHING",
-        ws_s,
-        display_name,
-        created_at,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
     sqlx::query!(
         "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
          VALUES ($1, $2, 'owner', 'confirmed', NULL, $3) ON CONFLICT (workspace_id, principal) DO NOTHING",
@@ -489,8 +501,363 @@ async fn admin_claim_run(
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
+    Ok(GenesisSeat::Created)
+}
 
-    // Register the device (anti-squat + revocation as in redeem).
+/// How many workspaces `owner` already owns (confirmed `owner` memberships, plane-wide) — the per-identity
+/// creation cap's count.
+async fn owned_workspace_count(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Principal,
+) -> Result<i64> {
+    let prin = owner.as_str();
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM workspace_member
+           WHERE principal = $1 AND role = 'owner' AND status = 'confirmed'"#,
+        prin,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(row.n)
+}
+
+/// The per-identity workspace-creation cap: a principal may own at most this many workspaces (the durable
+/// floor under any rate limiting a composition adds in front).
+const MAX_OWNED_WORKSPACES: i64 = 3;
+
+/// A fresh `w_<32 hex>` workspace id from the OS CSPRNG (collision ⇒ the caller's seat returns `Exists`
+/// and it re-mints; 128 bits make that ~impossible).
+fn fresh_workspace_id() -> Result<WorkspaceId> {
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw)
+        .map_err(|_| AuthorityError::internal(GenesisFault("entropy for a workspace id")))?;
+    let mut hex = String::with_capacity(34);
+    hex.push_str("w_");
+    for b in raw {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    WorkspaceId::parse(&hex).map_err(AuthorityError::internal)
+}
+
+/// A genesis-standup invariant failed (entropy, or the ~impossible id-mint exhaustion).
+#[derive(Debug, thiserror::Error)]
+#[error("workspace genesis fault: {0}")]
+struct GenesisFault(&'static str);
+
+/// The shared genesis body both self-serve doors run AFTER their own idempotency/identity checks: the
+/// per-owner cap, then mint-a-fresh-id + seat (bounded re-mint on the ~impossible collision). Returns the
+/// typed denial (`Err` inner) without writing anything.
+async fn genesis_create(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Principal,
+    display_name: &str,
+    deployment_mode: &str,
+    verified_domain: Option<&str>,
+    verified_domain_status: &str,
+    created_at: &str,
+) -> Result<std::result::Result<WorkspaceId, &'static str>> {
+    if owned_workspace_count(tx, owner).await? >= MAX_OWNED_WORKSPACES {
+        return Ok(Err("workspace creation limit reached"));
+    }
+    for _ in 0..8 {
+        let ws = fresh_workspace_id()?;
+        match seat_workspace_and_owner(
+            tx,
+            &ws,
+            display_name,
+            deployment_mode,
+            verified_domain,
+            verified_domain_status,
+            owner,
+            created_at,
+        )
+        .await?
+        {
+            GenesisSeat::Created => return Ok(Ok(ws)),
+            GenesisSeat::Exists => continue,
+        }
+    }
+    Err(AuthorityError::internal(GenesisFault(
+        "could not mint a fresh workspace id",
+    )))
+}
+
+// ── admin claim (one-time bearer standup: self-host first boot + the cloud break-glass) ────────────────
+
+/// An `admin_claim` row (the mint-time facts the redeem trusts; the request's display name is disclosure-only).
+struct ClaimRow {
+    workspace_id: String,
+    consumed_at: Option<i64>,
+    display_name: Option<String>,
+    expires_at: Option<i64>,
+    owner_email: Option<String>,
+}
+
+async fn read_claim_row(
+    tx: &mut Transaction<'_, Postgres>,
+    claim_sha256: &[u8],
+) -> Result<Option<ClaimRow>> {
+    let row = sqlx::query!(
+        r#"SELECT workspace_id AS "workspace_id!", consumed_at AS "consumed_at?: i64",
+                  display_name AS "display_name?", expires_at AS "expires_at?: i64",
+                  owner_email AS "owner_email?"
+           FROM admin_claim WHERE token_sha256 = $1"#,
+        claim_sha256,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(row.map(|r| ClaimRow {
+        workspace_id: r.workspace_id,
+        consumed_at: r.consumed_at,
+        display_name: r.display_name,
+        expires_at: r.expires_at,
+        owner_email: r.owner_email,
+    }))
+}
+
+/// The claim's seated owner principal: the mint-bound email when present, else the claiming device's
+/// server-derived device-rooted principal. A stored email was validated at mint, so a re-parse failure is
+/// store corruption.
+fn claim_owner_principal(row: &ClaimRow, server_device_key_id: &str) -> Result<Principal> {
+    match &row.owner_email {
+        Some(email) => Principal::parse(email).map_err(AuthorityError::integrity),
+        None => enroll::device_rooted_principal(server_device_key_id),
+    }
+}
+
+impl Db {
+    /// Mint a one-time admin-claim row (store only the token's sha256; the plaintext never reaches here).
+    /// Refuses a claim for a workspace that already exists — the claim is a GENESIS capability, never a way
+    /// into a live workspace. Re-minting for the same (still absent) workspace is allowed: multiple claim
+    /// rows are harmless because the first redeem's genesis seat wins and every later one denies.
+    pub(crate) async fn mint_admin_claim_txn(
+        &self,
+        token_sha256: &[u8; 32],
+        ws: &WorkspaceId,
+        display_name: Option<&str>,
+        owner_email: Option<&str>,
+        expires_at: i64,
+        created_at: &str,
+    ) -> Result<std::result::Result<(), MintClaimDenied>> {
+        run_serializable!(self, tx, {
+            mint_admin_claim_run(
+                &mut tx,
+                token_sha256,
+                ws,
+                display_name,
+                owner_email,
+                expires_at,
+                created_at,
+            )
+            .await
+        })
+    }
+
+    /// Consume a one-time admin-claim token: stand up the workspace (the PLANE's deployment mode — never a
+    /// request's), seat its first owner, and register the claiming device. One `SERIALIZABLE`
+    /// (`run_serializable!`) txn. All checks run before any write; an absent/consumed/expired token is the
+    /// uniform denial, EXCEPT the same-device replay of an already-consumed claim, which deterministically
+    /// re-returns `Redeemed` (lost-200 recovery).
+    pub(crate) async fn admin_claim_txn(
+        &self,
+        claim_sha256: &[u8; 32],
+        server_device_key_id: &str,
+        device_public_key: &[u8; 32],
+        plane_mode: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<RedeemOutcome> {
+        run_serializable!(self, tx, {
+            admin_claim_run(
+                &mut tx,
+                claim_sha256,
+                server_device_key_id,
+                device_public_key,
+                plane_mode,
+                now,
+                created_at,
+            )
+            .await
+        })
+    }
+
+    /// Read an admin-claim row for the `/i/` bootstrap: unconsumed ∧ unexpired ⇒ its disclosure facts;
+    /// consumed/expired/unknown ⇒ `None` (the caller's uniform NotFound). A pure pool read.
+    pub(crate) async fn read_claim_bootstrap_row(
+        &self,
+        token_sha256: &[u8; 32],
+        now: i64,
+    ) -> Result<Option<ClaimBootstrapRow>> {
+        let key = token_sha256.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT workspace_id AS "workspace_id!", display_name AS "display_name?"
+               FROM admin_claim
+               WHERE token_sha256 = $1 AND consumed_at IS NULL
+                 AND (expires_at IS NULL OR expires_at >= $2)"#,
+            key,
+            now,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(ClaimBootstrapRow {
+                workspace_id: WorkspaceId::parse(&r.workspace_id)
+                    .map_err(AuthorityError::integrity)?,
+                display_name: r.display_name,
+            })),
+        }
+    }
+
+    /// Create a workspace for an already-verified owner email (door 2): the genesis-requests idempotency
+    /// probe, the per-owner cap, the fresh-id seat, the deterministic self-invite, and the request ledger —
+    /// ONE `SERIALIZABLE` (`run_serializable!`) txn.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_workspace_txn(
+        &self,
+        request_sha256: &[u8; 32],
+        display_name: &str,
+        owner: &Principal,
+        plane_mode: &str,
+        verified_domain: Option<&str>,
+        verified_domain_status: &str,
+        secret: &[u8; 32],
+        created_at: &str,
+    ) -> Result<CreateWorkspaceOutcome> {
+        run_serializable!(self, tx, {
+            create_workspace_run(
+                &mut tx,
+                request_sha256,
+                display_name,
+                owner,
+                plane_mode,
+                verified_domain,
+                verified_domain_status,
+                secret,
+                created_at,
+            )
+            .await
+        })
+    }
+
+    /// Approve a STANDUP device-auth session (the web leg's write half): resolve the live standup session,
+    /// run the shared genesis body for the signed-in email, and CAS the session pending→confirmed with the
+    /// fresh workspace — ONE `SERIALIZABLE` (`run_serializable!`) txn. The session CAS is the idempotency
+    /// (an `AlreadyApproved` re-click replays; a different email is the uniform miss).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn approve_standup_txn(
+        &self,
+        user_code: &str,
+        email: &Principal,
+        display_name: &str,
+        plane_mode: &str,
+        verified_domain: Option<&str>,
+        verified_domain_status: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<ApproveStandupOutcome> {
+        run_serializable!(self, tx, {
+            approve_standup_run(
+                &mut tx,
+                user_code,
+                email,
+                display_name,
+                plane_mode,
+                verified_domain,
+                verified_domain_status,
+                now,
+                created_at,
+            )
+            .await
+        })
+    }
+}
+
+async fn mint_admin_claim_run(
+    tx: &mut Transaction<'_, Postgres>,
+    token_sha256: &[u8; 32],
+    ws: &WorkspaceId,
+    display_name: Option<&str>,
+    owner_email: Option<&str>,
+    expires_at: i64,
+    created_at: &str,
+) -> Result<std::result::Result<(), MintClaimDenied>> {
+    let ws_s = ws.as_str();
+    let exists = sqlx::query!(
+        r#"SELECT 1::int8 AS "ok!: i64" FROM workspace WHERE workspace_id = $1"#,
+        ws_s,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    if exists.is_some() {
+        return Ok(Err(MintClaimDenied::WorkspaceExists));
+    }
+    let key = token_sha256.as_slice();
+    sqlx::query!(
+        "INSERT INTO admin_claim (token_sha256, workspace_id, consumed_at, created_at, display_name, expires_at, owner_email) \
+         VALUES ($1, $2, NULL, $3, $4, $5, $6)",
+        key,
+        ws_s,
+        created_at,
+        display_name,
+        expires_at,
+        owner_email,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(Ok(()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admin_claim_run(
+    tx: &mut Transaction<'_, Postgres>,
+    claim_sha256: &[u8; 32],
+    server_device_key_id: &str,
+    device_public_key: &[u8; 32],
+    plane_mode: &str,
+    now: i64,
+    created_at: &str,
+) -> Result<RedeemOutcome> {
+    let cs = claim_sha256.as_slice();
+    // (1) Resolve the claim. Absent ⇒ the uniform denial.
+    let Some(claim) = read_claim_row(tx, cs).await? else {
+        return Ok(RedeemOutcome::Denied("no such claim token"));
+    };
+    let ws = WorkspaceId::parse(&claim.workspace_id).map_err(AuthorityError::integrity)?;
+    let principal = claim_owner_principal(&claim, server_device_key_id)?;
+
+    // (2) CONSUMED-REPLAY PROBE — before the expiry check, so a lost-200 retry recovers even after the TTL
+    // (expiry applies only to the FIRST consumption). If the consumed claim's workspace already holds THIS
+    // exact device — same key id, same public key, same seated principal, not revoked — the original redeem
+    // committed and this is the same caller retrying: deterministically re-return Redeemed. Anything else
+    // about a consumed claim is the one static denial.
+    if claim.consumed_at.is_some() {
+        if let Some((existing_pk, existing_principal, revoked)) =
+            read_device(tx, &ws, server_device_key_id).await?
+            && &existing_pk == device_public_key
+            && existing_principal == principal.as_str()
+            && !revoked
+        {
+            return Ok(RedeemOutcome::Redeemed(EnrollmentRedeemed {
+                workspace_id: ws,
+                principal,
+                device_key_id: server_device_key_id.to_owned(),
+                read_tokens: Vec::new(),
+            }));
+        }
+        return Ok(RedeemOutcome::Denied("claim token already consumed"));
+    }
+    // (3) Expiry — first consumption only (nullable: legacy/test rows never expire).
+    if claim.expires_at.is_some_and(|e| now > e) {
+        return Ok(RedeemOutcome::Denied("claim token expired"));
+    }
+    // (4) Anti-squat + revocation (all checks BEFORE any write).
     if let Some((existing_pk, existing_principal, revoked)) =
         read_device(tx, &ws, server_device_key_id).await?
     {
@@ -501,6 +868,31 @@ async fn admin_claim_run(
             return Ok(RedeemOutcome::Denied("device is revoked"));
         }
     }
+
+    // (5) Seat the workspace + first owner. The display name comes from the CLAIM ROW (the request's is
+    // disclosure-only); the deployment mode is THE PLANE'S (a cloud plane's break-glass claim stands up a
+    // cloud-mode workspace — never self_host on a cloud plane). Exists ⇒ denied, the claim NOT consumed.
+    let display_name = claim.display_name.as_deref().unwrap_or(ws.as_str());
+    match seat_workspace_and_owner(
+        tx,
+        &ws,
+        display_name,
+        plane_mode,
+        None,
+        "unverified",
+        &principal,
+        created_at,
+    )
+    .await?
+    {
+        GenesisSeat::Created => {}
+        GenesisSeat::Exists => {
+            return Ok(RedeemOutcome::Denied("workspace already exists"));
+        }
+    }
+
+    // (6) Register the claiming device; (7) consume the claim (CAS on the unconsumed row).
+    let (ws_s, prin) = (ws.as_str(), principal.as_str());
     let pk = device_public_key.as_slice();
     sqlx::query!(
         "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
@@ -528,6 +920,237 @@ async fn admin_claim_run(
         device_key_id: server_device_key_id.to_owned(),
         read_tokens: Vec::new(),
     }))
+}
+
+// ── create-workspace (door 2) + the standup approve (door 1's web leg) ─────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn create_workspace_run(
+    tx: &mut Transaction<'_, Postgres>,
+    request_sha256: &[u8; 32],
+    display_name: &str,
+    owner: &Principal,
+    plane_mode: &str,
+    verified_domain: Option<&str>,
+    verified_domain_status: &str,
+    secret: &[u8; 32],
+    created_at: &str,
+) -> Result<CreateWorkspaceOutcome> {
+    let req = request_sha256.as_slice();
+    // (1) The idempotency probe: a replay of the SAME request by the SAME owner returns the workspace it
+    // already created (re-deriving the identical self-invite token); the same request id under a DIFFERENT
+    // owner is denied — the slot belongs to the original.
+    let prior = sqlx::query!(
+        r#"SELECT owner_principal AS "owner_principal!", workspace_id AS "workspace_id!"
+           FROM genesis_requests WHERE request_sha256 = $1"#,
+        req,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    if let Some(prior) = prior {
+        if prior.owner_principal != owner.as_str() {
+            return Ok(CreateWorkspaceOutcome::Denied("request id already used"));
+        }
+        let ws = WorkspaceId::parse(&prior.workspace_id).map_err(AuthorityError::integrity)?;
+        let ws_s = ws.as_str();
+        let row = sqlx::query!(
+            r#"SELECT display_name AS "display_name!" FROM workspace WHERE workspace_id = $1"#,
+            ws_s,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        let Some(row) = row else {
+            return Err(AuthorityError::integrity(GenesisFault(
+                "genesis_requests names a missing workspace",
+            )));
+        };
+        let invite_token = self_invite_token(secret, request_sha256, &ws);
+        return Ok(CreateWorkspaceOutcome::Replayed(WorkspaceCreated {
+            workspace_id: ws,
+            display_name: row.display_name,
+            invite_token,
+        }));
+    }
+
+    // (2) The shared genesis body (cap → fresh-id seat).
+    let ws = match genesis_create(
+        tx,
+        owner,
+        display_name,
+        plane_mode,
+        verified_domain,
+        verified_domain_status,
+        created_at,
+    )
+    .await?
+    {
+        Ok(ws) => ws,
+        Err(reason) => return Ok(CreateWorkspaceOutcome::Denied(reason)),
+    };
+
+    // (3) The owner's SELF-INVITE — the paste-to-agent link the web shows. Deterministic in the request, so
+    // a replay re-derives the SAME link; member role (the owner row is already seated `confirmed`, and the
+    // row-writer never demotes it); no skills; no expiry.
+    let invite_token = self_invite_token(secret, request_sha256, &ws);
+    let invite_sha256 = enroll::sha256_token(&invite_token);
+    mint_invite_row(
+        tx,
+        &ws,
+        &invite_sha256,
+        None,
+        owner.as_str(),
+        Role::Member,
+        std::slice::from_ref(owner),
+        &[],
+        created_at,
+    )
+    .await?;
+
+    // (4) The request ledger — a plain INSERT: `genesis_requests_pkey` is in the runner's CONVERGENT 23505
+    // set, so a concurrent same-request racer aborts, retries, and replays the winner's workspace.
+    let ws_s = ws.as_str();
+    let prin = owner.as_str();
+    sqlx::query!(
+        "INSERT INTO genesis_requests (request_sha256, owner_principal, workspace_id, created_at) \
+         VALUES ($1, $2, $3, $4)",
+        req,
+        prin,
+        ws_s,
+        created_at,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+
+    let row = sqlx::query!(
+        r#"SELECT display_name AS "display_name!" FROM workspace WHERE workspace_id = $1"#,
+        ws_s,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(CreateWorkspaceOutcome::Created(WorkspaceCreated {
+        workspace_id: ws,
+        display_name: row.display_name,
+        invite_token,
+    }))
+}
+
+/// The deterministic self-invite token for a created workspace: the create-invite derivation shape with the
+/// REQUEST identity (its sha256) in the op-id slot — so a lost-ack replay re-derives the identical link.
+/// Binds the member role byte, an empty skill set, and the no-expiry sentinel, exactly as an owner-signed
+/// invite with those parameters would.
+fn self_invite_token(secret: &[u8; 32], request_sha256: &[u8; 32], ws: &WorkspaceId) -> String {
+    let role_byte = [Role::Member.signing_byte()];
+    let expires_be = topos_core::sign::INVITE_NO_EXPIRY.to_be_bytes();
+    enroll::derive_token(
+        secret,
+        b"invite",
+        &[
+            request_sha256.as_slice(),
+            ws.as_str().as_bytes(),
+            role_byte.as_slice(),
+            b"",
+            expires_be.as_slice(),
+        ],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approve_standup_run(
+    tx: &mut Transaction<'_, Postgres>,
+    user_code: &str,
+    email: &Principal,
+    display_name: &str,
+    plane_mode: &str,
+    verified_domain: Option<&str>,
+    verified_domain_status: &str,
+    now: i64,
+    created_at: &str,
+) -> Result<ApproveStandupOutcome> {
+    // (1) The live STANDUP session this code names. Unknown / non-standup / resolved ⇒ the uniform miss.
+    let row = sqlx::query!(
+        r#"SELECT status AS "status!", confirmed_principal AS "confirmed_principal?",
+                  workspace_id AS "workspace_id?", expires_at AS "expires_at!: i64"
+           FROM device_auth_sessions
+           WHERE user_code = $1 AND intent = 'standup' AND status IN ('pending', 'confirmed')
+           LIMIT 1"#,
+        user_code,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    let Some(row) = row else {
+        return Err(AuthorityError::NotFound);
+    };
+    // (2) FIRST-WRITER-WINS on the already-confirmed session: the SAME email's re-click replays
+    // (AlreadyApproved); a DIFFERENT email is the uniform miss — an approval is never re-bound.
+    if row.status == "confirmed" {
+        if row.confirmed_principal.as_deref() == Some(email.as_str()) {
+            let ws_str = row.workspace_id.as_deref().ok_or_else(|| {
+                AuthorityError::integrity(EnrollCorrupt(
+                    "confirmed standup session without workspace",
+                ))
+            })?;
+            let ws = WorkspaceId::parse(ws_str).map_err(AuthorityError::integrity)?;
+            return Ok(ApproveStandupOutcome::AlreadyApproved { workspace_id: ws });
+        }
+        return Err(AuthorityError::NotFound);
+    }
+    // (3) A pending-but-expired session is the same uniform miss (poll flips it to `expired` on its own).
+    if now > row.expires_at {
+        return Err(AuthorityError::NotFound);
+    }
+
+    // (4) The shared genesis body (cap → fresh-id seat) for the signed-in owner. A cap denial propagates
+    // typed to the approving web page.
+    let ws = match genesis_create(
+        tx,
+        email,
+        display_name,
+        plane_mode,
+        verified_domain,
+        verified_domain_status,
+        created_at,
+    )
+    .await?
+    {
+        Ok(ws) => ws,
+        Err(reason) => return Ok(ApproveStandupOutcome::Denied(reason)),
+    };
+
+    // (5) The session CAS — pending→confirmed with the fresh workspace + the approving email. The
+    // `status = 'pending'` arm is the idempotency/race guard (a raced second approve loses to the first and
+    // resolves via the confirmed branch on its retry — under SERIALIZABLE the racers serialize anyway).
+    let ws_s = ws.as_str();
+    let prin = email.as_str();
+    let updated = sqlx::query!(
+        "UPDATE device_auth_sessions \
+         SET workspace_id = $2, confirmed_principal = $3, status = 'confirmed' \
+         WHERE user_code = $1 AND intent = 'standup' AND status = 'pending'",
+        user_code,
+        ws_s,
+        prin,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    if updated.rows_affected() == 0 {
+        return Err(AuthorityError::NotFound);
+    }
+    let row = sqlx::query!(
+        r#"SELECT display_name AS "display_name!" FROM workspace WHERE workspace_id = $1"#,
+        ws_s,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(ApproveStandupOutcome::Approved {
+        workspace_id: ws,
+        display_name: row.display_name,
+    })
 }
 
 // ── shared in-txn helpers (governance-only; the cross-domain ones live in [`super::enroll`]) ───────────

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM workspace_member\n           WHERE principal = $1 AND role = 'owner' AND status = 'confirmed'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8b27137ce240cfa3a6de9728b4c21a60eb22e33c98bfd0d66e01d3a218627655"
+}

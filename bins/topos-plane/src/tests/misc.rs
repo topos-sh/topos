@@ -47,6 +47,7 @@ async fn open_builds_a_serving_state() {
         plane_key_path: dir.join("plane.key"),
         enroll_secret_path: dir.join("enroll.key"),
         base_url: "https://plane.test".to_owned(),
+        verify_base_url: None,
         mode: "cloud".to_owned(),
         enrollment_method: None,
         smtp: None,

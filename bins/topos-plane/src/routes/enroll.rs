@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceTokenRequest, PasscodeAck, PasscodeAckStatus,
-    PasscodeConfirmRequest, PasscodeRequest, RedeemRequest,
+    PasscodeConfirmRequest, PasscodeRequest, RedeemRequest, SessionIntent,
 };
 
 use crate::enroll::mailer::{MailContext, Passcode};
@@ -29,9 +29,9 @@ use crate::wire::{self, ApiJson, map};
     tag = "enrollment",
     request_body = DeviceAuthorizeRequest,
     responses(
-        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri).", body = topos_types::requests::DeviceAuthorizeResponse),
-        (status = 400, description = "Malformed body or device public key.", body = topos_types::JsonEnvelope),
-        (status = 404, description = "No such invite (or it is revoked/expired).", body = topos_types::JsonEnvelope),
+        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block to TOFU-pin).", body = topos_types::requests::DeviceAuthorizeResponse),
+        (status = 400, description = "Malformed body, device public key, or intent/invite combination.", body = topos_types::JsonEnvelope),
+        (status = 404, description = "No such invite (or it is revoked/expired), or a standup start on a plane that does not offer it.", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited.", body = topos_types::JsonEnvelope),
         (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),
     ),
@@ -42,17 +42,41 @@ pub(crate) async fn start_device_auth(
 ) -> Result<Response, PlaneHttpError> {
     let device_public_key = wire::base64url_key(&req.device_public_key)?;
     let (created_at, now) = wire::now_utc();
-    let start = state
-        .authority()
-        .start_device_auth(
-            &req.invite_token,
-            &device_public_key,
-            &req.machine_name,
-            now,
-            &created_at,
-        )
-        .await?;
-    Ok(Json(map::device_auth_to_wire(start, now)).into_response())
+    // Dispatch on (intent, invite_token): an explicit intent must be consistent with the invite's presence
+    // (fail closed on a contradictory body); an absent intent defaults from the invite's presence.
+    match (req.intent, req.invite_token.as_deref()) {
+        // ENROLL: the invite-anchored flow (the pre-existing path, byte-identical response fields plus the
+        // additive complete URI).
+        (Some(SessionIntent::Enroll) | None, Some(invite_token)) => {
+            let start = state
+                .authority()
+                .start_device_auth(
+                    invite_token,
+                    &device_public_key,
+                    &req.machine_name,
+                    now,
+                    &created_at,
+                )
+                .await?;
+            Ok(Json(map::device_auth_to_wire(start, now, None)).into_response())
+        }
+        // STANDUP: no invite — the session is born workspace-less; the response carries the plane block
+        // (base URL + posture + the signing key to TOFU-pin), which an enroll start leaves to `/i/`.
+        (Some(SessionIntent::Standup) | None, None) => {
+            let start = state
+                .authority()
+                .start_standup_device_auth(&device_public_key, &req.machine_name, now, &created_at)
+                .await?;
+            let plane = map::standup_plane_block(&state)?;
+            Ok(Json(map::device_auth_to_wire(start, now, Some(plane))).into_response())
+        }
+        (Some(SessionIntent::Standup), Some(_)) => Err(PlaneHttpError::BadBody(
+            "a standup start takes no invite_token".to_owned(),
+        )),
+        (Some(SessionIntent::Enroll), None) => Err(PlaneHttpError::BadBody(
+            "an enroll start requires an invite_token".to_owned(),
+        )),
+    }
 }
 
 #[utoipa::path(
@@ -141,7 +165,7 @@ pub(crate) async fn start_passcode(
     let to = req.email.clone();
     let ctx = MailContext {
         workspace_display_name: context.workspace_display_name,
-        base_url: state.enroll().base_url.clone(),
+        verify_base_url: state.enroll().verify_base_url.clone(),
     };
     let code = Passcode::new(started.passcode);
     tokio::task::spawn_blocking(move || {
@@ -236,15 +260,12 @@ pub(crate) async fn admin_claim(
 ) -> Result<Response, PlaneHttpError> {
     let device_public_key = wire::base64url_key(&req.device_public_key)?;
     let (created_at, now) = wire::now_utc();
+    // `req.display_name` is DISCLOSURE-ONLY (what the agent showed its human): the seated workspace's name
+    // comes from the claim row minted server-side, so an adversarial body cannot rename it.
+    let _ = &req.display_name;
     let outcome = state
         .authority()
-        .admin_claim(
-            &req.claim_token,
-            device_public_key,
-            &req.display_name,
-            now,
-            &created_at,
-        )
+        .admin_claim(&req.claim_token, device_public_key, now, &created_at)
         .await?;
     Ok((
         StatusCode::OK,

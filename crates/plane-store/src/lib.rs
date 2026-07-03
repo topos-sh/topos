@@ -99,11 +99,13 @@ pub use authority::{Authority, PoolConfig};
 pub use enroll::{
     ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
     EnrollmentRedeemed, GrantIssued, InviteBootstrap, MintedReadToken, PasscodeComplete,
-    PasscodeStart, RedeemOutcome, VerificationContext,
+    PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
 };
 pub use error::{AuthorityError, Result};
 pub use governance::{
-    CreateInviteOutcome, GovernanceOp, GovernanceOutcome, GovernanceSignedOp, InviteCreated, Role,
+    ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
+    GovernanceOutcome, GovernanceSignedOp, InviteCreated, MintClaimOutcome, MintedClaim, Role,
+    WorkspaceCreated,
 };
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
