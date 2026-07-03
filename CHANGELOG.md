@@ -5,6 +5,51 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## Workspace standup — the server half (self-serve genesis + the hardened one-time claim)
+
+Standing up a workspace's FIRST owner is now in-band on the server side, three doors onto ONE shared
+genesis seat (`workspace` + confirmed `owner` written together, the owner only when this call created the
+workspace — no genesis path can seat an owner into a live workspace):
+
+- **The standup device flow** (hosted planes only). `POST /v1/device/authorize` accepts an optional
+  `intent` (`enroll`/`standup`) with an optional `invite_token`: a standup start opens a session with NO
+  workspace, returns a HIGH-entropy 16-char user code (approving CREATES ownership, so the code must be
+  unguessable — enroll codes keep their short shape), and carries the plane block (base URL, posture, the
+  signing key to TOFU-pin) that an invited device would have read from `/i/`. The new lib-only
+  `Authority::approve_standup` (+ the leak-free `PlaneState::approve_standup`) is the web leg a composing
+  plane calls with a verified email: ONE transaction runs the per-identity creation cap, seats the
+  workspace + owner (server-minted `w_…` id; freemail-aware domain claim; a server-side display-name
+  default), and CASes the session pending→confirmed — the CAS is the idempotency (same-email re-click
+  replays, anything else is the uniform miss). The granted poll now carries `{workspace_id, display_name}`
+  and the redeem response the seated `principal`, so a standup client can bind its possession frame and
+  disclose "workspace X — owner Y".
+- **Direct create** (`Authority::create_workspace` / `PlaneState::create_workspace`, lib-only): the same
+  genesis body for an already-verified email, idempotent per `request_id` (a replay returns the SAME
+  workspace and the SAME deterministic self-invite link; the same request under a different owner is
+  denied), capped per identity, and finished with the owner's self-invite so a web page can print one
+  `topos follow <link>`.
+- **The one-time claim, hardened.** `topos-plane mint-claim --workspace … [--display-name … --owner-email
+  … --ttl 72h]` mints a bearer claim link (printed EXACTLY once to stdout; the token is never logged and
+  every `Debug` redacts it). The claim row now carries the mint-time display name, owner email, and
+  expiry; the redeem takes its facts from THAT ROW (the request's display name is disclosure-only), seats
+  the workspace at THE PLANE'S deployment mode, and orders its checks so a consumed claim's SAME-device
+  replay deterministically re-answers `Redeemed` (lost-200 recovery — expiry applies only to the first
+  consumption) while every other dead-claim case stays one static denial. A cloud-mode mint REQUIRES an
+  owner email. `GET /i/{token}` now also serves claim links (`enrollment_method: "admin_claim"`, no
+  skills) — invites and claims live in disjoint tables, so a token can never cross doors.
+- **First-writer-wins confirmations everywhere.** Every session confirmation is a pending→confirmed CAS:
+  a same-principal replay is idempotent, a different principal is the uniform miss, and a confirmed
+  principal is never overwritten; the passcode/OIDC legs refuse standup sessions outright (an
+  `intent = 'enroll'` guard) — a standup session is only ever advanced by its approval.
+- **Verification URLs got one base.** The plane now emits both `verification_uri` (`{base}/verify`) and
+  `verification_uri_complete` (`{base}/verify/{code}`), built on the new optional
+  `--verify-base-url` / `TOPOS_PLANE_VERIFY_BASE_URL` (default: the base URL) — the passcode mail body
+  points at the same base, and `GET /v1/enroll/verify/{user_code}` now discloses the session's `intent`
+  (a standup session shows an empty workspace name; the page renders create-copy from the intent).
+
+Wire changes are additive-only. The client gained only the mechanical field widenings; the standup client
+verbs and the hosted web pages are separate work.
+
 ## Hardening sweep — scheduled maintenance, honest errors, bounded durability
 
 - **The maintenance the storage layer mandates is now scheduled.** `topos-plane` gained a `maintenance`
