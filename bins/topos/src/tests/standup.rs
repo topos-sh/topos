@@ -767,16 +767,29 @@ fn claim_bootstrap() -> BootstrapData {
 #[derive(Clone)]
 struct FakeClaim {
     bootstrap: BootstrapData,
+    /// The `/i/` token this fake expects (asserted on the bootstrap read and the claim POST).
+    token: &'static str,
     /// Fail the first N admin-claim POSTs with a transport fault (the uncertain send).
     fail_claims: std::rc::Rc<Cell<u32>>,
+    /// Answer every admin-claim POST with the transport's TERMINAL 200+DENIED mapping (a dead claim).
+    deny_claims: bool,
     claim_calls: std::rc::Rc<Cell<u32>>,
     bootstrap_calls: std::rc::Rc<Cell<u32>>,
 }
 impl FakeClaim {
     fn new(fail_first: u32) -> Self {
+        Self::build("claimtok", fail_first, false)
+    }
+    /// A fake whose claim door always returns the terminal dead-claim denial.
+    fn denying() -> Self {
+        Self::build("claimtok", 0, true)
+    }
+    fn build(token: &'static str, fail_first: u32, deny_claims: bool) -> Self {
         Self {
             bootstrap: claim_bootstrap(),
+            token,
             fail_claims: std::rc::Rc::new(Cell::new(fail_first)),
+            deny_claims,
             claim_calls: std::rc::Rc::new(Cell::new(0)),
             bootstrap_calls: std::rc::Rc::new(Cell::new(0)),
         }
@@ -785,7 +798,7 @@ impl FakeClaim {
 impl EnrollSource for FakeClaim {
     fn fetch_bootstrap(&self, token: &str) -> Result<BootstrapData, ClientError> {
         self.bootstrap_calls.set(self.bootstrap_calls.get() + 1);
-        assert_eq!(token, "claimtok");
+        assert_eq!(token, self.token);
         Ok(self.bootstrap.clone())
     }
     fn device_authorize(
@@ -822,11 +835,19 @@ impl EnrollSource for FakeClaim {
         display_name: &str,
     ) -> Result<Redeem, ClientError> {
         self.claim_calls.set(self.claim_calls.get() + 1);
-        assert_eq!(claim_token, "claimtok");
+        assert_eq!(claim_token, self.token);
         assert_eq!(display_name, "Acme", "disclosure-only display name");
         if self.fail_claims.get() > 0 {
             self.fail_claims.set(self.fail_claims.get() - 1);
             return Err(ClientError::Plane("timed out mid-send".into()));
+        }
+        if self.deny_claims {
+            // The transport's terminal mapping of a 200+DENIED claim envelope (`map_redeem_envelope`).
+            return Err(ClientError::Enrollment(
+                "the claim link was refused — it may be consumed, expired, or the workspace may \
+                 already exist; ask the plane operator for a fresh claim link"
+                    .into(),
+            ));
         }
         let dk = device_key_id_for(&device_public_key);
         Ok(Redeem {
@@ -937,6 +958,38 @@ fn follow_resume_also_settles_an_unsettled_claim() {
     assert!(data.enrolled);
     assert_eq!(fake.bootstrap_calls.get(), 1, "never refetched");
     assert_eq!(fake.claim_calls.get(), 2);
+}
+
+#[test]
+fn a_terminal_claim_denial_clears_the_wal_and_unwedges_follow() {
+    let rig = Rig::new("claim-deny");
+    let fake = FakeClaim::denying();
+    let err = run_claim_follow(
+        &rig,
+        &fake,
+        Some(&format!("{CLAIM_BASE}/i/claimtok")),
+        false,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
+    assert_eq!(fake.claim_calls.get(), 1);
+    // A definitive plane rejection is not retryable — the ClaimPending WAL is GONE (contrast the
+    // uncertain transport fault, which KEEPS it: `an_uncertain_claim_send_retries_…` above).
+    assert!(
+        enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none(),
+        "a terminal claim denial clears the ClaimPending WAL"
+    );
+    // …so a follow of a DIFFERENT claim link is not wedged behind the "a different claim enrollment is
+    // in progress" begin-guard.
+    let fresh = FakeClaim::build("claimtok2", 0, false);
+    let data = run_claim_follow(
+        &rig,
+        &fresh,
+        Some(&format!("{CLAIM_BASE}/i/claimtok2")),
+        false,
+    )
+    .expect("a fresh claim link enrolls after the dead one cleared");
+    assert!(data.enrolled);
 }
 
 #[test]

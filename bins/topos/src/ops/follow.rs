@@ -450,7 +450,23 @@ fn retry_claim(
     let enroll_src = (connectors.enroll)(base_url);
     // The display name rides for DISCLOSURE only (the seated name comes from the mint-time claim row).
     let redeem =
-        enroll_src.admin_claim(claim_token, signer.public_key(), workspace_display_name)?;
+        match enroll_src.admin_claim(claim_token, signer.public_key(), workspace_display_name) {
+            Ok(redeem) => redeem,
+            // A TERMINAL plane denial — per the seam's contract, `admin_claim` returns
+            // [`ClientError::Enrollment`] ONLY for the 200+DENIED claim verdict (consumed by another device /
+            // expired / the workspace already exists). The claim is definitively dead, so the ClaimPending WAL
+            // is cleared BEFORE the error surfaces (mirroring the poll Denied/Expired arms clearing the
+            // Authorizing WAL) — otherwise the sweep-exempt WAL wedges every later `follow <other-link>`
+            // behind the begin-guard while `--resume` re-denies forever.
+            Err(e @ ClientError::Enrollment(_)) => {
+                enroll::delete_wal(ctx.fs, &ctx.layout)?;
+                return Err(e);
+            }
+            // Everything else is an UNCERTAIN fault (a transport error, a non-200, a malformed body — the
+            // send may or may not have consumed the claim): KEEP the WAL, so the next invocation retries the
+            // POST directly and the server's same-device replay re-answers Redeemed.
+            Err(e) => return Err(e),
+        };
     // The redeem names the claim row's authoritative workspace — it must match what the link disclosed.
     if redeem.workspace_id != *workspace_id {
         return Err(ClientError::Enrollment(
@@ -1013,3 +1029,4 @@ pub(super) fn machine_name(signer: &DeviceSigner) -> String {
 fn now_millis(ctx: &Ctx<'_>) -> i64 {
     i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX)
 }
+
