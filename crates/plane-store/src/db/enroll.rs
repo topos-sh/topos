@@ -634,7 +634,12 @@ async fn complete_passcode_run(
     if row.status == "confirmed" && row.confirmed_principal.as_deref() != Some(principal.as_str()) {
         return Err(AuthorityError::NotFound);
     }
-    let already_confirmed_same = row.status == "confirmed";
+    // A session already confirmed for THIS SAME principal replays idempotently — BEFORE any passcode-row
+    // consultation. The first writer won; the passcode row's later fate (expired, locked, gone) must not
+    // turn a lost-ack retry or refresh into a WrongCode/Expired/TooManyAttempts failure.
+    if row.status == "confirmed" {
+        return Ok(PasscodeComplete::Confirmed);
+    }
     let device_code_sha256 = blob32(&row.device_code_sha256)?;
     let dc = device_code_sha256.as_slice();
     let prin = principal.as_str();
@@ -664,19 +669,17 @@ async fn complete_passcode_run(
     let stored = blob32(&pc.passcode_sha256)?;
     if digest::sha256(code.as_bytes()) == stored {
         // Confirm the session's identity (the proven principal) — the device may now poll a grant. The
-        // pending→confirmed CAS is the first-writer-wins write; a session already confirmed for the SAME
-        // principal (checked above) replays idempotently with no re-write.
-        if !already_confirmed_same {
-            sqlx::query!(
-                "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = $2 \
-                 WHERE device_code_sha256 = $1 AND status = 'pending'",
-                dc,
-                prin,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(AuthorityError::internal)?;
-        }
+        // pending→confirmed CAS is the first-writer-wins write (the session is `pending` here: a
+        // confirmed-same session already replayed above, a confirmed-different one was the uniform miss).
+        sqlx::query!(
+            "UPDATE device_auth_sessions SET status = 'confirmed', confirmed_principal = $2 \
+             WHERE device_code_sha256 = $1 AND status = 'pending'",
+            dc,
+            prin,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
         Ok(PasscodeComplete::Confirmed)
     } else {
         let attempts = pc.attempts + 1;

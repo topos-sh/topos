@@ -989,6 +989,73 @@ async fn passcode_locks_after_the_attempt_cap(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_confirmed_same_principal_passcode_replay_stays_confirmed(pool: PgPool) {
+    // First-writer-wins replay: once a session is confirmed for a principal, a SAME-principal retry or
+    // refresh replays Confirmed BEFORE any passcode-row consultation — the row's later fate (expired,
+    // deleted) must never turn a lost-ack retry into a WrongCode/Expired failure.
+    let fx = Fixture::new(pool.clone(), "enr-replay").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    let invite = make_invite(
+        a,
+        &w,
+        &owner_seed,
+        &owner_dk,
+        &op_id(1),
+        "alice@acme.com",
+        "s_deploy",
+    )
+    .await;
+    let device_seed = [11u8; 32];
+    let dpub = device_pub(&device_seed);
+    let start = a
+        .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
+        .await
+        .unwrap();
+    let pc = a
+        .start_passcode(&start.user_code, "alice@acme.com", NOW, "t0")
+        .await
+        .unwrap();
+    assert_eq!(
+        a.complete_passcode(&start.user_code, "alice@acme.com", &pc.passcode, NOW)
+            .await
+            .unwrap(),
+        PasscodeComplete::Confirmed
+    );
+
+    // Replay AFTER the passcode row expired (10-min TTL; the 15-min session is still live) ⇒ Confirmed.
+    assert_eq!(
+        a.complete_passcode(
+            &start.user_code,
+            "alice@acme.com",
+            &pc.passcode,
+            NOW + 11 * 60 * 1000,
+        )
+        .await
+        .unwrap(),
+        PasscodeComplete::Confirmed
+    );
+    // Replay with the passcode row GONE entirely ⇒ still Confirmed (never a WrongCode).
+    sqlx::query("DELETE FROM passcodes")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.complete_passcode(&start.user_code, "alice@acme.com", &pc.passcode, NOW)
+            .await
+            .unwrap(),
+        PasscodeComplete::Confirmed
+    );
+    // The early replay sits BEHIND the different-principal miss: bob still gets the uniform NotFound.
+    assert!(matches!(
+        a.complete_passcode(&start.user_code, "bob@acme.com", &pc.passcode, NOW)
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[sqlx::test]
 async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-dk").await;
     let a = &fx.authority;
