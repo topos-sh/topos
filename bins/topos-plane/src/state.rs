@@ -144,6 +144,22 @@ fn pool_config_from_env() -> PoolConfig {
     }
 }
 
+/// Resolve the enrollment method a plane ADVERTISES on its bootstraps: an explicit configured value wins,
+/// else `passcode` when SMTP is configured, else `device_code`. The reserved value `"admin_claim"` is
+/// refused as a typed startup error: it is the claim-only species marker a one-time `/i/` claim link
+/// carries — a plane configured to advertise it would make every client treat LIVE INVITES as one-shot
+/// claims (the wrong door: no device-auth session, a `--resume`-less flow that wedges).
+fn resolve_enrollment_method(configured: Option<String>, has_smtp: bool) -> anyhow::Result<String> {
+    let method =
+        configured.unwrap_or_else(|| if has_smtp { "passcode" } else { "device_code" }.to_owned());
+    anyhow::ensure!(
+        method != "admin_claim",
+        "enrollment method \"admin_claim\" is reserved for one-time claim links and cannot be a \
+         plane's configured enrollment method; use \"device_code\" or \"passcode\""
+    );
+    Ok(method)
+}
+
 impl PlaneState {
     /// Construct from an already-built [`Authority`] with the **default** rate limits (read from the
     /// environment — `TOPOS_PLANE_RATELIMIT=off` disables enforcement; otherwise a generous in-process token
@@ -222,15 +238,9 @@ impl PlaneState {
             DeploymentMode::SelfHost
         });
         // Resolve the enrollment method after SMTP (the dependency is load-bearing: passcode only when a relay
-        // is configured, else device_code).
-        let enrollment_method = cfg.enrollment_method.unwrap_or_else(|| {
-            if cfg.smtp.is_some() {
-                "passcode"
-            } else {
-                "device_code"
-            }
-            .to_owned()
-        });
+        // is configured, else device_code) — refusing the reserved claim-only marker (fail closed at startup).
+        let enrollment_method =
+            resolve_enrollment_method(cfg.enrollment_method, cfg.smtp.is_some())?;
         let verify_base_url = cfg
             .verify_base_url
             .clone()
@@ -392,5 +402,31 @@ impl PlaneState {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn enroll(&self) -> &EnrollConfig {
         &self.enroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_enrollment_method;
+
+    #[test]
+    fn enrollment_method_resolves_the_defaults_and_honors_an_explicit_value() {
+        assert_eq!(
+            resolve_enrollment_method(None, false).unwrap(),
+            "device_code"
+        );
+        assert_eq!(resolve_enrollment_method(None, true).unwrap(), "passcode");
+        assert_eq!(
+            resolve_enrollment_method(Some("device_code".to_owned()), true).unwrap(),
+            "device_code"
+        );
+    }
+
+    #[test]
+    fn the_reserved_admin_claim_method_is_a_typed_startup_error() {
+        // "admin_claim" is a claim-only species marker: a plane ADVERTISING it would make clients treat
+        // live invites as one-shot claims (the wrong door). Constructing a PlaneState with it must fail.
+        let err = resolve_enrollment_method(Some("admin_claim".to_owned()), false).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "got {err}");
     }
 }

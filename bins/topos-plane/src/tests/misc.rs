@@ -69,6 +69,30 @@ async fn open_builds_a_serving_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The reserved claim-only species marker is refused at CONSTRUCTION: a plane configured to advertise
+/// `enrollment_method = "admin_claim"` would make clients treat live invites as one-shot claims (the wrong
+/// door), so `PlaneState::open` fails typed before anything serves.
+#[tokio::test]
+async fn open_refuses_the_reserved_admin_claim_enrollment_method() {
+    let dir = unique_dir("open-reserved");
+    let err = PlaneState::open(crate::PlaneConfig {
+        database_url: unique_database_url("open_reserved").await,
+        git_root: dir.join("git"),
+        large_root: dir.join("large"),
+        plane_key_path: dir.join("plane.key"),
+        enroll_secret_path: dir.join("enroll.key"),
+        base_url: "https://plane.test".to_owned(),
+        verify_base_url: None,
+        mode: "self_host".to_owned(),
+        enrollment_method: Some("admin_claim".to_owned()),
+        smtp: None,
+    })
+    .await
+    .expect_err("the reserved method must refuse the construction");
+    assert!(err.to_string().contains("reserved"), "got {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── maintenance: one scheduled tick body drives the authority's reclamation ops ─────────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
