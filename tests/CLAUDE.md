@@ -13,7 +13,8 @@ directory is for what only a cross-crate loopback run can prove.
 - **`tests/common/`** — the shared harness: per-test Postgres provisioning (`provision_pg` creates a
   uniquely-named database on `$DATABASE_URL` and runs the production migrations) plus the loopback-plane
   scaffold every suite stands on — `Scratch` / `Plane` / `start_plane` (bind-first, optional enrollment
-  config, then serve `router(state)`), the shared seeding helpers (`seed_genesis_plane`, the
+  config, then serve `router(state)`; `start_plane_mode` picks the deployment posture, and the `Plane`
+  keeps its per-test pool for row-level witnesses), the shared seeding helpers (`seed_genesis_plane`, the
   governance-signed `mint_invite`), and the placement-expectation builders. Each suite keeps only its
   scenario-specific seeding (a seed closure handed to `start_plane`). Each e2e runs a blocking
   `ureq` client on a plain thread beside a live `axum` server on a self-owned **multi-thread** runtime —
@@ -34,6 +35,21 @@ directory is for what only a cross-crate loopback run can prove.
 - **`tests/contribute_e2e.rs`** — the client device-signed write verbs (`publish` / `review` / `revert` /
   the plane-sourced `diff`) over loopback HTTP, with a separate follower receiving the shipped bytes
   byte-exact.
+- **`tests/restore_e2e.rs`** — the backup/restore rehearsal: a SQL-rewind "restore" over the real
+  loopback plane, the operator `restore-bump-epoch` helper re-signing `current` one epoch forward, and
+  the real pull engine rolling forward instead of alarming on a reused generation.
+- **`tests/standup_e2e.rs`** — the workspace-standup full chain (the self-serve genesis release-blocker
+  proof): **door 1** (an un-enrolled `publish` goes PENDING → the authority's `approve_standup` web leg →
+  the SAME re-invoked publish enrolls + lands the genesis in one invocation, with ZERO operator ops —
+  the `admin_claim` table stays empty — and a follower pulling the object back byte-exact), **door 2**
+  (`create_workspace` → the owner's follow through the web-approve leg → genesis publish → a real
+  `invite` → the member's `invited → confirmed` redeem → byte-exact placement), the **self-host claim
+  chain** (`mint_admin_claim` → the ONE-invocation `follow <claim-link>` → publish → invite → a second
+  client's bearer redeem → byte-exact placement), and the adversarial witnesses: the off-roster leaked
+  self-invite (the client's REQUEST_ACCESS ask-an-owner envelope), uniform approve-standup misses +
+  idempotent double-approve (ONE workspace), the 4th-create cap, the standup-session intent guard
+  (refused identity legs consume nothing), same-device claim replay vs different-device denial, claim
+  expiry (+ `/i/` NotFound), and cross-species token isolation in both directions.
 
 ## Running it
 
