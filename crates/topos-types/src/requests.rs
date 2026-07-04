@@ -577,7 +577,7 @@ pub struct RedeemedSkillCred {
 
 /// `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
 /// first owner. The server re-derives the device key id from `device_public_key`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
@@ -589,6 +589,18 @@ pub struct AdminClaimRequest {
     pub device_public_key: String,
     /// The display name for the standing-up workspace.
     pub display_name: String,
+}
+
+// `claim_token` is the LIVE one-time bearer owner capability — redact it so a formatted request value
+// (a debug trace, a panic message) can never mint a second custody surface for it.
+impl std::fmt::Debug for AdminClaimRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminClaimRequest")
+            .field("claim_token", &"<redacted>")
+            .field("device_public_key", &self.device_public_key)
+            .field("display_name", &self.display_name)
+            .finish()
+    }
 }
 
 // =================================================================================================
@@ -740,6 +752,23 @@ mod tests {
             serde_json::from_str::<WireFileMode>("\"100755\"").unwrap(),
             WireFileMode::Executable
         );
+    }
+
+    #[test]
+    fn admin_claim_request_debug_redacts_the_claim_token() {
+        let req = AdminClaimRequest {
+            claim_token: "one_time_bearer_secret".to_owned(),
+            device_public_key: "pubkey_b64".to_owned(),
+            display_name: "Acme".to_owned(),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("<redacted>"), "got {dbg}");
+        assert!(
+            !dbg.contains("one_time_bearer_secret"),
+            "the live bearer must never appear in Debug: {dbg}"
+        );
+        // The non-secret fields still print (the redaction is surgical).
+        assert!(dbg.contains("pubkey_b64") && dbg.contains("Acme"));
     }
 
     #[test]
