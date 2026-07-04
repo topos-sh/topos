@@ -12,11 +12,12 @@ the genuine plane — the release-blocker e2e for the self-serve genesis:
 
 - **`tests/tests/standup_e2e.rs`** (9 tests) walks every door: **door 1** — an un-enrolled direct
   `publish` goes PENDING (the sign-in envelope: `signin_required`, the server-built
-  `verification_uri_complete` verbatim, the 19-char high-entropy code, the same-command resume argv), a
-  verified email approves via the authority op (the lib surface a composing web page calls), and
-  re-invoking the SAME publish enrolls + lands the genesis at `(1,1)` in one invocation — the receipt
-  disclosing "workspace X — owner Y", the workspace born `cloud` with the localpart-default name, the
-  owner member confirmed, and the landed object pulled back byte-exact by a follower. The chain calls
+  `verification_uri_complete` verbatim, the 16-char high-entropy code — 19 with the group dashes — and
+  the same-command resume argv), a verified email approves via the authority op (the lib surface a
+  composing web page calls), and re-invoking the SAME publish enrolls + lands the genesis at `(1,1)`
+  in one invocation — the receipt disclosing "workspace X — owner Y", the workspace born `cloud` with
+  the localpart-default name, the owner member confirmed, and the landed object pulled back byte-exact
+  by a follower. The chain calls
   ZERO operator ops — by construction AND by the `admin_claim` table staying empty. **Door 2** —
   `create_workspace` (idempotent per request: a web retry replays ONE workspace + the identical
   self-invite), the owner's two-call follow through the web-approve leg, a genesis publish, a real
@@ -96,9 +97,10 @@ workspace — no genesis path can seat an owner into a live workspace):
 
 - **The standup device flow** (hosted planes only). `POST /v1/device/authorize` accepts an optional
   `intent` (`enroll`/`standup`) with an optional `invite_token`: a standup start opens a session with NO
-  workspace, returns a HIGH-entropy 16-char user code (approving CREATES ownership, so the code must be
-  unguessable — enroll codes keep their short shape), and carries the plane block (base URL, posture, the
-  signing key to TOFU-pin) that an invited device would have read from `/i/`. The new lib-only
+  workspace, returns a HIGH-entropy 16-char user code (19 with the group dashes; approving CREATES
+  ownership, so the code must be unguessable — enroll codes keep their short shape), and carries the
+  plane block (base URL, posture, the signing key to TOFU-pin) that an invited device would have read
+  from `/i/`. The new lib-only
   `Authority::approve_standup` (+ the leak-free `PlaneState::approve_standup`) is the web leg a composing
   plane calls with a verified email: ONE transaction runs the per-identity creation cap, seats the
   workspace + owner (server-minted `w_…` id; freemail-aware domain claim; a server-side display-name

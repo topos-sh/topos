@@ -7,9 +7,11 @@ files (`SKILL.md` + scripts + reference docs); the **whole bundle** is the unit 
 **Status: real, but early.** The distribute and contribute loops both work end-to-end today — publish →
 follow → pull lands byte-exact, signature-verified bundles (proven against the real Claude Code adapter),
 and propose → review → apply plus team-wide revert run over HTTP, with a compose file that self-hosts the
-plane. Not there yet: the plane serves plain HTTP (terminate TLS at a reverse proxy in front), the
-large-object store has no S3-compatible remote backend, harness adapters beyond Claude Code, and seating a
-brand-new plane's first workspace owner is not yet an in-band command (see `docs/RELEASE.md`).
+plane. A brand-new plane's first workspace owner is seated in-band too: `topos-plane mint-claim` prints a
+one-time claim link a single `topos follow` redeems. Harness adapters for OpenClaw and Hermes are built
+alongside the Claude Code reference (their exact config shapes stay provisional until each is proven
+against a real pilot install). Not there yet: the plane serves plain HTTP (terminate TLS at a reverse
+proxy in front), and the large-object store has no S3-compatible remote backend (see `docs/RELEASE.md`).
 
 This repository is two programs in one Apache-2.0 Cargo workspace:
 
@@ -232,10 +234,16 @@ The first *client* command against the running plane is a `follow` of an invite 
 topos follow http://localhost:8787/i/<token>
 ```
 
-Honest caveat: minting the **first** identity on a brand-new plane is not yet in-band — the `admin-claim`
-route that seats a fresh workspace's first owner is built, but the binary does not yet mint its one-time
-claim token (it is on the launch checklist, `docs/RELEASE.md`). Until then a fresh plane is exercised end
-to end by the workspace-seeded e2e suites (`cargo test -p topos-e2e`) and the smoke probe above.
+On a **brand-new** plane there is no workspace to be invited into yet — mint its first identity in-band:
+
+```sh
+topos-plane mint-claim --workspace w_acme --display-name "Acme"
+```
+
+prints a one-time `/i/` claim link, exactly once (it is a bearer owner capability — store it like a
+secret). A single `topos follow <claim-link>` then stands the workspace up and seats that device as its
+first owner, who can `publish` and mint ordinary invites from there. The full chain is exercised end to
+end by the e2e suites (`cargo test -p topos-e2e`) and the smoke probe above.
 
 ### Backups & restore
 

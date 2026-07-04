@@ -138,10 +138,11 @@ issuance decision (every credential/identity decision is `plane-store::Authority
   `with_mailer` shim injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in
   production).
 
-**Planned (lands later):** the **verification-page HTML** (the routes above are the JSON surface a composing
-web layer renders; the page itself is a separate surface); the **device-signed `PUT /policy` variant** (the
+**Planned (lands later):** the **device-signed `PUT /policy` variant** (the
 admin-token operator route is built — see above; a device-op-signed governance route over the same policy
-needs a new kernel frame, still later work); the **audit outbox** read via durable cursors. **TLS
+needs a new kernel frame, still later work); the **audit outbox** read via durable cursors. NOT planned
+here: **verification/create page HTML** — the routes above are the JSON surface, and a composing web layer
+serves its own pages over them (hosted compositions already do); this lib deliberately ships none. **TLS
 termination**: terminate at a reverse proxy (the recommended, documented path); the BIN also carries an
 optional, default-off `acme` cargo feature — an EXPERIMENTAL built-in ACME (tls-alpn-01) TLS listener,
 composition-root code in `main.rs`/`acme_serve.rs` only (never the lib surface), armed at runtime solely by

@@ -37,17 +37,12 @@ Delivery history lives in `CHANGELOG.md`; the per-area detail lives in the ownin
 | Gates + packaging | `cargo xtask ci` = the non-DB CI gates in order; `check-arch` enforces the layering, the leaf-crate leanness, the OIDC default-off claim, and the Dockerfile/toolchain pin pair; a stateless Docker image + compose + smoke script, the checksummed echo-then-match installer, and the tag-triggered release pipeline (`xtask dist`) ship the self-host. | `xtask/CLAUDE.md`, `README.md` |
 
 **Still to come:** the large-object store's **S3-compatible remote backend + online backfill** (additive,
-client-invisible); the **hosted verification-page HTML + cloud preview render** (the Rust completion API is
-built; the page is a TS surface); **SSO breadth** (managed multi-IdP / HRD / SAML / SCIM — one generic OIDC
+client-invisible); **SSO breadth** (managed multi-IdP / HRD / SAML / SCIM — one generic OIDC
 connector ships feature-gated); **magic-link** as a primary rung; **active read-token rotation** (per-device
 revoke + expiry are built; rotation in the `current` path is deferred — v0 mints long-lived device-bound
 tokens); the **device-signed `PUT /policy` variant** (the self-host admin-token route is built; a
 device-op-signed governance route over the same policy needs a new kernel frame) + the client
-**key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the **workspace-standup web pages**
-(the server AND client halves are built and the loopback full-chain standup e2e is green — the claim
-mint/redeem, the standup device flow + `approve_standup`, `create_workspace`, the `/i/` claim bootstrap,
-the client's un-enrolled `publish` standup resume and `follow <claim-link>`; what remains is the hosted
-web's verify/create pages that call the lib-only wrappers); the built-in ACME TLS path's
+**key-rotation-verify** (`KEY_REPIN_REQUIRED` beyond the first pin); the built-in ACME TLS path's
 **real-estate rehearsal** (public DNS · Let's Encrypt staging→prod · rate limits · renewal timing — the
 experimental label stands and no one-command auto-TLS claim is made until it passes; a reverse proxy
 remains the documented default); the **audit outbox**; at-rest key encryption (the plane signing key +
@@ -55,7 +50,10 @@ the enrollment secret are plaintext `0600` seeds for now); the two **pilot-build
 (both sibling adapters are built — see above; OpenClaw's concrete config bytes and Hermes's per-turn
 injection + consent flow stay provisional until each pilot's exact build is probed); and harness
 *selection* in the client's composition root (v0 constructs Claude Code only; the TTY receipt copy
-already branches on the report's `CurrencyKind`).
+already branches on the report's `CurrencyKind`). NOT on this list (done elsewhere, by design): the
+verification / workspace-create / preview **web pages** — this repo deliberately ships no page HTML;
+the JSON routes plus the lib-only wrappers (`approve_standup` / `create_workspace` / `approve_session`)
+are the seam, and hosted compositions serve their own pages over them (the hosted plane's already do).
 
 **Keep this status honest (no stale docs).** This table — and the per-folder `CLAUDE.md` "Implemented /
 Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what

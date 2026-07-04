@@ -27,9 +27,9 @@ check an item off in the same change that lands it.
 
 ## Operational gaps to close (or explicitly accept and document)
 
-- [ ] **First-boot workspace standup**: mint + log the one-time `admin-claim` token so a fresh self-hosted
-      plane can seat its first owner in-band (the authority op + `POST /v1/admin-claim` route exist; the
-      binary does not yet mint the token).
+- [x] **First-boot workspace standup**: DONE — the binary mints the one-time claim in-band
+      (`topos-plane mint-claim` prints the `/i/` link exactly once; the token never enters tracing), and
+      one `topos follow <claim-link>` seats the first owner. The README's self-host walkthrough shows it.
 - [ ] **TLS posture**: the plane serves plain HTTP — the reverse-proxy termination pattern must be
       documented as the supported deployment (it is, in the README; restate it in `SECURITY.md`).
 - [ ] **At-rest key posture**: the plane signing key + enrollment secret are plaintext `0600` seeds;

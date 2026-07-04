@@ -260,12 +260,13 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   can seat an owner into a live workspace; the deployment mode is a PARAMETER threaded from the plane's
   config, never a request). (1) **The standup device flow** — `start_standup_device_auth` (CLOUD planes
   only; self-host ⇒ the uniform `NotFound`) opens a session with `intent = 'standup'` and NO workspace,
-  minting a HIGH-entropy 16-char user code (approval CREATES ownership, so the code must be unguessable;
-  enroll codes keep the short 8-char shape); `approve_standup` (lib-only, for a composing web leg with an
-  already-verified email) runs cap → fresh-`w_<hex32>`-id seat → the session's pending→confirmed CAS in ONE
-  txn — the CAS is the idempotency (same-email re-click ⇒ `AlreadyApproved`; different email / unknown /
-  expired / enroll-intent ⇒ the single indistinguishable `NotFound`). The granted poll now carries the
-  workspace's `{id, display name}` and the redeem outcome its `principal`. (2) **`create_workspace`**
+  minting a HIGH-entropy 16-char user code (19 with the group dashes; approval CREATES ownership, so
+  the code must be unguessable; enroll codes keep the short 8-char shape); `approve_standup` (lib-only,
+  for a composing web leg with an already-verified email) runs cap → fresh-`w_<hex32>`-id seat → the
+  session's pending→confirmed CAS in ONE txn — the CAS is the idempotency (same-email re-click ⇒
+  `AlreadyApproved`; different email / unknown / expired / enroll-intent ⇒ the single indistinguishable
+  `NotFound`). The granted poll now carries the workspace's `{id, display name}` and the redeem
+  outcome its `principal`. (2) **`create_workspace`**
   (lib-only) — the same genesis body for a verified email, idempotent per `request_id` via
   `genesis_requests` (same request + same owner replays the SAME workspace + the SAME deterministic
   self-invite, minted through the signature-free `mint_invite_row` the owner-signed `create_invite` also
@@ -303,11 +304,12 @@ The large-object store's **S3-compatible remote backend** (a second `LargeObject
 flip `location` → `git repack`), both additive + client-invisible; **multi-reviewer governance**
 (`min_approvers` / N-approver / reviewer roles / queues / a rendered diff UI — single-approver only today, no
 role column; the client contribute loop + the proposals-listing read route that feeds it are now BUILT); the
-**HTTP plane's still-to-come surfaces** over the issuance
-core (the verification-page HTML and the audit outbox — the enrollment + governance request/response DTOs,
-the mailer, and one generic OSS OIDC connector all landed in `topos-plane` earlier, and the workspace-policy
-mutation route is now BUILT there as the admin-token `PUT …/policy/review-required`; the two remain
-unbuilt); **active read-token
+**HTTP plane's still-to-come surface** over the issuance core (the audit outbox — the enrollment +
+governance request/response DTOs, the mailer, and one generic OSS OIDC connector all landed in
+`topos-plane` earlier, and the workspace-policy
+mutation route is now BUILT there as the admin-token `PUT …/policy/review-required`; verification-page HTML
+is a composing web layer's surface, never this repo's — the JSON routes + the `topos-plane` lib wrappers
+are the seam, and hosted compositions serve their own pages over them); **active read-token
 rotation** (redeem
 mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
 revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);
