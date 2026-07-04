@@ -175,6 +175,29 @@ are asserted byte-equal in tests.
   I-COMMIT-PARITY wire test + the op_id-replay test are in `ops/contribute`; the full loop is proven e2e over
   loopback HTTP in `tests/`.
 
+- **The workspace-standup client** (`ops/publish`'s standup branch + `ops/follow`'s claim door) — the two
+  self-serve doors onto the server's genesis seat. **The un-enrolled direct `publish`** stands the
+  workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the `--approve`
+  gate) runs BEFORE any network, then a standup device authorization against the hosted base
+  (`TOPOS_PLANE_URL` override, else the compiled-in `https://api.topos.sh` — consulted ONLY on this
+  branch), TOFU-pin from the response's plane block, a `0600` `AuthorizingStandup` WAL, and an `ok`
+  PENDING receipt (`PublishData.pending` = `signin_required` + the SERVER-built
+  `verification_uri_complete` verbatim + the code + an RFC-3339 expiry) whose `ENROLL_RESUME` next-action
+  argv is THE SAME publish command. Re-invoking it polls ONCE (consent re-derives from `--approve`, so
+  drifted bytes are refused before any poll); granted ⇒ possession proof over the EMPTY offered set →
+  redeem → `Redeemed` WAL BEFORE promotion (the shared crash fence) → promote → the publish CONTINUES in
+  the same invocation (rebuilt around the freshly pinned key), disclosing `workspace <name> — owner
+  <principal>` on both surfaces (hijack visibility). `--propose` keeps the typed not-enrolled error; an
+  enrolled device never reaches the branch. **`follow <claim-link>`** enrolls in ONE invocation: the
+  bootstrap's `enrollment_method` branches (`admin_claim` ⇒ pin → pre-send `ClaimPending` WAL (`0600`,
+  token redacted) → POST `/v1/admin-claim` → promote; an unknown method fails CLOSED typed); an uncertain
+  send retries the POST directly from the WAL on the next invocation — never refetching the
+  possibly-consumed `/i/` link (the server's same-device replay re-answers Redeemed). The seated
+  `principal` persists into `user.json` (+ `email` when email-shaped), the WAL context records the
+  enrollment ROOT (invite / standup / claim ⇒ an honest `invite_rooted`), a DENIED grant redeem is the
+  typed ask-an-owner error (`REQUEST_ACCESS`), and the invite follow now persists + re-emits the
+  server-built `verification_uri_complete` verbatim (reconstruction is only the older-plane fallback).
+
 - **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
   byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
   the enrollment uses (retaining the workspace / mode / read credential so a later

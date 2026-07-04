@@ -117,6 +117,12 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
                 argv: Vec::new(),
             },
         ],
+        // A denied enrollment redeem (authenticated-but-uninvited): the ask-an-owner guidance rides the
+        // message; the action code is the existing REQUEST_ACCESS (no argv — the fix is another human's).
+        ClientError::RedeemDenied { .. } => vec![NextAction {
+            code: ActionCode::RequestAccess,
+            argv: Vec::new(),
+        }],
         // A retryable plane outcome (e.g. a not-yet-committed lease) — re-run the same command. The agent
         // owns the argv (this surface doesn't carry the verb); a permanent one carries no Retry.
         ClientError::PlaneTerminal {
@@ -359,7 +365,8 @@ fn fmt_utc_millis(ms: u64) -> String {
 }
 
 /// Days-since-epoch → (year, month, day), proleptic Gregorian (the standard era-based conversion).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+/// `pub(crate)` — the publish pending receipt's RFC-3339 expiry formatter reuses it.
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -501,19 +508,59 @@ pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
 }
 
 pub(crate) fn publish_tty(data: &PublishData) -> String {
-    let mut out = format!(
-        "Published {}@{} (digest {}) — current is now ({},{}).",
+    let mut out = String::new();
+    // A workspace-creating publish discloses what it stood up and who owns it FIRST (hijack visibility:
+    // an owner you don't recognize means someone else approved the sign-in).
+    if let Some(standup) = &data.standup {
+        out.push_str(&format!(
+            "Stood up workspace {} — owner {}.\n",
+            standup.workspace_display_name,
+            standup.owner_principal.as_deref().unwrap_or("(unknown)"),
+        ));
+    }
+    let version = data.version_id.as_deref().map(short).unwrap_or("?");
+    let gen_text = data
+        .current_generation
+        .map(|g| format!("({},{})", g.epoch, g.seq))
+        .unwrap_or_else(|| "(?)".to_owned());
+    out.push_str(&format!(
+        "Published {}@{} (digest {}) — current is now {}.",
         data.skill_id,
-        short(&data.version_id),
+        version,
         short(&data.bundle_digest),
-        data.current_generation.epoch,
-        data.current_generation.seq,
-    );
+        gen_text,
+    ));
     // On a first (genesis) publish that minted a shareable door, surface the link.
     if let Some(link) = &data.invite_link {
         out.push_str(&format!("\nShare this skill: {link}"));
     }
     out
+}
+
+/// The PENDING standup publish: the human opens the sign-in URL and approves; the agent then re-runs the
+/// SAME publish command (nothing was published yet — honest about that).
+pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) -> String {
+    let Some(pending) = &data.pending else {
+        // Unreachable by construction (the Pending outcome always carries the block) — stay honest anyway.
+        return "Publish is pending a workspace sign-in.".to_owned();
+    };
+    format!(
+        "No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, and \
+         approve (you become the workspace owner):\n  {}\n  code: {}\nNothing is published yet; then \
+         re-run:\n  {}",
+        pending.verification_uri_complete,
+        pending.user_code,
+        resume_argv.join(" "),
+    )
+}
+
+/// The pending publish's one next action: re-invoke THE SAME publish command (`ENROLL_RESUME` — the
+/// resume IS the original command; consent re-derives from its `--approve` on every invocation).
+pub(crate) fn publish_pending_next_actions(resume_argv: Vec<String>) -> Vec<NextAction> {
+    vec![NextAction {
+        code: ActionCode::from("ENROLL_RESUME".to_owned()),
+        argv: resume_argv,
+    }]
 }
 
 pub(crate) fn propose_tty(data: &ProposeData) -> String {

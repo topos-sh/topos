@@ -158,6 +158,10 @@ pub(crate) struct DeviceAuthorize {
     pub user_code: String,
     /// The verification URL a human visits to approve the session.
     pub verification_uri: String,
+    /// The verification URL with the code already embedded (RFC-8628 `verification_uri_complete`) — the
+    /// SERVER-built link, used verbatim when present (the client-side reconstruction is only the fallback
+    /// for an older plane that omits it).
+    pub verification_uri_complete: Option<String>,
     /// The session lifetime, in seconds.
     pub expires_in: u64,
     /// The minimum poll interval, in seconds.
@@ -170,10 +174,20 @@ impl std::fmt::Debug for DeviceAuthorize {
             .field("device_code", &"<redacted>")
             .field("user_code", &self.user_code)
             .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
             .field("expires_in", &self.expires_in)
             .field("interval", &self.interval)
             .finish()
     }
+}
+
+/// A STANDUP device-authorization start: the RFC-8628 grant PLUS the plane block a standup device has no
+/// `/i/` bootstrap to learn — the base URL / posture / enrollment method / signing key to TOFU-pin.
+#[derive(Debug, Clone)]
+pub(crate) struct StandupAuthorize {
+    pub auth: DeviceAuthorize,
+    /// The plane's self-description, including the signing key to pin (the TOFU root).
+    pub plane: topos_types::bootstrap::BootstrapPlane,
 }
 
 /// The opaque single-use enrollment grant (the redeem credential). **SECRET** — its `Debug` is redacted
@@ -197,6 +211,22 @@ impl std::fmt::Debug for Grant {
     }
 }
 
+/// The workspace context a granted poll carries — the id + display name a STANDUP client (which never read
+/// an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined. `None` on an
+/// older plane's response (the enroll flow already knows its workspace from the bootstrap).
+#[derive(Debug, Clone)]
+pub(crate) struct GrantedWorkspace {
+    pub workspace_id: String,
+    pub display_name: String,
+}
+
+/// A granted `device/token` poll: the opaque grant (redacted `Debug`) + the optional workspace context.
+#[derive(Debug, Clone)]
+pub(crate) struct GrantedToken {
+    pub grant: Grant,
+    pub workspace: Option<GrantedWorkspace>,
+}
+
 /// The outcome of a `device/token` poll (RFC-8628). NOT an error — every variant is a legitimate poll
 /// state. `Granted` carries the opaque grant (redacted `Debug`).
 #[derive(Debug, Clone)]
@@ -210,8 +240,8 @@ pub(crate) enum TokenPoll {
     Denied,
     /// The session expired before confirmation.
     Expired,
-    /// Confirmed — the grant is present.
-    Granted(Grant),
+    /// Confirmed — the grant (and, for a standup session, the workspace context) is present.
+    Granted(GrantedToken),
 }
 
 /// One minted per-skill read credential from a redeem (the `read_token` is a `0600` at-rest secret —
@@ -239,6 +269,9 @@ impl std::fmt::Debug for RedeemedCred {
 pub(crate) struct Redeem {
     pub workspace_id: String,
     pub device_key_id: String,
+    /// The principal this device now acts as (the confirmed email, or a device-rooted id) — a disclosure
+    /// the client persists and prints so a hijacked standup is visible. `None` from an older plane.
+    pub principal: Option<String>,
     pub read_creds: Vec<RedeemedCred>,
 }
 
@@ -265,6 +298,19 @@ pub(crate) trait EnrollSource {
         machine_name: &str,
     ) -> Result<DeviceAuthorize, ClientError>;
 
+    /// `POST /v1/device/authorize` with `intent = "standup"` and NO invite token — begin the workspace
+    /// STANDUP device flow (hosted planes only). The response additionally carries the plane block to
+    /// TOFU-pin (a standup device has no `/i/` bootstrap to learn it from).
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault / non-OK status (a plane that does not offer standup is
+    /// a 404); [`ClientError::WireInvalid`] on a malformed body or a response missing the plane block.
+    fn device_authorize_standup(
+        &self,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<StandupAuthorize, ClientError>;
+
     /// `POST /v1/device/token` — one poll of the session. The poll STATE (pending/slow_down/denied/expired/
     /// granted) is the `Ok` value; only a transport/parse fault is an `Err`.
     ///
@@ -284,6 +330,23 @@ pub(crate) trait EnrollSource {
         grant: &str,
         device_public_key: [u8; 32],
         enroll_sig: [u8; 64],
+    ) -> Result<Redeem, ClientError>;
+
+    /// `POST /v1/admin-claim` — consume a one-time claim token to stand up the workspace + seat this device
+    /// as its first owner (the self-host bearer door). NOT device-signed on the wire; the body's public key
+    /// is the identity anchor, and the server's same-device replay of a consumed claim re-answers Redeemed
+    /// (lost-200 recovery), so a WAL retry POSTs this directly — never refetching the consumed `/i/` link.
+    /// `display_name` is disclosure-only (the seated name comes from the mint-time claim row).
+    ///
+    /// # Errors
+    /// [`ClientError::Enrollment`] on a 200+DENIED claim (consumed by another device / expired / the
+    /// workspace already exists); [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`]
+    /// on a malformed body.
+    fn admin_claim(
+        &self,
+        claim_token: &str,
+        device_public_key: [u8; 32],
+        display_name: &str,
     ) -> Result<Redeem, ClientError>;
 }
 

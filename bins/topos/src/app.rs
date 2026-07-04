@@ -178,19 +178,28 @@ pub fn run() -> ExitCode {
             skill,
             propose,
             approve,
-        } => finish_publish(
-            json,
-            cmd_name,
-            ops::publish(
-                &ctx,
-                &connect_contribute,
-                &connect_governance,
-                skill.as_deref(),
-                propose,
-                &approve,
-            ),
-            &diag,
-        ),
+        } => {
+            // The standup branch's plane base: the env override, else the compiled-in hosted default.
+            // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
+            let standup = ops::StandupConnectors {
+                enroll: &connect_enroll,
+                base_url: resolve_standup_base(std::env::var("TOPOS_PLANE_URL").ok()),
+            };
+            finish_publish(
+                json,
+                cmd_name,
+                ops::publish(
+                    &ctx,
+                    &connect_contribute,
+                    &connect_governance,
+                    &standup,
+                    skill.as_deref(),
+                    propose,
+                    &approve,
+                ),
+                &diag,
+            )
+        }
         Command::Review {
             target,
             approve,
@@ -280,6 +289,19 @@ fn connect_governance(base_url: &str) -> Box<dyn GovernanceSource> {
 
 fn connect_contribute(base_url: &str) -> Box<dyn ContributeSource> {
     Box::new(UreqDeviceClient::new(base_url.to_owned()))
+}
+
+/// The hosted plane's compiled-in base URL — used ONLY by the un-enrolled `publish` standup branch (an
+/// enrolled client reads its plane from `instance.json`, and the `/i/` doors carry their own base).
+pub(crate) const DEFAULT_HOSTED_BASE_URL: &str = "https://api.topos.sh";
+
+/// Resolve the standup base URL: a non-empty `TOPOS_PLANE_URL` override wins, else the hosted default.
+/// Pure (the env read happens at the call site) so the override precedence is unit-testable.
+pub(crate) fn resolve_standup_base(env_override: Option<String>) -> String {
+    match env_override {
+        Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
+        _ => DEFAULT_HOSTED_BASE_URL.to_owned(),
+    }
 }
 
 fn finish<T: Serialize>(
@@ -378,10 +400,11 @@ fn finish_follow(
     }
 }
 
-/// `publish`'s finisher — the verb yields either a direct publish ([`PublishData`]) or an opened proposal
-/// ([`ProposeData`]); each renders through its own `--json` payload / TTY line. A typed failure
-/// (APPROVAL_REQUIRED / CONFLICT / DENIED / …) flows through [`emit_err`], which attaches the right
-/// `next_actions`.
+/// `publish`'s finisher — the verb yields a direct publish ([`PublishData`]), an opened proposal
+/// ([`ProposeData`]), or a PENDING standup sign-in (an `ok` envelope whose `ENROLL_RESUME` next-action
+/// carries this same command's argv); each renders through its own `--json` payload / TTY line. A typed
+/// failure (APPROVAL_REQUIRED / CONFLICT / DENIED / …) flows through [`emit_err`], which attaches the
+/// right `next_actions`.
 fn finish_publish(
     json: bool,
     command: &str,
@@ -404,6 +427,17 @@ fn finish_publish(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", render::propose_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::PublishOutcome::Pending { data, resume_argv }) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::publish_pending_next_actions(resume_argv);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::publish_pending_tty(&data, &resume_argv));
             }
             ExitCode::SUCCESS
         }
@@ -608,8 +642,23 @@ fn resolve_home() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::build_pull_scope;
+    use super::{DEFAULT_HOSTED_BASE_URL, build_pull_scope, resolve_standup_base};
     use crate::ops::{PullScope, TargetMode, VersionRef};
+
+    #[test]
+    fn standup_base_env_override_beats_the_compiled_default() {
+        // No override (or a blank one) → the compiled-in hosted default.
+        assert_eq!(resolve_standup_base(None), DEFAULT_HOSTED_BASE_URL);
+        assert_eq!(
+            resolve_standup_base(Some("   ".to_owned())),
+            DEFAULT_HOSTED_BASE_URL
+        );
+        // A non-empty TOPOS_PLANE_URL wins, trimmed of whitespace + a trailing slash.
+        assert_eq!(
+            resolve_standup_base(Some("http://127.0.0.1:8787/".to_owned())),
+            "http://127.0.0.1:8787"
+        );
+    }
 
     #[test]
     fn pull_target_recognizes_full_ids_and_short_prefixes() {

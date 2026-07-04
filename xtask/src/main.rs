@@ -254,10 +254,12 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
+    use topos_types::bootstrap::DeploymentMode;
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        AddData, ConflictPathReport, DiffData, DiffSource, ListData, LogData, MergeReport,
-        PullAction, PullData, PullSkill, SkillEntry, UnfollowData,
+        AddData, ConflictPathReport, DiffData, DiffSource, FollowData, ListData, LogData,
+        MergeReport, PublishData, PublishPending, PublishPendingStatus, PullAction, PullData,
+        PullSkill, SkillEntry, UnfollowData,
     };
     use topos_types::{
         ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
@@ -562,6 +564,69 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
+    // An UN-ENROLLED direct publish on the hosted plane: the workspace-standup PENDING envelope. Still
+    // `ok = true` — nothing failed, a human sign-in is simply required; the `ENROLL_RESUME` next-action
+    // carries THE SAME publish command (re-invoking it is the resume).
+    let publish_pending = JsonEnvelope {
+        schema_version: 1,
+        command: "publish".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PublishData {
+            skill_id: "topos_t00".to_owned(),
+            // Honest at pending: nothing was published, so there is no version and no generation yet.
+            version_id: None,
+            bundle_digest: fx_digest.to_owned(),
+            current_generation: None,
+            invite_link: None,
+            pending: Some(PublishPending {
+                status: PublishPendingStatus::SigninRequired,
+                verification_uri_complete: "https://topos.sh/verify/hxk3v9q2m8w4t6r5".to_owned(),
+                user_code: "hxk3v9q2m8w4t6r5".to_owned(),
+                expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
+            }),
+            standup: None,
+        })
+        .expect("PublishData serializes"),
+        warnings: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("ENROLL_RESUME".to_owned()),
+            argv: argv(&[
+                "topos",
+                "publish",
+                "pr-describe",
+                "--approve",
+                &format!("pr-describe@{fx_digest}"),
+                "--json",
+            ]),
+        }],
+        receipt: None,
+        error: None,
+    };
+
+    // A one-shot `follow <claim-link>` (the self-host admin-claim door): enrolled in ONE invocation —
+    // no pending block, no offered skills (a claim stands up membership, not bytes).
+    let follow_claim_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "follow".to_owned(),
+        ok: true,
+        data: serde_json::to_value(FollowData {
+            workspace_id: "w_demo".to_owned(),
+            enrolled: true,
+            skills: vec![],
+            deployment_mode: Some(DeploymentMode::SelfHost),
+            workspace_display_name: Some("Demo Team".to_owned()),
+            verified_domain: None,
+            verified_domain_status: Some(topos_types::bootstrap::VerifiedDomainStatus::Unverified),
+            pending: None,
+            currency: None,
+        })
+        .expect("FollowData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
@@ -576,6 +641,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             emit_json(&publish_approval_required),
         ),
         ("json/publish.conflict", emit_json(&publish_conflict)),
+        ("json/publish.pending", emit_json(&publish_pending)),
+        ("json/follow.claim.ok", emit_json(&follow_claim_ok)),
     ]
 }
 

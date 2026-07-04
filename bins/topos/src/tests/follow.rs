@@ -31,8 +31,8 @@ use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
     DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowMode,
-    FollowSource, Grant, InertFollow, InertPlane, KnownCurrent, PlaneError, PlaneSource,
-    PointerFetch, Redeem, RedeemedCred, TokenPoll,
+    FollowSource, Grant, GrantedToken, InertFollow, InertPlane, KnownCurrent, PlaneError,
+    PlaneSource, PointerFetch, Redeem, RedeemedCred, StandupAuthorize, TokenPoll,
 };
 use crate::plane_http::SkillCred;
 use crate::sidecar::Layout;
@@ -173,16 +173,27 @@ impl EnrollSource for FakeEnroll {
         Ok(DeviceAuthorize {
             device_code: self.device_code.clone(),
             user_code: self.user_code.clone(),
-            verification_uri: format!("{BASE_URL}/device"),
+            verification_uri: format!("{BASE_URL}/verify"),
+            verification_uri_complete: Some(format!("{BASE_URL}/verify/{}", self.user_code)),
             expires_in: 900,
             interval: 5,
         })
+    }
+    fn device_authorize_standup(
+        &self,
+        _device_public_key: [u8; 32],
+        _machine_name: &str,
+    ) -> Result<StandupAuthorize, ClientError> {
+        panic!("the invite follow flow never starts a standup authorization")
     }
     fn poll_token(&self, _device_code: &str) -> Result<TokenPoll, ClientError> {
         Ok(match self.poll {
             Poll::Pending => TokenPoll::Pending,
             Poll::Denied => TokenPoll::Denied,
-            Poll::Granted => TokenPoll::Granted(Grant::new(self.grant.clone())),
+            Poll::Granted => TokenPoll::Granted(GrantedToken {
+                grant: Grant::new(self.grant.clone()),
+                workspace: None,
+            }),
         })
     }
     fn redeem(
@@ -216,6 +227,7 @@ impl EnrollSource for FakeEnroll {
         Ok(Redeem {
             workspace_id: workspace_id.to_owned(),
             device_key_id: dk,
+            principal: Some("alice@acme.com".to_owned()),
             read_creds: self
                 .bootstrap
                 .offered_skills
@@ -227,6 +239,14 @@ impl EnrollSource for FakeEnroll {
                 })
                 .collect(),
         })
+    }
+    fn admin_claim(
+        &self,
+        _claim_token: &str,
+        _device_public_key: [u8; 32],
+        _display_name: &str,
+    ) -> Result<Redeem, ClientError> {
+        panic!("the invite follow flow never redeems an admin claim")
     }
 }
 
@@ -508,10 +528,11 @@ fn follow_link_returns_pending_writes_a_0600_wal_and_discloses_provenance() {
     // The pending arm: not enrolled, the verification URL + provenance disclosed.
     assert!(!data.enrolled);
     let pending = data.pending.expect("a pending enrollment");
-    assert!(
-        pending
-            .verification_uri_complete
-            .contains("user_code=WXYZ-1234")
+    // The SERVER-built complete URI is surfaced verbatim (the client-side reconstruction is only the
+    // fallback for an older plane that omits the field).
+    assert_eq!(
+        pending.verification_uri_complete,
+        format!("{BASE_URL}/verify/WXYZ-1234")
     );
     assert_eq!(pending.user_code, "WXYZ-1234");
     assert_eq!(data.workspace_display_name.as_deref(), Some("Acme Inc"));
@@ -608,7 +629,9 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
         .unwrap();
     assert_eq!(user.workspace_id, WS);
     assert!(user.invite_rooted);
-    assert!(user.email.is_none());
+    // The redeem now discloses the seated principal; an email-shaped one also fills `email`.
+    assert_eq!(user.principal.as_deref(), Some("alice@acme.com"));
+    assert_eq!(user.email.as_deref(), Some("alice@acme.com"));
 
     // host.json records the device key (the PUBLIC ref); the id matches the server derivation.
     let host_bytes = std::fs::read(layout.host_path()).unwrap();
@@ -704,6 +727,7 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
             name: Some("deploy".into()),
         }],
         mode: enroll::FollowModeDoc::Auto,
+        root: enroll::EnrollRoot::Invite,
     };
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
@@ -715,6 +739,7 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
                 expires_at: None,
             }],
             device_key_id: device_key_id_for(&device_pubkey(&rig)),
+            principal: None,
             enrolled_at_millis: 1,
         },
     };
@@ -767,6 +792,13 @@ impl EnrollSource for PanicEnroll {
     ) -> Result<DeviceAuthorize, ClientError> {
         panic!("a Redeemed-WAL resume must not re-authorize")
     }
+    fn device_authorize_standup(
+        &self,
+        _k: [u8; 32],
+        _m: &str,
+    ) -> Result<StandupAuthorize, ClientError> {
+        panic!("a Redeemed-WAL resume must not start a standup")
+    }
     fn poll_token(&self, _d: &str) -> Result<TokenPoll, ClientError> {
         panic!("a Redeemed-WAL resume must not re-poll")
     }
@@ -778,6 +810,9 @@ impl EnrollSource for PanicEnroll {
         _s: [u8; 64],
     ) -> Result<Redeem, ClientError> {
         panic!("a Redeemed-WAL resume must NOT re-redeem the single-use grant")
+    }
+    fn admin_claim(&self, _c: &str, _k: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
+        panic!("a Redeemed-WAL resume must not redeem an admin claim")
     }
 }
 
@@ -929,6 +964,7 @@ fn the_read_token_never_leaks_in_debug() {
                 expires_at: None,
             }],
             device_key_id: "dk_x".into(),
+            principal: None,
             enrolled_at_millis: 1,
         },
     };
@@ -955,6 +991,7 @@ fn tiny_context() -> enroll::EnrollContext {
         verified_domain_status: VerifiedDomainStatus::Unverified,
         offered_skills: Vec::new(),
         mode: enroll::FollowModeDoc::Auto,
+        root: enroll::EnrollRoot::Invite,
     }
 }
 

@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use topos_core::digest::{self, ManifestEntry, to_hex};
 use topos_core::sign::EnrollFields;
 use topos_gitstore::Store;
+use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
@@ -114,11 +115,56 @@ fn begin(
     manual: bool,
 ) -> Result<FollowData, ClientError> {
     let (base_url, token) = parse_link(ctx, link)?;
+
+    // An unsettled claim redeem for this same link retries the POST directly — NEVER refetching `/i/`
+    // (the first send may have consumed the claim, whose bootstrap then serves 404 by design; the
+    // server's same-device replay re-answers Redeemed). A different token/plane is refused typed.
+    if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)?
+        && let enroll::EnrollPhase::ClaimPending {
+            base_url: wal_base,
+            claim_token,
+            ..
+        } = &wal.state
+    {
+        if *wal_base == base_url && *claim_token == token {
+            return retry_claim(ctx, connectors, &wal);
+        }
+        return Err(ClientError::Enrollment(
+            "a different claim enrollment is in progress; run `topos follow --resume` to settle it \
+             first"
+                .into(),
+        ));
+    }
+
     let enroll_src = (connectors.enroll)(&base_url);
 
     let bootstrap = enroll_src.fetch_bootstrap(&token)?;
     // I-TOFU: pin the plane key over the unauthenticated `/i/` channel (or refuse a cross-plane / re-pin).
-    let pinned_plane_key = tofu_decide(ctx, &base_url, &bootstrap)?;
+    let pinned_plane_key = tofu_decide_key(ctx, &base_url, &bootstrap.plane.signing_key)?;
+
+    // Branch on the enrollment method the bootstrap disclosed. A method this build does not understand
+    // fails CLOSED — proceeding would enroll under a posture the human was never able to review.
+    match bootstrap.plane.enrollment_method.as_str() {
+        // The one-shot admin-claim door (self-host bearer): no device-auth session, no `--resume`.
+        "admin_claim" => {
+            return claim_follow(
+                ctx,
+                connectors,
+                &base_url,
+                &token,
+                &bootstrap,
+                &pinned_plane_key,
+            );
+        }
+        // The device-authorization flow (with or without the passcode identity leg on the verify page).
+        "device_code" | "passcode" => {}
+        other => {
+            return Err(ClientError::Enrollment(format!(
+                "this plane offers enrollment method '{other}', which this topos build does not \
+                 support; upgrade topos"
+            )));
+        }
+    }
 
     // Load (or, on first use, mint) the device signer — its public key starts the device authorization.
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
@@ -147,6 +193,7 @@ fn begin(
         } else {
             enroll::FollowModeDoc::Auto
         },
+        root: enroll::EnrollRoot::Invite,
     };
 
     // The 0600 WAL — written BEFORE returning, so a `--resume` can pick up exactly this session.
@@ -161,32 +208,34 @@ fn begin(
             context: context.clone(),
             device_code: auth.device_code,
             user_code: auth.user_code.clone(),
+            verification_uri_complete: auth.verification_uri_complete.clone(),
             interval: auth.interval,
             expires_at_millis,
         },
     };
     enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
 
-    Ok(pending_followdata(
-        &context,
-        &auth.user_code,
-        &auth.verification_uri,
-    ))
+    // The SERVER-built complete URI wins verbatim; the client-side embed is only the older-plane fallback.
+    let complete = auth
+        .verification_uri_complete
+        .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
+    Ok(pending_followdata(&context, &auth.user_code, complete))
 }
 
-/// The TOFU decision (I-TOFU). Decode the bootstrap's plane signing key (`alg` is the CLOSED `SignatureAlg`
-/// enum — a non-Ed25519 alg already failed the bootstrap deserialize; the value is raw-32B base64url →
-/// 64-hex). Then: ABSENT `instance.json` ⇒ first-ever pin; PRESENT with a different `base_url` ⇒ refuse a
-/// cross-plane follow (v0 is one plane per install); PRESENT, same `base_url`, different key ⇒
-/// `KEY_REPIN_REQUIRED`; same key ⇒ OK. Returns the pinned key as 64-char lowercase hex.
-fn tofu_decide(
+/// The TOFU decision (I-TOFU), shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
+/// Decode the plane signing key (`alg` is the CLOSED `SignatureAlg` enum — a non-Ed25519 alg already
+/// failed the deserialize; the value is raw-32B base64url → 64-hex). Then: ABSENT `instance.json` ⇒
+/// first-ever pin; PRESENT with a different `base_url` ⇒ refuse a cross-plane follow (v0 is one plane per
+/// install); PRESENT, same `base_url`, different key ⇒ `KEY_REPIN_REQUIRED`; same key ⇒ OK. Returns the
+/// pinned key as 64-char lowercase hex.
+pub(super) fn tofu_decide_key(
     ctx: &Ctx<'_>,
     base_url: &str,
-    bootstrap: &topos_types::BootstrapData,
+    signing_key: &topos_types::bootstrap::BootstrapSigningKey,
 ) -> Result<String, ClientError> {
     use base64::Engine as _;
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(bootstrap.plane.signing_key.value.as_bytes())
+        .decode(signing_key.value.as_bytes())
         .map_err(|_| ClientError::Corrupt("plane signing key is not base64url".into()))?;
     let raw: [u8; 32] = raw
         .try_into()
@@ -226,6 +275,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
             context,
             read_creds,
             device_key_id,
+            principal,
             enrolled_at_millis,
         } => {
             let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
@@ -235,24 +285,44 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                 &context,
                 &read_creds,
                 &device_key_id,
+                principal.as_deref(),
                 enrolled_at_millis,
                 &signer,
             )
+        }
+        // A standup session belongs to `publish` — its resume is the ORIGINAL publish command (the
+        // consent digest re-derives from that command's `--approve` each invocation, which `follow`
+        // cannot supply).
+        enroll::EnrollPhase::AuthorizingStandup { .. } => Err(ClientError::Enrollment(
+            "a workspace standup is in progress; re-run the `topos publish … --approve …` command \
+             that started it"
+                .into(),
+        )),
+        // An unsettled claim redeem: retry the POST directly (never refetch the possibly-consumed /i/).
+        state @ enroll::EnrollPhase::ClaimPending { .. } => {
+            let wal = enroll::PendingEnrollment {
+                schema_version: PERSISTED_SCHEMA_VERSION,
+                state,
+            };
+            retry_claim(ctx, connectors, &wal)
         }
         enroll::EnrollPhase::Authorizing {
             context,
             device_code,
             user_code,
+            verification_uri_complete,
             ..
         } => {
             let enroll_src = (connectors.enroll)(&context.base_url);
             match enroll_src.poll_token(&device_code)? {
-                // Still pending — re-surface the URL; the WAL stays put for the next `--resume`.
-                TokenPoll::Pending | TokenPoll::SlowDown => Ok(pending_followdata(
-                    &context,
-                    &user_code,
-                    &verification_uri(&context),
-                )),
+                // Still pending — re-surface the URL (the persisted server-built one, verbatim; the
+                // client-side reconstruction is only the fallback for a WAL an older plane filled); the
+                // WAL stays put for the next `--resume`.
+                TokenPoll::Pending | TokenPoll::SlowDown => {
+                    let complete = verification_uri_complete
+                        .unwrap_or_else(|| complete_uri(&verification_uri(&context), &user_code));
+                    Ok(pending_followdata(&context, &user_code, complete))
+                }
                 // A terminal denial / expiry — sweep the WAL, surface a typed error.
                 TokenPoll::Denied => {
                     enroll::delete_wal(ctx.fs, &ctx.layout)?;
@@ -266,12 +336,17 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                         "the enrollment session expired; start over with `follow <link>`".into(),
                     ))
                 }
-                TokenPoll::Granted(grant) => {
+                TokenPoll::Granted(granted) => {
                     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
                     // Sign the enroll possession proof over the SERVER-trusted framed fields (the server
                     // re-derives each from the grant, so they must match) + redeem.
-                    let redeem =
-                        redeem_grant(&*enroll_src, &context, &user_code, grant.as_str(), &signer)?;
+                    let redeem = redeem_grant(
+                        &*enroll_src,
+                        &context,
+                        &user_code,
+                        granted.grant.as_str(),
+                        &signer,
+                    )?;
                     let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
                         .read_creds
                         .iter()
@@ -293,6 +368,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                                 context: context.clone(),
                                 read_creds: read_creds.clone(),
                                 device_key_id: redeem.device_key_id.clone(),
+                                principal: redeem.principal.clone(),
                                 enrolled_at_millis: enrolled_at,
                             },
                         },
@@ -303,6 +379,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                         &context,
                         &read_creds,
                         &redeem.device_key_id,
+                        redeem.principal.as_deref(),
                         enrolled_at,
                         &signer,
                     )
@@ -310,6 +387,126 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
             }
         }
     }
+}
+
+// =================================================================================================
+// The admin-claim door — `follow <claim-link>` in ONE invocation (self-host bearer). The `/i/` bootstrap
+// disclosed `enrollment_method: "admin_claim"`; there is no device-auth session and no `--resume` on the
+// happy path. A pre-send WAL makes an uncertain send safely retryable: the retry POSTs `/v1/admin-claim`
+// directly (a consumed claim's bootstrap serves 404 by design; the server's same-device replay of a
+// consumed claim deterministically re-answers Redeemed).
+// =================================================================================================
+
+fn claim_follow(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    base_url: &str,
+    token: &str,
+    bootstrap: &topos_types::BootstrapData,
+    pinned_plane_key: &str,
+) -> Result<FollowData, ClientError> {
+    // The pre-send WAL (0600 — the claim token is a bearer secret), BEFORE the first POST.
+    let wal = enroll::PendingEnrollment {
+        schema_version: PERSISTED_SCHEMA_VERSION,
+        state: enroll::EnrollPhase::ClaimPending {
+            base_url: base_url.to_owned(),
+            pinned_plane_key: pinned_plane_key.to_owned(),
+            plane_key_id: bootstrap.plane.signing_key.key_id.clone(),
+            deployment_mode: bootstrap.plane.deployment_mode,
+            enrollment_method: bootstrap.plane.enrollment_method.clone(),
+            workspace_id: bootstrap.workspace.workspace_id.clone(),
+            workspace_display_name: bootstrap.workspace.display_name.clone(),
+            claim_token: token.to_owned(),
+        },
+    };
+    enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
+    retry_claim(ctx, connectors, &wal)
+}
+
+/// Send (or re-send) the claim redeem recorded in a `ClaimPending` WAL, then convert to the ordinary
+/// `Redeemed` fence and promote. Callable any number of times: the server treats a same-device replay of a
+/// consumed claim as the SAME redeem (lost-200 recovery), so the retry is idempotent by construction.
+fn retry_claim(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    wal: &enroll::PendingEnrollment,
+) -> Result<FollowData, ClientError> {
+    let enroll::EnrollPhase::ClaimPending {
+        base_url,
+        pinned_plane_key,
+        plane_key_id,
+        deployment_mode,
+        enrollment_method,
+        workspace_id,
+        workspace_display_name,
+        claim_token,
+    } = &wal.state
+    else {
+        return Err(ClientError::Corrupt(
+            "retry_claim needs a claim_pending WAL".into(),
+        ));
+    };
+    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+    let enroll_src = (connectors.enroll)(base_url);
+    // The display name rides for DISCLOSURE only (the seated name comes from the mint-time claim row).
+    let redeem =
+        enroll_src.admin_claim(claim_token, signer.public_key(), workspace_display_name)?;
+    // The redeem names the claim row's authoritative workspace — it must match what the link disclosed.
+    if redeem.workspace_id != *workspace_id {
+        return Err(ClientError::Enrollment(
+            "the claimed workspace does not match the claim link".into(),
+        ));
+    }
+    let context = enroll::EnrollContext {
+        base_url: base_url.clone(),
+        pinned_plane_key: pinned_plane_key.clone(),
+        plane_key_id: plane_key_id.clone(),
+        deployment_mode: *deployment_mode,
+        enrollment_method: enrollment_method.clone(),
+        workspace_id: workspace_id.clone(),
+        workspace_display_name: workspace_display_name.clone(),
+        verified_domain: None,
+        verified_domain_status: VerifiedDomainStatus::Unverified,
+        offered_skills: Vec::new(),
+        mode: enroll::FollowModeDoc::Auto,
+        root: enroll::EnrollRoot::Claim,
+    };
+    let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
+        .read_creds
+        .iter()
+        .map(|c| enroll::RedeemedCredDoc {
+            skill_id: c.skill_id.clone(),
+            read_token: c.read_token.clone(),
+            expires_at: c.expires_at,
+        })
+        .collect();
+    let enrolled_at = now_millis(ctx);
+    // The same lockout fence as the grant flow: the claim is consumed server-side, so the redeemed facts
+    // are recorded BEFORE promotion and a crash mid-promote completes from here without re-sending.
+    enroll::write_wal(
+        ctx.fs,
+        &ctx.layout,
+        &enroll::PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: enroll::EnrollPhase::Redeemed {
+                context: context.clone(),
+                read_creds: read_creds.clone(),
+                device_key_id: redeem.device_key_id.clone(),
+                principal: redeem.principal.clone(),
+                enrolled_at_millis: enrolled_at,
+            },
+        },
+    )?;
+    promote(
+        ctx,
+        connectors,
+        &context,
+        &read_creds,
+        &redeem.device_key_id,
+        redeem.principal.as_deref(),
+        enrolled_at,
+        &signer,
+    )
 }
 
 /// Build the enroll possession proof + redeem the grant into a registered device + per-skill read creds.
@@ -351,15 +548,57 @@ fn redeem_grant(
 // Promotion — the sidecar writers (crash-safe; idempotent so a re-resume re-promotes cleanly).
 // =================================================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn promote(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
     context: &enroll::EnrollContext,
     read_creds: &[enroll::RedeemedCredDoc],
     device_key_id: &str,
+    principal: Option<&str>,
     enrolled_at: i64,
     signer: &DeviceSigner,
 ) -> Result<FollowData, ClientError> {
+    let currency = promote_core(
+        ctx,
+        context,
+        read_creds,
+        device_key_id,
+        principal,
+        enrolled_at,
+        signer,
+    )?;
+
+    // Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
+    // sidecar, so first-receive stays an OFFER). Best-effort: a fetch hiccup omits that skill's offer.
+    let skills = disclose_offers(connectors, context, read_creds);
+
+    Ok(FollowData {
+        workspace_id: context.workspace_id.clone(),
+        enrolled: true,
+        skills,
+        deployment_mode: Some(context.deployment_mode),
+        workspace_display_name: Some(context.workspace_display_name.clone()),
+        verified_domain: context.verified_domain.clone(),
+        verified_domain_status: Some(context.verified_domain_status),
+        pending: None,
+        currency: Some(currency),
+    })
+}
+
+/// The sidecar half of a promotion — every durable write, WITHOUT the follow-shaped offer disclosure (the
+/// standup `publish` promotes through this too, then continues into its own publish body). Returns the
+/// currency-trigger report. Idempotent, so a re-resume re-promotes cleanly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn promote_core(
+    ctx: &Ctx<'_>,
+    context: &enroll::EnrollContext,
+    read_creds: &[enroll::RedeemedCredDoc],
+    device_key_id: &str,
+    principal: Option<&str>,
+    enrolled_at: i64,
+    signer: &DeviceSigner,
+) -> Result<topos_types::TriggerReport, ClientError> {
     // 1) instance.json — PUBLIC (the plane key is a public key) → ordinary perms.
     enroll::write_instance(
         ctx.fs,
@@ -392,7 +631,9 @@ fn promote(
         .collect();
     enroll::write_follows_merged(ctx.fs, &ctx.layout, &additions)?;
 
-    // 3) user.json — metadata only (no secret) → ordinary perms.
+    // 3) user.json — metadata only (no secret) → ordinary perms. The seated principal (when the plane
+    // disclosed one) is persisted for the receipt disclosures; an email-shaped principal also fills
+    // `email` (a device-rooted `dev.…` id is NOT an email and never pretends to be one).
     enroll::write_user(
         ctx.fs,
         &ctx.layout,
@@ -400,9 +641,10 @@ fn promote(
             schema_version: PERSISTED_SCHEMA_VERSION,
             workspace_id: context.workspace_id.clone(),
             deployment_mode: context.deployment_mode,
-            email: None,
+            email: principal.filter(|p| p.contains('@')).map(str::to_owned),
+            principal: principal.map(str::to_owned),
             roles: Vec::new(),
-            invite_rooted: true,
+            invite_rooted: matches!(context.root, enroll::EnrollRoot::Invite),
             enrolled_at,
         },
     )?;
@@ -435,23 +677,7 @@ fn promote(
     // CONFIG (never a skill dir), and the sweep no-ops until the first bytes land. Infallible (a
     // TriggerReport, degraded on a config hiccup), so it can never roll back the completed enrollment;
     // the outcome is disclosed on the result.
-    let currency = ctx.harness.install_currency_trigger();
-
-    // 8) Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
-    // sidecar, so first-receive stays an OFFER). Best-effort: a fetch hiccup omits that skill's offer.
-    let skills = disclose_offers(connectors, context, read_creds);
-
-    Ok(FollowData {
-        workspace_id: context.workspace_id.clone(),
-        enrolled: true,
-        skills,
-        deployment_mode: Some(context.deployment_mode),
-        workspace_display_name: Some(context.workspace_display_name.clone()),
-        verified_domain: context.verified_domain.clone(),
-        verified_domain_status: Some(context.verified_domain_status),
-        pending: None,
-        currency: Some(currency),
-    })
+    Ok(ctx.harness.install_currency_trigger())
 }
 
 /// Lay the NEVER-RECEIVED sidecar baseline for `skill_id` (mirrors `ops::add`'s staged-then-renamed,
@@ -714,11 +940,12 @@ fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError
 }
 
 /// Build the pending FollowData (the agent surfaces the URL WITH the verified-domain provenance — the
-/// relay-phishing guard — then runs `follow --resume`).
+/// relay-phishing guard — then runs `follow --resume`). `verification_uri_complete` is the SERVER-built
+/// link when the plane provided one (used verbatim), else the caller's reconstruction.
 fn pending_followdata(
     context: &enroll::EnrollContext,
     user_code: &str,
-    verification_uri: &str,
+    verification_uri_complete: String,
 ) -> FollowData {
     FollowData {
         workspace_id: context.workspace_id.clone(),
@@ -729,7 +956,7 @@ fn pending_followdata(
         verified_domain: context.verified_domain.clone(),
         verified_domain_status: Some(context.verified_domain_status),
         pending: Some(EnrollmentPending {
-            verification_uri_complete: complete_uri(verification_uri, user_code),
+            verification_uri_complete,
             user_code: user_code.to_owned(),
             // No RFC-3339 formatter client-side; the WAL holds the absolute expiry for the recovery sweep.
             expires_at: None,
@@ -738,8 +965,9 @@ fn pending_followdata(
     }
 }
 
-/// The verification URL with the `user_code` embedded (RFC-8628 `verification_uri_complete`).
-fn complete_uri(verification_uri: &str, user_code: &str) -> String {
+/// The verification URL with the `user_code` embedded (RFC-8628 `verification_uri_complete`) — the
+/// CLIENT-side reconstruction, used only as the fallback when the plane did not provide the complete URI.
+pub(super) fn complete_uri(verification_uri: &str, user_code: &str) -> String {
     let sep = if verification_uri.contains('?') {
         '&'
     } else {
@@ -777,7 +1005,7 @@ fn strip_digest(target: &str) -> &str {
 
 /// A human-readable machine name for the verification page (a confused-deputy aid, not authority) — carries
 /// the device key id so a human can cross-check the fingerprint shown on the page.
-fn machine_name(signer: &DeviceSigner) -> String {
+pub(super) fn machine_name(signer: &DeviceSigner) -> String {
     format!("topos CLI ({})", signer.device_key_id())
 }
 

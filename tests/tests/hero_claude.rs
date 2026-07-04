@@ -372,12 +372,18 @@ fn run_distribute_hero(case: &AdapterCase) {
     let PublishResult::Published(genesis) = published else {
         panic!("a direct publish moves current, never opens a proposal");
     };
-    assert_eq!(genesis.current_generation, Generation { epoch: 1, seq: 1 });
+    assert_eq!(
+        genesis.current_generation,
+        Some(Generation { epoch: 1, seq: 1 })
+    );
     assert!(
         genesis.invite_link.is_none(),
         "the genesis invite fold-in is owner-gated; a plain member publishes without one"
     );
-    let genesis_id = genesis.version_id.clone();
+    let genesis_id = genesis
+        .version_id
+        .clone()
+        .expect("a published receipt names its version");
 
     // ── 2 · Machine B: a pure follower enrolls via the real `follow`; the hook arms; genesis lands. ──
     let follower = enroll_follower(
@@ -431,7 +437,7 @@ fn run_distribute_hero(case: &AdapterCase) {
     let PublishResult::Published(v2) = updated else {
         panic!("a direct publish moves current");
     };
-    assert_eq!(v2.current_generation, Generation { epoch: 1, seq: 2 });
+    assert_eq!(v2.current_generation, Some(Generation { epoch: 1, seq: 2 }));
 
     let sweep = follower.pull(Scope::AllFollowed);
     assert_eq!(sweep.skills.len(), 1);

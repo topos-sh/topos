@@ -218,6 +218,26 @@ pub(crate) struct OfferedSkill {
     pub name: Option<String>,
 }
 
+/// How an enrollment was rooted — an `/i/` invite (the original door), a workspace-standup sign-in, or a
+/// one-time admin claim. Persisted in the WAL context so the promotion writes an honest
+/// `user.json.invite_rooted` and the standup publish can disclose its receipt; a missing field on an older
+/// WAL reads as `invite` (the only root that existed before this field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EnrollRoot {
+    /// Rooted in an `/i/` invite link.
+    Invite,
+    /// Rooted in the workspace-standup sign-in (an un-enrolled `publish` on a hosted plane).
+    Standup,
+    /// Rooted in a one-time admin-claim link (the self-host bearer door).
+    Claim,
+}
+
+/// The serde default for [`EnrollRoot`] — invite (the pre-existing WALs were all invite-rooted).
+fn default_enroll_root() -> EnrollRoot {
+    EnrollRoot::Invite
+}
+
 /// The non-secret workspace/plane context both WAL phases carry — everything a promotion needs to write
 /// `instance.json` + `follows.json` + `user.json` without re-contacting the plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +257,9 @@ pub(crate) struct EnrollContext {
     pub offered_skills: Vec<OfferedSkill>,
     /// How a followed skill adopts a new `current` (`--manual` ⇒ confirm-each, else auto).
     pub mode: FollowModeDoc,
+    /// Which door rooted this enrollment (invite / standup / claim); absent on an older WAL ⇒ invite.
+    #[serde(default = "default_enroll_root")]
+    pub root: EnrollRoot,
 }
 
 /// One minted read credential persisted into the Redeemed WAL (a `0600` secret — the `read_token` grants
@@ -273,11 +296,59 @@ pub(crate) enum EnrollPhase {
         device_code: String,
         /// The short user code (also the `device_auth_id` the enroll possession frame binds).
         user_code: String,
+        /// The SERVER-provided verification URL with the code embedded — persisted so a pending resume
+        /// re-emits it verbatim. `None` from an older plane (the resume then reconstructs a fallback).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification_uri_complete: Option<String>,
         /// The minimum poll interval, in seconds.
         interval: u64,
         /// The session expiry as epoch-millis — the recovery sweep abandons a WAL past this that never
         /// reached `Redeemed`.
         expires_at_millis: i64,
+    },
+    /// A live workspace-STANDUP device-authorization session (an un-enrolled `publish` on a hosted plane),
+    /// awaiting the human's sign-in approval. There is NO workspace yet — approving CREATES one — so this
+    /// phase carries the plane facts the standup authorize response disclosed instead of an
+    /// [`EnrollContext`]; the granted poll supplies `{workspace_id, display_name}`, at which point the
+    /// flow converts to the ordinary [`EnrollPhase::Redeemed`].
+    AuthorizingStandup {
+        /// The plane base URL this standup was started against (env override or the hosted default).
+        base_url: String,
+        /// The TOFU-decided plane public key (32-byte lowercase hex) — pinned at this `base_url`.
+        pinned_plane_key: String,
+        plane_key_id: String,
+        /// The plane's deployment posture (from the authorize response's plane block; disclosure).
+        deployment_mode: DeploymentMode,
+        /// The enrollment method the plane advertised (disclosure only).
+        enrollment_method: String,
+        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
+        device_code: String,
+        /// The high-entropy standup code (also the `device_auth_id` the possession frame binds).
+        user_code: String,
+        /// The SERVER-provided sign-in URL with the code embedded — re-emitted verbatim while pending.
+        verification_uri_complete: String,
+        /// The session expiry as epoch-millis — the recovery sweep abandons an expired standup WAL
+        /// exactly like an expired `Authorizing` one.
+        expires_at_millis: i64,
+    },
+    /// A one-time admin-CLAIM redeem about to be (or uncertainly) sent — written BEFORE the first POST so
+    /// an uncertain send retries `/v1/admin-claim` DIRECTLY from here (never refetching the `/i/` link —
+    /// a consumed claim bootstraps 404 by design; the server's same-device replay re-answers Redeemed).
+    ClaimPending {
+        base_url: String,
+        /// The TOFU-decided plane public key (32-byte lowercase hex) — pinned at this `base_url`.
+        pinned_plane_key: String,
+        plane_key_id: String,
+        /// The plane's deployment posture (from the claim bootstrap; disclosure).
+        deployment_mode: DeploymentMode,
+        /// The enrollment method the bootstrap advertised (`"admin_claim"`; disclosure only).
+        enrollment_method: String,
+        /// The workspace the claim stands up (from the bootstrap row).
+        workspace_id: String,
+        /// The workspace display name (disclosure).
+        workspace_display_name: String,
+        /// **SECRET** — the one-time claim token. Redacted in `Debug`.
+        claim_token: String,
     },
     /// The grant was redeemed and the read creds minted — recorded BEFORE promotion (the lockout fence: a
     /// single-use grant cannot be re-redeemed, so a crash after redeem completes from here).
@@ -286,6 +357,10 @@ pub(crate) enum EnrollPhase {
         /// **SECRET** — the minted per-skill read tokens. Redacted in `Debug`.
         read_creds: Vec<RedeemedCredDoc>,
         device_key_id: String,
+        /// The principal the redeem seated (the confirmed email, or a device-rooted id) — persisted into
+        /// `user.json` on promotion and disclosed on the receipt. `None` from an older plane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal: Option<String>,
         /// When the redeem completed (epoch-millis), recorded into `user.json` on promotion.
         enrolled_at_millis: i64,
     },
@@ -299,8 +374,9 @@ pub(crate) struct PendingEnrollment {
     pub state: EnrollPhase,
 }
 
-// Redact the WAL's secrets (the device code in `Authorizing`, the read tokens in `Redeemed`) so the whole
-// document — held transiently in memory — can never leak a secret through a Debug dump / panic / log.
+// Redact the WAL's secrets (the device code in `Authorizing`/`AuthorizingStandup`, the claim token in
+// `ClaimPending`, the read tokens in `Redeemed`) so the whole document — held transiently in memory — can
+// never leak a secret through a Debug dump / panic / log.
 impl std::fmt::Debug for PendingEnrollment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("PendingEnrollment");
@@ -320,15 +396,39 @@ impl std::fmt::Debug for PendingEnrollment {
                     .field("interval", interval)
                     .field("expires_at_millis", expires_at_millis);
             }
+            EnrollPhase::AuthorizingStandup {
+                base_url,
+                user_code,
+                expires_at_millis,
+                ..
+            } => {
+                s.field("phase", &"authorizing_standup")
+                    .field("base_url", base_url)
+                    .field("device_code", &"<redacted>")
+                    .field("user_code", user_code)
+                    .field("expires_at_millis", expires_at_millis);
+            }
+            EnrollPhase::ClaimPending {
+                base_url,
+                workspace_id,
+                ..
+            } => {
+                s.field("phase", &"claim_pending")
+                    .field("base_url", base_url)
+                    .field("workspace_id", workspace_id)
+                    .field("claim_token", &"<redacted>");
+            }
             EnrollPhase::Redeemed {
                 context,
                 read_creds,
                 device_key_id,
+                principal,
                 enrolled_at_millis,
             } => {
                 s.field("phase", &"redeemed")
                     .field("workspace_id", &context.workspace_id)
                     .field("device_key_id", device_key_id)
+                    .field("principal", principal)
                     .field("read_creds", read_creds) // RedeemedCredDoc Debug redacts the token
                     .field("enrolled_at_millis", enrolled_at_millis);
             }
@@ -346,6 +446,10 @@ pub(crate) struct UserDoc {
     /// The confirmed email, if the wire ever carries one (the redeem response does not in v0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// The principal the redeem seated this device as (a confirmed email, or a device-rooted id like
+    /// `dev.dk_…`) — the disclosure the standup receipt prints ("workspace X — owner Y").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
     /// Workspace roles, if the wire ever carries them (the redeem response does not in v0).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
@@ -473,6 +577,14 @@ pub(crate) fn read_wal(
                 }
                 context
             }
+            // A standup session has NO workspace yet — there is no id to validate (the granted poll's
+            // workspace id is validated at the wire boundary when it arrives).
+            EnrollPhase::AuthorizingStandup { .. } => return Ok(wal),
+            // A claim WAL carries the workspace-to-be's id (it later keys user.json + URL splices).
+            EnrollPhase::ClaimPending { workspace_id, .. } => {
+                crate::id::validate_workspace_id(workspace_id)?;
+                return Ok(wal);
+            }
         };
         crate::id::validate_workspace_id(&context.workspace_id)?;
         for s in &context.offered_skills {
@@ -488,11 +600,13 @@ pub(crate) fn delete_wal(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientEr
     Ok(())
 }
 
-/// The recovery sweep for the enrollment WAL: remove an `Authorizing` WAL whose session has expired
-/// (`now_millis > expires_at_millis`) and never reached `Redeemed` — a clean abandon. A `Redeemed` WAL is
-/// **always preserved** (a re-`--resume` promotes it), and an unexpired `Authorizing` WAL is preserved (a
-/// `--resume` can still poll it). Best-effort: an unreadable/corrupt WAL is left in place for the follow
-/// op to diagnose, never hard-failing recovery.
+/// The recovery sweep for the enrollment WAL: remove an `Authorizing` / `AuthorizingStandup` WAL whose
+/// session has expired (`now_millis > expires_at_millis`) and never reached `Redeemed` — a clean abandon.
+/// A `Redeemed` WAL is **always preserved** (a re-resume promotes it), a `ClaimPending` WAL is preserved
+/// (its retry is always safe — the server's same-device replay of a consumed claim re-answers Redeemed,
+/// and the claim's expiry is enforced server-side), and an unexpired authorizing WAL of either kind is
+/// preserved (a resume can still poll it). Best-effort: an unreadable/corrupt WAL is left in place for
+/// the owning op to diagnose, never hard-failing recovery.
 pub(crate) fn sweep_expired_wal(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -503,11 +617,16 @@ pub(crate) fn sweep_expired_wal(
         // Absent → nothing to sweep. Unreadable/permissive/corrupt → leave it for the op to surface.
         Ok(None) | Err(_) => return Ok(()),
     };
-    if let EnrollPhase::Authorizing {
-        expires_at_millis, ..
-    } = &wal.state
-        && now_millis > *expires_at_millis
-    {
+    let expired = match &wal.state {
+        EnrollPhase::Authorizing {
+            expires_at_millis, ..
+        }
+        | EnrollPhase::AuthorizingStandup {
+            expires_at_millis, ..
+        } => now_millis > *expires_at_millis,
+        EnrollPhase::ClaimPending { .. } | EnrollPhase::Redeemed { .. } => false,
+    };
+    if expired {
         delete_wal(fs, layout)?;
     }
     Ok(())
@@ -690,6 +809,7 @@ mod tests {
                         name: None,
                     }],
                     mode: FollowModeDoc::Auto,
+                    root: EnrollRoot::Invite,
                 },
                 read_creds: vec![RedeemedCredDoc {
                     skill_id: "../../x".to_owned(),
@@ -697,11 +817,131 @@ mod tests {
                     expires_at: None,
                 }],
                 device_key_id: "dk_abc".to_owned(),
+                principal: None,
                 enrolled_at_millis: 1,
             },
         };
         write_wal(&fs, &layout, &wal).unwrap();
         let err = read_wal(&fs, &layout).unwrap_err();
         assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn standup_and_claim_wal_phases_round_trip_and_redact_their_secrets() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("standup-wal"));
+        std::fs::create_dir_all(layout.identity_dir()).unwrap();
+
+        // AuthorizingStandup: round-trips through the 0600 WAL, Debug redacts the device code.
+        let standup = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::AuthorizingStandup {
+                base_url: "https://api.topos.sh".to_owned(),
+                pinned_plane_key: "a".repeat(64),
+                plane_key_id: "pk_hosted".to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                enrollment_method: "device_code".to_owned(),
+                device_code: "dc_standup_secret".to_owned(),
+                user_code: "ABCDEFGH23456789".to_owned(),
+                verification_uri_complete: "https://topos.sh/verify/ABCDEFGH23456789".to_owned(),
+                expires_at_millis: 2_000,
+            },
+        };
+        write_wal(&fs, &layout, &standup).unwrap();
+        let back = read_wal(&fs, &layout).unwrap().expect("standup WAL loads");
+        assert_eq!(back, standup);
+        let dbg = format!("{back:?}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(
+            !dbg.contains("dc_standup_secret"),
+            "the device code must never appear in Debug: {dbg}"
+        );
+
+        // ClaimPending: round-trips, Debug redacts the claim token, and a traversal workspace id in a
+        // (hand-edited) claim WAL fails the load closed.
+        let claim = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::ClaimPending {
+                base_url: "https://plane.acme.test".to_owned(),
+                pinned_plane_key: "b".repeat(64),
+                plane_key_id: "pk_selfhost".to_owned(),
+                deployment_mode: DeploymentMode::SelfHost,
+                enrollment_method: "admin_claim".to_owned(),
+                workspace_id: "w_acme".to_owned(),
+                workspace_display_name: "Acme".to_owned(),
+                claim_token: "claim_bearer_secret".to_owned(),
+            },
+        };
+        write_wal(&fs, &layout, &claim).unwrap();
+        let back = read_wal(&fs, &layout).unwrap().expect("claim WAL loads");
+        assert_eq!(back, claim);
+        let dbg = format!("{back:?}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(
+            !dbg.contains("claim_bearer_secret"),
+            "the claim token must never appear in Debug: {dbg}"
+        );
+        let hostile = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::ClaimPending {
+                base_url: "https://plane.acme.test".to_owned(),
+                pinned_plane_key: "b".repeat(64),
+                plane_key_id: "pk_selfhost".to_owned(),
+                deployment_mode: DeploymentMode::SelfHost,
+                enrollment_method: "admin_claim".to_owned(),
+                workspace_id: "../../w".to_owned(),
+                workspace_display_name: "Acme".to_owned(),
+                claim_token: "claim_bearer_secret".to_owned(),
+            },
+        };
+        write_wal(&fs, &layout, &hostile).unwrap();
+        let err = read_wal(&fs, &layout).unwrap_err();
+        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn sweep_reaps_an_expired_standup_wal_and_keeps_a_claim_wal() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("standup-sweep"));
+        std::fs::create_dir_all(layout.identity_dir()).unwrap();
+        let standup = |expires_at_millis: i64| PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::AuthorizingStandup {
+                base_url: "https://api.topos.sh".to_owned(),
+                pinned_plane_key: "a".repeat(64),
+                plane_key_id: "pk".to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                enrollment_method: "device_code".to_owned(),
+                device_code: "dc".to_owned(),
+                user_code: "CODE".to_owned(),
+                verification_uri_complete: "https://topos.sh/verify/CODE".to_owned(),
+                expires_at_millis,
+            },
+        };
+        // Unexpired: preserved (a re-invoked publish can still poll it).
+        write_wal(&fs, &layout, &standup(10_000)).unwrap();
+        sweep_expired_wal(&fs, &layout, 5_000).unwrap();
+        assert!(read_wal(&fs, &layout).unwrap().is_some());
+        // Expired: reaped, exactly like an expired invite Authorizing WAL.
+        sweep_expired_wal(&fs, &layout, 20_000).unwrap();
+        assert!(read_wal(&fs, &layout).unwrap().is_none());
+        // A ClaimPending WAL has no client-side expiry — the sweep always preserves it (the retry is
+        // idempotent server-side, and the claim's own expiry is enforced at redeem).
+        let claim = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::ClaimPending {
+                base_url: "https://plane.acme.test".to_owned(),
+                pinned_plane_key: "b".repeat(64),
+                plane_key_id: "pk".to_owned(),
+                deployment_mode: DeploymentMode::SelfHost,
+                enrollment_method: "admin_claim".to_owned(),
+                workspace_id: "w_acme".to_owned(),
+                workspace_display_name: "Acme".to_owned(),
+                claim_token: "tok".to_owned(),
+            },
+        };
+        write_wal(&fs, &layout, &claim).unwrap();
+        sweep_expired_wal(&fs, &layout, i64::MAX).unwrap();
+        assert!(read_wal(&fs, &layout).unwrap().is_some());
     }
 }

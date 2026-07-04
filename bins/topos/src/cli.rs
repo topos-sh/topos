@@ -27,11 +27,12 @@ pub(crate) enum Command {
         path: PathBuf,
     },
     /// Enroll with a plane via an `/i/` invite link, then follow its skills. Two-call resume: `follow
-    /// <link>` returns a verification URL; `follow --resume` polls + completes. `follow --approve
-    /// <skill>[@<hash>]` places a disclosed first-receive offer, or resumes a skill `unfollow` paused.
+    /// <link>` returns a verification URL; `follow --resume` polls + completes. A one-time admin CLAIM
+    /// link (a self-host standup) enrolls in ONE call — no resume. `follow --approve <skill>[@<hash>]`
+    /// places a disclosed first-receive offer, or resumes a skill `unfollow` paused.
     Follow {
-        /// The `/i/<token>` invite link (the full URL, or a bare token once already enrolled). Omitted
-        /// with `--resume` / `--approve`.
+        /// The `/i/<token>` invite or claim link (the full URL, or a bare token once already enrolled).
+        /// Omitted with `--resume` / `--approve`.
         link: Option<String>,
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
         #[arg(long)]
@@ -85,8 +86,10 @@ pub(crate) enum Command {
     /// Ship a draft to the team. `publish` moves `current` to your draft (or genesis-creates a never-yet-
     /// published skill); `--propose` opens a PR **without** moving `current`. Gated by `--approve
     /// <skill>@<digest>` (the disclosed consent digest matching the bytes being shipped). Under
-    /// review-required a direct publish fails typed — re-run as `--propose` (never an auto-flip). Requires
-    /// prior enrollment (`follow` first). Device-signed; roster-gated.
+    /// review-required a direct publish fails typed — re-run as `--propose` (never an auto-flip).
+    /// Un-enrolled, a direct publish STANDS UP a workspace on the hosted plane (a human signs in to
+    /// approve; re-running the same command completes it); `--propose` still requires prior enrollment
+    /// (`follow` first). Device-signed; roster-gated.
     Publish {
         /// The skill to publish — optional; inferred from the `--approve <skill>@<digest>` token if omitted
         /// (they must agree when both are given).

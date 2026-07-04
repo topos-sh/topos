@@ -2436,20 +2436,26 @@
       },
       "PublishData": {
         "type": "object",
-        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**",
+        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**\n\nAn UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the\nenvelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and\nno version — `version_id` / `current_generation` are `None` at pending because nothing was published yet\n(only the consent digest, already bound by `--approve`, can be honestly filled). Re-invoking the SAME\npublish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command\ncompletes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]\ndisclosure.",
         "required": [
           "skill_id",
-          "version_id",
-          "bundle_digest",
-          "current_generation"
+          "bundle_digest"
         ],
         "properties": {
           "bundle_digest": {
-            "type": "string"
+            "type": "string",
+            "description": "The byte-exact consent digest of the shipped (or, at pending, the approved) bytes — always present:\n`--approve <skill>@<digest>` bound it before any network call."
           },
           "current_generation": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The pointer's new generation after the move."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Generation",
+                "description": "The pointer's new generation after the move — `None` while the publish is PENDING a standup sign-in\n(no pointer moved yet)."
+              }
+            ]
           },
           "invite_link": {
             "type": [
@@ -2458,14 +2464,76 @@
             ],
             "description": "A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the\npublisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer\nmove is the real outcome; the link is a convenience (the `invite` verb mints one independently)."
           },
+          "pending": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublishPending",
+                "description": "Present when this publish is WAITING on the workspace-standup sign-in (the un-enrolled first publish\non a hosted plane): a human opens `verification_uri_complete` and approves; the agent then re-runs\nthe SAME publish command (the `ENROLL_RESUME` next-action carries the argv)."
+              }
+            ]
+          },
           "skill_id": {
             "type": "string"
           },
+          "standup": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StandupReceipt",
+                "description": "Present ONLY when THIS invocation completed a workspace standup before publishing — the disclosure\nthat makes a hijacked approval visible (\"workspace X — owner Y\"): the human who approved the sign-in\nis the seated owner, so a name you don't recognize means someone else owns your workspace."
+              }
+            ]
+          },
           "version_id": {
-            "type": "string",
-            "description": "The new commit."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new commit — `None` while the publish is PENDING a workspace-standup sign-in (nothing was\npublished yet; the version id is only knowable once the bytes actually ship)."
           }
         }
+      },
+      "PublishPending": {
+        "type": "object",
+        "description": "The workspace-standup sign-in a pending `publish` waits on. **INFERRED.**",
+        "required": [
+          "status",
+          "verification_uri_complete",
+          "user_code"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sign-in session's expiry as an RFC-3339 string, if it expires."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PublishPendingStatus",
+            "description": "Always `signin_required` — the one pending state this block discloses."
+          },
+          "user_code": {
+            "type": "string",
+            "description": "The code embedded in the URL, shown for cross-checking on the sign-in page."
+          },
+          "verification_uri_complete": {
+            "type": "string",
+            "description": "The sign-in URL with the code already embedded — the ONE link a human opens to approve (served by\nthe plane; the client uses it verbatim)."
+          }
+        }
+      },
+      "PublishPendingStatus": {
+        "type": "string",
+        "description": "A pending publish's status — a CLOSED single-value set (snake_case): the standup sign-in is required.",
+        "enum": [
+          "signin_required"
+        ]
       },
       "PublishRequest": {
         "type": "object",
@@ -2936,6 +3004,26 @@
           },
           "signature": {
             "$ref": "#/components/schemas/Signature"
+          }
+        }
+      },
+      "StandupReceipt": {
+        "type": "object",
+        "description": "The standup disclosure a workspace-creating publish carries: which workspace was stood up and who owns\nit. **INFERRED.**",
+        "required": [
+          "workspace_display_name"
+        ],
+        "properties": {
+          "owner_principal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack\ntripwire: a principal you don't recognize means someone else approved (and owns) this workspace."
+          },
+          "workspace_display_name": {
+            "type": "string",
+            "description": "The stood-up workspace's display name (chosen at the sign-in approval)."
           }
         }
       },

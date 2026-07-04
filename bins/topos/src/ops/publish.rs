@@ -5,17 +5,31 @@
 //! byte-identical `commit_id`/`bundle_digest` the plane re-derives (I-COMMIT-PARITY), gates the outward
 //! ship behind `--approve <skill>@<digest>` matching the scanned bytes (refusing on mismatch — never a
 //! silent mode-flip), persists an op-WAL before the first send (so an uncertain retry replays the same
-//! `op_id`), and maps the plane's typed outcome. Requires prior enrollment (the workspace + the pinned
-//! plane come from what `follow` wrote).
+//! `op_id`), and maps the plane's typed outcome.
+//!
+//! **The workspace-standup branch.** An UN-ENROLLED direct publish does not fail — it stands the
+//! workspace up: after the FULL normal pre-flight (skill resolution, scan, digest computation, the
+//! `--approve` consent gate — so consent binds BEFORE any network), the client starts a standup device
+//! authorization against the hosted plane (`TOPOS_PLANE_URL` override, else the compiled-in default),
+//! TOFU-pins the plane key from the response, writes an `AuthorizingStandup` WAL, and returns a PENDING
+//! receipt whose `ENROLL_RESUME` next-action is the SAME publish command. Re-invoking it polls once;
+//! once a signed-in human approves (creating the workspace and seating them as owner), the same
+//! invocation redeems, promotes the enrollment, and CONTINUES into the ordinary publish — disclosing
+//! "workspace X — owner Y" so a hijacked approval is visible. `--propose` never stands up (a proposal
+//! against a workspace that does not exist yet is meaningless) and keeps the typed not-enrolled error.
 
-use topos_core::digest::to_hex;
-use topos_core::sign::{self, Commit};
+use topos_core::digest::{self, to_hex};
+use topos_core::sign::{self, Commit, EnrollFields};
 use topos_gitstore::{ImportFile, Store};
+use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
-use topos_types::results::{ProposeData, PublishData};
+use topos_types::results::{
+    ProposeData, PublishData, PublishPending, PublishPendingStatus, StandupReceipt,
+};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
+use super::follow::{EnrollConnect, complete_uri, machine_name, promote_core, tofu_decide_key};
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
 use super::{parse_hex32, resolve_skill};
@@ -23,35 +37,81 @@ use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
-use crate::plane::WriteReceipt;
+use crate::plane::{TokenPoll, WriteReceipt};
 use crate::{doc, op_wal, scan, sidecar};
 
-/// The result of `publish`: either `current` moved (a direct publish) or a proposal opened (`--propose`).
+/// The result of `publish`: either `current` moved (a direct publish), a proposal opened (`--propose`), or
+/// the publish is PENDING the workspace-standup sign-in (the un-enrolled first publish).
+#[derive(Debug)]
 pub(crate) enum PublishOutcome {
     /// A direct publish moved `current` to the draft.
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
+    /// The un-enrolled standup branch is waiting on a human sign-in: nothing was published; the envelope
+    /// stays `ok = true` with `data.pending` set, and the `ENROLL_RESUME` next-action carries the ORIGINAL
+    /// publish argv (re-invoking it IS the resume — consent re-derives from `--approve` each invocation).
+    Pending {
+        data: PublishData,
+        /// The argv the agent re-invokes to resume (the canonical spelling of this same command).
+        resume_argv: Vec<String>,
+    },
+}
+
+/// The standup branch's network seam + base URL — the enroll transport factory (the same creds-free
+/// connector `follow` uses) and the RESOLVED plane base (the `TOPOS_PLANE_URL` override, else the
+/// compiled-in hosted default; tests always pass an explicit base).
+pub(crate) struct StandupConnectors<'a> {
+    pub enroll: &'a EnrollConnect<'a>,
+    pub base_url: String,
 }
 
 /// The genesis base — a skill whose `current` does not exist yet is published as a zero-parent commit at
 /// `(0,0)` (the plane's genesis branch creates `current` at `(1,1)`).
 const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 
-/// Ship `skill`'s draft (or, with `propose`, open a proposal).
+/// Ship `skill`'s draft (or, with `propose`, open a proposal). Un-enrolled + direct dispatches to the
+/// workspace-standup branch (see the module doc); un-enrolled + `--propose` keeps the typed error.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::ApprovalMismatch`] if `--approve` does not
-/// match the scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
-/// [`ClientError::Conflict`] / [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's
-/// typed verdict; a signing / transport / store failure otherwise.
+/// [`ClientError::Enrollment`] if not enrolled (`--propose`) or a standup step fails typed;
+/// [`ClientError::ApprovalMismatch`] if `--approve` does not match the scanned bytes;
+/// [`ClientError::PublishBlocked`] if an unresolved merge conflict is present; [`ClientError::Conflict`] /
+/// [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's typed verdict; a signing /
+/// transport / store failure otherwise.
 pub(crate) fn publish(
+    ctx: &Ctx<'_>,
+    connect: &ContributeConnect<'_>,
+    gov_connect: &GovernanceConnect<'_>,
+    standup: &StandupConnectors<'_>,
+    skill_arg: Option<&str>,
+    propose: bool,
+    approve: &str,
+) -> Result<PublishOutcome, ClientError> {
+    // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
+    // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup; absent + propose ⇒ the
+    // typed error (a proposal against a workspace that does not exist yet is meaningless).
+    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
+        if propose {
+            return Err(ClientError::Enrollment(
+                "not enrolled; run `topos follow <link>` first".into(),
+            ));
+        }
+        return standup_publish(ctx, connect, gov_connect, standup, skill_arg, approve);
+    }
+    enrolled_publish(ctx, connect, gov_connect, skill_arg, propose, approve, None)
+}
+
+/// The ordinary ENROLLED publish (the pre-standup body, unchanged in behavior). `standup_receipt` is the
+/// disclosure a workspace-creating invocation attaches to its Published outcome (`None` normally).
+fn enrolled_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     gov_connect: &GovernanceConnect<'_>,
     skill_arg: Option<&str>,
     propose: bool,
     approve: &str,
+    standup_receipt: Option<StandupReceipt>,
 ) -> Result<PublishOutcome, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -65,19 +125,8 @@ pub(crate) fn publish(
             )
         })?;
 
-    // `--approve <skill>@<digest>` names the skill + the consent digest. A positional skill must agree.
-    let (approve_skill, approved_digest) = parse_skill_at(approve)?;
-    let skill_name = match skill_arg {
-        Some(s) if s != approve_skill => {
-            return Err(ClientError::ApprovalMismatch {
-                skill: s.to_owned(),
-                expected: format!("skill '{approve_skill}' (from --approve)"),
-                got: format!("skill '{s}' (positional)"),
-            });
-        }
-        Some(s) => s,
-        None => &approve_skill,
-    };
+    let (skill_name, approved_digest) = agree_skill_and_digest(skill_arg, approve)?;
+    let skill_name = skill_name.as_str();
 
     let (id, lock) = resolve_skill(ctx, skill_name)?;
     let sp = ctx.layout.published(&id);
@@ -168,7 +217,461 @@ pub(crate) fn publish(
         .ok()
         .map(|inv| inv.invite_link);
     }
+    // A workspace-creating invocation discloses what it stood up and who owns it (hijack visibility).
+    if let PublishOutcome::Published(data) = &mut outcome {
+        data.standup = standup_receipt;
+    }
     Ok(outcome)
+}
+
+// =================================================================================================
+// The workspace-standup branch — the un-enrolled direct publish. Two calls share one WAL: call 1 runs
+// the full consent pre-flight, starts the standup device authorization, TOFU-pins the plane key, and
+// returns PENDING; call 2 (the SAME command re-invoked) re-runs the pre-flight (consent re-binds — bytes
+// that drifted since call 1 are refused, never silently shipped), polls ONCE, and on a granted poll
+// redeems, promotes the enrollment, and continues into the ordinary publish above.
+// =================================================================================================
+
+fn standup_publish(
+    ctx: &Ctx<'_>,
+    connect: &ContributeConnect<'_>,
+    gov_connect: &GovernanceConnect<'_>,
+    standup: &StandupConnectors<'_>,
+    skill_arg: Option<&str>,
+    approve: &str,
+) -> Result<PublishOutcome, ClientError> {
+    // FULL pre-flight FIRST — skill resolution, scan, digest computation, the --approve match — so the
+    // consent decision binds BEFORE any network call ever happens.
+    let (skill_name, approved_digest) = agree_skill_and_digest(skill_arg, approve)?;
+    standup_preflight(ctx, &skill_name, &approved_digest)?;
+
+    // The WAL decides which call this is. Any OTHER in-flight enrollment owns the shared WAL slot — this
+    // publish neither hijacks nor clobbers it (typed guidance instead).
+    match enroll::read_wal(ctx.fs, &ctx.layout)?.map(|w| w.state) {
+        None => standup_begin(ctx, standup, &skill_name, &approved_digest),
+        Some(enroll::EnrollPhase::AuthorizingStandup {
+            base_url,
+            pinned_plane_key,
+            plane_key_id,
+            deployment_mode,
+            enrollment_method,
+            device_code,
+            user_code,
+            verification_uri_complete,
+            expires_at_millis,
+        }) => standup_resume(
+            ctx,
+            connect,
+            gov_connect,
+            standup,
+            &skill_name,
+            &approved_digest,
+            StandupWal {
+                base_url,
+                pinned_plane_key,
+                plane_key_id,
+                deployment_mode,
+                enrollment_method,
+                device_code,
+                user_code,
+                verification_uri_complete,
+                expires_at_millis,
+            },
+        ),
+        // A crash between redeem and promotion: complete the promotion from the persisted facts (the
+        // existing follow fence — never re-redeem a spent grant), then continue into the publish.
+        Some(enroll::EnrollPhase::Redeemed {
+            context,
+            read_creds,
+            device_key_id,
+            principal,
+            enrolled_at_millis,
+        }) => {
+            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            promote_core(
+                ctx,
+                &context,
+                &read_creds,
+                &device_key_id,
+                principal.as_deref(),
+                enrolled_at_millis,
+                &signer,
+            )?;
+            // Only a STANDUP-rooted enrollment claims the standup receipt — a crashed invite/claim
+            // promotion completed here is disclosed as the ordinary publish it then is.
+            let receipt =
+                matches!(context.root, enroll::EnrollRoot::Standup).then(|| StandupReceipt {
+                    workspace_display_name: context.workspace_display_name.clone(),
+                    owner_principal: principal.clone(),
+                });
+            continue_enrolled(
+                ctx,
+                connect,
+                gov_connect,
+                &context.pinned_plane_key,
+                &skill_name,
+                approve,
+                receipt,
+            )
+        }
+        Some(enroll::EnrollPhase::Authorizing { .. }) => Err(ClientError::Enrollment(
+            "an invite enrollment is in progress; run `topos follow --resume` first".into(),
+        )),
+        Some(enroll::EnrollPhase::ClaimPending { .. }) => Err(ClientError::Enrollment(
+            "a claim enrollment is in progress; run `topos follow --resume` first".into(),
+        )),
+    }
+}
+
+/// The standup pre-flight: resolve the skill, refuse an unresolved merge conflict, scan the live draft,
+/// and run the `--approve` consent gate — all BEFORE any network. The per-skill lock is held only for the
+/// scan (the continuation re-acquires it and re-runs the authoritative consent gate, so bytes that drift
+/// after this check are still refused, never silently shipped).
+fn standup_preflight(
+    ctx: &Ctx<'_>,
+    skill_name: &str,
+    approved_digest: &str,
+) -> Result<(), ClientError> {
+    let (id, lock) = resolve_skill(ctx, skill_name)?;
+    let sp = ctx.layout.published(&id);
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
+    if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
+        return Err(ClientError::PublishBlocked {
+            skill: skill_name.to_owned(),
+        });
+    }
+    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
+        .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+    let placement = sync_engine::first_placement(&map)?;
+    let scanned = scan::scan(std::path::Path::new(&placement))?;
+    let digest_hex = to_hex(&scanned.bundle_digest);
+    if digest_hex != approved_digest {
+        return Err(ClientError::ApprovalMismatch {
+            skill: lock.name,
+            expected: digest_hex,
+            got: approved_digest.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Call 1: start the standup device authorization, TOFU-pin the plane key from the response's plane
+/// block, write the `AuthorizingStandup` WAL, and return the PENDING receipt.
+fn standup_begin(
+    ctx: &Ctx<'_>,
+    standup: &StandupConnectors<'_>,
+    skill_name: &str,
+    approved_digest: &str,
+) -> Result<PublishOutcome, ClientError> {
+    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+    let enroll_src = (standup.enroll)(&standup.base_url);
+    let start = enroll_src.device_authorize_standup(signer.public_key(), &machine_name(&signer))?;
+
+    // TOFU: pin the plane key the response's plane block disclosed, under the base URL this client
+    // actually called (instance.json is absent on this branch, so this is normally the first-ever pin;
+    // the shared decision still refuses a conflicting pin that appeared concurrently).
+    let pinned_plane_key = tofu_decide_key(ctx, &standup.base_url, &start.plane.signing_key)?;
+
+    let expires_at_millis = i64::try_from(ctx.clock.now_unix_millis())
+        .unwrap_or(i64::MAX)
+        .saturating_add(
+            i64::try_from(start.auth.expires_in)
+                .unwrap_or(0)
+                .saturating_mul(1000),
+        );
+    // The SERVER-built complete URI, verbatim when present (the reconstruction is only the fallback).
+    let complete = start
+        .auth
+        .verification_uri_complete
+        .clone()
+        .unwrap_or_else(|| complete_uri(&start.auth.verification_uri, &start.auth.user_code));
+    enroll::write_wal(
+        ctx.fs,
+        &ctx.layout,
+        &enroll::PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: enroll::EnrollPhase::AuthorizingStandup {
+                base_url: standup.base_url.clone(),
+                pinned_plane_key,
+                plane_key_id: start.plane.signing_key.key_id.clone(),
+                deployment_mode: start.plane.deployment_mode,
+                enrollment_method: start.plane.enrollment_method.clone(),
+                device_code: start.auth.device_code.clone(),
+                user_code: start.auth.user_code.clone(),
+                verification_uri_complete: complete.clone(),
+                expires_at_millis,
+            },
+        },
+    )?;
+
+    Ok(pending_outcome(
+        ctx,
+        skill_name,
+        approved_digest,
+        complete,
+        start.auth.user_code,
+        expires_at_millis,
+    ))
+}
+
+/// The persisted `AuthorizingStandup` facts (destructured out of the WAL for the resume path).
+struct StandupWal {
+    base_url: String,
+    pinned_plane_key: String,
+    plane_key_id: String,
+    deployment_mode: topos_types::bootstrap::DeploymentMode,
+    enrollment_method: String,
+    device_code: String,
+    user_code: String,
+    verification_uri_complete: String,
+    expires_at_millis: i64,
+}
+
+/// Call 2 (the same command re-invoked): poll ONCE; pending re-emits the pending receipt (the WAL stays),
+/// a terminal denial/expiry clears the WAL typed, and a granted poll redeems + promotes + CONTINUES into
+/// the ordinary publish in this same invocation.
+#[allow(clippy::too_many_arguments)]
+fn standup_resume(
+    ctx: &Ctx<'_>,
+    connect: &ContributeConnect<'_>,
+    gov_connect: &GovernanceConnect<'_>,
+    standup: &StandupConnectors<'_>,
+    skill_name: &str,
+    approved_digest: &str,
+    wal: StandupWal,
+) -> Result<PublishOutcome, ClientError> {
+    // The in-flight session's base URL is authoritative for this session (a changed TOPOS_PLANE_URL
+    // affects the NEXT standup, never a half-done one).
+    let enroll_src = (standup.enroll)(&wal.base_url);
+    match enroll_src.poll_token(&wal.device_code)? {
+        // Still waiting on the human — re-emit the pending receipt verbatim; the WAL stays put.
+        TokenPoll::Pending | TokenPoll::SlowDown => Ok(pending_outcome(
+            ctx,
+            skill_name,
+            approved_digest,
+            wal.verification_uri_complete,
+            wal.user_code,
+            wal.expires_at_millis,
+        )),
+        TokenPoll::Denied => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the workspace standup was denied at the sign-in page".into(),
+            ))
+        }
+        TokenPoll::Expired => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the standup sign-in expired; re-run this publish to start over".into(),
+            ))
+        }
+        TokenPoll::Granted(granted) => {
+            // The workspace context is what a standup client (no /i/ bootstrap) signs its possession
+            // frame over — a granted standup poll without it is unusable.
+            let workspace = granted.workspace.ok_or_else(|| {
+                ClientError::WireInvalid("a granted standup poll carried no workspace".into())
+            })?;
+            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            // The possession proof over the SERVER-trusted framed fields: the standup session offered NO
+            // skills (there was no invite), so the bound offered-set is empty.
+            let grant_hash = digest::sha256(granted.grant.as_str().as_bytes());
+            let fields = EnrollFields {
+                workspace_id: &workspace.workspace_id,
+                grant_hash,
+                device_auth_id: &wal.user_code,
+                device_key_id: signer.device_key_id(),
+                device_public_key: signer.public_key(),
+                offered_skill_ids: &[],
+            };
+            let sig = signer.sign_enroll(&fields)?;
+            let redeem = enroll_src.redeem(
+                &workspace.workspace_id,
+                granted.grant.as_str(),
+                signer.public_key(),
+                sig,
+            )?;
+            if redeem.workspace_id != workspace.workspace_id {
+                return Err(ClientError::Enrollment(
+                    "the redeemed workspace does not match the granted session".into(),
+                ));
+            }
+            let context = enroll::EnrollContext {
+                base_url: wal.base_url,
+                pinned_plane_key: wal.pinned_plane_key,
+                plane_key_id: wal.plane_key_id,
+                deployment_mode: wal.deployment_mode,
+                enrollment_method: wal.enrollment_method,
+                workspace_id: workspace.workspace_id,
+                workspace_display_name: workspace.display_name,
+                verified_domain: None,
+                verified_domain_status: VerifiedDomainStatus::Unverified,
+                offered_skills: Vec::new(),
+                mode: enroll::FollowModeDoc::Auto,
+                root: enroll::EnrollRoot::Standup,
+            };
+            let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
+                .read_creds
+                .iter()
+                .map(|c| enroll::RedeemedCredDoc {
+                    skill_id: c.skill_id.clone(),
+                    read_token: c.read_token.clone(),
+                    expires_at: c.expires_at,
+                })
+                .collect();
+            let enrolled_at = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
+            // The lockout fence: record the redeemed facts BEFORE promotion, so a crash mid-promote
+            // completes from the WAL without re-redeeming the spent grant.
+            enroll::write_wal(
+                ctx.fs,
+                &ctx.layout,
+                &enroll::PendingEnrollment {
+                    schema_version: PERSISTED_SCHEMA_VERSION,
+                    state: enroll::EnrollPhase::Redeemed {
+                        context: context.clone(),
+                        read_creds: read_creds.clone(),
+                        device_key_id: redeem.device_key_id.clone(),
+                        principal: redeem.principal.clone(),
+                        enrolled_at_millis: enrolled_at,
+                    },
+                },
+            )?;
+            promote_core(
+                ctx,
+                &context,
+                &read_creds,
+                &redeem.device_key_id,
+                redeem.principal.as_deref(),
+                enrolled_at,
+                &signer,
+            )?;
+            // CONTINUE into the ordinary enrolled publish in this SAME invocation (the consent gate runs
+            // again inside — bytes that drifted since the pre-flight are refused, never silently shipped),
+            // carrying the standup disclosure onto the receipt.
+            let approve_token = format!("{skill_name}@{approved_digest}");
+            continue_enrolled(
+                ctx,
+                connect,
+                gov_connect,
+                &context.pinned_plane_key,
+                skill_name,
+                &approve_token,
+                Some(StandupReceipt {
+                    workspace_display_name: context.workspace_display_name.clone(),
+                    owner_principal: redeem.principal,
+                }),
+            )
+        }
+    }
+}
+
+/// Continue a just-promoted standup invocation into the ordinary enrolled publish. The AMBIENT `ctx` was
+/// composed while un-enrolled (its `plane_key` is the inert all-zero placeholder), so the continuation
+/// rebuilds the context with the key THIS flow TOFU-pinned — the OK receipt's signed pointer is verified
+/// against the real pin, never the placeholder.
+fn continue_enrolled(
+    ctx: &Ctx<'_>,
+    connect: &ContributeConnect<'_>,
+    gov_connect: &GovernanceConnect<'_>,
+    pinned_plane_key: &str,
+    skill_name: &str,
+    approve: &str,
+    standup_receipt: Option<StandupReceipt>,
+) -> Result<PublishOutcome, ClientError> {
+    let plane_key = parse_hex32(pinned_plane_key)?;
+    let continuation = Ctx {
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        layout: ctx.layout.clone(),
+        harness: ctx.harness,
+        plane: ctx.plane,
+        plane_key,
+        follow: ctx.follow,
+    };
+    enrolled_publish(
+        &continuation,
+        connect,
+        gov_connect,
+        Some(skill_name),
+        false,
+        approve,
+        standup_receipt,
+    )
+}
+
+/// Build the PENDING outcome: `ok = true`, no version (nothing shipped), the sign-in block, and the
+/// resume argv (this same command, canonically spelled).
+fn pending_outcome(
+    ctx: &Ctx<'_>,
+    skill_name: &str,
+    approved_digest: &str,
+    verification_uri_complete: String,
+    user_code: String,
+    expires_at_millis: i64,
+) -> PublishOutcome {
+    // The sidecar skill id is the receipt's stable handle (matching the enrolled receipt's skill_id).
+    let skill_id = resolve_skill(ctx, skill_name)
+        .map(|(id, _)| id.into_string())
+        .unwrap_or_else(|_| skill_name.to_owned());
+    PublishOutcome::Pending {
+        data: PublishData {
+            skill_id,
+            version_id: None,
+            bundle_digest: approved_digest.to_owned(),
+            current_generation: None,
+            invite_link: None,
+            pending: Some(PublishPending {
+                status: PublishPendingStatus::SigninRequired,
+                verification_uri_complete,
+                user_code,
+                expires_at: Some(fmt_rfc3339_millis(expires_at_millis)),
+            }),
+            standup: None,
+        },
+        resume_argv: vec![
+            "topos".to_owned(),
+            "publish".to_owned(),
+            skill_name.to_owned(),
+            "--approve".to_owned(),
+            format!("{skill_name}@{approved_digest}"),
+            "--json".to_owned(),
+        ],
+    }
+}
+
+/// Epoch-millis → an RFC-3339 `YYYY-MM-DDTHH:MM:SSZ` string (UTC, second precision) — enough for the
+/// pending receipt's expiry disclosure. Negative inputs clamp to the epoch.
+fn fmt_rfc3339_millis(millis: i64) -> String {
+    let secs = millis.max(0) as u64 / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = crate::render::civil_from_days(days as i64);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// `--approve <skill>@<digest>` names the skill + the consent digest; a positional skill must agree.
+fn agree_skill_and_digest(
+    skill_arg: Option<&str>,
+    approve: &str,
+) -> Result<(String, String), ClientError> {
+    let (approve_skill, approved_digest) = parse_skill_at(approve)?;
+    let skill_name = match skill_arg {
+        Some(s) if s != approve_skill => {
+            return Err(ClientError::ApprovalMismatch {
+                skill: s.to_owned(),
+                expected: format!("skill '{approve_skill}' (from --approve)"),
+                got: format!("skill '{s}' (positional)"),
+            });
+        }
+        Some(s) => s.to_owned(),
+        None => approve_skill,
+    };
+    Ok((skill_name, approved_digest))
 }
 
 /// Build the fresh op: precondition the state, run the consent gate over the scanned draft, compute the
@@ -291,10 +794,12 @@ fn map_outcome(
             let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, signed)?;
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
-                version_id: rec.candidate_commit.clone(),
+                version_id: Some(rec.candidate_commit.clone()),
                 bundle_digest: rec.bundle_digest.clone(),
-                current_generation: new_gen,
+                current_generation: Some(new_gen),
                 invite_link: None,
+                pending: None,
+                standup: None,
             }))
         }
         TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {

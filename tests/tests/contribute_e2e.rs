@@ -209,7 +209,7 @@ fn publish_direct_lands_on_a_follower_byte_exact() {
     };
     assert_eq!(
         data.current_generation,
-        Generation { epoch: 1, seq: 2 },
+        Some(Generation { epoch: 1, seq: 2 }),
         "current moved +1"
     );
     assert_eq!(

@@ -322,6 +322,7 @@ mod tests {
                     workspace_id: WS.to_owned(),
                     deployment_mode: DeploymentMode::Cloud,
                     email: None,
+                    principal: None,
                     roles: Vec::new(),
                     invite_rooted: true,
                     enrolled_at: 1,

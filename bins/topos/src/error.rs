@@ -128,6 +128,15 @@ pub(crate) enum ClientError {
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
     #[error("the plane denied this operation ({0})")]
     Denied(String),
+    /// An enrollment REDEEM came back DENIED — on a hosted plane this is the authenticated-but-uninvited
+    /// case (a confirmed identity that is not on the workspace roster), so the guidance is ask-an-owner:
+    /// the message tells the human exactly what to request, and the envelope carries `REQUEST_ACCESS`.
+    /// Carries the wire code (never a secret; the plane's denial is deliberately uniform).
+    #[error(
+        "the workspace did not admit this enrollment ({code}) — ask a workspace owner to run \
+         `topos invite <your-email>`, then re-run `topos follow`"
+    )]
+    RedeemDenied { code: String },
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
@@ -187,6 +196,8 @@ impl ClientError {
             ClientError::ApprovalRequired { .. } => "APPROVAL_REQUIRED",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",
+            // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
+            ClientError::RedeemDenied { .. } => "DENIED",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
             ClientError::ConfirmRequired { .. } => "CONFIRM_REQUIRED",
             ClientError::PendingOp { .. } => "PENDING_OP",
@@ -219,7 +230,7 @@ impl ClientError {
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::ApprovalRequired { .. } => TerminalOutcome::ApprovalRequired,
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
-            ClientError::Denied(_) => TerminalOutcome::Denied,
+            ClientError::Denied(_) | ClientError::RedeemDenied { .. } => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // An in-flight op must be settled, then the command retried.
             ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,

@@ -4,5 +4,6 @@
 
 mod durability;
 mod follow;
+mod standup;
 mod sync;
 mod verbs;

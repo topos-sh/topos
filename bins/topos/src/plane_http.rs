@@ -23,9 +23,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
-    DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest, DeviceTokenResponse,
-    DeviceTokenStatus, InviteRequest, ProposeRequest, PublishRequest, RedeemRequest,
-    RedeemResponse, RevertRequest, ReviewRequest, WireFileMode, WireProposalList, WireVersionMeta,
+    AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest,
+    DeviceTokenResponse, DeviceTokenStatus, InviteRequest, ProposeRequest, PublishRequest,
+    RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent, WireFileMode,
+    WireProposalList, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
@@ -33,8 +34,9 @@ use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
 use crate::error::ClientError;
 use crate::plane::{
     ContributeSource, DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext,
-    FollowSource, GovernanceSource, Grant, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
-    Redeem, RedeemedCred, TokenPoll, WriteReceipt,
+    FollowSource, GovernanceSource, Grant, GrantedToken, GrantedWorkspace, KnownCurrent,
+    PlaneError, PlaneSource, PointerFetch, Redeem, RedeemedCred, StandupAuthorize, TokenPoll,
+    WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -427,6 +429,24 @@ impl UreqDeviceClient {
         Ok((status, bytes))
     }
 
+    /// POST `/v1/device/authorize` (enroll or standup — the body decides) and parse the typed response.
+    /// `what` names the step for the transport-fault message.
+    fn post_device_authorize(
+        &self,
+        req: DeviceAuthorizeRequest,
+        what: &str,
+    ) -> Result<DeviceAuthorizeResponse, ClientError> {
+        let body = serde_json::to_value(req)
+            .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
+        let url = format!("{}/v1/device/authorize", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, None, what)?;
+        if classify(status) != HttpClass::Ok {
+            return Err(ClientError::Plane(format!("{what}: HTTP {status}")));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| ClientError::WireInvalid(format!("authorize response is malformed: {e}")))
+    }
+
     /// POST a device-signed contribute write (the 64-byte device-op signature in the
     /// `Topos-Device-Signature` header) and map the all-outcome **200 envelope** to a [`WriteReceipt`].
     /// The four verbs differ only by `path` + body type; the signing rode the body's bound identity.
@@ -476,32 +496,39 @@ impl EnrollSource for UreqDeviceClient {
         device_public_key: [u8; 32],
         machine_name: &str,
     ) -> Result<DeviceAuthorize, ClientError> {
-        // MECHANICAL wire-widening fix: `invite_token` became optional (+ an `intent` field) for the
-        // plane's standup flow; this enroll path still always sends the invite token. The client-side
-        // standup verbs are separate work.
-        let body = serde_json::to_value(DeviceAuthorizeRequest {
-            invite_token: Some(token.to_owned()),
-            intent: None,
-            device_public_key: b64(&device_public_key),
-            machine_name: machine_name.to_owned(),
-        })
-        .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
-        let url = format!("{}/v1/device/authorize", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, None, "device authorize")?;
-        if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(format!(
-                "device authorize: HTTP {status}"
-            )));
-        }
-        let resp: DeviceAuthorizeResponse = serde_json::from_slice(&bytes).map_err(|e| {
-            ClientError::WireInvalid(format!("authorize response is malformed: {e}"))
+        let resp = self.post_device_authorize(
+            DeviceAuthorizeRequest {
+                invite_token: Some(token.to_owned()),
+                intent: None,
+                device_public_key: b64(&device_public_key),
+                machine_name: machine_name.to_owned(),
+            },
+            "device authorize",
+        )?;
+        Ok(device_authorize_from_wire(resp))
+    }
+
+    fn device_authorize_standup(
+        &self,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<StandupAuthorize, ClientError> {
+        let resp = self.post_device_authorize(
+            DeviceAuthorizeRequest {
+                invite_token: None,
+                intent: Some(SessionIntent::Standup),
+                device_public_key: b64(&device_public_key),
+                machine_name: machine_name.to_owned(),
+            },
+            "standup authorize",
+        )?;
+        // The plane block is what a standup device TOFU-pins; a response without it is unusable.
+        let plane = resp.plane.clone().ok_or_else(|| {
+            ClientError::WireInvalid("a standup authorize carried no plane block".into())
         })?;
-        Ok(DeviceAuthorize {
-            device_code: resp.device_code,
-            user_code: resp.user_code,
-            verification_uri: resp.verification_uri,
-            expires_in: resp.expires_in,
-            interval: resp.interval,
+        Ok(StandupAuthorize {
+            auth: device_authorize_from_wire(resp),
+            plane,
         })
     }
 
@@ -525,7 +552,25 @@ impl EnrollSource for UreqDeviceClient {
             DeviceTokenStatus::Denied => TokenPoll::Denied,
             DeviceTokenStatus::Expired => TokenPoll::Expired,
             DeviceTokenStatus::Granted => match resp.grant {
-                Some(g) => TokenPoll::Granted(Grant::new(g)),
+                Some(g) => {
+                    // The workspace context (a standup grant's disclosure) rides alongside; its id later
+                    // keys the redeem URL + user.json, so it is validated at this wire boundary.
+                    let workspace = match resp.workspace {
+                        Some(w) => {
+                            crate::id::validate_workspace_id(&w.workspace_id)
+                                .map_err(crate::id::wire_flavor)?;
+                            Some(GrantedWorkspace {
+                                workspace_id: w.workspace_id,
+                                display_name: w.display_name,
+                            })
+                        }
+                        None => None,
+                    };
+                    TokenPoll::Granted(GrantedToken {
+                        grant: Grant::new(g),
+                        workspace,
+                    })
+                }
                 // `granted` without a grant is a malformed response, not a silent re-poll.
                 None => {
                     return Err(ClientError::WireInvalid(
@@ -555,16 +600,45 @@ impl EnrollSource for UreqDeviceClient {
         let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
         let sig = b64(&enroll_sig);
         let (status, bytes) = self.post_json(&url, &body, Some(&sig), "redeem")?;
-        map_redeem_envelope(status, &bytes)
+        map_redeem_envelope(RedeemKind::Grant, status, &bytes)
+    }
+
+    fn admin_claim(
+        &self,
+        claim_token: &str,
+        device_public_key: [u8; 32],
+        display_name: &str,
+    ) -> Result<Redeem, ClientError> {
+        // NOT device-signed on the wire (the claim token is the bearer capability); the display name is
+        // disclosure-only (the seated name comes from the mint-time claim row). The token is a SECRET —
+        // it rides the body, never a URL or an error message.
+        let body = serde_json::to_value(AdminClaimRequest {
+            claim_token: claim_token.to_owned(),
+            device_public_key: b64(&device_public_key),
+            display_name: display_name.to_owned(),
+        })
+        .map_err(|_| ClientError::Corrupt("claim body: could not serialize".to_owned()))?;
+        let url = format!("{}/v1/admin-claim", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, None, "admin claim")?;
+        map_redeem_envelope(RedeemKind::Claim, status, &bytes)
     }
 }
 
-/// Map a redeem response — the all-outcome **200 envelope** — to the typed [`Redeem`], validating every
-/// id the plane minted (the per-cred skill ids become path components under `~/.topos/` and the harness
-/// skills dir; the workspace id becomes a URL segment) — a traversal-shaped id fails the whole redeem as
-/// malformed. **Pure** (status + bytes in), so the ok / denied / hostile-id arms are unit-tested without
-/// a socket (mirrors [`map_invite_envelope`]).
-fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError> {
+/// Which redeem-shaped envelope is being mapped — the two doors carry the SAME wire shape but deserve
+/// different typed denials: a grant redeem's DENIED is authenticated-but-uninvited (ask an owner), a claim
+/// redeem's DENIED means the one-time claim is dead (consumed elsewhere / expired / workspace exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedeemKind {
+    Grant,
+    Claim,
+}
+
+/// Map a redeem / admin-claim response — the all-outcome **200 envelope** — to the typed [`Redeem`],
+/// validating every id the plane minted (the per-cred skill ids become path components under `~/.topos/`
+/// and the harness skills dir; the workspace id becomes a URL segment) — a traversal-shaped id fails the
+/// whole redeem as malformed. **Pure** (status + bytes in), so the ok / denied / hostile-id arms are
+/// unit-tested without a socket (mirrors [`map_invite_envelope`]).
+fn map_redeem_envelope(kind: RedeemKind, status: u16, bytes: &[u8]) -> Result<Redeem, ClientError> {
     // The redeem is an all-outcome 200 envelope; a non-2xx is a transport/auth/integrity fault.
     if classify(status) != HttpClass::Ok {
         return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
@@ -572,12 +646,23 @@ fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError>
     let env: JsonEnvelope = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("redeem envelope is malformed: {e}")))?;
     if !env.ok {
-        // A DENIED redeem (e.g. a device-key mismatch) — surface the code, never any secret.
+        // A DENIED redeem — surface a typed error, never any secret. The plane's denial is deliberately
+        // uniform, so the guidance comes from WHICH door was knocked on, not from the (static) code.
         let code = env
             .error
             .map(|e| e.code)
             .unwrap_or_else(|| "DENIED".to_owned());
-        return Err(ClientError::Plane(format!("redeem refused ({code})")));
+        return Err(match kind {
+            // Authenticated-but-uninvited on a hosted plane: the ask-an-owner guidance + REQUEST_ACCESS.
+            RedeemKind::Grant => ClientError::RedeemDenied { code },
+            // A dead one-time claim: consumed by ANOTHER device (a same-device retry replays Redeemed),
+            // expired, or the workspace already exists — ask the operator for a fresh claim link.
+            RedeemKind::Claim => ClientError::Enrollment(
+                "the claim link was refused — it may be consumed, expired, or the workspace may \
+                 already exist; ask the plane operator for a fresh claim link"
+                    .into(),
+            ),
+        });
     }
     let resp: RedeemResponse = serde_json::from_value(env.data)
         .map_err(|e| ClientError::WireInvalid(format!("redeem data is malformed: {e}")))?;
@@ -597,8 +682,22 @@ fn map_redeem_envelope(status: u16, bytes: &[u8]) -> Result<Redeem, ClientError>
     Ok(Redeem {
         workspace_id: resp.workspace_id,
         device_key_id: resp.device_key_id,
+        principal: resp.principal,
         read_creds,
     })
+}
+
+/// Map the wire [`DeviceAuthorizeResponse`] to the transport-level [`DeviceAuthorize`] (drops the standup
+/// plane block, which [`UreqDeviceClient::device_authorize_standup`] extracts separately).
+fn device_authorize_from_wire(resp: DeviceAuthorizeResponse) -> DeviceAuthorize {
+    DeviceAuthorize {
+        device_code: resp.device_code,
+        user_code: resp.user_code,
+        verification_uri: resp.verification_uri,
+        verification_uri_complete: resp.verification_uri_complete,
+        expires_in: resp.expires_in,
+        interval: resp.interval,
+    }
 }
 
 /// Parse + validate the `/i/` bootstrap body: the serde decode (a non-Ed25519 `alg` fails the CLOSED
@@ -1084,6 +1183,7 @@ mod tests {
             data: serde_json::json!({
                 "workspace_id": workspace_id,
                 "device_key_id": "dk_abc",
+                "principal": "alice@acme.com",
                 "read_creds": [
                     { "skill_id": skill_id, "read_token": "rt_secret" }
                 ]
@@ -1101,7 +1201,8 @@ mod tests {
         // so every traversal/separator/case shape must fail the WHOLE redeem — as the WIRE flavor of the
         // corrupt family (same CORRUPT_STATE code; the safe message names the plane, not a sidecar).
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
-            let err = map_redeem_envelope(200, &redeem_env(bad, "w_acme")).unwrap_err();
+            let err = map_redeem_envelope(RedeemKind::Grant, 200, &redeem_env(bad, "w_acme"))
+                .unwrap_err();
             assert!(
                 matches!(err, ClientError::WireInvalid(_)),
                 "skill id {bad:?} must be refused as WireInvalid, got {err:?}"
@@ -1112,18 +1213,61 @@ mod tests {
                 "the plane's response failed validation"
             );
         }
-        // A clean redeem still parses.
-        let ok = map_redeem_envelope(200, &redeem_env("s_deploy", "w_acme")).unwrap();
+        // A clean redeem still parses (and carries the seated principal disclosure).
+        let ok =
+            map_redeem_envelope(RedeemKind::Grant, 200, &redeem_env("s_deploy", "w_acme")).unwrap();
         assert_eq!(ok.read_creds.len(), 1);
+        assert_eq!(ok.principal.as_deref(), Some("alice@acme.com"));
     }
 
     #[test]
     fn map_redeem_envelope_refuses_a_hostile_workspace_id() {
         // The workspace id is spliced into request URL paths — same charset rule.
         for bad in ["../../x", "a/b", "A", ""] {
-            let err = map_redeem_envelope(200, &redeem_env("s_deploy", bad)).unwrap_err();
+            let err = map_redeem_envelope(RedeemKind::Grant, 200, &redeem_env("s_deploy", bad))
+                .unwrap_err();
             assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
         }
+    }
+
+    #[test]
+    fn a_denied_redeem_is_typed_by_its_door() {
+        // The plane's DENIED envelope is uniform — the guidance comes from which door was knocked on.
+        let denied = envelope_bytes(&JsonEnvelope {
+            schema_version: 1,
+            command: "redeem".to_owned(),
+            ok: false,
+            data: serde_json::json!({}),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: Some(WireError {
+                code: "DENIED".to_owned(),
+                outcome: TerminalOutcome::Denied,
+                retryable: false,
+                affected: topos_types::Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            }),
+        });
+        // A grant redeem's denial → the ask-an-owner guidance (REQUEST_ACCESS rides the envelope).
+        let grant = map_redeem_envelope(RedeemKind::Grant, 200, &denied).unwrap_err();
+        assert!(
+            matches!(&grant, ClientError::RedeemDenied { code } if code == "DENIED"),
+            "got {grant:?}"
+        );
+        assert_eq!(grant.code(), "DENIED");
+        assert_eq!(grant.outcome(), TerminalOutcome::Denied);
+        assert!(
+            crate::render::safe_message(&grant).contains("topos invite <your-email>"),
+            "the ask-an-owner guidance names the exact command: {grant}"
+        );
+        // A claim redeem's denial → the dead-claim guidance (ask the operator for a fresh link).
+        let claim = map_redeem_envelope(RedeemKind::Claim, 200, &denied).unwrap_err();
+        assert!(matches!(claim, ClientError::Enrollment(_)), "got {claim:?}");
+        assert!(claim.to_string().contains("fresh claim link"), "{claim}");
     }
 
     fn bootstrap_json(skill_id: &str, workspace_id: &str) -> Vec<u8> {

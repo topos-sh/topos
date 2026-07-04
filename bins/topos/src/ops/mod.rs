@@ -42,7 +42,7 @@ pub(crate) use list::{ListOutcome, list};
 #[cfg(test)]
 pub(crate) use list::{FollowNote, ListEnrollment};
 pub(crate) use log::log;
-pub(crate) use publish::{PublishOutcome, publish};
+pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
 pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull};
 pub(crate) use revert::revert;
 pub(crate) use review::review;

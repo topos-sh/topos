@@ -23,7 +23,11 @@ asserts the `topos` tree resolves neither `schemars` nor `utoipa`).
 
 Per-verb `data` shapes: `pull`/`list`/`diff` are spec-PINNED; the other nine are marked **INFERRED**
 (additive-only, will tighten as each verb is built). `WireError.code` is an **open** string vocabulary by
-design — the spec deliberately does not freeze a closed code set.
+design — the spec deliberately does not freeze a closed code set. `PublishData` widened for the
+workspace-standup client: `version_id`/`current_generation` became `Option` (unknowable while a publish is
+PENDING the standup sign-in) and it gained the optional `pending` (`PublishPending`, status
+`signin_required`) + `standup` (`StandupReceipt` — the "workspace X — owner Y" hijack-visibility
+disclosure) blocks.
 
 ## Frozen names (do not rename)
 

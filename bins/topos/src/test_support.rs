@@ -935,6 +935,7 @@ impl ContributeHarness {
                 workspace_id: workspace_id.to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 email: None,
+                principal: None,
                 roles: Vec::new(),
                 invite_rooted: true,
                 enrolled_at: 1,
@@ -1090,13 +1091,28 @@ impl ContributeHarness {
         propose: bool,
         approve: &str,
     ) -> Result<PublishResult, String> {
-        self.with_write_ctx(plane_key, |ctx, contribute, governance| match ops::publish(
-            ctx, contribute, governance, None, propose, approve,
-        )
-        .map_err(|e| e.to_string())?
-        {
-            ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
-            ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
+        self.with_write_ctx(plane_key, |ctx, contribute, governance| {
+            // The harness is ALWAYS enrolled, so the standup branch never fires; the connector panics
+            // if a regression ever routes an enrolled publish into it, and the base is explicit (the
+            // compiled-in hosted default is never consulted from tests).
+            let standup_enroll = |_b: &str| -> Box<dyn crate::plane::EnrollSource> {
+                panic!("an enrolled publish must never build a standup transport")
+            };
+            let standup = ops::StandupConnectors {
+                enroll: &standup_enroll,
+                base_url: "http://127.0.0.1:0".to_owned(),
+            };
+            match ops::publish(
+                ctx, contribute, governance, &standup, None, propose, approve,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
+                ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
+                ops::PublishOutcome::Pending { .. } => {
+                    Err("unexpected standup-pending publish from an enrolled harness".to_owned())
+                }
+            }
         })
     }
 
