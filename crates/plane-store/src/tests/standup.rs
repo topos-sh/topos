@@ -129,13 +129,55 @@ async fn claim_mint_refusals_are_typed(pool: PgPool) {
             .unwrap(),
         MintClaimOutcome::Denied("a cloud-mode claim requires an owner email")
     ));
-    // Self-host may omit the email (the claiming device roots the owner).
+    // A self-host mint REFUSES an owner email (the symmetric refusal): a self-host owner is
+    // device-rooted, and an email-seated principal would later collide with the same device's
+    // self-host invites (which derive `dev.{kid}` and hit the device-rebind denial).
+    assert!(matches!(
+        a.mint_admin_claim(
+            &w2,
+            None,
+            Some("o@x.com"),
+            DeploymentMode::SelfHost,
+            1_000,
+            NOW,
+            T0
+        )
+        .await
+        .unwrap(),
+        MintClaimOutcome::Denied(
+            "a self-host claim's owner is device-rooted; omit the owner email"
+        )
+    ));
+    // Self-host WITHOUT the email mints (the claiming device roots the owner).
     assert!(matches!(
         a.mint_admin_claim(&w2, None, None, DeploymentMode::SelfHost, 1_000, NOW, T0)
             .await
             .unwrap(),
         MintClaimOutcome::Minted(_)
     ));
+}
+
+#[sqlx::test]
+async fn a_self_host_claim_seats_a_device_rooted_owner(pool: PgPool) {
+    // A SELF-HOST plane: the claim redeem must seat the claiming device's own `dev.{kid}` principal —
+    // never an email — so a later self-host invite for the same device (which derives the same
+    // device-rooted principal) resolves to the SAME identity instead of a device-rebind denial.
+    let fx = Fixture::with_mode(pool.clone(), "st-claim-devroot", DeploymentMode::SelfHost).await;
+    let a = &fx.authority;
+    let w = ws("w_home");
+    let token = mint(a, &w, Some("Home"), None, DeploymentMode::SelfHost, 60_000).await;
+    let dpub = device_pub(&[48u8; 32]);
+    let RedeemOutcome::Redeemed(r) = a.admin_claim(&token, dpub, NOW, T0).await.unwrap() else {
+        panic!("self-host claim redeem");
+    };
+    assert_eq!(
+        r.principal.as_str(),
+        format!("dev.{}", device_key_id_for(&dpub)),
+        "the seated owner is the device-rooted principal"
+    );
+    let row = a.db().read_workspace(&w).await.unwrap().expect("workspace");
+    assert_eq!(row.deployment_mode, "self_host");
+    assert_eq!(owner_rows(&pool, "w_home").await, 1);
 }
 
 #[sqlx::test]

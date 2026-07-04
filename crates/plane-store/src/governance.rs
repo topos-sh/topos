@@ -396,10 +396,12 @@ pub(crate) async fn admin_claim(
 }
 
 /// Mint a one-time admin-claim link token (the orchestration half of
-/// [`Authority::mint_admin_claim`]). Refuses a workspace that already exists (typed) and — on a CLOUD-mode
-/// plane — a mint with no owner email (the claim would otherwise seat a device-rooted owner no human
-/// identity can govern). The plaintext token is returned ONCE; only its sha256 is stored, and
-/// [`MintedClaim`]'s `Debug` redacts it.
+/// [`Authority::mint_admin_claim`]). Refuses a workspace that already exists (typed); on a CLOUD-mode
+/// plane a mint with no owner email (the claim would otherwise seat a device-rooted owner no human
+/// identity can govern); and — symmetrically — on a SELF-HOST plane a mint WITH an owner email: a
+/// self-host owner is device-rooted by design, and an email-seated principal would collide with the same
+/// device's later self-host invites (which derive `dev.{kid}` and then hit the device-rebind denial).
+/// The plaintext token is returned ONCE; only its sha256 is stored, and [`MintedClaim`]'s `Debug` redacts it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn mint_admin_claim(
     authority: &Authority,
@@ -414,6 +416,11 @@ pub(crate) async fn mint_admin_claim(
     if plane_mode == DeploymentMode::Cloud && owner_email.is_none() {
         return Ok(MintClaimOutcome::Denied(
             "a cloud-mode claim requires an owner email",
+        ));
+    }
+    if plane_mode == DeploymentMode::SelfHost && owner_email.is_some() {
+        return Ok(MintClaimOutcome::Denied(
+            "a self-host claim's owner is device-rooted; omit the owner email",
         ));
     }
     let owner = match owner_email {

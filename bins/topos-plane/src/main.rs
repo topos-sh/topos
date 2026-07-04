@@ -49,7 +49,8 @@ enum Command {
     /// Mint a ONE-TIME claim link that stands up a workspace and seats its first owner on redeem — the
     /// operator path for a fresh plane's first workspace (and the hosted break-glass). Prints the link
     /// EXACTLY ONCE to stdout; it is a bearer owner capability, so store it like a secret. On a cloud-mode
-    /// plane --owner-email is required.
+    /// plane --owner-email is required; on a self-host plane it is refused (the claiming device roots the
+    /// owner).
     MintClaim {
         /// The workspace id to stand up (must not exist yet).
         #[arg(long)]
@@ -57,8 +58,8 @@ enum Command {
         /// The workspace display name (defaults to the workspace id at redeem).
         #[arg(long)]
         display_name: Option<String>,
-        /// The owner email the redeem seats (required on a cloud-mode plane; omitted on self-host the
-        /// claiming device roots the owner).
+        /// The owner email the redeem seats — required on a cloud-mode plane, REFUSED on self-host
+        /// (there the claiming device roots the owner as its `dev.…` principal).
         #[arg(long)]
         owner_email: Option<String>,
         /// How long the UNREDEEMED claim stays valid — seconds, or a suffixed duration (`30m`, `72h`, `7d`).

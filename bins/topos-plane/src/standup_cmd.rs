@@ -98,7 +98,8 @@ impl PlaneState {
     /// Mint a one-time admin-claim link for a workspace that does not exist yet, returning the full
     /// `<base_url>/i/<token>` link — ONCE. The token is a bearer OWNER capability: the caller prints or
     /// delivers it and must never log it (this wrapper and the authority never do). On a cloud-mode plane
-    /// `owner_email` is required. `ttl_secs` bounds the FIRST redeem (a consumed claim's same-device replay
+    /// `owner_email` is required; on a self-host plane it is REFUSED (the claiming device roots the owner
+    /// as its device principal). `ttl_secs` bounds the FIRST redeem (a consumed claim's same-device replay
     /// still answers after expiry — lost-200 recovery).
     ///
     /// # Errors
