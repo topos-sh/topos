@@ -43,7 +43,9 @@ pub struct BootstrapData {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct BootstrapInvite {
-    /// A stable, non-secret reference for this invite (the link token the client used to reach the payload).
+    /// A stable, non-secret reference for this invite (the link token the client used to reach the
+    /// payload). Empty for an admin-claim bootstrap — a claim token is a live one-time bearer capability
+    /// the server never echoes into a body; the claim client uses the token it parsed from the link.
     pub token_id: String,
     /// The invite's expiry as an RFC-3339 string, if it expires (`None` = never).
     #[serde(default, skip_serializing_if = "Option::is_none")]

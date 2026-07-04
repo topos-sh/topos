@@ -1732,7 +1732,7 @@
           },
           "token_id": {
             "type": "string",
-            "description": "A stable, non-secret reference for this invite (the link token the client used to reach the payload)."
+            "description": "A stable, non-secret reference for this invite (the link token the client used to reach the\npayload). Empty for an admin-claim bootstrap — a claim token is a live one-time bearer capability\nthe server never echoes into a body; the claim client uses the token it parsed from the link."
           }
         }
       },

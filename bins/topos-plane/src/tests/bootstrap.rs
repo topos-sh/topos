@@ -20,6 +20,9 @@ async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_fal
     let (status, _, bytes) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
     assert_eq!(status, StatusCode::OK);
     let data: BootstrapData = serde_json::from_slice(&bytes).expect("the body is a BootstrapData");
+    // An INVITE bootstrap still echoes the link token as the non-secret token_id (a shareable link's
+    // own tail) — the claim door, by contrast, must not (see the claim test below).
+    assert_eq!(data.invite.token_id, token);
     // The plane signing key is pinned (the trust root the device TOFU-pins).
     assert_eq!(data.plane.signing_key.alg, SignatureAlg::Ed25519);
     assert!(!data.plane.signing_key.key_id.is_empty());
@@ -65,6 +68,14 @@ async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool
     assert!(
         !data.plane.signing_key.value.is_empty(),
         "the TOFU root rides the claim bootstrap"
+    );
+    // The claim token is the LIVE one-time bearer owner capability: unlike an invite, the body must not
+    // echo it anywhere (`token_id` is the empty placeholder) — a body-logging proxy learns nothing.
+    assert_eq!(data.invite.token_id, "");
+    let body = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+    assert!(
+        !body.contains(&token),
+        "a claim /i/ body must never contain the claim token: {body}"
     );
 
     // Redeem it over the wire (the request display_name is disclosure-only — the row's name wins)…

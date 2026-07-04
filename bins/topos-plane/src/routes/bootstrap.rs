@@ -32,12 +32,19 @@ pub(crate) async fn read_invite_bootstrap(
     let now = wire::now_utc().1;
     // Try the invite table first, then the claim table — sequential probes over DISJOINT stores (an
     // invite resolver never touches claims and vice versa), folding both misses into one uniform 404.
-    let bootstrap = match state.authority().read_invite_bootstrap(&token, now).await {
-        Ok(bootstrap) => bootstrap,
-        Err(AuthorityError::NotFound) => {
-            state.authority().read_claim_bootstrap(&token, now).await?
-        }
-        Err(other) => return Err(other.into()),
-    };
-    Ok(Json(map::bootstrap_to_wire(&token, bootstrap)).into_response())
+    // The echoed `invite.token_id` differs by door: an INVITE echoes the token the client used (the
+    // shareable link's own tail, non-secret by design), but a CLAIM token is the LIVE one-time bearer
+    // owner capability — repeating it in the response body would mint a second custody surface (a
+    // body-logging proxy captures it), and the claim client only ever uses the token it parsed from the
+    // link, never the echo. The claim branch therefore emits an empty placeholder.
+    let (bootstrap, echoed_token_id) =
+        match state.authority().read_invite_bootstrap(&token, now).await {
+            Ok(bootstrap) => (bootstrap, token.as_str()),
+            Err(AuthorityError::NotFound) => (
+                state.authority().read_claim_bootstrap(&token, now).await?,
+                "",
+            ),
+            Err(other) => return Err(other.into()),
+        };
+    Ok(Json(map::bootstrap_to_wire(echoed_token_id, bootstrap)).into_response())
 }

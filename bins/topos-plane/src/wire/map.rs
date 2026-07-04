@@ -245,7 +245,9 @@ fn default_code(outcome: TerminalOutcome) -> &'static str {
 // =================================================================================================
 
 /// Map an [`InviteBootstrap`] to the wire [`BootstrapData`] — the pre-enrollment TOFU payload. `token` is the
-/// invite link token the client used (echoed as the non-secret `token_id`); the plane key is pinned here.
+/// invite link token the client used, echoed as the non-secret `token_id` — for an INVITE only; the claim
+/// route passes an empty placeholder instead, because a claim token is the live one-time bearer owner
+/// capability and must never be repeated into a response body. The plane key is pinned here.
 pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapData {
     BootstrapData {
         schema_version: WIRE_SCHEMA_VERSION,
