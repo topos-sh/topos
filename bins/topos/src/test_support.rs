@@ -521,7 +521,8 @@ impl FollowHarness {
     }
 
     /// The `ops::follow` connector closures (a creds-free `ureq` enroll client + the read transport), built
-    /// EXACTLY as the production composition root builds them.
+    /// EXACTLY as the production composition root builds them. Keeps the TYPED error — the public wrappers
+    /// stringify it; [`resume_expect_denied`](Self::resume_expect_denied) renders the production envelope.
     fn run_follow(
         &self,
         plane: &dyn PlaneSource,
@@ -529,7 +530,7 @@ impl FollowHarness {
         plane_key: [u8; 32],
         link: Option<String>,
         opts: ops::FollowOpts,
-    ) -> Result<topos_types::results::FollowData, String> {
+    ) -> Result<topos_types::results::FollowData, crate::error::ClientError> {
         let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
             Box::new(UreqDeviceClient::new(base_url.to_owned()))
         };
@@ -543,8 +544,7 @@ impl FollowHarness {
         };
         // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op, so the
         // enrollment writer can record the device key into it; mirror that here.
-        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
-            .map_err(|e| e.to_string())?;
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())?;
         self.with_adapter(|harness| {
             let ctx = Ctx {
                 fs: &self.fs,
@@ -557,9 +557,7 @@ impl FollowHarness {
                 plane_key,
                 follow,
             };
-            ops::follow(&ctx, &connectors, link, opts)
-                .map(|o| o.data)
-                .map_err(|e| e.to_string())
+            ops::follow(&ctx, &connectors, link, opts).map(|o| o.data)
         })
     }
 
@@ -599,6 +597,7 @@ impl FollowHarness {
             Some(link.to_owned()),
             opts,
         )
+        .map_err(|e| e.to_string())
     }
 
     /// Call 2: `topos follow --resume` — poll, redeem (sign the enroll possession proof over the wire), promote.
@@ -614,6 +613,43 @@ impl FollowHarness {
             approve: Vec::new(),
         };
         self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `topos follow --resume` where the redeem is EXPECTED to be refused — returns the denial exactly as
+    /// the production error envelope surfaces it (wire code + next-action codes + the redacted message),
+    /// so the e2e asserts the ask-an-owner `REQUEST_ACCESS` guidance.
+    ///
+    /// # Panics
+    /// If the resume unexpectedly succeeds.
+    #[must_use]
+    pub fn resume_expect_denied(&self, plane_key: [u8; 32]) -> DeniedSurface {
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        let opts = ops::FollowOpts {
+            manual: false,
+            resume: true,
+            approve: Vec::new(),
+        };
+        match self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts) {
+            Ok(_) => panic!("test_support: expected the resume to be denied"),
+            Err(e) => {
+                let envelope = crate::render::err_envelope("follow", &e);
+                DeniedSurface {
+                    code: envelope
+                        .error
+                        .as_ref()
+                        .map(|w| w.code.clone())
+                        .unwrap_or_default(),
+                    message: crate::render::safe_message(&e),
+                    next_action_codes: envelope
+                        .next_actions
+                        .iter()
+                        .map(|a| a.code.as_str().to_owned())
+                        .collect(),
+                }
+            }
+        }
     }
 
     /// `topos follow --approve <targets>` — place the first-received bytes through the REAL read transport
@@ -641,6 +677,7 @@ impl FollowHarness {
             approve: targets.to_vec(),
         };
         self.run_follow(&plane, &follow, plane_key, None, opts)
+            .map_err(|e| e.to_string())
     }
 
     /// The plane public key pinned in `instance.json` (or `None` if not yet enrolled), as raw 32 bytes.
@@ -820,16 +857,240 @@ impl FollowHarness {
                 .data
         })
     }
+
+    // ── the workspace-standup drivers (the chain e2e's surface) ────────────────────────────────────
+
+    /// Adopt a local skill under the EXACT `skill_id` into this rig's work root via the genuine
+    /// `ops::add` (the same never-pulled sidecar docs a real adopt writes) — the draft a subsequent
+    /// [`publish`](Self::publish) ships. `files` entries are `(bundle-relative path, is_executable, bytes)`.
+    ///
+    /// # Panics
+    /// If the adopt fails (a test-precondition error).
+    pub fn adopt(&self, skill_id: &str, files: &[(&str, bool, &[u8])]) {
+        let dir = self.work.0.join(skill_id);
+        write_tree(&dir, files);
+        let fixed = FixedId(skill_id.to_owned());
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("load-or-create device id");
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &fixed,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                plane_key: [0u8; 32],
+                follow: &inert_follow,
+            };
+            let added = ops::add(&ctx, &dir)
+                .unwrap_or_else(|e| panic!("test_support: adopt of {skill_id} failed: {e}"));
+            assert_eq!(
+                added.skill_id, skill_id,
+                "the fixed id source must mint the requested skill id"
+            );
+        });
+    }
+
+    /// The adopted draft's bundle digest (lowercase hex) — the `<digest>` a publish's `--approve` must
+    /// carry. Scans the SAME work-root placement [`adopt`](Self::adopt) tracked.
+    ///
+    /// # Panics
+    /// If the placement cannot be scanned.
+    #[must_use]
+    pub fn draft_digest(&self, skill_id: &str) -> String {
+        let scanned = scan::scan(&self.work.0.join(skill_id)).expect("scan the adopted draft");
+        to_hex(&scanned.bundle_digest)
+    }
+
+    /// Drive a DIRECT `publish … --approve <skill>@<digest>` over the REAL transports — including the
+    /// workspace-standup branch: on an un-enrolled rig the publish starts the standup device flow against
+    /// `standup_base_url` (the explicit loopback base — the compiled-in hosted default is never consulted)
+    /// and returns [`PublishResult::Pending`]; re-invoking the SAME call resumes (poll → redeem → promote →
+    /// the publish continues in that same invocation). On an enrolled rig this is the ordinary publish.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn publish(
+        &self,
+        standup_base_url: &str,
+        plane_key: [u8; 32],
+        approve: &str,
+    ) -> Result<PublishResult, String> {
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let contribute = |b: &str| -> Box<dyn ContributeSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
+        let standup_enroll =
+            |b: &str| -> Box<dyn EnrollSource> { Box::new(UreqDeviceClient::new(b.to_owned())) };
+        let standup = ops::StandupConnectors {
+            enroll: &standup_enroll,
+            base_url: standup_base_url.to_owned(),
+        };
+        // `publish` never reads ctx.plane (the enrolled write transport is built per-base inside the op),
+        // so the read seams stay inert; the pinned `plane_key` verifies the OK receipt's signed pointer.
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                plane_key,
+                follow: &inert_follow,
+            };
+            match ops::publish(
+                &ctx,
+                &contribute,
+                &governance,
+                &standup,
+                None,
+                false,
+                approve,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
+                ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
+                ops::PublishOutcome::Pending { data, resume_argv } => {
+                    Ok(PublishResult::Pending { data, resume_argv })
+                }
+            }
+        })
+    }
+
+    /// Drive the real `invite` verb: this (owner) rig signs the governance Invite op and POSTs it,
+    /// returning the minted `/i/` link. `skills` pre-offers the named skill ids to `email`.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (a non-owner is DENIED).
+    pub fn invite(&self, email: &str, skills: &[&str]) -> Result<String, String> {
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                plane_key: [0u8; 32],
+                follow: &inert_follow,
+            };
+            ops::invite(
+                &ctx,
+                &governance,
+                vec![email.to_owned()],
+                None,
+                skills.iter().map(|s| (*s).to_owned()).collect(),
+            )
+            .map(|d| d.invite_link)
+            .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The device public key this rig's signer mints (load-or-generate is idempotent) — for the
+    /// server-side same-device / different-device claim-replay witnesses.
+    #[must_use]
+    pub fn device_pubkey(&self) -> [u8; 32] {
+        DeviceSigner::load_or_generate(&self.fs, &self.layout())
+            .expect("load-or-generate device key")
+            .public_key()
+    }
+
+    /// The principal the enrollment seated this device as (from `user.json`; `None` before promote).
+    #[must_use]
+    pub fn user_principal(&self) -> Option<String> {
+        enroll::read_user(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .and_then(|u| u.principal)
+    }
+
+    /// The enrolled workspace id (from `user.json`; `None` before promote).
+    #[must_use]
+    pub fn user_workspace(&self) -> Option<String> {
+        enroll::read_user(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|u| u.workspace_id)
+    }
+
+    /// POST a token to `/v1/admin-claim` over the REAL transport (this rig's device key) — the
+    /// cross-species witness surface. `Ok` carries the redeemed workspace id.
+    ///
+    /// # Errors
+    /// The transport's typed error rendered to a string (a non-claim / dead token is refused uniformly).
+    pub fn admin_claim_attempt(&self, base_url: &str, token: &str) -> Result<String, String> {
+        let signer =
+            DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
+        let client = UreqDeviceClient::new(base_url.to_owned());
+        EnrollSource::admin_claim(&client, token, signer.public_key(), "e2e")
+            .map(|r| r.workspace_id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// POST a token as the `invite_token` of a `/v1/device/authorize` start over the REAL transport —
+    /// the other cross-species direction. `Ok` carries the session's user code.
+    ///
+    /// # Errors
+    /// The transport's typed error rendered to a string (a non-invite / dead token is refused uniformly).
+    pub fn device_authorize_attempt(&self, base_url: &str, token: &str) -> Result<String, String> {
+        let signer =
+            DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
+        let client = UreqDeviceClient::new(base_url.to_owned());
+        EnrollSource::device_authorize(&client, token, signer.public_key(), "e2e")
+            .map(|a| a.user_code)
+            .map_err(|e| e.to_string())
+    }
 }
 
-/// The result of a [`ContributeHarness::publish`]: either `current` moved (a direct publish) or a proposal
-/// opened (`--propose`). The public face of the client's internal `PublishOutcome`.
+/// The result of a [`ContributeHarness::publish`] / [`FollowHarness::publish`]: `current` moved (a direct
+/// publish), a proposal opened (`--propose`), or the un-enrolled workspace-standup branch is PENDING a
+/// human sign-in. The public face of the client's internal `PublishOutcome`.
 #[derive(Debug, Clone)]
 pub enum PublishResult {
     /// A direct publish moved `current`.
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
+    /// The un-enrolled standup branch is waiting on a human sign-in: nothing was published, `data.pending`
+    /// carries the sign-in envelope, and re-invoking `resume_argv` (the SAME publish command) resumes.
+    Pending {
+        data: PublishData,
+        resume_argv: Vec<String>,
+    },
+}
+
+/// A follow step's DENIAL, surfaced exactly as the production `--json` envelope would carry it: the wire
+/// error code and the next-action codes come from the real render mapping, the message from the redacted
+/// safe surface — so an external e2e asserts the REQUEST_ACCESS guidance without reaching `pub(crate)`.
+#[derive(Debug, Clone)]
+pub struct DeniedSurface {
+    /// The wire error code (`DENIED` for a refused redeem).
+    pub code: String,
+    /// The redacted user-facing message (the ask-an-owner guidance for a denied enrollment redeem).
+    pub message: String,
+    /// The machine-actionable next-action codes (`REQUEST_ACCESS` for a denied redeem).
+    pub next_action_codes: Vec<String>,
 }
 
 /// The contribute rig: an ENROLLED publisher/reviewer home (instance/user/follows + a device key) with one

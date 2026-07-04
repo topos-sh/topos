@@ -118,6 +118,9 @@ pub(crate) struct Seeded {
 pub(crate) struct Plane {
     pub(crate) rt: tokio::runtime::Runtime,
     pub(crate) authority: Arc<Authority>,
+    /// The provisioned per-test database — for direct row-level witnesses only (e.g. the standup chain's
+    /// "the admin_claim table stayed empty"), never a second write path.
+    pub(crate) pool: PgPool,
     pub(crate) base_url: String,
     pub(crate) plane_key: [u8; 32],
     seeded: Seeded,
@@ -150,11 +153,24 @@ impl Plane {
 /// the real `base_url`, and an early client connect queues in the backlog with no race), open the
 /// authority over a fresh migrated database (+ the plane key, + the device-code enrollment config when
 /// `enrollment`), run the scenario's `seed`, then serve `router(state)` on a background multi-thread
-/// runtime. Returns the live [`Plane`].
+/// runtime. Returns the live [`Plane`]. The plane runs at `Cloud` mode; the standup e2e's self-host
+/// chain uses [`start_plane_mode`].
 pub(crate) fn start_plane(
     scratch_prefix: &str,
     tag: &str,
     enrollment: bool,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
+    start_plane_mode(scratch_prefix, tag, enrollment, DeploymentMode::Cloud, seed)
+}
+
+/// [`start_plane`] with an explicit deployment posture — a self-host plane's standup door is the uniform
+/// miss and its redeem gate admits a bearer, so the standup e2e needs both modes.
+pub(crate) fn start_plane_mode(
+    scratch_prefix: &str,
+    tag: &str,
+    enrollment: bool,
+    mode: DeploymentMode,
     seed: impl AsyncFnOnce(&Authority) -> Seeded,
 ) -> Plane {
     let dir = Scratch::new(scratch_prefix, tag);
@@ -169,29 +185,27 @@ pub(crate) fn start_plane(
     let addr = listener.local_addr().expect("local addr");
     let base_url = format!("http://{addr}");
 
-    let (authority, seeded, plane_key) = rt.block_on(async {
-        let mut authority = Authority::from_pool(
-            provision_pg().await,
-            &dir.0.join("git"),
-            &dir.0.join("large"),
-        )
-        .expect("open authority")
-        .with_plane_key(&dir.0.join("plane.key"))
-        .expect("load plane key");
+    let (authority, seeded, plane_key, pool) = rt.block_on(async {
+        let pool = provision_pg().await;
+        let mut authority =
+            Authority::from_pool(pool.clone(), &dir.0.join("git"), &dir.0.join("large"))
+                .expect("open authority")
+                .with_plane_key(&dir.0.join("plane.key"))
+                .expect("load plane key");
         if enrollment {
             authority = authority
                 .with_enrollment_config(EnrollmentConfig {
                     secret_path: dir.0.join("enroll.key"),
                     base_url: base_url.clone(),
                     verify_base_url: None,
-                    deployment_mode: DeploymentMode::Cloud,
+                    deployment_mode: mode,
                     enrollment_method: "device_code".to_owned(),
                 })
                 .expect("load enrollment secret");
         }
         let seeded = seed(&authority).await;
         let plane_key = authority.plane_public_key().expect("plane public key");
-        (authority, seeded, plane_key)
+        (authority, seeded, plane_key, pool)
     });
 
     let authority = Arc::new(authority);
@@ -207,6 +221,7 @@ pub(crate) fn start_plane(
     Plane {
         rt,
         authority,
+        pool,
         base_url,
         plane_key,
         seeded,
