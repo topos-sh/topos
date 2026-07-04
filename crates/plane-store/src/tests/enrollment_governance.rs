@@ -455,6 +455,74 @@ async fn redeem_replay_re_derives_identical_read_tokens(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn redeem_fails_closed_on_a_corrupt_stored_deployment_mode(pool: PgPool) {
+    // The deployment mode decides the redeem GATE (cloud requires a rostered identity; self-host admits
+    // the bearer). A corrupted/unknown stored mode must be an Integrity fault — never a fall-through to
+    // the permissive self-host bearer semantics. The schema CHECK normally forbids such a row, so the
+    // test drops it to simulate exactly the corruption (a bad restore, a slipped migration) the strict
+    // parse is the defense against — matching start_device_auth/read_invite_bootstrap, which already
+    // fail closed on it.
+    let fx = Fixture::new(pool.clone(), "enr-mode-closed").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    let invite = make_invite(
+        a,
+        &w,
+        &owner_seed,
+        &owner_dk,
+        &op_id(1),
+        "alice@acme.com",
+        "s_deploy",
+    )
+    .await;
+    let device_seed = [23u8; 32];
+    let dpub = device_pub(&device_seed);
+    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+
+    // Corrupt the stored mode AFTER the grant was issued, so the redeem is the first read of it.
+    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_deployment_mode_check")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspace SET deployment_mode = 'banana' WHERE workspace_id = $1")
+        .bind(w.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let grant_hash = digest::sha256(grant.grant_token.as_bytes());
+    let offered: Vec<&str> = grant.offered_skills.iter().map(SkillId::as_str).collect();
+    let sig = sign_enroll(
+        &device_seed,
+        grant.workspace_id.as_str(),
+        grant_hash,
+        &grant.device_auth_id,
+        &grant.device_key_id,
+        dpub,
+        &offered,
+    );
+    let err = a
+        .redeem_enrollment(&grant.grant_token, &sig, dpub, NOW, "t0")
+        .await
+        .expect_err("a garbage stored mode must fail the redeem closed");
+    assert!(
+        matches!(err, AuthorityError::Integrity(_)),
+        "an Integrity fault, never a bearer admission: {err:?}"
+    );
+    // Nothing was admitted: no device row, no read token, no self-host membership for alice.
+    let devices = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2",
+    )
+    .bind(w.as_str())
+    .bind(&grant.device_key_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(devices, 0, "the failed redeem registered nothing");
+}
+
+#[sqlx::test]
 async fn cloud_redeem_of_a_non_rostered_principal_is_denied(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-gate").await;
     let a = &fx.authority;

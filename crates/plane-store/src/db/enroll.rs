@@ -14,8 +14,8 @@ use topos_core::sign::{EnrollFields, verify_enroll};
 
 use super::{Db, blob32};
 use crate::enroll::{
-    self, ConfirmOutcome, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued, MintedReadToken,
-    PasscodeComplete, RedeemInput, RedeemOutcome,
+    self, ConfirmOutcome, DeploymentMode, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued,
+    MintedReadToken, PasscodeComplete, RedeemInput, RedeemOutcome,
 };
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
@@ -758,12 +758,17 @@ async fn redeem_run(
         return Ok(RedeemOutcome::Denied("possession proof failed"));
     }
 
-    // (5) THE GATE (deployment mode from the workspace row).
+    // (5) THE GATE (deployment mode from the workspace row). The stored mode is parsed STRICTLY — an
+    // unknown/corrupted value is an Integrity fault (fail closed, matching start_device_auth and
+    // read_invite_bootstrap), NEVER a silent fall-through to the self-host bearer semantics: a garbage
+    // mode must not admit a device that would have had to pass the cloud roster gate.
     let Some(workspace) = read_workspace_in_tx(tx, &grant.workspace_id).await? else {
         return Ok(RedeemOutcome::Denied("no such workspace"));
     };
-    let cloud_invited = match workspace.deployment_mode.as_str() {
-        "cloud" => {
+    let deployment = DeploymentMode::parse(&workspace.deployment_mode)
+        .ok_or_else(|| AuthorityError::integrity(EnrollCorrupt("workspace deployment mode")))?;
+    let cloud_invited = match deployment {
+        DeploymentMode::Cloud => {
             // Cloud requires a confirmed identity ALREADY on the roster (the invite carried no role).
             match read_member_status(tx, &grant.workspace_id, &grant.principal).await? {
                 None => {
@@ -775,7 +780,7 @@ async fn redeem_run(
             }
         }
         // Self-host grants membership straight from the bearer.
-        _ => false,
+        DeploymentMode::SelfHost => false,
     };
 
     // (6) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
@@ -811,7 +816,7 @@ async fn redeem_run(
         .execute(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
-    } else if workspace.deployment_mode == "self_host" {
+    } else if deployment == DeploymentMode::SelfHost {
         sqlx::query!(
             "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
              VALUES ($1, $2, 'member', 'confirmed', NULL, $3) \
