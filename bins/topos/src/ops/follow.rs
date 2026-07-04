@@ -114,19 +114,18 @@ fn begin(
     link: &str,
     manual: bool,
 ) -> Result<FollowData, ClientError> {
-    let (base_url, token) = parse_link(ctx, link)?;
+    let (link_base, token) = parse_link(ctx, link)?;
 
     // An unsettled claim redeem for this same link retries the POST directly — NEVER refetching `/i/`
     // (the first send may have consumed the claim, whose bootstrap then serves 404 by design; the
-    // server's same-device replay re-answers Redeemed). A different token/plane is refused typed.
+    // server's same-device replay re-answers Redeemed). The match is on the TOKEN alone: it is
+    // HMAC-derived and unique per plane, and the WAL's `base_url` is the re-rooted API base while a
+    // re-pasted link may ride the team's share host — the token, not the host string, is the claim's
+    // identity. A different token is refused typed.
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)?
-        && let enroll::EnrollPhase::ClaimPending {
-            base_url: wal_base,
-            claim_token,
-            ..
-        } = &wal.state
+        && let enroll::EnrollPhase::ClaimPending { claim_token, .. } = &wal.state
     {
-        if *wal_base == base_url && *claim_token == token {
+        if *claim_token == token {
             return retry_claim(ctx, connectors, &wal);
         }
         return Err(ClientError::Enrollment(
@@ -136,10 +135,16 @@ fn begin(
         ));
     }
 
-    let enroll_src = (connectors.enroll)(&base_url);
-
-    let bootstrap = enroll_src.fetch_bootstrap(&token)?;
+    let bootstrap = (connectors.enroll)(&link_base).fetch_bootstrap(&token)?;
+    // RE-ROOT onto the plane's declared API base. The link is only where the bootstrap lives (a hosted
+    // team's share links ride its web origin); the bootstrap declares the plane every later call — the
+    // device flow, the redeem, every pull — must dial. The declared base passes the same gate as the
+    // link base and may never downgrade the transport. This adds no attacker capability: whoever mints
+    // the link already controls both the bootstrap and the key it pins (the link IS the TOFU channel).
+    let base_url = resolve_api_base(&link_base, &bootstrap.plane.base_url)?;
     // I-TOFU: pin the plane key over the unauthenticated `/i/` channel (or refuse a cross-plane / re-pin).
+    // Keyed on the RE-ROOTED API base — the base every later verify dials and `instance.json` records —
+    // so a second link from the same plane (whatever host the link string rides) matches the pin.
     let pinned_plane_key = tofu_decide_key(ctx, &base_url, &bootstrap.plane.signing_key)?;
 
     // Branch on the enrollment method the bootstrap disclosed. A method this build does not understand
@@ -167,7 +172,9 @@ fn begin(
     }
 
     // Load (or, on first use, mint) the device signer — its public key starts the device authorization.
+    // The transport is (re)built on the RE-ROOTED API base: only the one bootstrap GET rode the link base.
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+    let enroll_src = (connectors.enroll)(&base_url);
     let auth = enroll_src.device_authorize(&token, signer.public_key(), &machine_name(&signer))?;
 
     let context = enroll::EnrollContext {
@@ -223,6 +230,8 @@ fn begin(
 }
 
 /// The TOFU decision (I-TOFU), shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
+/// `base_url` is the plane's API base — for a link follow that is the RE-ROOTED base the bootstrap
+/// declared (never the share host the link string rode), so the pin matches what every later verify dials.
 /// Decode the plane signing key (`alg` is the CLOSED `SignatureAlg` enum — a non-Ed25519 alg already
 /// failed the deserialize; the value is raw-32B base64url → 64-hex). Then: ABSENT `instance.json` ⇒
 /// first-ever pin; PRESENT with a different `base_url` ⇒ refuse a cross-plane follow (v0 is one plane per
@@ -315,12 +324,19 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
         } => {
             let enroll_src = (connectors.enroll)(&context.base_url);
             match enroll_src.poll_token(&device_code)? {
-                // Still pending — re-surface the URL (the persisted server-built one, verbatim; the
-                // client-side reconstruction is only the fallback for a WAL an older plane filled); the
-                // WAL stays put for the next `--resume`.
+                // Still pending — re-surface the persisted SERVER-built URL, verbatim. There is no
+                // client-side reconstruction: the plane's verification page lives on its (possibly
+                // separate) verify base, which this client cannot derive — a fabricated URL would point
+                // the human at a page that does not exist. A WAL an older build wrote without the URL
+                // restarts cleanly.
                 TokenPoll::Pending | TokenPoll::SlowDown => {
-                    let complete = verification_uri_complete
-                        .unwrap_or_else(|| complete_uri(&verification_uri(&context), &user_code));
+                    let complete = verification_uri_complete.ok_or_else(|| {
+                        ClientError::Enrollment(
+                            "this enrollment session carries no verification URL; start over with \
+                             `follow <link>`"
+                                .into(),
+                        )
+                    })?;
                     Ok(pending_followdata(&context, &user_code, complete))
                 }
                 // A terminal denial / expiry — sweep the WAL, surface a typed error.
@@ -400,6 +416,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
 fn claim_follow(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
+    // The RE-ROOTED API base (the WAL records it; the redeem POST + the promote ride it).
     base_url: &str,
     token: &str,
     bootstrap: &topos_types::BootstrapData,
@@ -597,6 +614,7 @@ fn promote(
         workspace_display_name: Some(context.workspace_display_name.clone()),
         verified_domain: context.verified_domain.clone(),
         verified_domain_status: Some(context.verified_domain_status),
+        plane_base_url: Some(context.base_url.clone()),
         pending: None,
         currency: Some(currency),
     })
@@ -921,6 +939,7 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientErr
             workspace_display_name: None,
             verified_domain: None,
             verified_domain_status: None,
+            plane_base_url: None,
             pending: None,
             currency: None,
         },
@@ -961,6 +980,27 @@ fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError
     Err(ClientError::Enrollment(
         "a bare invite token needs a prior enrollment; pass the full /i/<token> link".into(),
     ))
+}
+
+/// Resolve the API base a follow re-roots onto: the bootstrap's declared `plane.base_url`, normalized
+/// (trimmed of trailing slashes — the pin comparisons are exact string equality) and gated the same way
+/// as the link base — plus the one extra rule the re-root introduces: an `https` link must never re-root
+/// onto a plain-`http` plane (a transport downgrade the human who pasted the link could not see).
+pub(super) fn resolve_api_base(link_base: &str, declared: &str) -> Result<String, ClientError> {
+    let declared = declared.trim().trim_end_matches('/');
+    if declared.is_empty() {
+        return Err(ClientError::Enrollment(
+            "the bootstrap declared no plane base URL; upgrade the plane".into(),
+        ));
+    }
+    validate_base_url(declared)?;
+    if link_base.starts_with("https://") && !declared.starts_with("https://") {
+        return Err(ClientError::Enrollment(
+            "refusing to enroll: the link is https but the plane declares a plain-http base URL"
+                .into(),
+        ));
+    }
+    Ok(declared.to_owned())
 }
 
 /// Refuse a plane base that is not a well-formed absolute `http(s)://…` URL (the transport's own `Uri`
@@ -1011,6 +1051,7 @@ fn pending_followdata(
         workspace_display_name: Some(context.workspace_display_name.clone()),
         verified_domain: context.verified_domain.clone(),
         verified_domain_status: Some(context.verified_domain_status),
+        plane_base_url: Some(context.base_url.clone()),
         pending: Some(EnrollmentPending {
             verification_uri_complete,
             user_code: user_code.to_owned(),
@@ -1030,12 +1071,6 @@ pub(super) fn complete_uri(verification_uri: &str, user_code: &str) -> String {
         '?'
     };
     format!("{verification_uri}{sep}user_code={user_code}")
-}
-
-/// The plane's device-verification URL, rebuilt from the pinned base (used when a `--resume` is still
-/// pending — the `Authorizing` WAL stores only the user code, not the full URL).
-fn verification_uri(context: &enroll::EnrollContext) -> String {
-    format!("{}/device", context.base_url)
 }
 
 /// A followed skill's display name from the bootstrap (else its id).
@@ -1072,7 +1107,32 @@ fn now_millis(ctx: &Ctx<'_>) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_base_url;
+    use super::{resolve_api_base, validate_base_url};
+
+    /// The re-root resolver: normalizes trailing slashes (the pin compares are exact strings), applies
+    /// the same URL gate as the link base, and refuses the one thing a re-root could newly smuggle in —
+    /// an https→http transport downgrade the human who pasted the link could not see.
+    #[test]
+    fn api_base_resolver_normalizes_gates_and_refuses_downgrade() {
+        assert_eq!(
+            resolve_api_base("https://links.example", "https://api.plane.test/").unwrap(),
+            "https://api.plane.test"
+        );
+        assert_eq!(
+            resolve_api_base("http://localhost:1", "http://127.0.0.1:2").unwrap(),
+            "http://127.0.0.1:2"
+        );
+        // An http link may upgrade to an https plane…
+        assert_eq!(
+            resolve_api_base("http://links.example", "https://api.plane.test").unwrap(),
+            "https://api.plane.test"
+        );
+        // …but an https link never downgrades to plain http.
+        assert!(resolve_api_base("https://links.example", "http://api.plane.test").is_err());
+        // An empty / malformed declared base is refused typed (same gate as the link base).
+        assert!(resolve_api_base("https://links.example", "").is_err());
+        assert!(resolve_api_base("https://links.example", "not-a-url").is_err());
+    }
 
     #[test]
     fn base_url_gate_accepts_the_legit_shapes_and_refuses_the_uri_hazards() {

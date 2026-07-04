@@ -617,6 +617,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_display_name: Some("Demo Team".to_owned()),
             verified_domain: None,
             verified_domain_status: Some(topos_types::bootstrap::VerifiedDomainStatus::Unverified),
+            plane_base_url: Some("https://plane.demo.test".to_owned()),
             pending: None,
             currency: None,
         })

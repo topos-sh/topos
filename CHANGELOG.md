@@ -5,6 +5,47 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## Main-domain share links + the agent-readable bootstrap (paste a link to your agent)
+
+The `/i/<token>` share link is now the complete cold-start artifact: a human pastes the bare link to
+their agent, and the link itself teaches the agent every step.
+
+- **`GET /i/{token}` content-negotiates.** An `Accept` asking for JSON (or no `Accept` at all) gets the
+  unchanged versioned `BootstrapData` machine contract; everything else — curl's `*/*`, a browser, an
+  agent's web fetch — gets a `text/markdown` **agent-instruction document** rendered from the same
+  authority read: what the link is (workspace, verified-domain badge, offered skills), the checksummed
+  installer one-liner if `topos` is missing, the `follow` command, the show-the-human verification step,
+  the resume, and the per-digest offer consent (nothing auto-lands — the document says so). The CLAIM
+  variant warns that the first redeemer becomes the workspace owner and NEVER echoes the token or link
+  (the same custody rule as the JSON `token_id` placeholder). Both 200s are `no-store` + `Vary: accept`
+  + `noindex`; errors stay the uniform JSON envelope on every `Accept`. Named skew, pre-GA: an OLD
+  client binary's fresh `follow` sent `*/*` and now receives markdown — the new client sends
+  `Accept: application/json` explicitly; already-enrolled devices are unaffected (pulls never touch `/i/`).
+- **`--link-base-url` / `TOPOS_PLANE_LINK_BASE_URL`** (default: the base URL): the PUBLIC base every
+  minted `/i/` link rides — create-invite, mint-claim, and the standup self-invite — so a hosted plane's
+  user-visible links live on its web origin while the API stays on its own host. Only the link STRING
+  moves: the bootstrap payload keeps declaring the API `base_url`.
+- **The client re-roots.** `follow <link>` fetches the bootstrap from the link's host, then re-roots
+  onto the bootstrap's declared `plane.base_url` for everything after — the device flow, the redeem,
+  every pull, and the pinned `instance.json` (normalized; the same URL gate as the link base; an https
+  link never downgrades to a plain-http plane). The TOFU pin and the one-plane-per-install refusal key
+  on the RE-ROOTED base, so a second link from the same plane matches the pin whatever host it rides;
+  the standup publish pins identically from its response's plane block. The enrolled plane is disclosed
+  as `FollowData.plane_base_url` and on the pending TTY receipt. The claim-retry dedup now matches on
+  the token alone (HMAC-derived, unique per plane), so a re-pasted claim link retries the redeem POST
+  without ever refetching the possibly-consumed bootstrap. The client's fabricated
+  `{base}/device` verification-URL fallback is gone — the server-built URL is used verbatim or the
+  session restarts typed.
+- **One authoritative source for the disclosed bases.** The standup `device/authorize` plane block and
+  the bootstrap document read the Authority's enrollment config (`Authority::enrollment_disclosure`; the
+  domain bootstrap carries `link_base`) — previously a `PlaneState::new` composition silently served the
+  state-side default (blank base URL, self-host posture) in the standup block.
+- **Receipts teach the motion.** `invite` and a genesis `publish` now say it plainly: teammates paste
+  the link to their agent and ask it to follow — the link walks the agent through the rest.
+- Proven end-to-end over loopback HTTP on ONE listener with split host strings
+  (`tests/tests/follow_e2e.rs`): the minted link rides `localhost`, the markdown serves over the real
+  socket, and the client pins + pulls on `127.0.0.1`.
+
 ## Workspace standup — the chain proof (the loopback full-chain e2e + the mint-claim smoke)
 
 The two halves below are now proven END TO END, over real loopback HTTP, with the genuine client against

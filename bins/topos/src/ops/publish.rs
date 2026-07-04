@@ -29,7 +29,9 @@ use topos_types::results::{
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
-use super::follow::{EnrollConnect, complete_uri, machine_name, promote_core, tofu_decide_key};
+use super::follow::{
+    EnrollConnect, complete_uri, machine_name, promote_core, resolve_api_base, tofu_decide_key,
+};
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
 use super::{parse_hex32, resolve_skill};
@@ -385,10 +387,12 @@ fn standup_begin(
     let enroll_src = (standup.enroll)(&standup.base_url);
     let start = enroll_src.device_authorize_standup(signer.public_key(), &machine_name(&signer))?;
 
-    // TOFU: pin the plane key the response's plane block disclosed, under the base URL this client
-    // actually called (instance.json is absent on this branch, so this is normally the first-ever pin;
-    // the shared decision still refuses a conflicting pin that appeared concurrently).
-    let pinned_plane_key = tofu_decide_key(ctx, &standup.base_url, &start.plane.signing_key)?;
+    // RE-ROOT + TOFU, exactly as a link follow does: the response's plane block declares the API base
+    // this device pins and every later call dials (normally the dialed base itself — the compiled-in
+    // hosted default IS the API base). Pinning the declared base keeps the standup pin and a later
+    // `/i/`-link pin string-identical, so neither door ever refuses the other as cross-plane.
+    let base_url = resolve_api_base(&standup.base_url, &start.plane.base_url)?;
+    let pinned_plane_key = tofu_decide_key(ctx, &base_url, &start.plane.signing_key)?;
 
     let expires_at_millis = i64::try_from(ctx.clock.now_unix_millis())
         .unwrap_or(i64::MAX)
@@ -409,7 +413,7 @@ fn standup_begin(
         &enroll::PendingEnrollment {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: enroll::EnrollPhase::AuthorizingStandup {
-                base_url: standup.base_url.clone(),
+                base_url,
                 pinned_plane_key,
                 plane_key_id: start.plane.signing_key.key_id.clone(),
                 deployment_mode: start.plane.deployment_mode,

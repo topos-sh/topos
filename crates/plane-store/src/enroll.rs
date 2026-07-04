@@ -57,8 +57,26 @@ pub struct InviteBootstrap {
     pub plane_public_key: [u8; 32],
     /// The plane signing key id.
     pub plane_key_id: String,
-    /// The plane's public base URL.
+    /// The plane's public API base URL (what the bootstrap payload declares; the client re-roots onto it).
     pub base_url: String,
+    /// The base the minted `/i/` share links ride (`link_base_url` else `base_url`) — for a serving layer
+    /// that re-renders the link (e.g. the agent-readable bootstrap document). Never on the wire payload.
+    pub link_base: String,
+    /// The offered enrollment method.
+    pub enrollment_method: String,
+}
+
+/// The plane's enrollment-config disclosure — what a STANDUP `device/authorize` response carries as its
+/// plane block (the same facts the `/i/` bootstrap serves an invited device; a standup device has no
+/// `/i/` link to fetch them from). One authoritative source: the enrollment config on the Authority.
+#[derive(Debug, Clone)]
+pub struct EnrollmentDisclosure {
+    /// The plane's public API base URL (what the client re-roots onto and pins).
+    pub base_url: String,
+    /// The base the minted `/i/` share links ride (`link_base_url` else `base_url`).
+    pub link_base: String,
+    /// The plane's deployment posture.
+    pub deployment_mode: DeploymentMode,
     /// The offered enrollment method.
     pub enrollment_method: String,
 }
@@ -284,12 +302,19 @@ impl SessionIntent {
 pub struct EnrollmentConfig {
     /// The `0600` file the 32-byte HMAC enrollment secret is load-or-generated from (load-time only).
     pub secret_path: PathBuf,
-    /// The plane's public base URL (the `/i/<token>` link + the device-auth `verification_uri` are built on it).
+    /// The plane's public **API** base URL — the root a client dials for enrollment + sync. The bootstrap
+    /// payload's `plane.base_url` is always this (never a web front); the device-auth `verification_uri`
+    /// and the minted `/i/` links fall back to it when their dedicated bases are unset.
     pub base_url: String,
     /// The HUMAN-facing verification base URL, when it differs from `base_url` (a hosted plane whose web
     /// pages live on another host). `None` ⇒ `base_url`. Only the device-auth `verification_uri`(+`_complete`)
-    /// are built on it; the `/i/` links stay on `base_url` (they are client API links).
+    /// are built on it.
     pub verify_base_url: Option<String>,
+    /// The PUBLIC share-link base the minted `/i/<token>` links ride, when it differs from `base_url` (a
+    /// hosted plane whose user-visible links live on the web origin, which serves/proxies the bootstrap
+    /// read). `None` ⇒ `base_url`. Only the minted link STRING moves — the bootstrap payload keeps
+    /// declaring the API `base_url`, and the client re-roots onto it after the one bootstrap fetch.
+    pub link_base_url: Option<String>,
     /// This plane's deployment posture (the default for a workspace this plane stands up).
     pub deployment_mode: DeploymentMode,
     /// The enrollment method offered to a bootstrapping device (e.g. `"device_code"`), surfaced in the bootstrap.
@@ -300,6 +325,11 @@ impl EnrollmentConfig {
     /// The base the human-facing verification links are built on (`verify_base_url` else `base_url`).
     pub(crate) fn verify_base(&self) -> &str {
         self.verify_base_url.as_deref().unwrap_or(&self.base_url)
+    }
+
+    /// The base the minted `/i/<token>` share links ride (`link_base_url` else `base_url`).
+    pub(crate) fn link_base(&self) -> &str {
+        self.link_base_url.as_deref().unwrap_or(&self.base_url)
     }
 }
 
@@ -544,6 +574,7 @@ pub(crate) async fn read_invite_bootstrap(
         plane_public_key,
         plane_key_id,
         base_url: config.base_url.clone(),
+        link_base: config.link_base().to_owned(),
         enrollment_method: config.enrollment_method.clone(),
     })
 }

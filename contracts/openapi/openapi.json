@@ -28,7 +28,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The bootstrap payload (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills.",
+            "description": "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a `text/markdown` agent-instruction document rendered from the same data.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38,7 +38,7 @@
             }
           },
           "404": {
-            "description": "No such invite or claim, or it is revoked/consumed/expired.",
+            "description": "No such invite or claim, or it is revoked/consumed/expired (always the JSON envelope, any Accept).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1748,7 +1748,7 @@
         "properties": {
           "base_url": {
             "type": "string",
-            "description": "The plane's public base URL (the verification + invite links are built on it)."
+            "description": "The plane's public API base URL — the root the client dials for enrollment and sync after this\nbootstrap read. Always the plane itself, never a web front: a share link may ride another host,\nbut the client re-roots onto this value the moment the bootstrap is fetched."
           },
           "deployment_mode": {
             "$ref": "#/components/schemas/DeploymentMode",

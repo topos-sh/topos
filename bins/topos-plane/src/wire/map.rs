@@ -305,11 +305,13 @@ pub(crate) fn device_auth_to_wire(
 pub(crate) fn standup_plane_block(
     state: &crate::state::PlaneState,
 ) -> Result<BootstrapPlane, PlaneHttpError> {
-    let enroll = state.enroll();
+    // The AUTHORITY's enrollment config is the one source (the `/i/` bootstrap serves the same facts
+    // from it) — a composition that builds through `PlaneState::new` never fills the state-side copy.
+    let disclosure = state.authority().enrollment_disclosure()?;
     Ok(BootstrapPlane {
-        base_url: enroll.base_url.clone(),
-        deployment_mode: deployment_mode_to_wire(enroll.deployment_mode),
-        enrollment_method: enroll.enrollment_method.clone(),
+        base_url: disclosure.base_url,
+        deployment_mode: deployment_mode_to_wire(disclosure.deployment_mode),
+        enrollment_method: disclosure.enrollment_method,
         signing_key: BootstrapSigningKey {
             alg: SignatureAlg::Ed25519,
             key_id: state.authority().plane_key_id()?,

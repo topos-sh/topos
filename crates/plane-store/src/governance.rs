@@ -322,7 +322,9 @@ pub(crate) async fn create_invite(
         ],
     )?;
     let token_sha256 = sha256_token(&token);
-    let link = format!("{}/i/{token}", authority.enrollment()?.config.base_url);
+    // The share-link STRING rides the link base (a hosted web origin, when configured); the bootstrap it
+    // resolves to keeps declaring the API `base_url` — the client re-roots onto that after the fetch.
+    let link = format!("{}/i/{token}", authority.enrollment()?.config.link_base());
 
     let input = GovernanceInput {
         ws,
@@ -553,6 +555,7 @@ pub(crate) async fn read_claim_bootstrap(
         plane_public_key,
         plane_key_id,
         base_url: config.base_url.clone(),
+        link_base: config.link_base().to_owned(),
         enrollment_method: "admin_claim".to_owned(),
     })
 }

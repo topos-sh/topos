@@ -31,7 +31,12 @@ directory is for what only a cross-crate loopback run can prove.
   reaches model context is a documented manual MUST-VERIFY.
 - **`tests/follow_e2e.rs`** — the real `topos follow` enrollment loop: invite mint → bootstrap fetch +
   TOFU key pin → device authorize → confirm → resume signs the enroll possession proof → redeem over the
-  wire → the first-received bundle lands byte-exact.
+  wire → the first-received bundle lands byte-exact. Plus the hosted main-domain-link shape on one
+  listener (`start_plane_split`: links ride `http://localhost:<port>`, the API stays
+  `http://127.0.0.1:<port>`): the minted link rides the public link base, a non-JSON fetch of the link
+  serves the markdown agent-instruction document over the real socket, and the client re-roots — only
+  the bootstrap GET touches the link host; the pin, the device flow, and the placing pull ride the
+  declared API base.
 - **`tests/contribute_e2e.rs`** — the client device-signed write verbs (`publish` / `review` / `revert` /
   the plane-sourced `diff`) over loopback HTTP, with a separate follower receiving the shipped bytes
   byte-exact.

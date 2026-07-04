@@ -122,6 +122,9 @@ pub(crate) struct Plane {
     /// "the admin_claim table stayed empty"), never a second write path.
     pub(crate) pool: PgPool,
     pub(crate) base_url: String,
+    /// The base the minted `/i/` links ride — `base_url` unless the plane was started split
+    /// ([`start_plane_split`]), the hosted links-on-the-web-origin shape.
+    pub(crate) link_base_url: String,
     pub(crate) plane_key: [u8; 32],
     seeded: Seeded,
     _dir: Scratch,
@@ -173,6 +176,30 @@ pub(crate) fn start_plane_mode(
     mode: DeploymentMode,
     seed: impl AsyncFnOnce(&Authority) -> Seeded,
 ) -> Plane {
+    start_plane_impl(scratch_prefix, tag, enrollment, mode, false, seed)
+}
+
+/// [`start_plane`] with the SPLIT link base: the same listener answers two host strings — the API
+/// `base_url` is `http://127.0.0.1:<port>` and the minted `/i/` links ride `http://localhost:<port>`
+/// (the hosted user-visible-links-on-the-web-origin shape, without a second server). What only this
+/// split can prove: the client re-roots off the link host onto the bootstrap-declared API base.
+#[allow(dead_code)] // each e2e binary compiles the shared harness; only follow_e2e drives the split.
+pub(crate) fn start_plane_split(
+    scratch_prefix: &str,
+    tag: &str,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
+    start_plane_impl(scratch_prefix, tag, true, DeploymentMode::Cloud, true, seed)
+}
+
+fn start_plane_impl(
+    scratch_prefix: &str,
+    tag: &str,
+    enrollment: bool,
+    mode: DeploymentMode,
+    split_link_base: bool,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
     let dir = Scratch::new(scratch_prefix, tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -184,6 +211,11 @@ pub(crate) fn start_plane_mode(
         .expect("bind loopback listener");
     let addr = listener.local_addr().expect("local addr");
     let base_url = format!("http://{addr}");
+    let link_base_url = if split_link_base {
+        format!("http://localhost:{}", addr.port())
+    } else {
+        base_url.clone()
+    };
 
     let (authority, seeded, plane_key, pool) = rt.block_on(async {
         let pool = provision_pg().await;
@@ -198,6 +230,7 @@ pub(crate) fn start_plane_mode(
                     secret_path: dir.0.join("enroll.key"),
                     base_url: base_url.clone(),
                     verify_base_url: None,
+                    link_base_url: split_link_base.then(|| link_base_url.clone()),
                     deployment_mode: mode,
                     enrollment_method: "device_code".to_owned(),
                 })
@@ -223,6 +256,7 @@ pub(crate) fn start_plane_mode(
         authority,
         pool,
         base_url,
+        link_base_url,
         plane_key,
         seeded,
         _dir: dir,

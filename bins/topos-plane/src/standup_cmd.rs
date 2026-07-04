@@ -134,7 +134,9 @@ impl PlaneState {
             .map_err(|error| anyhow::anyhow!("minting the claim: {error}"))?;
         match outcome {
             MintClaimOutcome::Minted(minted) => {
-                Ok(format!("{}/i/{}", self.enroll().base_url, minted.token))
+                // The AUTHORITY's copy is the one source for the link base (mirrors the routes).
+                let link_base = self.authority().enrollment_disclosure()?.link_base;
+                Ok(format!("{link_base}/i/{}", minted.token))
             }
             MintClaimOutcome::Denied(reason) => Err(anyhow::anyhow!("{reason}")),
         }
@@ -160,7 +162,8 @@ impl PlaneState {
             .create_workspace(request_id, display_name, owner_email, mode, &created_at)
             .await
             .map_err(|error| anyhow::anyhow!("creating the workspace: {error}"))?;
-        let link = |token: &str| format!("{}/i/{token}", self.enroll().base_url);
+        let link_base = self.authority().enrollment_disclosure()?.link_base;
+        let link = |token: &str| format!("{link_base}/i/{token}");
         Ok(match outcome {
             CreateWorkspaceOutcome::Created(c) => CreateWorkspaceSummary::Created {
                 workspace_id: c.workspace_id.as_str().to_owned(),

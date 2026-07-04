@@ -21,6 +21,7 @@ async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
         .with_enroll_config(crate::state::EnrollConfig {
             base_url: "https://plane.test".to_owned(),
             verify_base_url: "https://plane.test".to_owned(),
+            link_base_url: "https://plane.test".to_owned(),
             strict_deployment_mode: Some(plane_store::DeploymentMode::Cloud),
             deployment_mode: plane_store::DeploymentMode::Cloud,
             enrollment_method: "passcode".to_owned(),

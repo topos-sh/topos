@@ -48,6 +48,7 @@ async fn open_builds_a_serving_state() {
         enroll_secret_path: dir.join("enroll.key"),
         base_url: "https://plane.test".to_owned(),
         verify_base_url: None,
+        link_base_url: None,
         mode: "cloud".to_owned(),
         enrollment_method: None,
         smtp: None,
@@ -58,6 +59,8 @@ async fn open_builds_a_serving_state() {
     // The constructor's internal resolution matches the bin's: the mode `String` parsed to `Cloud`, and the
     // enrollment method defaulted to `device_code` (no SMTP relay).
     assert_eq!(state.enroll().base_url, "https://plane.test");
+    // The link base defaults to the base URL (the construction record mirrors the authority's copy).
+    assert_eq!(state.enroll().link_base_url, "https://plane.test");
     assert_eq!(state.enroll().deployment_mode, DeploymentMode::Cloud);
     assert_eq!(state.enroll().enrollment_method, "device_code");
 
@@ -83,6 +86,7 @@ async fn open_refuses_the_reserved_admin_claim_enrollment_method() {
         enroll_secret_path: dir.join("enroll.key"),
         base_url: "https://plane.test".to_owned(),
         verify_base_url: None,
+        link_base_url: None,
         mode: "self_host".to_owned(),
         enrollment_method: Some("admin_claim".to_owned()),
         smtp: None,

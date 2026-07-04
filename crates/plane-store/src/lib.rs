@@ -98,8 +98,8 @@ mod tests;
 pub use authority::{Authority, PoolConfig};
 pub use enroll::{
     ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
-    EnrollmentRedeemed, GrantIssued, InviteBootstrap, MintedReadToken, PasscodeComplete,
-    PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
+    EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap, MintedReadToken,
+    PasscodeComplete, PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
 };
 pub use error::{AuthorityError, Result};
 pub use governance::{

@@ -8,9 +8,9 @@ use topos_gitstore::{LocalLargeStore, Store};
 use crate::db::Db;
 use crate::enroll::DeploymentMode;
 use crate::enroll::{
-    ConfirmOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentState,
-    InviteBootstrap, NoEnrollmentConfig, PasscodeComplete, PasscodeStart, RedeemOutcome,
-    VerificationContext,
+    ConfirmOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentDisclosure,
+    EnrollmentState, InviteBootstrap, NoEnrollmentConfig, PasscodeComplete, PasscodeStart,
+    RedeemOutcome, VerificationContext,
 };
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
@@ -985,6 +985,22 @@ impl Authority {
     /// [`AuthorityError::Internal`] if no plane key is configured.
     pub fn plane_key_id(&self) -> Result<String> {
         Ok(self.plane_signer()?.key_id().to_owned())
+    }
+
+    /// The enrollment-config disclosure (API base URL / deployment posture / enrollment method) — what a
+    /// standup `device/authorize` response carries as its plane block, from the ONE authoritative copy
+    /// (the enrollment config this authority was built with).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is configured.
+    pub fn enrollment_disclosure(&self) -> Result<EnrollmentDisclosure> {
+        let config = &self.enrollment()?.config;
+        Ok(EnrollmentDisclosure {
+            base_url: config.base_url.clone(),
+            link_base: config.link_base().to_owned(),
+            deployment_mode: config.deployment_mode,
+            enrollment_method: config.enrollment_method.clone(),
+        })
     }
 
     /// Read back a skill's signed `current` record — the serialized `SignedCurrentRecord` bytes. `None`

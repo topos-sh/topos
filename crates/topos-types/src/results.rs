@@ -257,6 +257,10 @@ pub struct FollowData {
     /// The workspace's domain-verification state (disclosed from the bootstrap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_domain_status: Option<crate::bootstrap::VerifiedDomainStatus>,
+    /// The plane API base URL this machine enrolls against (disclosed from the bootstrap — a share link
+    /// may ride another host, e.g. a hosted team's web origin; this is where the device actually dials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane_base_url: Option<String>,
     /// Present when `follow` returned a pending device-authorization that needs a human verification step
     /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

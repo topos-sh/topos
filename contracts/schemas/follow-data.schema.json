@@ -40,6 +40,13 @@
         }
       ]
     },
+    "plane_base_url": {
+      "description": "The plane API base URL this machine enrolls against (disclosed from the bootstrap — a share link\nmay ride another host, e.g. a hosted team's web origin; this is where the device actually dials).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skills": {
       "description": "First-receive offers — empty when the link is membership-only.",
       "type": "array",

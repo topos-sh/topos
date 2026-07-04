@@ -866,10 +866,14 @@ fn a_cross_base_url_follow_is_refused() {
     )
     .unwrap();
 
-    // A follow against a DIFFERENT base URL is refused (v0 is one plane per install).
+    // A follow whose bootstrap DECLARES a different plane API base is refused (v0 is one plane per
+    // install). The link's own host is NOT the discriminator — a share link may legitimately ride
+    // another host — the plane the bootstrap re-roots onto is.
+    let mut other_plane = fake(&[("s_other", "other")], Poll::Pending);
+    other_plane.bootstrap.plane.base_url = "https://other.plane.test".into();
     let other = run_follow(
         &rig,
-        &fake(&[("s_other", "other")], Poll::Pending),
+        &other_plane,
         &plane,
         Some("https://evil.test/i/t2"),
         opts(false, false, &[]),
@@ -879,6 +883,75 @@ fn a_cross_base_url_follow_is_refused() {
         matches!(other, ClientError::PlacementUnsupported { .. }),
         "got {other:?}"
     );
+
+    // The mirror case: a link riding ANOTHER host whose bootstrap declares the ALREADY-PINNED plane
+    // matches the pin — the enrolled install accepts its own team's share links from any host.
+    let same_plane = run_follow(
+        &rig,
+        &fake(&[("s_other", "other")], Poll::Pending),
+        &plane,
+        Some("https://links.example/i/t3"),
+        opts(false, false, &[]),
+    )
+    .expect("a share-host link onto the pinned plane is accepted");
+    assert_eq!(same_plane.plane_base_url.as_deref(), Some(BASE_URL));
+}
+
+/// The re-root itself: a link on a share host (a hosted team's web origin) fetches the bootstrap there,
+/// then EVERYTHING else — the device flow, the pin, the persisted `instance.json` — rides the API base
+/// the bootstrap declared. The share host never appears in the sidecar.
+#[test]
+fn a_share_host_link_re_roots_onto_the_declared_api_base() {
+    use std::cell::RefCell;
+
+    let rig = Rig::new("reroot");
+    let mut plane = FixturePlane::default();
+    plane.serve_genesis("s_deploy", GENESIS_FILES);
+    let f = fake(&[("s_deploy", "deploy")], Poll::Pending);
+
+    // A recording connector: which bases the op built enrollment transports for, in order.
+    let bases = RefCell::new(Vec::<String>::new());
+    rig.mint_identity();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let enroll_connect = |b: &str| -> Box<dyn EnrollSource> {
+        bases.borrow_mut().push(b.to_owned());
+        Box::new(f.clone())
+    };
+    let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
+        Box::new(plane.clone())
+    };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        plane: &plane_connect,
+    };
+    let data = ops::follow(
+        &ctx,
+        &connectors,
+        Some("https://links.example/i/tok_abc".to_owned()),
+        opts(false, false, &[]),
+    )
+    .expect("begin re-roots")
+    .data;
+
+    // The receipt disclosed the plane the device actually enrolls against (not the share host).
+    assert_eq!(data.plane_base_url.as_deref(), Some(BASE_URL));
+    // The bootstrap GET rode the link base; the device authorization rode the re-rooted API base.
+    assert_eq!(
+        bases.borrow().as_slice(),
+        ["https://links.example", BASE_URL]
+    );
+
+    // Complete the enrollment; the pinned instance records the API base — the share host is nowhere.
+    let granted = fake(&[("s_deploy", "deploy")], Poll::Granted);
+    let done = run_follow(&rig, &granted, &plane, None, opts(false, true, &[])).unwrap();
+    assert!(done.enrolled);
+    assert_eq!(done.plane_base_url.as_deref(), Some(BASE_URL));
+    let instance = enroll::read_instance(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.base_url, BASE_URL);
 }
 
 #[test]

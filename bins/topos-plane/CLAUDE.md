@@ -33,7 +33,15 @@
   unauthenticated TOFU bootstrap `GET /i/{token}` (the workspace + the plane signing root to pin; **no bytes,
   no role**; a dead invite ⇒ 404 — and the route now ALSO serves one-time admin-CLAIM links, probed after
   the invite table: `enrollment_method: "admin_claim"`, no skills, the same uniform 404 for
-  consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors); the
+  consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors). The route
+  **content-negotiates**: an Accept asking for JSON (or no Accept) gets the versioned `BootstrapData`
+  contract; anything else — curl's `*/*`, a browser, an agent's web fetch — gets a `text/markdown`
+  **agent-instruction document** (`routes/bootstrap_doc.rs`, a pure renderer over the same authority
+  read: install `topos` if missing via the checksummed installer line, `follow` the link, surface the
+  verification URL to the human, land offers per-digest; the CLAIM variant warns first-redeemer-becomes-
+  owner and NEVER echoes the token or link — the same custody rule as the JSON `token_id` placeholder).
+  Both 200s are `Cache-Control: no-store` + `Vary: accept` + `X-Robots-Tag: noindex`; errors stay the
+  uniform JSON envelope on every Accept; the
   enrollment flow `POST /v1/device/authorize` (now intent-dispatching: an `enroll` start needs its
   `invite_token`; a `standup` start — explicit intent, or no invite at all — opens a workspace-less session
   on a hosted plane [self-host ⇒ 404], answers with the high-entropy code + `verification_uri_complete` +
@@ -110,10 +118,17 @@
   Every wrapper parses the plane's deployment mode STRICTLY — a mode string the constructor could only
   warn-fallback is a typed refusal here (fail closed), so an operator typo can never decide what mode a
   workspace is born with.
-- **The verification base seam**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
+- **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
-  `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`); the
-  `/i/` invite/claim links stay on `base_url` (client API links).
+  `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —
+  and `PlaneConfig.link_base_url` (`--link-base-url` / `TOPOS_PLANE_LINK_BASE_URL`, default the base
+  URL) — the PUBLIC base every minted `/i/<token>` share link rides (create-invite, mint-claim, the
+  standup self-invite), for a hosted plane whose user-visible links live on its web origin (that origin
+  serves or proxies `GET /i/{token}` back to the plane). Only the minted link STRING moves: the
+  bootstrap payload keeps declaring the API `base_url` and the client re-roots onto it after the one
+  bootstrap fetch. The standup `device/authorize` plane block and the bootstrap document both read the
+  AUTHORITY's copy (`Authority::enrollment_disclosure` / the domain bootstrap's `link_base`) — one
+  source, so a `PlaneState::new` composition can never serve blank or drifted bases.
 
 **Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
 issuance decision (every credential/identity decision is `plane-store::Authority`'s):

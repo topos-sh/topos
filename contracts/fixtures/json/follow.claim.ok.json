@@ -5,6 +5,7 @@
   "data": {
     "deployment_mode": "self_host",
     "enrolled": true,
+    "plane_base_url": "https://plane.demo.test",
     "verified_domain_status": "unverified",
     "workspace_display_name": "Demo Team",
     "workspace_id": "w_demo"

@@ -361,6 +361,21 @@ async fn enroll_setup(pool: PgPool, tag: &str) -> EnrollCtx {
 /// An [`EnrollCtx`] whose plane runs at the given deployment mode (the standup tests need a self-host
 /// plane, whose standup start must be the uniform 404).
 async fn enroll_setup_mode(pool: PgPool, tag: &str, mode: DeploymentMode) -> EnrollCtx {
+    enroll_setup_full(pool, tag, mode, None).await
+}
+
+/// An [`EnrollCtx`] whose minted `/i/` links ride a SEPARATE public link base (the hosted split: links on
+/// the web origin, the API on the plane base) — the content-negotiation + link-minting tests use it.
+async fn enroll_setup_link_base(pool: PgPool, tag: &str, link_base: &str) -> EnrollCtx {
+    enroll_setup_full(pool, tag, DeploymentMode::Cloud, Some(link_base)).await
+}
+
+async fn enroll_setup_full(
+    pool: PgPool,
+    tag: &str,
+    mode: DeploymentMode,
+    link_base: Option<&str>,
+) -> EnrollCtx {
     let dir = unique_dir(tag);
     let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
@@ -370,6 +385,7 @@ async fn enroll_setup_mode(pool: PgPool, tag: &str, mode: DeploymentMode) -> Enr
             secret_path: dir.join("enroll.secret"),
             base_url: ENROLL_BASE_URL.to_owned(),
             verify_base_url: None,
+            link_base_url: link_base.map(str::to_owned),
             deployment_mode: mode,
             enrollment_method: "passcode".to_owned(),
         })
@@ -408,6 +424,7 @@ async fn enroll_setup_mode(pool: PgPool, tag: &str, mode: DeploymentMode) -> Enr
         .with_enroll_config(crate::state::EnrollConfig {
             base_url: ENROLL_BASE_URL.to_owned(),
             verify_base_url: ENROLL_BASE_URL.to_owned(),
+            link_base_url: link_base.unwrap_or(ENROLL_BASE_URL).to_owned(),
             strict_deployment_mode: Some(mode),
             deployment_mode: mode,
             enrollment_method: "passcode".to_owned(),

@@ -41,12 +41,18 @@ renderer over the SAME typed outcomes (one value, two presentations).
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
   `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).
 - **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqDeviceClient`) — the two-call device-flow
-  enrollment + first-receive. `follow <link>` reads the unauthenticated `/i/` **TOFU bootstrap**, pins the
-  plane key (I-TOFU: absent → first pin; same base-url different key → `KEY_REPIN_REQUIRED`; cross-base-url
-  → refused — one plane per install; the `alg` is a CLOSED enum, so a non-Ed25519 trust root fails the
+  enrollment + first-receive. `follow <link>` reads the unauthenticated `/i/` **TOFU bootstrap** (fetched
+  with an explicit `Accept: application/json` — the same URL serves an agent-instruction markdown to
+  everything else), **re-roots onto the bootstrap's declared `plane.base_url`** (a share link may ride the
+  team's web origin; the declared API base — normalized, same URL gate, https-may-never-downgrade — is
+  what the device flow, the redeem, every pull, and `instance.json` ride; disclosed as
+  `FollowData.plane_base_url`), pins the plane key (I-TOFU, keyed on the RE-ROOTED base: absent → first
+  pin; same base different key → `KEY_REPIN_REQUIRED`; a bootstrap declaring a different plane →
+  refused — one plane per install; the `alg` is a CLOSED enum, so a non-Ed25519 trust root fails the
   deserialize), starts a device authorization, writes a **`0600` WAL** (`identity/enrollment.json`), and
-  returns `ENROLLMENT_PENDING` + the verification URL with the verified-domain provenance (the
-  relay-phishing guard). `follow --resume` polls once; on a granted poll it signs the **enroll possession
+  returns `ENROLLMENT_PENDING` + the SERVER-built verification URL with the verified-domain provenance
+  (the relay-phishing guard; there is no client-side URL reconstruction — a WAL without the persisted
+  URL restarts typed). `follow --resume` polls once; on a granted poll it signs the **enroll possession
   proof** (the device signer, binding `device_auth_id = user_code` + the offered-skill set + `grant_hash`),
   **redeems** the grant into per-skill read creds, records them in the WAL **before promotion** (the lockout
   fence — a single-use grant can't be re-redeemed; a re-`--resume` of a `Redeemed` WAL re-promotes without

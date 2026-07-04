@@ -439,6 +439,9 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
             };
             s.push_str(&format!(" ({domain}, {status})"));
         }
+        if let Some(plane) = &data.plane_base_url {
+            s.push_str(&format!("\nplane: {plane}"));
+        }
         s.push_str(&format!(
             "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}",
             pending.verification_uri_complete, pending.user_code
@@ -495,7 +498,11 @@ pub(crate) fn invite_tty(data: &InviteData) -> String {
     } else {
         out.push_str(&format!("\nPre-offers: {}", data.skills.join(", ")));
     }
-    out.push_str("\nShare the link; redeeming it never enrolls on its own.");
+    out.push_str(
+        "\nTeammates just paste the link to their agent and ask it to follow — the link itself \
+         walks the agent through install, sign-in, and landing the skills. Redeeming it never \
+         enrolls anyone on its own.",
+    );
     out
 }
 
@@ -532,7 +539,11 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     ));
     // On a first (genesis) publish that minted a shareable door, surface the link.
     if let Some(link) = &data.invite_link {
-        out.push_str(&format!("\nShare this skill: {link}"));
+        out.push_str(&format!(
+            "\nShare this skill: {link}\nTeammates just paste that link to their agent and ask it \
+             to follow — the link itself walks the agent through install, sign-in, and landing the \
+             skill.",
+        ));
     }
     out
 }

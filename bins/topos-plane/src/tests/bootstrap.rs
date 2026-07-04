@@ -106,3 +106,143 @@ async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool
     let (s404, _, _) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
     assert_eq!(s404, StatusCode::NOT_FOUND);
 }
+
+// ── Content negotiation: one resource, two representations ───────────────────────────────────────────
+
+/// The hosted split, end to end at the route: the minted link rides the PUBLIC link base; an
+/// `Accept: application/json` (the topos client) gets the unchanged machine contract, while curl's bare
+/// `*/*` and a browser's html Accept get the markdown agent-instruction document — which echoes the full
+/// share link (invite tokens are the link's own non-secret tail), the install line, and the consent
+/// floor. Both 200s are `no-store` + `Vary: accept`; a dead token stays the uniform JSON 404 either way.
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) {
+    const LINK_BASE: &str = "https://links.test";
+    let ctx = enroll_setup_link_base(pool, "nego-bootstrap", LINK_BASE).await;
+    let env = create_invite(
+        &ctx,
+        "aaaaaaaa-0000-4000-8000-000000000021",
+        &[ALICE_EMAIL],
+        SKILL,
+    )
+    .await;
+    let link = env.data["invite_link"].as_str().unwrap().to_owned();
+    // The minted link STRING rides the public link base…
+    assert!(
+        link.starts_with(&format!("{LINK_BASE}/i/")),
+        "minted on the link base: {link}"
+    );
+    let token = token_from_link(&link);
+    // …and so does a bin-side composer (the mint-claim / standup self-invite path).
+    let claim_link = ctx
+        .state
+        .mint_admin_claim("w_lb", Some("LB"), Some("owner@lb.test"), 3600)
+        .await
+        .expect("mint claim");
+    assert!(claim_link.starts_with(&format!("{LINK_BASE}/i/")));
+
+    // The topos client's explicit Accept ⇒ the unchanged JSON contract.
+    let (status, headers, bytes) = send(
+        ctx.app(),
+        get(&format!("/i/{token}"), &[("accept", "application/json")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data: BootstrapData = serde_json::from_slice(&bytes).expect("a BootstrapData");
+    // The bootstrap payload keeps declaring the API base — the client re-roots onto it, so pointing
+    // this field at the link base would route every later call through the web front.
+    assert_eq!(data.plane.base_url, ENROLL_BASE_URL);
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+    assert_eq!(headers.get("vary").unwrap(), "accept");
+
+    // curl / an agent's web fetch (bare */*) ⇒ the markdown instruction document.
+    let (status, headers, bytes) =
+        send(ctx.app(), get(&format!("/i/{token}"), &[("accept", "*/*")])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/markdown"),
+        "markdown for */*"
+    );
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+    assert_eq!(headers.get("vary").unwrap(), "accept");
+    assert_eq!(headers.get("x-robots-tag").unwrap(), "noindex");
+    let doc = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(doc.contains(&format!("topos follow '{link}' --json")));
+    assert!(doc.contains("releases/latest/download/install.sh"));
+    assert!(doc.contains("Acme"));
+    assert!(doc.contains("follow --resume"));
+
+    // A browser Accept takes the markdown door too (the hosted web front serves its own HTML page).
+    let (_, headers, _) = send(
+        ctx.app(),
+        get(
+            &format!("/i/{token}"),
+            &[("accept", "text/html,application/xhtml+xml,*/*;q=0.8")],
+        ),
+    )
+    .await;
+    assert!(
+        headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/markdown")
+    );
+
+    // NO Accept at all stays the machine-contract JSON (bare HTTP libraries; older clients).
+    let (_, headers, bytes) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
+    assert!(
+        headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+    let _: BootstrapData = serde_json::from_slice(&bytes).expect("still the JSON contract");
+
+    // Errors never content-negotiate: a dead token is the uniform JSON envelope on every Accept.
+    let (s404, headers, _) =
+        send(ctx.app(), get("/i/not-a-real-token", &[("accept", "*/*")])).await;
+    assert_eq!(s404, StatusCode::NOT_FOUND);
+    assert!(
+        headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+}
+
+/// The claim door's markdown holds the same custody line as its JSON: the one-time bearer owner token
+/// never appears in a response body — the document warns about the owner semantics and points the agent
+/// at the URL it just fetched instead of echoing it.
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn the_claim_markdown_never_echoes_the_token(pool: PgPool) {
+    let ctx = enroll_setup(pool, "nego-claim").await;
+    let link = ctx
+        .state
+        .mint_admin_claim("w_newco", Some("Newco"), Some("owner@newco.com"), 3600)
+        .await
+        .expect("mint the claim link");
+    let token = token_from_link(&link);
+
+    let (status, _, bytes) =
+        send(ctx.app(), get(&format!("/i/{token}"), &[("accept", "*/*")])).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        !doc.contains(&token),
+        "a claim /i/ markdown body must never contain the claim token: {doc}"
+    );
+    assert!(doc.contains("ONE-TIME workspace claim"));
+    assert!(doc.contains("becomes its OWNER"));
+    assert!(doc.contains("the link you just fetched"));
+    assert!(doc.contains("Newco"));
+}

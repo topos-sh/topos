@@ -44,12 +44,23 @@ pub struct PlaneState {
 /// [`PlaneState::open`] from the leak-free [`PlaneConfig`]; a downstream plane never constructs it.
 #[derive(Debug, Clone)]
 pub(crate) struct EnrollConfig {
-    /// The plane's public base URL (the `/i/` invite/claim links are built on it).
+    /// The plane's public API base URL (what a client dials; the bootstrap payload declares it). The
+    /// **authority** holds the authoritative copy every disclosure serves (the `/i/` bootstrap + the
+    /// standup plane block both read it there); this is the construction record, asserted by tests —
+    /// mirroring `deployment_mode` below.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub base_url: String,
     /// The HUMAN-facing verification base (already resolved: `verify_base_url` else `base_url`). The
     /// passcode mail body points at `{this}/verify`; the authority builds the device-auth
     /// `verification_uri`(+`_complete`) from its own copy of the same value.
     pub verify_base_url: String,
+    /// The PUBLIC share-link base (already resolved: `link_base_url` else `base_url`). The
+    /// **authority** holds the authoritative copy every consumer reads (the link composers + the
+    /// agent-readable bootstrap document go through `Authority::enrollment_disclosure` / the domain
+    /// bootstrap's `link_base`); this is the construction record, asserted by tests — mirroring
+    /// `base_url` above.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub link_base_url: String,
     /// The deployment posture parsed STRICTLY (`None` ⇒ the configured mode string was unrecognized and
     /// `deployment_mode` below is the warn-fallback). The standup/create/mint wrappers REFUSE to run off a
     /// fallback — they fail closed on `None` instead of inheriting it.
@@ -91,9 +102,13 @@ pub struct PlaneConfig {
     pub base_url: String,
     /// The HUMAN-facing verification base URL, when it differs from `base_url` (a hosted plane whose
     /// verification pages live on another host). `None` ⇒ `base_url`. Only the device-auth
-    /// `verification_uri`(+`_complete`) and the passcode mail link are built on it; `/i/` links stay on
-    /// `base_url` (they are client API links).
+    /// `verification_uri`(+`_complete`) and the passcode mail link are built on it.
     pub verify_base_url: Option<String>,
+    /// The PUBLIC share-link base the minted `/i/<token>` links ride, when it differs from `base_url`
+    /// (a hosted plane whose user-visible links live on the web origin, which must then serve or proxy
+    /// `GET /i/{token}` back to this plane). `None` ⇒ `base_url`. Only the minted link STRING moves —
+    /// the bootstrap payload keeps declaring the API `base_url` and clients re-root onto it.
+    pub link_base_url: Option<String>,
     /// The deployment posture — `"self_host"` or `"cloud"`. Parsed internally (an unknown value warns and
     /// falls back to `self_host`), so no `plane_store::DeploymentMode` crosses the boundary.
     pub mode: String,
@@ -114,6 +129,7 @@ impl Default for EnrollConfig {
         Self {
             base_url: String::new(),
             verify_base_url: String::new(),
+            link_base_url: String::new(),
             strict_deployment_mode: None,
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
@@ -209,6 +225,7 @@ impl PlaneState {
     ///     enroll_secret_path: "enroll.key".into(),
     ///     base_url: "https://plane.example".to_owned(),
     ///     verify_base_url: None,
+    ///     link_base_url: None,
     ///     mode: "cloud".to_owned(),
     ///     enrollment_method: None,
     ///     smtp: None,
@@ -249,6 +266,10 @@ impl PlaneState {
             .verify_base_url
             .clone()
             .unwrap_or_else(|| cfg.base_url.clone());
+        let link_base_url = cfg
+            .link_base_url
+            .clone()
+            .unwrap_or_else(|| cfg.base_url.clone());
         let authority = Authority::open_with_pool(
             &cfg.database_url,
             &cfg.git_root,
@@ -263,6 +284,7 @@ impl PlaneState {
             secret_path: cfg.enroll_secret_path,
             base_url: cfg.base_url.clone(),
             verify_base_url: cfg.verify_base_url,
+            link_base_url: cfg.link_base_url,
             deployment_mode,
             enrollment_method: enrollment_method.clone(),
         })
@@ -272,6 +294,7 @@ impl PlaneState {
             PlaneState::new(Arc::new(authority)).with_enroll_config(EnrollConfig {
                 base_url: cfg.base_url,
                 verify_base_url,
+                link_base_url,
                 strict_deployment_mode,
                 deployment_mode,
                 enrollment_method,

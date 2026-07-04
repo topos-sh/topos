@@ -948,6 +948,40 @@ fn an_uncertain_claim_send_retries_the_post_directly_without_refetching_the_link
 }
 
 #[test]
+fn a_claim_link_re_pasted_from_another_host_still_retries_without_refetch() {
+    // The claim's identity is its TOKEN, not the host the link string rode: the WAL records the
+    // re-rooted API base, and a human may re-paste the same claim as a share-host link. The retry must
+    // still go straight to the POST — never refetching the (possibly consumed) /i/ bootstrap.
+    let rig = Rig::new("claim-rehost");
+    let fake = FakeClaim::new(1);
+    let _ = run_claim_follow(
+        &rig,
+        &fake,
+        Some(&format!("https://share.example/i/{}", fake.token)),
+        false,
+    )
+    .unwrap_err();
+    // The pre-send WAL recorded the DECLARED API base (the bootstrap's), not the share host.
+    let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    let enroll::EnrollPhase::ClaimPending { base_url, .. } = &wal.state else {
+        panic!("expected a ClaimPending WAL");
+    };
+    assert_eq!(base_url, CLAIM_BASE);
+
+    // The retry rides the ORIGINAL canonical link this time — same token, different host string.
+    let data = run_claim_follow(
+        &rig,
+        &fake,
+        Some(&format!("{CLAIM_BASE}/i/{}", fake.token)),
+        false,
+    )
+    .expect("the re-pasted claim settles");
+    assert!(data.enrolled);
+    assert_eq!(fake.bootstrap_calls.get(), 1, "never refetched");
+    assert_eq!(fake.claim_calls.get(), 2);
+}
+
+#[test]
 fn follow_resume_also_settles_an_unsettled_claim() {
     let rig = Rig::new("claim-resume");
     let fake = FakeClaim::new(1);

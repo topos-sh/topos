@@ -78,7 +78,9 @@ pub enum ConsentMode {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct BootstrapPlane {
-    /// The plane's public base URL (the verification + invite links are built on it).
+    /// The plane's public API base URL — the root the client dials for enrollment and sync after this
+    /// bootstrap read. Always the plane itself, never a web front: a share link may ride another host,
+    /// but the client re-roots onto this value the moment the bootstrap is fetched.
     pub base_url: String,
     /// This plane's deployment posture.
     pub deployment_mode: DeploymentMode,

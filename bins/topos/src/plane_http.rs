@@ -470,9 +470,12 @@ impl EnrollSource for UreqDeviceClient {
     fn fetch_bootstrap(&self, token: &str) -> Result<BootstrapData, ClientError> {
         // The `/i/{token}` URL is SECRET (the token grants the bootstrap read) — error text names no URL.
         let url = format!("{}/i/{}", self.base_url, token);
+        // Ask for the machine contract EXPLICITLY: the route content-negotiates, and anything not asking
+        // for JSON is served the agent-instruction markdown instead (ureq's default Accept is `*/*`).
         let resp = self
             .agent
             .get(&url)
+            .header("Accept", "application/json")
             .call()
             .map_err(|e| ClientError::Plane(format!("fetch invite bootstrap: {e}")))?;
         let status = resp.status().as_u16();

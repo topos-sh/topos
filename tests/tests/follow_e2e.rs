@@ -36,86 +36,91 @@ const INVITE_OP: &str = "b0000000-0000-4000-8000-000000000001";
 /// loopback address): the workspace + owner, the published skill, a pre-rostered invitee, and the minted
 /// `/i/` invite link.
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane(
-        "topos-enroll-e2e",
-        tag,
-        true,
-        async |authority: &Authority| {
-            let ws = WorkspaceId::parse(WS).unwrap();
-            let skill = SkillId::parse(SKILL).unwrap();
-            let owner = Principal::parse(OWNER).unwrap();
-            let publisher = Principal::parse(PUB_PRINCIPAL).unwrap();
-            let invitee = Principal::parse(INVITEE).unwrap();
+    common::start_plane("topos-enroll-e2e", tag, true, seed_follow_plane)
+}
 
-            // The workspace + the owner (with a registered device so the owner can sign the invite).
-            authority
-                .seed_workspace(&ws, "Acme", "verified", "cloud")
-                .await
-                .expect("seed workspace");
-            authority
-                .seed_workspace_member(&ws, &owner, "owner", "confirmed")
-                .await
-                .expect("seed owner");
-            let owner_pk = SigningKey::from_bytes(&OWNER_SEED)
-                .verifying_key()
-                .to_bytes();
-            authority
-                .seed_device(&ws, OWNER_DKID, &owner_pk, &owner, false)
-                .await
-                .expect("seed owner device");
+/// [`start_plane`] on the SPLIT link base (links ride `http://localhost:<port>`, the API stays
+/// `http://127.0.0.1:<port>` — one listener): the hosted main-domain-links shape.
+fn start_plane_split(tag: &str) -> Plane {
+    common::start_plane_split("topos-enroll-e2e", tag, seed_follow_plane)
+}
 
-            // The published skill the invite offers.
-            let pub_pk = SigningKey::from_bytes(&PUB_SEED).verifying_key().to_bytes();
-            authority
-                .seed_device(&ws, PUB_DKID, &pub_pk, &publisher, false)
-                .await
-                .expect("seed publisher device");
-            authority
-                .seed_roster(&ws, &skill, &publisher)
-                .await
-                .expect("seed publisher roster");
-            let receipt = authority
-                .seed_published_genesis(
-                    &ws,
-                    &skill,
-                    PUB_DKID,
-                    &PUB_SEED,
-                    &OpId::parse(GENESIS_OP).unwrap(),
-                    genesis_files(),
-                    AUTHOR,
-                    MSG,
-                    AT,
-                    NOW,
-                )
-                .await
-                .expect("seed genesis");
-            assert_eq!(receipt.outcome, TerminalOutcome::Ok);
-            assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
-            let genesis = receipt.version_id.expect("genesis version id");
+async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
+    {
+        let ws = WorkspaceId::parse(WS).unwrap();
+        let skill = SkillId::parse(SKILL).unwrap();
+        let owner = Principal::parse(OWNER).unwrap();
+        let publisher = Principal::parse(PUB_PRINCIPAL).unwrap();
+        let invitee = Principal::parse(INVITEE).unwrap();
 
-            // Pre-roster the invitee on the workspace — the cloud redeem gate requires it (a leaked link is inert
-            // to anyone NOT on this list).
-            authority
-                .seed_workspace_member(&ws, &invitee, "member", "invited")
-                .await
-                .expect("pre-roster invitee");
+        // The workspace + the owner (with a registered device so the owner can sign the invite).
+        authority
+            .seed_workspace(&ws, "Acme", "verified", "cloud")
+            .await
+            .expect("seed workspace");
+        authority
+            .seed_workspace_member(&ws, &owner, "owner", "confirmed")
+            .await
+            .expect("seed owner");
+        let owner_pk = SigningKey::from_bytes(&OWNER_SEED)
+            .verifying_key()
+            .to_bytes();
+        authority
+            .seed_device(&ws, OWNER_DKID, &owner_pk, &owner, false)
+            .await
+            .expect("seed owner device");
 
-            let invite_link = common::mint_invite(
-                authority,
+        // The published skill the invite offers.
+        let pub_pk = SigningKey::from_bytes(&PUB_SEED).verifying_key().to_bytes();
+        authority
+            .seed_device(&ws, PUB_DKID, &pub_pk, &publisher, false)
+            .await
+            .expect("seed publisher device");
+        authority
+            .seed_roster(&ws, &skill, &publisher)
+            .await
+            .expect("seed publisher roster");
+        let receipt = authority
+            .seed_published_genesis(
                 &ws,
-                (OWNER_DKID, &OWNER_SEED),
-                INVITE_OP,
-                INVITEE,
-                SKILL,
+                &skill,
+                PUB_DKID,
+                &PUB_SEED,
+                &OpId::parse(GENESIS_OP).unwrap(),
+                genesis_files(),
+                AUTHOR,
+                MSG,
                 AT,
+                NOW,
             )
-            .await;
-            common::Seeded {
-                genesis: Some(genesis),
-                invites: vec![invite_link],
-            }
-        },
-    )
+            .await
+            .expect("seed genesis");
+        assert_eq!(receipt.outcome, TerminalOutcome::Ok);
+        assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
+        let genesis = receipt.version_id.expect("genesis version id");
+
+        // Pre-roster the invitee on the workspace — the cloud redeem gate requires it (a leaked link is inert
+        // to anyone NOT on this list).
+        authority
+            .seed_workspace_member(&ws, &invitee, "member", "invited")
+            .await
+            .expect("pre-roster invitee");
+
+        let invite_link = common::mint_invite(
+            authority,
+            &ws,
+            (OWNER_DKID, &OWNER_SEED),
+            INVITE_OP,
+            INVITEE,
+            SKILL,
+            AT,
+        )
+        .await;
+        common::Seeded {
+            genesis: Some(genesis),
+            invites: vec![invite_link],
+        }
+    }
 }
 
 // ── the keystone: a real follow lands the first skill ──────────────────────────────────────────────────
@@ -237,4 +242,94 @@ fn e2e_off_roster_identity_cannot_redeem_a_leaked_invite() {
         !client.enrolled(),
         "no enrollment state lands for a denied redeem"
     );
+}
+
+// ── the hosted main-domain-link shape: re-root + the agent instruction document, over real HTTP ───────
+
+/// The link rides one host (`localhost` — standing in for the hosted web origin) while the plane's API
+/// base is another (`127.0.0.1`). What this proves over a REAL socket: (1) the minted invite link rides
+/// the configured PUBLIC link base; (2) `GET /i/{token}` without a JSON Accept serves the markdown
+/// agent-instruction document (the paste-a-link-to-your-agent door) carrying the install line and the
+/// full follow command; (3) the real client re-roots — the bootstrap GET hits the link host, everything
+/// after (device flow, redeem, the pinned `instance.json`, the placing pull) rides the declared API
+/// base; and (4) the landed bytes are the genesis, byte-exact.
+#[test]
+fn e2e_a_share_host_link_re_roots_and_serves_the_agent_doc() {
+    let plane = start_plane_split("splitbase");
+    let client = FollowHarness::new("splitbase");
+
+    // (1) The minted link rides the public link base, not the API base.
+    let link = plane.invite(0).to_owned();
+    assert!(
+        link.starts_with(&format!("{}/i/", plane.link_base_url)),
+        "the invite link rides the link base: {link}"
+    );
+    assert_ne!(plane.link_base_url, plane.base_url);
+
+    // (2) A non-JSON fetch of the link — what a browserless agent does first — is the markdown
+    // instruction document, served over the real socket.
+    let doc = http_get_markdown(&link);
+    assert!(doc.contains("text/markdown"), "content-type: {doc}");
+    assert!(doc.contains("releases/latest/download/install.sh"));
+    assert!(doc.contains(&format!("topos follow '{link}' --json")));
+
+    // (3) The real two-call follow: bootstrap on the link host, then re-root.
+    let pending = client
+        .follow(&link, plane.plane_key)
+        .expect("follow call 1");
+    assert!(!pending.enrolled);
+    assert_eq!(
+        pending.plane_base_url.as_deref(),
+        Some(plane.base_url.as_str()),
+        "the receipt disclosed the re-rooted API base"
+    );
+    let user_code = pending.pending.as_ref().expect("pending").user_code.clone();
+    let confirm = plane
+        .rt
+        .block_on(
+            plane
+                .authority
+                .confirm_external_identity(&user_code, INVITEE, NOW),
+        )
+        .expect("confirm the session identity");
+    assert!(matches!(confirm, ConfirmOutcome::Confirmed));
+    let done = client.resume(plane.plane_key).expect("follow --resume");
+    assert!(done.enrolled);
+    assert_eq!(
+        done.plane_base_url.as_deref(),
+        Some(plane.base_url.as_str())
+    );
+    assert_eq!(
+        client.instance_pinned_key(),
+        Some(plane.plane_key),
+        "the TOFU pin committed under the API base"
+    );
+
+    // (4) The placing pull rides the API base and lands the genesis byte-exact.
+    let target = format!("{SKILL}@{}", hex::encode(plane.genesis().0));
+    client
+        .approve(&plane.base_url, plane.plane_key, &[target])
+        .expect("follow --approve");
+    let got = client.placement_files(SKILL);
+    assert_eq!(got, expected_placement(&genesis_files()));
+}
+
+/// A minimal HTTP/1.1 GET over a plain TcpStream (no client library — the e2e crate carries none): send
+/// a browserless-agent-shaped request (`Accept: */*`) and return the raw response (headers + body).
+fn http_get_markdown(link: &str) -> String {
+    use std::io::{Read as _, Write as _};
+
+    let rest = link.strip_prefix("http://").expect("a loopback http link");
+    let (host, path) = rest.split_once('/').expect("a path");
+    let mut stream = std::net::TcpStream::connect(host).expect("connect the link host");
+    write!(
+        stream,
+        "GET /{path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    )
+    .expect("send the request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read the response");
+    response
 }

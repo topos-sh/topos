@@ -141,7 +141,8 @@ Everything the plane binary reads from the environment (most also exist as `--fl
 | `TOPOS_PLANE_LARGE_ROOT` | *required* (image: `/data/large`) | The per-workspace large-object store root (created if absent). |
 | `TOPOS_PLANE_KEY` | *required* (image: `/data/plane.key`) | The plane signing key — a `0600` seed, generated on first run if absent. |
 | `TOPOS_PLANE_ENROLL_SECRET` | *required* (image: `/data/enroll.key`) | The enrollment HMAC secret (`0600` seed, generated on first run) every opaque invite / grant / read token derives from. |
-| `TOPOS_PLANE_BASE_URL` | `http://<bind>` | The plane's PUBLIC base URL — invite + verification links are built on it; set it to the externally reachable address behind a reverse proxy. |
+| `TOPOS_PLANE_BASE_URL` | `http://<bind>` | The plane's public API base URL — what clients dial (the bootstrap declares it); set it to the externally reachable address behind a reverse proxy. |
+| `TOPOS_PLANE_LINK_BASE_URL` | the base URL | The PUBLIC base the minted `/i/<token>` share links ride, when user-visible links should live on another origin (that origin must serve or proxy `GET /i/{token}` back to this plane). Most self-hosts leave it unset. |
 | `TOPOS_PLANE_MODE` | `self_host` | The deployment posture: `self_host` or `cloud`. |
 | `TOPOS_PLANE_ENROLLMENT_METHOD` | `passcode` if SMTP is configured, else `device_code` | The enrollment method advertised in the bootstrap. |
 | `TOPOS_PLANE_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` | unset | The SMTP relay for emailed-passcode enrollment — **all five** must be set to enable it (credentials are never logged). |

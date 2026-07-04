@@ -8,6 +8,7 @@
 //! resolved from a server-trusted row inside the authority). The wire mapping lives in [`crate::wire`].
 
 pub(crate) mod bootstrap;
+pub(crate) mod bootstrap_doc;
 pub(crate) mod bundles;
 pub(crate) mod current;
 pub(crate) mod enroll;

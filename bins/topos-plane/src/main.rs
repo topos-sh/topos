@@ -117,6 +117,12 @@ struct Config {
     /// verification links + the passcode mail link are built on it; `/i/` links stay on the base URL.
     #[arg(long, env = "TOPOS_PLANE_VERIFY_BASE_URL")]
     verify_base_url: Option<String>,
+    /// The PUBLIC share-link base the minted `/i/<token>` links ride, when it differs from the base URL
+    /// (a hosted plane whose user-visible links live on a web origin that serves or proxies
+    /// `GET /i/{token}` back to this plane). Defaults to the base URL. Only the minted link string
+    /// moves; the bootstrap payload keeps declaring the API base URL.
+    #[arg(long, env = "TOPOS_PLANE_LINK_BASE_URL")]
+    link_base_url: Option<String>,
     /// The deployment posture — `cloud` or `self_host` (default `self_host`).
     #[arg(long, env = "TOPOS_PLANE_MODE", default_value = "self_host")]
     mode: String,
@@ -359,6 +365,7 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
         enroll_secret_path: cfg.enroll_secret,
         base_url,
         verify_base_url: cfg.verify_base_url,
+        link_base_url: cfg.link_base_url,
         mode: cfg.mode,
         enrollment_method: cfg.enrollment_method,
         smtp,

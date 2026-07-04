@@ -73,6 +73,7 @@ impl Fixture {
                 secret_path: dir.join("enroll.key"),
                 base_url: "https://plane.test".to_owned(),
                 verify_base_url: None,
+                link_base_url: None,
                 deployment_mode: mode,
                 enrollment_method: "device_code".to_owned(),
             })
