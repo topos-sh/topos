@@ -935,6 +935,11 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientErr
 /// Parse `<base_url>/i/<token>` into `(base_url, token)`. A FULL URL splits on `/i/` (the token is the
 /// first path segment after it). A bare token reuses the already-pinned plane's `base_url` (so a follow-up
 /// `follow <token>` works once enrolled); without a prior enrollment a bare token is refused.
+///
+/// The base is validated as a well-formed absolute http(s) URL HERE — before the secret token is ever
+/// spliced into a request URL — because a malformed base would otherwise surface downstream as a ureq
+/// `BadUri` transport error whose message echoes the FULL URI (token included), and every transport error
+/// detail is persisted to the `~/.topos/log.jsonl` diagnostics file.
 fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError> {
     let link = link.trim();
     if let Some(idx) = link.find("/i/") {
@@ -944,15 +949,50 @@ fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError
         if base.is_empty() || token.is_empty() {
             return Err(ClientError::Enrollment("malformed invite link".into()));
         }
+        validate_base_url(base)?;
         return Ok((base.to_owned(), token.to_owned()));
     }
-    // A bare token: reuse the pinned plane (must already be enrolled).
+    // A bare token: reuse the pinned plane (must already be enrolled). The persisted base gets the same
+    // gate — a hand-edited `instance.json` must not smuggle the token into a URI-shaped error either.
     if let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)? {
+        validate_base_url(&instance.base_url)?;
         return Ok((instance.base_url, link.to_owned()));
     }
     Err(ClientError::Enrollment(
         "a bare invite token needs a prior enrollment; pass the full /i/<token> link".into(),
     ))
+}
+
+/// Refuse a plane base that is not a well-formed absolute `http(s)://…` URL (the transport's own `Uri`
+/// grammar, so anything accepted here builds cleanly downstream). The error names the problem — never the
+/// link's token, which the caller has not yet joined onto the base.
+fn validate_base_url(base: &str) -> Result<(), ClientError> {
+    let well_formed = base.parse::<ureq::http::Uri>().is_ok_and(|uri| {
+        matches!(uri.scheme_str(), Some("http" | "https")) && authority_usable(&uri)
+    });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(ClientError::Enrollment(
+            "malformed invite link: the plane base URL is not a valid http(s) URL".into(),
+        ))
+    }
+}
+
+/// The authority half of the base gate: a non-empty host, and a bracketed literal must be a REAL IPv6
+/// address. `http::Uri` itself accepts RFC-3986 IPvFuture-shaped brackets (e.g. `[bad]`), which the
+/// transport only rejects LATER — with a URI-echoing error, too late for a URL that carries the token.
+fn authority_usable(uri: &ureq::http::Uri) -> bool {
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host_port = authority.as_str().rsplit('@').next().unwrap_or("");
+    match host_port.strip_prefix('[') {
+        Some(rest) => rest
+            .split_once(']')
+            .is_some_and(|(v6, _port)| v6.parse::<std::net::Ipv6Addr>().is_ok()),
+        None => !host_port.is_empty(),
+    }
 }
 
 /// Build the pending FollowData (the agent surfaces the URL WITH the verified-domain provenance — the
@@ -1030,3 +1070,31 @@ fn now_millis(ctx: &Ctx<'_>) -> i64 {
     i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::validate_base_url;
+
+    #[test]
+    fn base_url_gate_accepts_the_legit_shapes_and_refuses_the_uri_hazards() {
+        for ok in [
+            "https://topos.sh",
+            "https://api.topos.sh",
+            "http://localhost:8787",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8787",
+            "http://[2001:db8::1]",
+        ] {
+            assert!(validate_base_url(ok).is_ok(), "must accept {ok}");
+        }
+        for bad in [
+            "http://[bad]",     // IPvFuture-shaped garbage http::Uri itself accepts
+            "http://[::1",      // unterminated bracket
+            "ftp://plane.test", // not http(s)
+            "http:",            // no authority
+            "plane.test",       // no scheme
+            "",
+        ] {
+            assert!(validate_base_url(bad).is_err(), "must refuse {bad:?}");
+        }
+    }
+}

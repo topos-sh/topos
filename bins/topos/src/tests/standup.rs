@@ -993,6 +993,62 @@ fn a_terminal_claim_denial_clears_the_wal_and_unwedges_follow() {
 }
 
 #[test]
+fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_token() {
+    // A syntactically-bad base must be refused BEFORE the secret token is spliced into a request URL:
+    // downstream it would surface as a ureq BadUri transport error whose message carries the full URI
+    // (token included) — and every transport-error detail is persisted to ~/.topos/log.jsonl.
+    let rig = Rig::new("bad-base");
+    identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    let ctx = rig.ctx();
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> {
+        panic!("a malformed base is refused before any transport is built")
+    };
+    let plane_connect =
+        |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn crate::plane::PlaneSource> {
+            panic!("no offers on a refused link")
+        };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        plane: &plane_connect,
+    };
+    for bad in [
+        "http://[bad]/i/claim_secret_token",
+        "ftp://plane.acme.test/i/claim_secret_token",
+        "http:///i/claim_secret_token",
+    ] {
+        let err = ops::follow(
+            &ctx,
+            &connectors,
+            Some(bad.to_owned()),
+            ops::FollowOpts {
+                manual: false,
+                resume: false,
+                approve: Vec::new(),
+            },
+        )
+        .map(|o| o.data)
+        .unwrap_err();
+        assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
+        for surface in [err.to_string(), err.detail()] {
+            assert!(
+                !surface.contains("claim_secret_token"),
+                "the token must never ride an error surface: {surface}"
+            );
+        }
+    }
+    // A well-formed base still parses (the validation must not over-reject the legit shapes).
+    let fake = FakeClaim::new(0);
+    let data = run_claim_follow(
+        &rig,
+        &fake,
+        Some(&format!("{CLAIM_BASE}/i/claimtok")),
+        false,
+    )
+    .expect("a well-formed https base still enrolls");
+    assert!(data.enrolled);
+}
+
+#[test]
 fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
     let rig = Rig::new("torn-promote");
     let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
