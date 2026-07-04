@@ -607,11 +607,24 @@ pub(crate) fn delete_wal(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientEr
 /// and the claim's expiry is enforced server-side), and an unexpired authorizing WAL of either kind is
 /// preserved (a resume can still poll it). Best-effort: an unreadable/corrupt WAL is left in place for
 /// the owning op to diagnose, never hard-failing recovery.
+///
+/// The read → decide → delete runs UNDER the `"identity"` lock (the same lock the device-key mint and
+/// every `follows.json` merge hold), and the phase is decided from the read taken under that lock —
+/// never from an earlier observation. A concurrent live flow that advanced the WAL (e.g. a granted poll
+/// recording `Redeemed`, the fence a crashed promotion completes from) before the lock was won is
+/// therefore re-observed and spared; only a WAL that is STILL an expired authorizing phase is reaped.
 pub(crate) fn sweep_expired_wal(
     fs: &dyn FsOps,
     layout: &Layout,
     now_millis: i64,
 ) -> Result<(), ClientError> {
+    // A cheap unlocked probe first: no WAL at all (the overwhelmingly common case — the sweep runs at the
+    // start of EVERY command) takes no lock and touches nothing.
+    if !fs.exists(&layout.enrollment_path()) {
+        return Ok(());
+    }
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    // The authoritative read, under the lock, immediately before any delete decision.
     let wal = match read_wal(fs, layout) {
         Ok(Some(wal)) => wal,
         // Absent → nothing to sweep. Unreadable/permissive/corrupt → leave it for the op to surface.
@@ -897,6 +910,158 @@ mod tests {
         write_wal(&fs, &layout, &hostile).unwrap();
         let err = read_wal(&fs, &layout).unwrap_err();
         assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+    }
+
+    /// A clean `Redeemed` WAL (the crash-recovery fence a live flow records before promotion).
+    fn redeemed_wal() -> PendingEnrollment {
+        PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::Redeemed {
+                context: EnrollContext {
+                    base_url: "https://acme.topos.test".to_owned(),
+                    pinned_plane_key: "a".repeat(64),
+                    plane_key_id: "pk".to_owned(),
+                    deployment_mode: DeploymentMode::SelfHost,
+                    enrollment_method: "device_code".to_owned(),
+                    workspace_id: "w_acme".to_owned(),
+                    workspace_display_name: "Acme".to_owned(),
+                    verified_domain: None,
+                    verified_domain_status: VerifiedDomainStatus::Unverified,
+                    offered_skills: Vec::new(),
+                    mode: FollowModeDoc::Auto,
+                    root: EnrollRoot::Invite,
+                },
+                read_creds: Vec::new(),
+                device_key_id: "dk_abc".to_owned(),
+                principal: None,
+                enrolled_at_millis: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn sweep_decides_from_the_read_under_the_identity_lock_never_a_stale_one() {
+        // The TOCTOU the identity lock closes: the sweep sets out to reap an EXPIRED Authorizing WAL, but
+        // a concurrent live flow records `Redeemed` — the fence a crashed promotion completes from — just
+        // before the sweep wins the lock. The delete decision must come from the read taken UNDER the
+        // lock, so the Redeemed WAL survives. The seam decorator below delegates every op to the real fs
+        // and injects exactly that interleave: the moment the identity lock is requested, the WAL flips.
+        use crate::fs_seam::{LockGuard, PathKind, RealFs};
+        use std::cell::Cell;
+        use std::io;
+        use std::path::{Path, PathBuf};
+
+        struct SwapOnIdentityLock {
+            inner: RealFs,
+            layout: Layout,
+            identity_lock: PathBuf,
+            swapped: Cell<bool>,
+        }
+        impl FsOps for SwapOnIdentityLock {
+            fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
+                if path == self.identity_lock && !self.swapped.get() {
+                    self.swapped.set(true);
+                    // The concurrent flow finished first: the WAL is now the Redeemed fence.
+                    write_wal(&self.inner, &self.layout, &redeemed_wal()).unwrap();
+                }
+                self.inner.lock_exclusive(path)
+            }
+            fn write_temp(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+                self.inner.write_temp(path, bytes)
+            }
+            fn fsync_file(&self, path: &Path) -> io::Result<()> {
+                self.inner.fsync_file(path)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                self.inner.rename(from, to)
+            }
+            fn fsync_dir(&self, dir: &Path) -> io::Result<()> {
+                self.inner.fsync_dir(dir)
+            }
+            fn rename_dir_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+                self.inner.rename_dir_noreplace(from, to)
+            }
+            fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+                self.inner.create_dir_all(dir)
+            }
+            fn append_fsync(&self, path: &Path, line: &[u8]) -> io::Result<()> {
+                self.inner.append_fsync(path, line)
+            }
+            fn remove_file(&self, path: &Path) -> io::Result<()> {
+                self.inner.remove_file(path)
+            }
+            fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+                self.inner.remove_dir_all(path)
+            }
+            fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+                self.inner.read_opt(path)
+            }
+            fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+                self.inner.read_dir(dir)
+            }
+            fn exists(&self, path: &Path) -> bool {
+                self.inner.exists(path)
+            }
+            fn try_lock_exclusive(&self, path: &Path) -> io::Result<Option<LockGuard>> {
+                self.inner.try_lock_exclusive(path)
+            }
+            fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
+                self.inner.path_kind(path)
+            }
+            fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
+                self.inner.write_staged(path, bytes, executable)
+            }
+            fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+                self.inner.write_private(path, bytes)
+            }
+            fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
+                self.inner.private_perms_ok(path)
+            }
+            fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+                self.inner.exchange_dir(a, b)
+            }
+        }
+
+        let layout = Layout::new(&scratch("sweep-toctou"));
+        std::fs::create_dir_all(layout.identity_dir()).unwrap();
+        // On disk when the sweep starts: an EXPIRED Authorizing WAL (the stale observation).
+        let expired = PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: EnrollPhase::Authorizing {
+                context: match redeemed_wal().state {
+                    EnrollPhase::Redeemed { context, .. } => context,
+                    _ => unreachable!(),
+                },
+                device_code: "dc".to_owned(),
+                user_code: "CODE".to_owned(),
+                verification_uri_complete: None,
+                interval: 5,
+                expires_at_millis: 1_000,
+            },
+        };
+        let real = RealFs;
+        write_wal(&real, &layout, &expired).unwrap();
+
+        let fs = SwapOnIdentityLock {
+            inner: RealFs,
+            identity_lock: layout.identity_lock_file(),
+            layout: layout.clone(),
+            swapped: Cell::new(false),
+        };
+        sweep_expired_wal(&fs, &layout, 2_000).unwrap();
+        assert!(fs.swapped.get(), "the interleave fired at the lock");
+        let survivor = read_wal(&real, &layout).unwrap().expect(
+            "the Redeemed WAL a concurrent flow recorded before the lock was won must survive the sweep",
+        );
+        assert!(
+            matches!(survivor.state, EnrollPhase::Redeemed { .. }),
+            "got {survivor:?}"
+        );
+
+        // And the control: with no interleave, the same expired Authorizing WAL is still reaped.
+        write_wal(&real, &layout, &expired).unwrap();
+        sweep_expired_wal(&real, &layout, 2_000).unwrap();
+        assert!(read_wal(&real, &layout).unwrap().is_none());
     }
 
     #[test]
