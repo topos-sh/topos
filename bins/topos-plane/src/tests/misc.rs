@@ -233,6 +233,35 @@ async fn mint_claim_emits_one_link_line_and_never_traces_the_token(pool: PgPool)
     );
 }
 
+// ── the unconfigured `new` path fails closed on the genesis wrappers ─────────────────────────────────
+
+/// A [`PlaneState::new`] composition that never set an enroll config has NO configured deployment mode:
+/// every strict-mode genesis/standup wrapper must refuse typed (fail closed) instead of silently assuming
+/// self_host against an `Authority` that may be configured cloud. (`PlaneState::open` always sets the
+/// strict mode explicitly from the parsed config, so the bin and a composing plane are unaffected.)
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn an_unconfigured_new_state_refuses_the_genesis_wrappers(pool: PgPool) {
+    let ctx = setup(pool, "unconfigured-mode").await; // PlaneState::new + the DEFAULT enroll config
+    let err = ctx
+        .state
+        .mint_admin_claim("w_newco", Some("Newco"), Some("owner@newco.com"), 3600)
+        .await
+        .expect_err("mint_admin_claim must fail closed with no configured mode");
+    assert!(err.to_string().contains("not configured"), "got {err}");
+    let err = ctx
+        .state
+        .create_workspace("req-unconfigured", None, "owner@newco.com")
+        .await
+        .expect_err("create_workspace must fail closed with no configured mode");
+    assert!(err.to_string().contains("not configured"), "got {err}");
+    let err = ctx
+        .state
+        .approve_standup("ABCD-EFGH-IJKL-MNOP", "owner@newco.com", None)
+        .await
+        .expect_err("approve_standup must fail closed with no configured mode");
+    assert!(err.to_string().contains("not configured"), "got {err}");
+}
+
 // ── transport: a malformed body is an envelope-shaped 400 ─────────────────────────────────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]

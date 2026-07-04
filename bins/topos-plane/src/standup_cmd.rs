@@ -85,12 +85,13 @@ pub enum ApproveSessionSummary {
 impl PlaneState {
     /// The plane's deployment mode, parsed STRICTLY at construction — the genesis wrappers refuse to run
     /// off the constructor's warn-fallback (an operator typo must not decide what mode a workspace is born
-    /// with).
+    /// with) and off an UNCONFIGURED state (a `PlaneState::new` composition that never set an enroll
+    /// config must fail closed here, never silently assume self_host).
     fn strict_mode(&self) -> anyhow::Result<DeploymentMode> {
         self.enroll().strict_deployment_mode.ok_or_else(|| {
             anyhow::anyhow!(
-                "the plane mode is not a recognized value; set TOPOS_PLANE_MODE to 'cloud' or 'self_host' \
-                 before running workspace-standup operations"
+                "the plane deployment mode is not configured (or not a recognized value); set \
+                 TOPOS_PLANE_MODE to 'cloud' or 'self_host' before running workspace-standup operations"
             )
         })
     }

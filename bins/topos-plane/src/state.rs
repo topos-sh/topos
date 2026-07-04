@@ -106,11 +106,15 @@ pub struct PlaneConfig {
 
 impl Default for EnrollConfig {
     /// The accountless self-host default: no base URL, self-host posture, the device-code method, no SMTP.
+    /// The STRICT mode is deliberately `None` — a [`PlaneState::new`] composition that never set an enroll
+    /// config has not configured a mode, so the genesis/standup wrappers must refuse typed (fail closed)
+    /// rather than silently assume self_host against an Authority that may be configured cloud.
+    /// [`PlaneState::open`] always sets it explicitly from the parsed config.
     fn default() -> Self {
         Self {
             base_url: String::new(),
             verify_base_url: String::new(),
-            strict_deployment_mode: Some(DeploymentMode::SelfHost),
+            strict_deployment_mode: None,
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
             smtp: None,
