@@ -5,6 +5,48 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## Workspace standup — the client half (the un-enrolled publish that creates a workspace; `follow <claim-link>`)
+
+The `topos` CLI now walks through both standup doors the server opened:
+
+- **An un-enrolled direct `publish` stands the workspace up instead of failing.** The FULL normal
+  pre-flight runs first — skill resolution, scan, digest computation, the `--approve` consent gate — so
+  consent binds BEFORE any network call. Only then does the client start a standup device authorization
+  against the hosted plane (`TOPOS_PLANE_URL` override, else the compiled-in `https://api.topos.sh`;
+  never consulted once enrolled), TOFU-pin the plane key from the response's plane block, write a `0600`
+  `AuthorizingStandup` WAL, and return an `ok` PENDING receipt: `PublishData.pending`
+  (`signin_required` + the SERVER-built `verification_uri_complete`, verbatim + persisted, + the code +
+  an RFC-3339 expiry) with an `ENROLL_RESUME` next-action whose argv is THE SAME publish command —
+  re-invoking it IS the resume, and the consent digest re-derives from `--approve` on every invocation
+  (bytes that drift between the two calls hit the existing digest-mismatch refusal, never a silent ship).
+  The re-invoked command polls ONCE: pending re-emits; denied/expired clears the WAL typed; granted
+  signs the possession proof over the EMPTY offered set, redeems, records the `Redeemed` WAL BEFORE
+  promotion (the existing crash fence — a later invocation re-promotes without re-redeeming), promotes
+  the enrollment, and CONTINUES into the ordinary publish in the same invocation — the receipt disclosing
+  `workspace <name> — owner <principal>` (hijack visibility: an owner you don't recognize means someone
+  else approved the sign-in). `--propose` never stands up (a proposal against a workspace that doesn't
+  exist yet is meaningless) and keeps its typed not-enrolled error; an enrolled device never reaches the
+  branch. `PublishData` widened honestly: `version_id`/`current_generation` became optional (they are
+  unknowable at pending), `pending` + `standup` blocks are new, and the pending envelope + a claim-follow
+  envelope joined the golden fixtures.
+- **`follow <claim-link>` enrolls in ONE invocation** (the self-host bearer door). The `/i/` bootstrap now
+  branches on `enrollment_method`: `admin_claim` skips the device-auth session entirely — pin the key,
+  write a pre-send `ClaimPending` WAL (`0600`; the claim token is the bearer secret, `Debug`-redacted),
+  POST `/v1/admin-claim`, promote. An UNCERTAIN send retries the POST directly from the WAL on the next
+  `follow` invocation (same link, or `--resume`) — never refetching the possibly-consumed `/i/` link,
+  because the server's same-device replay of a consumed claim deterministically re-answers `Redeemed`.
+  An enrollment method this build does not understand now fails CLOSED (typed), instead of silently
+  running the device flow under an undisclosed posture.
+- **The seated principal is persisted + disclosed.** The redeem's new `principal` lands in `user.json`
+  (an email-shaped one also fills `email`; a device-rooted `dev.…` id never pretends to be one), the WAL
+  context records which door rooted the enrollment (invite / standup / claim — `user.json.invite_rooted`
+  is now honest for the new doors), and a DENIED grant redeem became a typed ask-an-owner error carrying
+  the existing `REQUEST_ACCESS` action code ("ask a workspace owner to run `topos invite <your-email>`,
+  then re-run `topos follow`").
+- **The server-built `verification_uri_complete` wins everywhere.** The invite follow persists it in the
+  `Authorizing` WAL and re-emits it verbatim on a pending resume; the client-side reconstruction survives
+  only as the fallback for a plane that omits the field.
+
 ## Workspace standup — the server half (self-serve genesis + the hardened one-time claim)
 
 Standing up a workspace's FIRST owner is now in-band on the server side, three doors onto ONE shared
