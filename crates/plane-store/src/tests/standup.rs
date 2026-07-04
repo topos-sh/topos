@@ -418,6 +418,75 @@ async fn the_workspace_creation_cap_denies_the_fourth(pool: PgPool) {
     ));
 }
 
+#[sqlx::test]
+async fn racing_creates_at_the_cap_boundary_never_overshoot_it(pool: PgPool) {
+    // The per-owner cap has NO co-located CAS — it is a COUNT-then-INSERT read-write invariant that
+    // relies on Postgres SSI (the serializable runner's retry) to serialize. Two concurrent creates by
+    // the SAME owner sitting at cap-1, with DIFFERENT request ids: whatever the interleave, exactly ONE
+    // may win (3 owned total) and the other must resolve to the typed cap denial — never 4 owned.
+    let fx = Fixture::new(pool.clone(), "st-cap-race").await;
+    let a = &fx.authority;
+    for n in 0..2 {
+        assert!(matches!(
+            a.create_workspace(
+                &format!("seed-{n}"),
+                None,
+                "serial@founder.com",
+                DeploymentMode::Cloud,
+                T0
+            )
+            .await
+            .unwrap(),
+            CreateWorkspaceOutcome::Created(_)
+        ));
+    }
+    let (r1, r2) = tokio::join!(
+        a.create_workspace(
+            "race-a",
+            None,
+            "serial@founder.com",
+            DeploymentMode::Cloud,
+            T0
+        ),
+        a.create_workspace(
+            "race-b",
+            None,
+            "serial@founder.com",
+            DeploymentMode::Cloud,
+            T0
+        ),
+    );
+    let outcomes = [r1.unwrap(), r2.unwrap()];
+    let created = outcomes
+        .iter()
+        .filter(|o| matches!(o, CreateWorkspaceOutcome::Created(_)))
+        .count();
+    let denied = outcomes
+        .iter()
+        .filter(|o| {
+            matches!(
+                o,
+                CreateWorkspaceOutcome::Denied("workspace creation limit reached")
+            )
+        })
+        .count();
+    assert_eq!(
+        (created, denied),
+        (1, 1),
+        "exactly one racer lands the third workspace and one takes the typed cap denial: {outcomes:?}"
+    );
+    // The durable floor held: the owner owns exactly the cap, never cap+1.
+    let owned = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workspace_member \
+         WHERE principal = $1 AND role = 'owner' AND status = 'confirmed'",
+    )
+    .bind("serial@founder.com")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owned, 3, "SSI must serialize the COUNT-then-INSERT pair");
+}
+
 // ── door 1: the standup session (start → verify → approve → poll → redeem → genesis publish) ──────────
 
 #[sqlx::test]
