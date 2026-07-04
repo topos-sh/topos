@@ -99,6 +99,24 @@ pub(crate) fn publish(
         }
         return standup_publish(ctx, connect, gov_connect, standup, skill_arg, approve);
     }
+    // `instance.json` PRESENT does not yet mean the promotion COMPLETED: promote_core writes it FIRST and
+    // `user.json` later, so a crash inside a standup promotion leaves instance present, user absent, and
+    // the standup `Redeemed` WAL still holding the recovery fence. The enrolled path below would then fail
+    // "could not determine your workspace" without ever consulting the WAL — a wedge, because the standup
+    // receipt's own next-action is to re-run THIS command. Route a standup-rooted Redeemed WAL back
+    // through the standup dispatch, whose Redeemed arm completes the promotion idempotently and continues
+    // into the publish. (An invite/claim-rooted Redeemed WAL keeps its own recovery door, `follow
+    // --resume` — exactly what the enrolled path's error message points at. And once the WAL is gone — a
+    // crash AFTER the delete — a retry publishes without the "workspace X — owner Y" standup disclosure:
+    // an accepted cosmetic residual; the workspace and the genesis are correct, and no durable-receipt
+    // machinery is worth re-creating that one line.)
+    if !propose
+        && let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)?
+        && let enroll::EnrollPhase::Redeemed { context, .. } = &wal.state
+        && matches!(context.root, enroll::EnrollRoot::Standup)
+    {
+        return standup_publish(ctx, connect, gov_connect, standup, skill_arg, approve);
+    }
     enrolled_publish(ctx, connect, gov_connect, skill_arg, propose, approve, None)
 }
 

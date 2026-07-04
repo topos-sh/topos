@@ -993,6 +993,107 @@ fn a_terminal_claim_denial_clears_the_wal_and_unwedges_follow() {
 }
 
 #[test]
+fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
+    let rig = Rig::new("torn-promote");
+    let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
+    let approve = format!("{name}@{digest_hex}");
+
+    // Reproduce the torn state a crash inside promote_core leaves: instance.json written (its FIRST
+    // durable step), user.json absent (never reached), and the standup Redeemed WAL still on disk.
+    let layout = rig.layout();
+    enroll::write_instance(
+        &rig.fs,
+        &layout,
+        &enroll::Instance {
+            schema_version: 1,
+            base_url: HOSTED.to_owned(),
+            plane_key: to_hex(&plane_pubkey()),
+            plane_key_id: "pk_hosted".to_owned(),
+            deployment_mode: DeploymentMode::Cloud,
+            enrollment_method: "device_code".to_owned(),
+            workspace_display_name: Some("robert's workspace".to_owned()),
+            verified_domain: None,
+            verified_domain_status: VerifiedDomainStatus::Unverified,
+        },
+    )
+    .unwrap();
+    enroll::write_wal(
+        &rig.fs,
+        &layout,
+        &enroll::PendingEnrollment {
+            schema_version: 1,
+            state: enroll::EnrollPhase::Redeemed {
+                context: enroll::EnrollContext {
+                    base_url: HOSTED.to_owned(),
+                    pinned_plane_key: to_hex(&plane_pubkey()),
+                    plane_key_id: "pk_hosted".to_owned(),
+                    deployment_mode: DeploymentMode::Cloud,
+                    enrollment_method: "device_code".to_owned(),
+                    workspace_id: STANDUP_WS.to_owned(),
+                    workspace_display_name: "robert's workspace".to_owned(),
+                    verified_domain: None,
+                    verified_domain_status: VerifiedDomainStatus::Unverified,
+                    offered_skills: Vec::new(),
+                    mode: enroll::FollowModeDoc::Auto,
+                    root: enroll::EnrollRoot::Standup,
+                },
+                read_creds: Vec::new(),
+                device_key_id: "dk_torn".to_owned(),
+                principal: Some("robert@example.com".to_owned()),
+                enrolled_at_millis: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    // Re-running the SAME publish command must heal: before the fix, instance.json's presence routed it
+    // to the enrolled path, which failed "could not determine your workspace" without consulting the
+    // WAL — and the standup receipt's own next-action is to re-run this exact command (a wedge). The
+    // standup device-auth seam is never touched (nothing to poll) — the panicking connector proves it.
+    let ctx = rig.ctx();
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
+    let governance = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(NoInvite) };
+    let standup = ops::StandupConnectors {
+        enroll: &panicking_standup_connect,
+        base_url: HOSTED.to_owned(),
+    };
+    let outcome = ops::publish(
+        &ctx,
+        &contribute,
+        &governance,
+        &standup,
+        None,
+        false,
+        &approve,
+    )
+    .expect("the torn promotion heals and the genesis publish lands");
+    let ops::PublishOutcome::Published(data) = outcome else {
+        panic!("expected Published, got a pending/proposed outcome");
+    };
+    assert_eq!(
+        data.current_generation,
+        Some(Generation { epoch: 1, seq: 1 }),
+        "the genesis publish completed"
+    );
+    let receipt = data
+        .standup
+        .expect("the surviving WAL still carried the standup disclosure");
+    assert_eq!(
+        receipt.owner_principal.as_deref(),
+        Some("robert@example.com")
+    );
+
+    // The promotion completed: user.json healed, the WAL gone; a THIRD run is the ordinary enrolled
+    // publish (idempotent op-WAL replay territory), not another heal.
+    let user = enroll::read_user(&rig.fs, &layout)
+        .unwrap()
+        .expect("user.json was written");
+    assert_eq!(user.workspace_id, STANDUP_WS);
+    assert!(!user.invite_rooted);
+    assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
+}
+
+#[test]
 fn an_unknown_enrollment_method_fails_closed() {
     let rig = Rig::new("unknown-method");
     let mut fake = FakeClaim::new(0);
