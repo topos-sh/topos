@@ -133,6 +133,82 @@ async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgP
     assert_eq!(second, crate::maintenance::MaintenancePass::default());
 }
 
+// ── the mint-claim subcommand's print path: one link line, the token never in tracing ────────────────
+
+/// The bin's `mint-claim` subcommand prints EXACTLY the string [`PlaneState::mint_admin_claim`] returns
+/// (one `println!` — the only stdout write on that path), so the wrapper's return IS the print path:
+/// assert it is a single `<base_url>/i/<token>` line (newline-free, base64url token) and that the bearer
+/// token never enters tracing (a TRACE-level subscriber captures everything emitted during the mint).
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn mint_claim_emits_one_link_line_and_never_traces_the_token(pool: PgPool) {
+    let ctx = enroll_setup(pool, "mint-claim-smoke").await;
+
+    // A thread-local TRACE-capturing subscriber for the duration of the mint (the `#[sqlx::test]` runtime
+    // is current-thread, so the whole op — including the authority's SQL — runs under it).
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buf lock").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+        .with_writer(buf.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let link = ctx
+        .state
+        .mint_admin_claim("w_newco", Some("Newco"), Some("owner@newco.com"), 3600)
+        .await
+        .expect("mint the claim link");
+    drop(guard);
+
+    // Exactly one printable line, shaped `<base_url>/i/<token>`.
+    assert!(
+        !link.contains('\n') && !link.contains('\r'),
+        "the link is a single stdout line"
+    );
+    let token = link
+        .strip_prefix(&format!("{ENROLL_BASE_URL}/i/"))
+        .expect("the link is <base_url>/i/<token>");
+    assert_eq!(token.len(), 43, "a 32-byte base64url-unpadded token");
+    assert!(
+        token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "the token is base64url (path-safe): {token}"
+    );
+
+    // The bearer token appears NOWHERE in the captured tracing output.
+    let traced = String::from_utf8_lossy(&buf.0.lock().expect("buf lock")).into_owned();
+    assert!(
+        !traced.contains(token),
+        "the claim token must never enter tracing"
+    );
+
+    // On a cloud-mode plane the mint REFUSES without an owner email — the typed operator refusal.
+    let refused = ctx
+        .state
+        .mint_admin_claim("w_other", None, None, 3600)
+        .await;
+    assert!(
+        refused.is_err(),
+        "a cloud-mode mint without an owner email is refused: {refused:?}"
+    );
+}
+
 // ── transport: a malformed body is an envelope-shaped 400 ─────────────────────────────────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
