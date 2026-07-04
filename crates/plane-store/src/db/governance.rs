@@ -18,7 +18,7 @@ use topos_core::sign::{
 use super::Db;
 use super::blob32;
 use super::enroll::{EnrollCorrupt, read_device};
-use crate::enroll::{self, EnrollmentRedeemed, RedeemOutcome};
+use crate::enroll::{self, DeploymentMode, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
     ApproveStandupOutcome, ClaimBootstrapRow, CreateWorkspaceOutcome, GovernanceInput,
@@ -867,6 +867,16 @@ async fn admin_claim_run(
         if revoked {
             return Ok(RedeemOutcome::Denied("device is revoked"));
         }
+    }
+    // (4b) The per-identity creation cap — CLOUD claims only, the same durable floor `genesis_create`
+    // enforces for the two self-serve doors (the break-glass claim must not seat a 4th cloud workspace
+    // for one identity). Self-host claims stay uncapped: device-rooted, the operator-run posture with no
+    // self-serve exposure. Sits AFTER the consumed-replay probe (a lost-200 replay by a now-at-cap owner
+    // still recovers via the early Redeemed) and before the seat, so a denial writes nothing.
+    if plane_mode == DeploymentMode::Cloud.as_str()
+        && owned_workspace_count(tx, &principal).await? >= MAX_OWNED_WORKSPACES
+    {
+        return Ok(RedeemOutcome::Denied("workspace creation limit reached"));
     }
 
     // (5) Seat the workspace + first owner. The display name comes from the CLAIM ROW (the request's is

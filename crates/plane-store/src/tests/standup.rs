@@ -487,6 +487,114 @@ async fn racing_creates_at_the_cap_boundary_never_overshoot_it(pool: PgPool) {
     assert_eq!(owned, 3, "SSI must serialize the COUNT-then-INSERT pair");
 }
 
+#[sqlx::test]
+async fn a_cloud_claim_shares_the_workspace_creation_cap(pool: PgPool) {
+    // The break-glass door shares the same durable floor as the two self-serve doors: a CLOUD claim
+    // minted for an at-cap owner email may not seat a 4th workspace for that identity.
+    let fx = Fixture::new(pool.clone(), "st-claim-cap").await;
+    let a = &fx.authority;
+    for n in 0..3 {
+        assert!(matches!(
+            a.create_workspace(
+                &format!("req-{n}"),
+                None,
+                "serial@founder.com",
+                DeploymentMode::Cloud,
+                T0
+            )
+            .await
+            .unwrap(),
+            CreateWorkspaceOutcome::Created(_)
+        ));
+    }
+    let w = ws("w_fourth");
+    let token = mint(
+        a,
+        &w,
+        None,
+        Some("serial@founder.com"),
+        DeploymentMode::Cloud,
+        60_000,
+    )
+    .await;
+    let dpub = device_pub(&[51u8; 32]);
+    assert!(matches!(
+        a.admin_claim(&token, dpub, NOW, T0).await.unwrap(),
+        RedeemOutcome::Denied("workspace creation limit reached")
+    ));
+    // The denial wrote nothing: no workspace, no owner row.
+    assert!(a.db().read_workspace(&w).await.unwrap().is_none());
+    assert_eq!(owner_rows(&pool, "w_fourth").await, 0);
+
+    // A SELF-HOST claim is unaffected — device-rooted, the operator-run posture with no self-serve cap:
+    // even a device principal already owning 3 workspaces still redeems.
+    let sh = Fixture::with_mode(pool.clone(), "st-claim-cap-sh", DeploymentMode::SelfHost).await;
+    let a = &sh.authority;
+    let dpub = device_pub(&[52u8; 32]);
+    let dev_owner = prin(&format!("dev.{}", device_key_id_for(&dpub)));
+    for n in 0..3 {
+        let owned = ws(&format!("w_sh_owned_{n}"));
+        a.db()
+            .seed_workspace(&owned, "Owned", "unverified", "self_host")
+            .await
+            .unwrap();
+        a.db()
+            .seed_workspace_member(&owned, &dev_owner, "owner", "confirmed")
+            .await
+            .unwrap();
+    }
+    let w_sh = ws("w_sh_fourth");
+    let token = mint(a, &w_sh, None, None, DeploymentMode::SelfHost, 60_000).await;
+    let RedeemOutcome::Redeemed(r) = a.admin_claim(&token, dpub, NOW, T0).await.unwrap() else {
+        panic!("a self-host claim stays uncapped");
+    };
+    assert_eq!(r.principal.as_str(), dev_owner.as_str());
+    assert_eq!(owner_rows(&pool, "w_sh_fourth").await, 1);
+}
+
+#[sqlx::test]
+async fn a_consumed_cloud_claim_replays_redeemed_even_at_cap(pool: PgPool) {
+    // The cap check sits AFTER the consumed-replay probe: an owner whose successful claim redeem put them
+    // AT the cap must still recover a lost 200 by replaying — the probe answers before the cap can deny.
+    let fx = Fixture::new(pool.clone(), "st-claim-cap-replay").await;
+    let a = &fx.authority;
+    for n in 0..2 {
+        assert!(matches!(
+            a.create_workspace(
+                &format!("req-{n}"),
+                None,
+                "serial@founder.com",
+                DeploymentMode::Cloud,
+                T0
+            )
+            .await
+            .unwrap(),
+            CreateWorkspaceOutcome::Created(_)
+        ));
+    }
+    let w = ws("w_third");
+    let token = mint(
+        a,
+        &w,
+        None,
+        Some("serial@founder.com"),
+        DeploymentMode::Cloud,
+        60_000,
+    )
+    .await;
+    let dpub = device_pub(&[53u8; 32]);
+    let RedeemOutcome::Redeemed(_) = a.admin_claim(&token, dpub, NOW, T0).await.unwrap() else {
+        panic!("the third workspace is under the cap");
+    };
+    // Now at cap — the same-device replay of the consumed claim still answers Redeemed.
+    let RedeemOutcome::Redeemed(replay) = a.admin_claim(&token, dpub, NOW, T0).await.unwrap()
+    else {
+        panic!("the consumed-replay probe must answer before the cap");
+    };
+    assert_eq!(replay.workspace_id.as_str(), "w_third");
+    assert_eq!(owner_rows(&pool, "w_third").await, 1);
+}
+
 // ── door 1: the standup session (start → verify → approve → poll → redeem → genesis publish) ──────────
 
 #[sqlx::test]
