@@ -35,7 +35,7 @@ use crate::governance::{GovernanceOutcome, Role};
 use crate::id::{Principal, WorkspaceId};
 use crate::session_roster::{
     RosterSeat, RosterView, SESSION_ACTING_DENIED, SessionInput, SessionInviteOutcome,
-    SessionRotateOutcome,
+    SessionInviteRole, SessionRotateOutcome,
 };
 
 /// The standing-door token for `(workspace, link_epoch)` — the one derivation `invite`, `rotate`,
@@ -297,7 +297,7 @@ impl Db {
         &self,
         input: &SessionInput<'_>,
         emails: &[Principal],
-        role: Role,
+        role: SessionInviteRole,
         secret: &[u8; 32],
     ) -> Result<SessionInviteOutcome> {
         run_serializable!(
@@ -391,9 +391,14 @@ async fn session_invite_run(
     tx: &mut Transaction<'_, Postgres>,
     input: &SessionInput<'_>,
     emails: &[Principal],
-    role: Role,
+    // Threaded as the OWNER-LESS `SessionInviteRole`, not the full `Role`, so `Role::Owner` is
+    // unrepresentable across the whole session-invite SQL path — the `member | reviewer` invariant
+    // is enforced by the type, not by a single caller's discipline. Narrowed to `Role` only at the
+    // `mint_invite_row` call site below.
+    role: SessionInviteRole,
     secret: &[u8; 32],
 ) -> Result<SessionInviteOutcome> {
+    let role = role.as_role();
     match session_gate(tx, input).await? {
         SessionGate::Replay {
             matches,

@@ -769,3 +769,168 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
         assert!(!d.contains("/i/"), "a receipt leaked a link: {d}");
     }
 }
+
+// ── concurrency (the session leg is a distinct code path; race it on its own) ─────────────────────
+
+#[sqlx::test]
+async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-race-invite").await;
+    let a = &fx.authority;
+    let w = ws("w_race");
+    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
+
+    // Two concurrent invites with the SAME request_id + payload: the workspace_events hard INSERT
+    // (in run_serializable!'s convergent-23505 set) makes the loser abort, retry, and replay — so
+    // both return the byte-identical Invited and exactly one row lands.
+    let rid = op_id(7);
+    let emails = ["alice@acme.com".to_owned()];
+    let (ra, rb) = tokio::join!(
+        a.invite_members_session(
+            &w,
+            &rid,
+            owner.as_str(),
+            &emails,
+            SessionInviteRole::Member,
+            CLOUD,
+            T0
+        ),
+        a.invite_members_session(
+            &w,
+            &rid,
+            owner.as_str(),
+            &emails,
+            SessionInviteRole::Member,
+            CLOUD,
+            T0
+        ),
+    );
+    let tok = |o: SessionInviteOutcome| match o {
+        SessionInviteOutcome::Invited {
+            invite_token,
+            seated,
+        } => (invite_token, seated),
+        SessionInviteOutcome::Denied(r) => panic!("raced invite denied: {r}"),
+    };
+    let (ta, sa) = tok(ra.unwrap());
+    let (tb, sb) = tok(rb.unwrap());
+    assert_eq!(ta, tb);
+    assert_eq!((sa, sb), (1, 1));
+    // Exactly ONE receipt for the shared request id.
+    let n = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workspace_events WHERE workspace_id = $1 AND op_id = $2",
+    )
+    .bind("w_race")
+    .bind(&rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn raced_mutual_owner_removes_keep_one_owner(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-race-remove").await;
+    let a = &fx.authority;
+    let w = ws("w_race_rm");
+    let (_seed, owner1, _dk) = seat_owner(a, &w, "cloud").await;
+    let owner2 = prin("owner2@acme.com");
+    a.db()
+        .seed_workspace_member(&w, &owner2, "owner", "confirmed")
+        .await
+        .unwrap();
+
+    // Each owner concurrently removes the OTHER — the write-skew SERIALIZABLE must catch (the two
+    // targets are different rows, so no co-located lock serializes them; the retry re-counts and
+    // would_orphan_owner DENIES the loser).
+    let (op1, op2) = (op_id(1), op_id(2));
+    let (ra, rb) = tokio::join!(
+        a.roster_remove_session(&w, &op1, owner1.as_str(), owner2.as_str(), CLOUD, T0),
+        a.roster_remove_session(&w, &op2, owner2.as_str(), owner1.as_str(), CLOUD, T0),
+    );
+    let outcomes = [ra.unwrap(), rb.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, GovernanceOutcome::Ok))
+            .count(),
+        1,
+        "exactly one raced remove may succeed"
+    );
+    let owners = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workspace_member WHERE workspace_id = $1 AND role = 'owner' AND status = 'confirmed'",
+    )
+    .bind("w_race_rm")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owners, 1, "one confirmed owner always remains");
+}
+
+#[sqlx::test]
+async fn a_session_request_id_slot_is_closed_to_a_later_device_op(pool: PgPool) {
+    // The reverse cross-leg direction: a session op takes an op-id slot; a device-signed governance
+    // op that reuses that id later fails closed as a key reuse (the two preimages can never match).
+    let fx = Fixture::new(pool, "sr-cross-leg").await;
+    let a = &fx.authority;
+    let w = ws("w_cross");
+    let (owner_seed, owner, owner_dk) = seat_owner(a, &w, "cloud").await;
+
+    let shared = op_id(9);
+    invite_ok(
+        a,
+        &w,
+        &shared,
+        owner.as_str(),
+        &["alice@acme.com"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    // A device-signed invite reusing the session's request_id as its op_id is denied key-reuse.
+    let signed = super::enrollment_governance::sign_governance(
+        &owner_seed,
+        w.as_str(),
+        &shared,
+        &owner_dk,
+        crate::GovernanceOp::Invite {
+            role: crate::Role::Member,
+            expires_at: None,
+            emails: vec![prin("carol@acme.com")],
+            skills: vec![],
+        },
+    );
+    assert!(matches!(
+        a.create_invite(&w, &shared, signed, T0).await.unwrap(),
+        crate::CreateInviteOutcome::Denied("op id reused with a different request")
+    ));
+}
+
+// ── credential redaction (the standing door is a live join credential) ────────────────────────────
+
+#[test]
+fn token_carrying_outcomes_redact_the_door_in_debug() {
+    let invited = SessionInviteOutcome::Invited {
+        invite_token: "SECRETdoortoken".to_owned(),
+        seated: 2,
+    };
+    let rotated = SessionRotateOutcome::Rotated {
+        invite_token: "SECRETdoortoken".to_owned(),
+    };
+    let view = crate::RosterView {
+        seats: vec![],
+        invite_token: Some("SECRETdoortoken".to_owned()),
+    };
+    for rendered in [
+        format!("{invited:?}"),
+        format!("{rotated:?}"),
+        format!("{view:?}"),
+    ] {
+        assert!(
+            !rendered.contains("SECRETdoortoken"),
+            "Debug leaked the door: {rendered}"
+        );
+        assert!(
+            rendered.contains("redacted"),
+            "Debug should mark the redaction: {rendered}"
+        );
+    }
+}

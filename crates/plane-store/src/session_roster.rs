@@ -70,8 +70,10 @@ impl SessionInviteRole {
     }
 }
 
-/// The outcome of [`Authority::invite_members_session`].
-#[derive(Debug, Clone)]
+/// The outcome of [`Authority::invite_members_session`]. `Debug` REDACTS `invite_token` — the
+/// standing door is a live workspace-wide join credential (like a magic link), so it must never
+/// reach a log or trace through a formatted value (the crate convention `MintedClaim` set).
+#[derive(Clone)]
 pub enum SessionInviteOutcome {
     /// The seats are seeded and the standing door stands (or the identical request replayed).
     Invited {
@@ -84,8 +86,22 @@ pub enum SessionInviteOutcome {
     Denied(&'static str),
 }
 
-/// The outcome of [`Authority::rotate_join_link_session`].
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for SessionInviteOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionInviteOutcome::Invited { seated, .. } => f
+                .debug_struct("Invited")
+                .field("invite_token", &"<redacted>")
+                .field("seated", seated)
+                .finish(),
+            SessionInviteOutcome::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
+        }
+    }
+}
+
+/// The outcome of [`Authority::rotate_join_link_session`]. `Debug` REDACTS the new door token (see
+/// [`SessionInviteOutcome`]).
+#[derive(Clone)]
 pub enum SessionRotateOutcome {
     /// The door rotated: the prior door family is revoked and this token is the new standing door.
     Rotated {
@@ -94,6 +110,18 @@ pub enum SessionRotateOutcome {
     },
     /// The request was denied (a uniform denial; the static reason is for server logs).
     Denied(&'static str),
+}
+
+impl std::fmt::Debug for SessionRotateOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionRotateOutcome::Rotated { .. } => f
+                .debug_struct("Rotated")
+                .field("invite_token", &"<redacted>")
+                .finish(),
+            SessionRotateOutcome::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
+        }
+    }
 }
 
 /// One workspace seat, as the roster read discloses it.
@@ -111,13 +139,25 @@ pub struct RosterSeat {
 
 /// The roster read's disclosure: every seat, plus — for a confirmed OWNER caller only — the
 /// standing door token (`None` also when no door exists yet, e.g. a standup-born workspace before
-/// its first session invite or rotation).
-#[derive(Debug, Clone)]
+/// its first session invite or rotation). `Debug` REDACTS the token (see [`SessionInviteOutcome`]).
+#[derive(Clone)]
 pub struct RosterView {
     /// The workspace's seats (invited and confirmed), ordered by `added_at` then email.
     pub seats: Vec<RosterSeat>,
     /// The standing door token — disclosed ONLY to a confirmed owner, and only if a door stands.
     pub invite_token: Option<String>,
+}
+
+impl std::fmt::Debug for RosterView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RosterView")
+            .field("seats", &self.seats)
+            .field(
+                "invite_token",
+                &self.invite_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// The server-trusted inputs to a session-leg transaction.
@@ -231,7 +271,7 @@ pub(crate) async fn invite_members_session(
     };
     authority
         .db()
-        .session_invite_txn(&input, &invited, role.as_role(), secret)
+        .session_invite_txn(&input, &invited, role, secret)
         .await
 }
 

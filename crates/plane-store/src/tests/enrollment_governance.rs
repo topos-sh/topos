@@ -30,7 +30,7 @@ fn token_of(link: &str) -> String {
 }
 
 /// Sign a governance op the way an owner's device would (rebuild the kernel frame, sign the preimage).
-fn sign_governance(
+pub(super) fn sign_governance(
     owner_seed: &[u8; 32],
     ws: &str,
     op_id: &str,

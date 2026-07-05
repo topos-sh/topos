@@ -17,8 +17,9 @@ use plane_store::{
 use crate::state::PlaneState;
 use crate::wire;
 
-/// The outcome of [`PlaneState::invite_members`]. Plain owned fields only.
-#[derive(Debug, Clone)]
+/// The outcome of [`PlaneState::invite_members`]. Plain owned fields only. `Debug` REDACTS
+/// `invite_link` — the standing door is a live workspace-wide join credential (never logged).
+#[derive(Clone)]
 pub enum InviteMembersSummary {
     /// The seats are seeded (or the identical request replayed); `invite_link` is the standing
     /// workspace door.
@@ -35,6 +36,21 @@ pub enum InviteMembersSummary {
     },
 }
 
+impl std::fmt::Debug for InviteMembersSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InviteMembersSummary::Invited { seated, .. } => f
+                .debug_struct("Invited")
+                .field("invite_link", &"<redacted>")
+                .field("seated", seated)
+                .finish(),
+            InviteMembersSummary::Denied { reason } => {
+                f.debug_struct("Denied").field("reason", reason).finish()
+            }
+        }
+    }
+}
+
 /// The outcome of [`PlaneState::remove_member`].
 #[derive(Debug, Clone)]
 pub enum RemoveMemberSummary {
@@ -48,8 +64,8 @@ pub enum RemoveMemberSummary {
     },
 }
 
-/// The outcome of [`PlaneState::rotate_join_link`].
-#[derive(Debug, Clone)]
+/// The outcome of [`PlaneState::rotate_join_link`]. `Debug` REDACTS the new door link.
+#[derive(Clone)]
 pub enum RotateJoinLinkSummary {
     /// The door rotated; `invite_link` is the NEW standing door.
     Rotated {
@@ -61,6 +77,20 @@ pub enum RotateJoinLinkSummary {
         /// The static, typed reason.
         reason: String,
     },
+}
+
+impl std::fmt::Debug for RotateJoinLinkSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RotateJoinLinkSummary::Rotated { .. } => f
+                .debug_struct("Rotated")
+                .field("invite_link", &"<redacted>")
+                .finish(),
+            RotateJoinLinkSummary::Denied { reason } => {
+                f.debug_struct("Denied").field("reason", reason).finish()
+            }
+        }
+    }
 }
 
 /// One seat, as [`PlaneState::read_roster`] discloses it. Plain owned fields only.
@@ -78,8 +108,8 @@ pub struct RosterSeatSummary {
 
 /// The outcome of [`PlaneState::read_roster`]. `NotFound` is the UNIFORM miss (an absent
 /// workspace, a non-member or merely-invited acting email, a self-host plane) — the caller must
-/// render it indistinguishably.
-#[derive(Debug, Clone)]
+/// render it indistinguishably. `Debug` REDACTS the owner-only door link.
+#[derive(Clone)]
 pub enum RosterSummary {
     /// The roster, plus the standing door link for a confirmed OWNER caller (`None` also when no
     /// door stands yet).
@@ -91,6 +121,19 @@ pub enum RosterSummary {
     },
     /// The uniform miss.
     NotFound,
+}
+
+impl std::fmt::Debug for RosterSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RosterSummary::Roster { seats, invite_link } => f
+                .debug_struct("Roster")
+                .field("seats", seats)
+                .field("invite_link", &invite_link.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            RosterSummary::NotFound => f.write_str("NotFound"),
+        }
+    }
 }
 
 impl PlaneState {

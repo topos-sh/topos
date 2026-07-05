@@ -17,8 +17,9 @@ use crate::state::PlaneState;
 use crate::wire;
 
 /// The outcome of [`PlaneState::create_workspace`] — a created (or idempotently replayed) workspace, or a
-/// typed denial. Plain owned fields only.
-#[derive(Debug, Clone)]
+/// typed denial. Plain owned fields only. `Debug` REDACTS `invite_link` — the self-invite is a live
+/// join credential (the same door the session-roster ops rotate), so it must never reach a log.
+#[derive(Clone)]
 pub enum CreateWorkspaceSummary {
     /// A fresh workspace was created; `invite_link` is the owner's paste-to-agent `/i/` link.
     Created {
@@ -43,6 +44,36 @@ pub enum CreateWorkspaceSummary {
         /// The static, typed reason.
         reason: String,
     },
+}
+
+impl std::fmt::Debug for CreateWorkspaceSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateWorkspaceSummary::Created {
+                workspace_id,
+                display_name,
+                ..
+            } => f
+                .debug_struct("Created")
+                .field("workspace_id", workspace_id)
+                .field("display_name", display_name)
+                .field("invite_link", &"<redacted>")
+                .finish(),
+            CreateWorkspaceSummary::Replayed {
+                workspace_id,
+                display_name,
+                ..
+            } => f
+                .debug_struct("Replayed")
+                .field("workspace_id", workspace_id)
+                .field("display_name", display_name)
+                .field("invite_link", &"<redacted>")
+                .finish(),
+            CreateWorkspaceSummary::Denied { reason } => {
+                f.debug_struct("Denied").field("reason", reason).finish()
+            }
+        }
+    }
 }
 
 /// The outcome of [`PlaneState::approve_standup`]. `NotFound` is the UNIFORM miss (an unknown/expired/raced
