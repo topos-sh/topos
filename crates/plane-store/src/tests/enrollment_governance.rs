@@ -8,8 +8,8 @@ use topos_core::sign::{
 
 use crate::enroll::device_key_id_for;
 use crate::{
-    ConfirmOutcome, CreateInviteOutcome, DeviceAuthPoll, GovernanceOp, GovernanceOutcome,
-    GovernanceSignedOp, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
+    ConfirmOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, DeviceAuthPoll, GovernanceOp,
+    GovernanceOutcome, GovernanceSignedOp, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
 };
 
 const NOW: i64 = 1_000;
@@ -548,6 +548,93 @@ async fn cloud_redeem_of_a_non_rostered_principal_is_denied(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn mixed_case_confirmed_principal_redeems_into_a_lowercase_invite_seat(pool: PgPool) {
+    // THE BUG the canonical fold kills: the invite seats `alice@acme.com`, but the human proves the
+    // MIXED-CASE `Alice@Acme.COM` on the verification page (an OIDC provider's casing, or just what
+    // she typed). Pre-fix the byte-exact roster gate saw two identities — "invited but can't join".
+    // The parse-boundary fold makes them ONE: the redeem succeeds and flips the SAME seat row.
+    let fx = Fixture::new(pool.clone(), "enr-fold-redeem").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    let invite = make_invite(
+        a,
+        &w,
+        &owner_seed,
+        &owner_dk,
+        &op_id(1),
+        "alice@acme.com",
+        "s_deploy",
+    )
+    .await;
+
+    let device_seed = [11u8; 32];
+    let dpub = device_pub(&device_seed);
+    // The confirm path receives the provider's casing verbatim; the op folds it internally.
+    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "Alice@Acme.COM").await;
+    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+        panic!("a mixed-case-confirmed principal must redeem into its lowercase seat");
+    };
+    assert_eq!(r.principal.as_str(), "alice@acme.com");
+    // The one seat row flipped invited → confirmed — no second case-variant row was born.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT principal, status FROM workspace_member WHERE workspace_id = $1 AND role = 'member'",
+    )
+    .bind(w.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![("alice@acme.com".to_owned(), "confirmed".to_owned())]
+    );
+}
+
+#[sqlx::test]
+async fn a_mixed_case_invite_seats_the_canonical_row_and_a_lowercase_confirm_redeems_into_it(
+    pool: PgPool,
+) {
+    // The reverse direction: the OWNER types the mixed case. `make_invite` parses the email at the
+    // op edge (`prin` folds) and signs over the FOLDED set — exactly what the fixed CLI does — so
+    // the signature verifies, the seat is born canonical, and a lowercase-proven identity lands in it.
+    let fx = Fixture::new(pool.clone(), "enr-fold-invite").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    let invite = make_invite(
+        a,
+        &w,
+        &owner_seed,
+        &owner_dk,
+        &op_id(1),
+        "Alice@Acme.COM",
+        "s_deploy",
+    )
+    .await;
+
+    // Born canonical: the stored seat carries the folded bytes, at `invited`.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT principal, status FROM workspace_member WHERE workspace_id = $1 AND role = 'member'",
+    )
+    .bind(w.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![("alice@acme.com".to_owned(), "invited".to_owned())]
+    );
+
+    let device_seed = [11u8; 32];
+    let dpub = device_pub(&device_seed);
+    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+        panic!("a lowercase-confirmed principal must redeem into the folded seat");
+    };
+    assert_eq!(r.principal.as_str(), "alice@acme.com");
+}
+
+#[sqlx::test]
 async fn self_host_redeem_grants_membership_without_smtp(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-selfhost").await;
     let a = &fx.authority;
@@ -941,6 +1028,93 @@ async fn create_invite_is_op_id_idempotent_with_an_identical_link(pool: PgPool) 
 }
 
 #[sqlx::test]
+async fn an_invite_signed_over_raw_mixed_case_emails_verifies_and_seats_canonical_rows(
+    pool: PgPool,
+) {
+    // The kernel folds email-valued inputs IN-FRAME: `governance_op_preimage` passes every Invite
+    // email through `canonical_principal` BEFORE the set-build, so the preimage below — built over
+    // the RAW `Alice@Acme.COM` bytes, with no explicit fold anywhere in this test — is
+    // byte-identical to the one the plane rebuilds from its parsed (folded) wire form. The
+    // signature verifies, the op is Created, and the seat is born canonical: the structural
+    // in-frame fold, proven end-to-end.
+    //
+    // (Version-skew residual, as prose only: a binary built from an OLD kernel — one WITHOUT the
+    // in-frame fold — that signed mixed-case input bound genuinely different bytes, and a new
+    // plane still denies that signature at verification. No such kernel exists in this tree, so
+    // it is compatibility narrative here, not a testable property.)
+    let fx = Fixture::new(pool.clone(), "enr-fold-raw").await;
+    let a = &fx.authority;
+    let w = ws("w_acme");
+    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+
+    let op = op_id(2);
+    let op_id_bytes = uuid::Uuid::parse_str(&op)
+        .expect("canonical uuid")
+        .into_bytes();
+    let raw_emails = ["Alice@Acme.COM"]; // the raw argv casing, bound into the frame verbatim
+    let raw_skills = ["s_deploy"];
+    let preimage = governance_op_preimage(&GovernanceOpFields {
+        workspace_id: w.as_str(),
+        op_id: op_id_bytes,
+        device_key_id: &owner_dk,
+        op: GovernanceOpKind::Invite {
+            role: Role::Member.signing_byte(),
+            expires_at: 0,
+            emails: &raw_emails,
+            skills: &raw_skills,
+        },
+    })
+    .expect("preimage");
+    let signature = SigningKey::from_bytes(&owner_seed)
+        .sign(&preimage)
+        .to_bytes();
+    let mk_op = || GovernanceOp::Invite {
+        role: Role::Member,
+        expires_at: None,
+        // The wire edge parses (= folds) the email; the SIGNATURE above bound the raw casing.
+        emails: vec![prin("Alice@Acme.COM")],
+        skills: vec![(skill("s_deploy"), None)],
+    };
+    let raw_signed = GovernanceSignedOp {
+        device_key_id: owner_dk.clone(),
+        op: mk_op(),
+        signature,
+    };
+    let out = a.create_invite(&w, &op, raw_signed, "t0").await.unwrap();
+    let CreateInviteOutcome::Created(created) = out else {
+        panic!("a raw-mixed-case-signed invite must verify against the in-frame fold: {out:?}");
+    };
+
+    // The seated member row is the FOLDED principal — one canonical identity, born `invited`.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT principal, status FROM workspace_member WHERE workspace_id = $1 AND role = 'member'",
+    )
+    .bind(w.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![("alice@acme.com".to_owned(), "invited".to_owned())]
+    );
+
+    // Raw-cased and folded signing are now the SAME bytes end-to-end: `sign_governance` (which
+    // signs over the parsed, folded Principals) emits the IDENTICAL deterministic signature, and
+    // a same-op_id retry with it replays the identical link — never a divergent-payload denial.
+    let folded_signed = sign_governance(&owner_seed, w.as_str(), &op, &owner_dk, mk_op());
+    assert_eq!(
+        folded_signed.signature, signature,
+        "preimage(raw) == preimage(folded) ⇒ the deterministic Ed25519 signatures are identical"
+    );
+    let CreateInviteOutcome::Created(replayed) =
+        a.create_invite(&w, &op, folded_signed, "t0").await.unwrap()
+    else {
+        panic!("the folded-signing retry must replay");
+    };
+    assert_eq!(created.link, replayed.link);
+}
+
+#[sqlx::test]
 async fn passcode_locks_after_the_attempt_cap(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-brute").await;
     let a = &fx.authority;
@@ -1142,4 +1316,36 @@ async fn admin_claim_stands_up_a_workspace_and_replays_only_for_the_same_device(
         .await
         .unwrap();
     assert!(matches!(again, RedeemOutcome::Denied(_)));
+}
+
+#[sqlx::test]
+async fn the_workspace_creation_cap_folds_case_variants_into_one_identity(pool: PgPool) {
+    // The owned-workspace cap (3 confirmed-owner seats) counts the MAILBOX, not the casing: three
+    // creates for `robert@x.io` exhaust the cap for `Robert@X.io` too — a case variant is the same
+    // identity at the genesis door, never a cap bypass. (The cap mechanics themselves are the standup
+    // suite's; this is the canonical-principal witness on that gate.)
+    let fx = Fixture::new(pool, "enr-fold-cap").await;
+    let a = &fx.authority;
+    for n in 0..3 {
+        let out = a
+            .create_workspace(
+                &format!("req-{n}"),
+                None,
+                "robert@x.io",
+                DeploymentMode::Cloud,
+                "t0",
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, CreateWorkspaceOutcome::Created(_)),
+            "create {n}: {out:?}"
+        );
+    }
+    assert!(matches!(
+        a.create_workspace("req-3", None, "Robert@X.io", DeploymentMode::Cloud, "t0")
+            .await
+            .unwrap(),
+        CreateWorkspaceOutcome::Denied("workspace creation limit reached")
+    ));
 }

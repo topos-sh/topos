@@ -429,6 +429,44 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     assert_eq!(t1, t1_replay);
 }
 
+#[sqlx::test]
+async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPool) {
+    // The session-leg request identity is computed over the FOLDED principals — `Principal::parse`
+    // folds the acting owner and every invited email BEFORE `session_request_sha256` — so a retry
+    // that re-cases both replays the byte-identical outcome (same door, same seated count), never
+    // the key-reuse/divergent-payload denial.
+    let fx = Fixture::new(pool, "sr-recase").await;
+    let a = &fx.authority;
+    let w = ws("w_recase");
+    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
+
+    let rid = op_id(30);
+    let (token_a, seated_a) = invite_ok(
+        a,
+        &w,
+        &rid,
+        owner.as_str(),
+        &["Alice@X.io"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    // The SAME request id, acting owner AND email re-cased: the identical replay.
+    let (token_b, seated_b) = invite_ok(
+        a,
+        &w,
+        &rid,
+        "Owner@Acme.COM",
+        &["alice@x.io"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    assert_eq!(
+        token_a, token_b,
+        "the re-cased retry must replay the SAME standing door"
+    );
+    assert_eq!((seated_a, seated_b), (1, 1));
+}
+
 // ── remove: lockout + instant revoke ────────────────────────────────────────────────────────────
 
 #[sqlx::test]
@@ -481,6 +519,135 @@ async fn remove_locks_out_the_last_owner_and_drops_read_tokens_in_txn(pool: PgPo
             .unwrap(),
         GovernanceOutcome::Ok
     ));
+}
+
+// ── canonical principals (one mailbox, one identity, however the edge cased it) ─────────────────
+
+#[sqlx::test]
+async fn mixed_case_invite_variants_dedupe_to_one_canonical_seat(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-canon-invite").await;
+    let a = &fx.authority;
+    let w = ws("w_canon_inv");
+    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
+
+    // ONE call carrying two casings of one mailbox: the parse fold makes them ONE principal, so
+    // exactly one seat lands, stored canonical.
+    let (_door, seated) = invite_ok(
+        a,
+        &w,
+        &op_id(1),
+        owner.as_str(),
+        &["Alice@Acme.COM", "alice@acme.com"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    assert_eq!(seated, 1);
+    assert_eq!(
+        seat_of(&pool, "w_canon_inv", "alice@acme.com").await,
+        Some(("member".to_owned(), "invited".to_owned()))
+    );
+    // Exactly one row for the mailbox under ANY casing — no mixed-case sibling seat exists.
+    let n = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workspace_member \
+         WHERE workspace_id = $1 AND lower(principal) = $2",
+    )
+    .bind("w_canon_inv")
+    .bind("alice@acme.com")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn mixed_case_acting_owner_passes_the_gate(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-canon-gate").await;
+    let a = &fx.authority;
+    let w = ws("w_canon_gate");
+    a.db()
+        .seed_workspace(&w, "Acme", "verified", "cloud")
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(&w, &prin("robert@x.io"), "owner", "confirmed")
+        .await
+        .unwrap();
+
+    // The web session's email arrives cased however the IdP rendered it; the gate folds, so the
+    // canonical owner seat authorizes the op instead of denying the owner their own workspace.
+    let (_door, seated) = invite_ok(
+        a,
+        &w,
+        &op_id(1),
+        "Robert@X.io",
+        &["sam@x.io"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    assert_eq!(seated, 1);
+    assert_eq!(
+        seat_of(&pool, "w_canon_gate", "sam@x.io").await,
+        Some(("member".to_owned(), "invited".to_owned()))
+    );
+    // The receipt names the CANONICAL acting principal, never the session's casing.
+    let events = events_of(&pool, "w_canon_gate").await;
+    assert_eq!(events.len(), 1);
+    let (_op, actor, _verb, outcome, method) = &events[0];
+    assert_eq!(
+        (actor.as_str(), outcome.as_str(), method.as_str()),
+        ("robert@x.io", "OK", "web_session")
+    );
+}
+
+#[sqlx::test]
+async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-canon-remove").await;
+    let a = &fx.authority;
+    let w = ws("w_canon_rm");
+    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
+    let bob = prin("bob@x.io");
+    invite_ok(
+        a,
+        &w,
+        &op_id(1),
+        owner.as_str(),
+        &["bob@x.io"],
+        SessionInviteRole::Member,
+    )
+    .await;
+    a.db()
+        .seed_roster(&w, &skill("s_deploy"), &bob)
+        .await
+        .unwrap();
+    a.db()
+        .seed_read_token(&w, &skill("s_deploy"), &bob, "rt-bob")
+        .await
+        .unwrap();
+    assert_eq!(read_token_rows(&pool, "w_canon_rm", "bob@x.io").await, 1);
+
+    // Remove by the MIXED-CASE spelling: the target folds, and the canonical seat + per-skill
+    // roster + read tokens are severed in the one transaction (the instant-revoke shape).
+    assert!(matches!(
+        a.roster_remove_session(&w, &op_id(2), owner.as_str(), "Bob@X.io", CLOUD, T0)
+            .await
+            .unwrap(),
+        GovernanceOutcome::Ok
+    ));
+    assert!(seat_of(&pool, "w_canon_rm", "bob@x.io").await.is_none());
+    assert_eq!(read_token_rows(&pool, "w_canon_rm", "bob@x.io").await, 0);
+    assert!(matches!(
+        a.resolve_read_token("rt-bob", NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+    let roster_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM roster WHERE workspace_id = $1 AND principal = $2",
+    )
+    .bind("w_canon_rm")
+    .bind("bob@x.io")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(roster_rows, 0);
 }
 
 // ── the standing door family ────────────────────────────────────────────────────────────────────

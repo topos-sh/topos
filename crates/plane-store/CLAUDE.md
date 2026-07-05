@@ -322,6 +322,21 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   reuse / epoch-pinned rotate replay, lockout + same-txn token drop, genesis-door continuity, the
   lazy epoch mint, rotation-blocks-future-only (an already-issued grant completes; a rotated door's
   entry gates 404), and the receipt method/actor matrix.
+- **Canonical principal form — one mailbox, one identity.** `Principal::parse` folds every principal
+  to the kernel's ASCII-lowercase form (`topos_core::sign::canonical_principal` — the same fold the
+  client signer applies to every email-valued preimage input, so governance signatures verify over
+  the folded bytes), which makes every roster gate, seat write, idempotency hash, and the
+  owned-workspace cap case-insensitive for one human's mailbox: a lowercased invite seat now matches
+  a mixed-case device-confirmed principal at the redeem gate ("invited but can't join" is dead), and
+  a mixed-case owner seat accepts its lowercased web session. Migration `0010` folds the durable
+  rows that predate the rule — deduping case-variant duplicates deterministically first (`roster`
+  losslessly; `workspace_member` keeps the strongest seat: confirmed > invited, then owner >
+  reviewer > member, then earliest `added_at`) — and pins the invariant with
+  `lower(… COLLATE "C")` CHECKs on `workspace_member` + `roster`. Ephemeral flow tables and the
+  audit ledger are deliberately not rewritten (an in-flight mixed-case enrollment crossing the
+  deploy re-runs fresh; history stays as recorded). Driven by the mixed-case redeem/session/cap
+  tests in `src/tests/enrollment_governance.rs` + `src/tests/session_roster.rs` and the
+  migration-logic probe in `src/tests/canonical_migration.rs`.
 
 ## Backend shape (Postgres-only)
 

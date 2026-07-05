@@ -114,6 +114,21 @@ pub fn device_key_id(public_key: &[u8; 32]) -> String {
     id
 }
 
+/// The canonical form of a principal identifier (an email, or a device-rooted `dev.dk_…` id):
+/// the ASCII-lowercase fold of the input.
+///
+/// A **cross-component identity rule**, like [`device_key_id`]: every email-valued preimage input —
+/// the governance Invite email set, the RosterSet/RosterRemove targets — MUST be folded through this
+/// function **before signing**, and the plane folds at its parse boundary before it re-derives the
+/// preimage, so signer and verifier bind the same bytes and one human's `Alice@x` / `alice@x` are one
+/// rostered identity everywhere (storage, roster gates, idempotency hashes). Principals are
+/// ASCII-only by charset (the plane's parse rejects non-ASCII), so the ASCII fold is total; device
+/// key ids are lowercase hex, so folding a `dev.dk_…` principal is a no-op.
+#[must_use]
+pub fn canonical_principal(s: &str) -> String {
+    s.to_ascii_lowercase()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Commit — the content hash that yields `commit_id` (= `version_id`). Not a signature.
 // ---------------------------------------------------------------------------------------------
@@ -461,6 +476,14 @@ pub struct GovernanceOpFields<'a> {
 ///
 /// Every multi-byte integer is big-endian; every string length prefix is `u32be`.
 ///
+/// **Email-valued inputs fold in-frame.** Every email the frame binds — the `Invite` email set,
+/// the `RosterSet`/`RosterRemove` target — passes [`canonical_principal`] INSIDE this function, so
+/// a signer and a verifier can never skew on casing: mixed-case and folded inputs produce the
+/// IDENTICAL preimage (case variants of one mailbox dedup to one set entry). Callers putting an
+/// email on the WIRE still fold it themselves (the plane stores the parsed wire form, and an older
+/// plane rebuilt this frame from raw wire bytes), but the signature can no longer be the thing
+/// that breaks. The byte layout is unchanged — the fold constrains input bytes, not the frame.
+///
 /// # Errors
 /// [`PreimageError::FieldTooLong`] if a string field — or a deduped set count — exceeds `u32::MAX`.
 pub fn governance_op_preimage(fields: &GovernanceOpFields) -> Result<Vec<u8>, PreimageError> {
@@ -479,19 +502,27 @@ pub fn governance_op_preimage(fields: &GovernanceOpFields) -> Result<Vec<u8>, Pr
         } => {
             out.push(*role);
             out.extend_from_slice(&expires_at.to_be_bytes());
-            put_lp_str_set(&mut out, emails)?;
+            // The frame folds its email-valued inputs ITSELF (see the doc above): a signer that
+            // forgets `canonical_principal` still signs the folded frame, so signer/verifier skew
+            // on casing is structurally impossible rather than a per-call-site convention. The
+            // fold happens BEFORE the set-build so case variants of one mailbox dedup in-frame.
+            let folded: Vec<String> = emails.iter().map(|e| canonical_principal(e)).collect();
+            let folded_refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+            put_lp_str_set(&mut out, &folded_refs)?;
             put_lp_str_set(&mut out, skills)?;
         }
         GovernanceOpKind::RosterSet { role, target } => {
             out.push(*role);
-            put_lp_str(&mut out, target)?;
+            put_lp_str(&mut out, &canonical_principal(target))?;
         }
         GovernanceOpKind::RosterRemove { target } => {
-            put_lp_str(&mut out, target)?;
+            put_lp_str(&mut out, &canonical_principal(target))?;
         }
         GovernanceOpKind::DeviceRevoke {
             target_device_key_id,
         } => {
+            // A device key id, not a principal — already canonical by construction (lowercase
+            // hex), so no fold arm; folding here would blur the rule's scope.
             put_lp_str(&mut out, target_device_key_id)?;
         }
     }
@@ -1420,6 +1451,46 @@ mod tests {
     }
 
     #[test]
+    fn governance_invite_preimage_folds_email_inputs_in_frame() {
+        // The frame folds its email-valued inputs ITSELF: mixed-case and folded inputs build the
+        // IDENTICAL preimage, and the fold runs BEFORE the set-build, so case variants of one
+        // mailbox dedup to ONE entry — a signer/verifier skew on casing is structurally
+        // impossible, not a per-call-site convention.
+        fn invite_frame(emails: &'static [&'static str]) -> Vec<u8> {
+            governance_op_preimage(&GovernanceOpFields {
+                op: GovernanceOpKind::Invite {
+                    role: 1,
+                    expires_at: 1_735_689_600,
+                    emails,
+                    skills: &["s_deploy"],
+                },
+                ..fixture_governance()
+            })
+            .unwrap()
+        }
+        assert_eq!(
+            invite_frame(&["Alice@Acme.COM", "alice@acme.com", "bob@x.io"]),
+            invite_frame(&["alice@acme.com", "bob@x.io"]),
+            "mixed-case + folded email inputs must build a byte-identical Invite frame \
+             (fold, then in-frame set-dedup)",
+        );
+        // The RosterSet target folds in-frame too (RosterRemove shares the same fold arm;
+        // DeviceRevoke deliberately does NOT — a device key id is not a principal).
+        fn roster_set_frame(target: &'static str) -> Vec<u8> {
+            governance_op_preimage(&GovernanceOpFields {
+                op: GovernanceOpKind::RosterSet { role: 1, target },
+                ..fixture_governance()
+            })
+            .unwrap()
+        }
+        assert_eq!(
+            roster_set_frame("Alice@X.io"),
+            roster_set_frame("alice@x.io"),
+            "the RosterSet target must fold in-frame",
+        );
+    }
+
+    #[test]
     fn governance_domain_separation() {
         // The governance frame carries its own tag, and its signature does not cross into the enroll or
         // device-op frames — nor either of theirs into governance.
@@ -1460,6 +1531,19 @@ mod tests {
         assert_eq!(
             device_key_id(&arr32(DEVICE_PK)),
             alloc::format!("dk_{}", &full[..32])
+        );
+    }
+
+    #[test]
+    fn canonical_principal_is_the_total_ascii_fold() {
+        // The one identity fold both halves bind: emails fold to lowercase, already-canonical
+        // strings (every lowercase email, every `dev.dk_…` device-rooted principal — key ids are
+        // lowercase hex) are fixpoints.
+        assert_eq!(canonical_principal("Alice@Acme.COM"), "alice@acme.com");
+        assert_eq!(canonical_principal("alice@acme.com"), "alice@acme.com");
+        assert_eq!(
+            canonical_principal("dev.dk_56475aa75463474c0285df5dbf2bcab7"),
+            "dev.dk_56475aa75463474c0285df5dbf2bcab7"
         );
     }
 

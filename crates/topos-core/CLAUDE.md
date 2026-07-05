@@ -15,8 +15,9 @@ Implemented (each behind a known-answer / truth-table test):
   verify-only **device-enrollment possession proof** + **governance-op** signature frames (the concrete
   `sign` lives in the caller, over the same dalek crate) — plus the **cross-component identity
   derivations** those frames bind (`device_key_id`, the `GovernanceRole` signing byte, the
-  `INVITE_NO_EXPIRY` sentinel), written once here and called by both the client signer and the plane's
-  verify side.
+  `INVITE_NO_EXPIRY` sentinel, and `canonical_principal` — the ASCII-lowercase principal fold every
+  email-valued preimage input passes before signing, the same fold the plane applies at its parse
+  boundary), written once here and called by both the client signer and the plane's verify side.
 - ✅ the **client sync transition** (`sync`) — the four currency states from `work==base?`×`applied==observed?`,
   the anti-rollback floor + reused-tuple-ALARM evaluation (epoch-dominant generation order), and the
   post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind a

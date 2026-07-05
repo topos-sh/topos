@@ -51,6 +51,13 @@ pub struct WorkspaceId(String);
 pub struct SkillId(String);
 
 /// A principal identifier — the rostered reader/uploader identity (device id, account, …).
+///
+/// Parsing **canonicalizes**: the accepted charset is mixed-case (humans type `Alice@Acme.com`),
+/// but the stored form is the kernel's ASCII-lowercase fold ([`topos_core::sign::canonical_principal`]) —
+/// so one mailbox is ONE identity at every roster gate, seat write, and idempotency hash, however it
+/// was cased at the edge. Every durable principal column holds this canonical form: values fold at
+/// their parse edge before storage (ephemeral flow rows copied between tables inherit it), and
+/// migration `0010` pins the invariant with `lower()` CHECKs on the roster tables.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Principal(String);
 
@@ -65,8 +72,8 @@ pub struct Principal(String);
 pub struct OpId(String);
 
 /// `[A-Za-z0-9_-]` — the mixed-case path-safe base charset. Only [`is_principal_char`] builds on it now
-/// (principals are database keys that legitimately carry mixed case); the id newtypes all use the
-/// lowercase rule below.
+/// (principals legitimately ARRIVE mixed-case — humans type emails — and are folded to lowercase at
+/// parse); the id newtypes all use the lowercase rule below.
 fn is_path_safe(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
@@ -137,13 +144,16 @@ impl SkillId {
 }
 
 impl Principal {
-    /// Parse a principal id, admitting the id-plus-email charset `[A-Za-z0-9_-.@+]`.
+    /// Parse a principal id, admitting the id-plus-email charset `[A-Za-z0-9_-.@+]` and
+    /// **canonicalizing to the kernel's ASCII-lowercase fold** (`Alice@Acme.com` parses as
+    /// `alice@acme.com`; an already-lowercase principal — every device-rooted `dev.dk_…` id — is a
+    /// fixpoint). The charset is ASCII-only, so the fold is total.
     ///
     /// # Errors
     /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
     pub fn parse(s: &str) -> Result<Self, IdError> {
         validate(s, is_principal_char)?;
-        Ok(Self(s.to_owned()))
+        Ok(Self(topos_core::sign::canonical_principal(s)))
     }
 
     /// The id as a string slice.
@@ -314,5 +324,29 @@ mod tests {
                 "should accept principal {ok:?}"
             );
         }
+    }
+
+    #[test]
+    fn principal_parse_folds_to_the_canonical_lowercase_form() {
+        // One mailbox, one identity: mixed-case input is ACCEPTED and stored folded, so every SQL
+        // bind and every == against a stored row compares canonical bytes. Already-canonical
+        // strings (all-lowercase emails, `dev.dk_…` device-rooted ids) are fixpoints.
+        assert_eq!(
+            Principal::parse("Alice@Acme.COM").unwrap().as_str(),
+            "alice@acme.com"
+        );
+        assert_eq!(
+            Principal::parse("alice@acme.com").unwrap().as_str(),
+            "alice@acme.com"
+        );
+        assert_eq!(
+            Principal::parse("Dev+Second@X.io").unwrap().as_str(),
+            "dev+second@x.io"
+        );
+        // Case-variant inputs parse EQUAL — the dedup/idempotency property every set-build relies on.
+        assert_eq!(
+            Principal::parse("Alice@Acme.COM").unwrap(),
+            Principal::parse("alice@acme.com").unwrap()
+        );
     }
 }

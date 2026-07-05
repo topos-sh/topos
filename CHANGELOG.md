@@ -5,6 +5,37 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## Canonical principal form — one mailbox, one identity
+
+Principals (emails, and the device-rooted `dev.dk_…` ids) were stored and compared byte-exact, so
+`alice@x` and `Alice@x` were two identities: a lowercased invite seat could never match a mixed-case
+device-confirmed principal at the redeem roster gate ("invited but can't join"), a mixed-case owner
+seat denied its own lowercased web session, and the per-identity workspace cap counted one human once
+per casing. Now:
+
+- **The kernel owns the fold.** `topos_core::sign::canonical_principal` (ASCII lowercase — the
+  principal charset is ASCII-only, so the fold is total) is a cross-component identity rule like
+  `device_key_id`: every email-valued signing-preimage input (the governance Invite email set, the
+  roster-mutation targets) is folded **before signing**, and the plane folds at its parse boundary
+  (`Principal::parse`) before storage, every compare, and its preimage re-derivation — signer and
+  verifier bind the same bytes by construction. The signing frames themselves are byte-unchanged.
+- **`topos invite` folds its emails once at op entry**, so the signed frame and the wire body agree
+  (an older, case-preserving plane verifies the wire bytes — frame/body divergence would strand it).
+- **Migration `0010`** folds the durable rows that predate the rule, deduping case-variant duplicate
+  seats deterministically first (`roster` losslessly; `workspace_member` keeps the strongest seat:
+  confirmed > invited, then owner > reviewer > member, then earliest seat — a confirmed owner can
+  never lose its seat, so no workspace is orphaned), then pins the invariant with
+  `lower(… COLLATE "C")` CHECKs on the two roster tables ("C" so a locale-sensitive `lower()` can
+  never emit non-ASCII bytes the parse would later reject). Ephemeral flow tables and the audit
+  ledger are deliberately not rewritten.
+- **Named residuals, honestly:** an in-flight mixed-case enrollment crossing the deploy denies at
+  the roster gate and is re-run fresh (`topos follow` again — a re-poll alone cannot heal it, the
+  deterministic grant pinned the old casing); a cross-deploy same-op-id retry of a pre-deploy
+  mixed-case governance/session op replays as the key-reuse denial; an OLD client binary (a
+  kernel without the in-frame fold) inviting a mixed-case email against a new plane is DENIED at
+  signature verification — retry with the lowercase form succeeds. (A client on the new kernel
+  cannot hit this: the governance frame folds its email inputs itself.)
+
 ## Main-domain share links + the agent-readable bootstrap (paste a link to your agent)
 
 The `/i/<token>` share link is now the complete cold-start artifact: a human pastes the bare link to

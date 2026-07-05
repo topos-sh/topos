@@ -82,6 +82,14 @@ pub(crate) fn invite(
 ) -> Result<InviteData, ClientError> {
     // The argv boundary: refuse a malformed skill id before signing or contacting anything.
     validate_skill_tokens(&skills)?;
+    // Fold the emails to the kernel's canonical (ASCII-lowercase) principal form ONCE, before they
+    // reach the signing frame OR the wire body — the plane folds at its parse boundary and rebuilds
+    // the preimage from the folded form, so signing unfolded bytes would fail verification there
+    // (and an older, case-preserving plane verifies the wire bytes, so frame and body must agree).
+    let emails: Vec<String> = emails
+        .iter()
+        .map(|e| topos_core::sign::canonical_principal(e))
+        .collect();
     // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -158,7 +166,9 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_core::sign::{GovernanceOpFields, GovernanceOpKind, verify_governance_op};
+    use topos_core::sign::{
+        GovernanceOpFields, GovernanceOpKind, governance_op_preimage, verify_governance_op,
+    };
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
     use topos_types::requests::{InviteRequest, WorkspaceRole};
@@ -568,6 +578,133 @@ mod tests {
             }
             other => panic!("expected INVALID_ARGUMENT, got {other:?}"),
         }
+    }
+
+    /// Rebuild the plane-side Invite frame from a captured wire body, substituting the given email set —
+    /// the way the FOLDING plane rebuilds its verify preimage (role byte 3 = the omitted-`--role` Member
+    /// default; `expires_at = 0` = the shared no-expiry sentinel).
+    fn rebuild_fields<'a>(
+        body: &'a InviteRequest,
+        op_id: [u8; 16],
+        emails: &'a [&'a str],
+        skills: &'a [&'a str],
+    ) -> GovernanceOpFields<'a> {
+        GovernanceOpFields {
+            workspace_id: &body.workspace_id,
+            op_id,
+            device_key_id: &body.device_key_id,
+            op: GovernanceOpKind::Invite {
+                role: 3,
+                expires_at: 0,
+                emails,
+                skills,
+            },
+        }
+    }
+
+    #[test]
+    fn mixed_case_argv_emails_fold_into_the_frame_and_the_wire() {
+        // The op folds argv emails to the kernel canonical (ASCII-lowercase) form ONCE, before signing
+        // AND the wire body — and the kernel ALSO folds email-valued inputs in-frame, so the plane,
+        // whichever form it rebuilds the preimage from, verifies the same bytes the client signed.
+        let rig = Rig::new("fold-mixed-case");
+        rig.seed_enrolled();
+        let (out, cap) = run_invite(
+            &rig,
+            Resp::Ok(InviteData {
+                invite_link: format!("{BASE_URL}/i/tok_fold"),
+                roster_added: vec!["alice@acme.com".to_owned()],
+                skills: vec!["s_deploy".to_owned()],
+            }),
+            &["Alice@Acme.COM", "bob@x.io"],
+            None,
+            &["s_deploy"],
+        );
+        out.expect("the op POSTs the signed invite");
+        let (body, sig) = cap.expect("the op reached the transport");
+
+        // (a) The wire body carries the FOLDED forms, argv order preserved.
+        assert_eq!(
+            body.emails,
+            vec!["alice@acme.com".to_owned(), "bob@x.io".to_owned()],
+            "the wire body's emails are the folded forms, order preserved"
+        );
+
+        let op_id = uuid::Uuid::parse_str(&body.op_id)
+            .expect("op_id is a UUID")
+            .into_bytes();
+        let skill_refs: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
+
+        // (b) The signature verifies over the frame the plane rebuilds — from the folded emails…
+        let folded = rebuild_fields(&body, op_id, &["alice@acme.com", "bob@x.io"], &skill_refs);
+        assert!(
+            verify_governance_op(&folded, &sig, &rig.signer_pubkey()),
+            "the signature must verify over the frame rebuilt from the FOLDED emails"
+        );
+        // …and over a frame rebuilt from the raw mixed-case argv input too — the kernel folds
+        // email-valued inputs IN-FRAME (before the set-build), so the raw and folded rebuilds are
+        // the SAME preimage bytes: signer/verifier casing skew is structurally impossible, not a
+        // per-call-site convention.
+        let raw = rebuild_fields(&body, op_id, &["Alice@Acme.COM", "bob@x.io"], &skill_refs);
+        assert_eq!(
+            governance_op_preimage(&raw).expect("raw preimage"),
+            governance_op_preimage(&folded).expect("folded preimage"),
+            "the in-frame fold makes the raw-cased and folded rebuilds byte-identical"
+        );
+        assert!(
+            verify_governance_op(&raw, &sig, &rig.signer_pubkey()),
+            "the signature must verify over the raw-cased rebuild — preimage(raw) == preimage(folded)"
+        );
+    }
+
+    #[test]
+    fn case_variant_argv_duplicates_converge_to_one_set_entry() {
+        // Two case-variants of one address fold to the SAME canonical form; the kernel preimage binds
+        // emails as a sorted+deduped SET, so post-fold they are ONE entry — the signed frame is
+        // byte-identical to one built from the single folded email. The wire body, by contrast, is NOT
+        // deduped client-side: it carries both folded entries verbatim (the plane's parse+set-build
+        // dedups server-side).
+        let rig = Rig::new("fold-dup-variants");
+        rig.seed_enrolled();
+        let (out, cap) = run_invite(
+            &rig,
+            Resp::Ok(InviteData {
+                invite_link: format!("{BASE_URL}/i/tok_dup"),
+                roster_added: vec!["alice@x.io".to_owned()],
+                skills: vec!["s_deploy".to_owned()],
+            }),
+            &["Alice@X.io", "alice@x.io"],
+            None,
+            &["s_deploy"],
+        );
+        out.expect("the op POSTs the signed invite");
+        let (body, sig) = cap.expect("the op reached the transport");
+
+        // The wire body: both folded entries, verbatim, no client-side dedup.
+        assert_eq!(
+            body.emails,
+            vec!["alice@x.io".to_owned(), "alice@x.io".to_owned()],
+            "the wire body carries both folded entries verbatim (dedup is the plane's set-build)"
+        );
+
+        let op_id = uuid::Uuid::parse_str(&body.op_id)
+            .expect("op_id is a UUID")
+            .into_bytes();
+        let skill_refs: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
+
+        // The signed frame == one built from the single folded email: same preimage BYTES…
+        let duplicated = rebuild_fields(&body, op_id, &["alice@x.io", "alice@x.io"], &skill_refs);
+        let single = rebuild_fields(&body, op_id, &["alice@x.io"], &skill_refs);
+        assert_eq!(
+            governance_op_preimage(&duplicated).expect("preimage"),
+            governance_op_preimage(&single).expect("preimage"),
+            "the kernel set-dedup makes the two case-variants ONE entry post-fold"
+        );
+        // …and the captured signature verifies over the single-email frame.
+        assert!(
+            verify_governance_op(&single, &sig, &rig.signer_pubkey()),
+            "the signature must verify over the frame built from the ONE deduped email"
+        );
     }
 
     #[test]

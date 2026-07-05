@@ -80,8 +80,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   **cross-component agreements live once, in the kernel**, and both halves call them: the role byte via
   `topos_core::sign::GovernanceRole` (`Owner=1, Reviewer=2, Member=3`; an omitted `--role` is the enum's
   shared Member default, matching the plane's `role.unwrap_or(member)`), the no-expiry sentinel
-  `topos_core::sign::INVITE_NO_EXPIRY` (the plane's invite handler hardcodes no expiry), and the emails
-  + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant). The POST rides
+  `topos_core::sign::INVITE_NO_EXPIRY` (the plane's invite handler hardcodes no expiry), the emails
+  + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant), and the
+  **canonical principal fold** — the emails are folded to `topos_core::sign::canonical_principal`'s
+  ASCII-lowercase form ONCE at op entry, before the signing frame AND the wire body, because the plane
+  folds at its parse boundary and re-derives the preimage from the folded form. The POST rides
   through the same creds-free `UreqDeviceClient` client behind a `GovernanceSource` seam (the 64-byte signature in
   the `Topos-Device-Signature` header), mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a
   role-DENIED `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the client

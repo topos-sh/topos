@@ -663,7 +663,9 @@ async fn do_reject(
 // drops out of read + retention. The roster JOIN is the authorization (non-rostered ⇒ empty, never a probe);
 // the scope/path assert is the cross-skill/workspace leak guard (a mismatch ⇒ the indistinguishable 404).
 
-// ── the split suites (each `use super::*;` for the shared fixtures/helpers above) ──
+// ── the split suites (most `use super::*;` for the shared fixtures/helpers above;
+//    canonical_migration is self-contained — it probes raw migration SQL, not the Authority) ──
+mod canonical_migration;
 mod contribute;
 mod enrollment_governance;
 mod ingest;
