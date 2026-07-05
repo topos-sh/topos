@@ -28,6 +28,11 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   `workspace_events` audit + idempotency), and the **workspace-standup genesis ops** — the one-time
   `admin_claim` mint/redeem, `create_workspace`, `approve_standup`, and the shared
   `seat_workspace_and_owner` genesis seat.
+- `session_roster.rs` / `db/session_roster.rs` — the WEB-SESSION roster leg (privileged lib-level, no
+  OSS HTTP route): invite-at-member-or-reviewer / remove / rotate-the-standing-door / the roster read,
+  authorized by an in-transaction confirmed-OWNER acting gate (no signature — the composing caller's
+  session verification is the authentication), `request_id`-idempotent through the same
+  `workspace_events` slot under a fresh session-tagged identity, uniformly denied on self-host.
 - `set_current.rs` / `db/set_current.rs` — the pointer-move: `db/set_current.rs` keeps `run`'s ordered
   arms (replay → authz → CAS → availability → lineage → the op tails) as its single story, plus the reject
   transaction; the proposals' orchestration lives here too (propose/approve are arms of the one write).
@@ -289,6 +294,34 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   standup suite (`src/tests/standup.rs`): the full standup chain through the genesis-publish gate, the
   same-device replay + racing double redeem (exactly one owner row), the cap at the 4th create, the
   cross-door token separation, and the intent/first-writer-wins guards.
+- **The web-session roster leg (real, but basic).** Four PRIVILEGED lib-level ops (no OSS HTTP route —
+  a hosted composition's authenticated admin routes call them; self-host is uniformly denied in-op,
+  keeping bearer + invite-chain the self-host membership story): **`invite_members_session`** (seats
+  emails at member|reviewer — owner is unrepresentable in `SessionInviteRole` — through the shared
+  never-demote row-writer, and returns the STANDING WORKSPACE DOOR), **`roster_remove_session`**
+  (the device lane's exact instant-revoke txn shape + `would_orphan_owner` lockout),
+  **`rotate_join_link_session`** ("reset link"), and the **`read_roster`** privileged read (seats for
+  any confirmed member; the door link disclosed ONLY to a confirmed owner). The STANDING DOOR is
+  deterministic — `derive_token(secret, b"door", [ws, link_epoch])` over a new `workspace.link_epoch`
+  counter (migration `0009`) — so it re-shows without storing plaintext; a create-page-born
+  workspace's door at epoch 0 IS its genesis self-invite (re-derived through `genesis_requests`, now
+  indexed by workspace), a standup/claim-born workspace mints `door(0)` lazily at the first session
+  invite, and rotation revokes the WHOLE standing family (epoch door + genesis row — the FIRST writer
+  of `invites.revoked`) and bumps the epoch: future redemption blocks at the existing bootstrap /
+  device-auth entry gates with the redeem path byte-untouched, and nothing already exchanged is
+  severed (device-leg invite links are deliberately out of rotation's scope). Authorization is a
+  signature-FREE session gate: replay BEFORE authz through the same `workspace_events` slot under a
+  fresh `TOPOS_SESSION_ROSTER_V1` request identity (a device op id and a session request id fail
+  closed against each other as key reuse), then the in-txn confirmed-OWNER check — ONE uniform denial
+  for member/reviewer/invited/absent, and only a CONFIRMED member's denial is ever recorded (a
+  stranger cannot grow the ledger or squat op-id slots). Receipts gain the `method` discriminant
+  (`web_session` with the acting EMAIL as actor vs `device_signed` with the signing device key id) —
+  the audit trail says which leg acted, forever. Driven in-process by `src/tests/session_roster.rs`:
+  the uniform acting gate + recording rule, role-on-the-seat seeding (a reviewer invitee redeems into
+  a confirmed reviewer), self-host denial, identical replay / divergent-payload + cross-leg key
+  reuse / epoch-pinned rotate replay, lockout + same-txn token drop, genesis-door continuity, the
+  lazy epoch mint, rotation-blocks-future-only (an already-issued grant completes; a rotated door's
+  entry gates 404), and the receipt method/actor matrix.
 
 ## Backend shape (Postgres-only)
 

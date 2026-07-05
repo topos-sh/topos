@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace SET link_epoch = $2 WHERE workspace_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6269c0e01331c4477e822ec7665b01bcbc8e028aa3ccaf0771323adeacb6cdf2"
+}

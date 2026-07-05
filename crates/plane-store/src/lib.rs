@@ -75,6 +75,7 @@ mod id;
 mod lineage;
 mod read;
 mod restore;
+mod session_roster;
 mod set_current;
 mod signer;
 mod upload;
@@ -111,6 +112,9 @@ pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId}
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
 pub use restore::EpochBumpReport;
+pub use session_roster::{
+    RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
+};
 pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 

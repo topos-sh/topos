@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_sha256 AS \"request_sha256!: Vec<u8>\" FROM genesis_requests\n           WHERE workspace_id = $1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_sha256!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4a5e5c14a0c3d1057cd1737b0607b30a7c05a43d5336757681669a58109da2d7"
+}

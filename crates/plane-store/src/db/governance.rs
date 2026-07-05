@@ -96,9 +96,9 @@ async fn govern_preamble(
     let request_sha256 = digest::sha256(&preimage);
 
     // Replay BEFORE authz (mirrors the pointer-move): a since-revoked owner still replays its committed OK.
-    if let Some((stored_req, outcome)) = read_event(tx, input.ws, input.op_id).await? {
-        let replay = if stored_req == request_sha256 {
-            match outcome.as_str() {
+    if let Some(stored) = read_event(tx, input.ws, input.op_id).await? {
+        let replay = if stored.request_sha256 == request_sha256 {
+            match stored.outcome.as_str() {
                 "OK" => GovernanceOutcome::Ok,
                 _ => GovernanceOutcome::Denied("replayed denial"),
             }
@@ -222,11 +222,12 @@ async fn create_invite_run(
 
 /// The signature-free invite ROW-WRITER: store the (hash-only) invite + its offered skills and UPSERT the
 /// invited members. Shared by the owner-signed [`create_invite_run`] (which authorizes FIRST — its
-/// governance-signature check stays exactly where it was) and the create-workspace genesis (which mints the
+/// governance-signature check stays exactly where it was), the create-workspace genesis (which mints the
 /// owner's self-invite inside the same transaction that seats that owner — no device signature exists yet;
-/// the caller's own gate is the authorization). Idempotent per row.
+/// the caller's own gate is the authorization), and the web-session roster ops in
+/// [`super::session_roster`] (same rule: the session acting gate is the authorization). Idempotent per row.
 #[allow(clippy::too_many_arguments)]
-async fn mint_invite_row(
+pub(super) async fn mint_invite_row(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     invite_token_sha256: &[u8; 32],
@@ -416,8 +417,8 @@ async fn governance_mutation_run(
 
 /// Would setting `target` to `new_role` (or removing it, `new_role = None`) drop the confirmed-owner count to
 /// zero? True only if `target` is CURRENTLY a confirmed owner, the change stops it being an owner, and it is
-/// the LAST confirmed owner — the last-owner-lockout guard.
-async fn would_orphan_owner(
+/// the LAST confirmed owner — the last-owner-lockout guard (shared with the session-leg remove).
+pub(super) async fn would_orphan_owner(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     target: &str,
@@ -1051,8 +1052,13 @@ async fn create_workspace_run(
 /// The deterministic self-invite token for a created workspace: the create-invite derivation shape with the
 /// REQUEST identity (its sha256) in the op-id slot — so a lost-ack replay re-derives the identical link.
 /// Binds the member role byte, an empty skill set, and the no-expiry sentinel, exactly as an owner-signed
-/// invite with those parameters would.
-fn self_invite_token(secret: &[u8; 32], request_sha256: &[u8; 32], ws: &WorkspaceId) -> String {
+/// invite with those parameters would. Shared with [`super::session_roster`]'s door resolution (a
+/// create-page-born workspace's standing door IS this token until the first rotation revokes it).
+pub(super) fn self_invite_token(
+    secret: &[u8; 32],
+    request_sha256: &[u8; 32],
+    ws: &WorkspaceId,
+) -> String {
     let role_byte = [Role::Member.signing_byte()];
     let expires_be = topos_core::sign::INVITE_NO_EXPIRY.to_be_bytes();
     enroll::derive_token(
@@ -1187,7 +1193,7 @@ async fn read_active_device(
     }
 }
 
-async fn read_member_role(
+pub(super) async fn read_member_role(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     principal: &Principal,
@@ -1205,15 +1211,24 @@ async fn read_member_role(
     Ok(row.map(|r| (r.role, r.status)))
 }
 
-/// Read a workspace_events row's `(request_sha256, outcome)` for the op-id replay check.
-async fn read_event(
+/// A stored workspace_events row's replay-relevant facts (both legs' op-id replay check reads this;
+/// `details` carries what a session-leg replay needs to re-derive its byte-identical response).
+pub(super) struct StoredEvent {
+    pub(super) request_sha256: [u8; 32],
+    pub(super) outcome: String,
+    pub(super) details: Option<String>,
+}
+
+/// Read a workspace_events row for the op-id replay check.
+pub(super) async fn read_event(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     op_id: &str,
-) -> Result<Option<([u8; 32], String)>> {
+) -> Result<Option<StoredEvent>> {
     let ws_s = ws.as_str();
     let row = sqlx::query!(
-        r#"SELECT request_sha256 AS "request_sha256!: Vec<u8>", outcome AS "outcome!"
+        r#"SELECT request_sha256 AS "request_sha256!: Vec<u8>", outcome AS "outcome!",
+                  details AS "details?"
            FROM workspace_events WHERE workspace_id = $1 AND op_id = $2"#,
         ws_s,
         op_id,
@@ -1223,8 +1238,28 @@ async fn read_event(
     .map_err(AuthorityError::internal)?;
     match row {
         None => Ok(None),
-        Some(r) => Ok(Some((blob32(&r.request_sha256)?, r.outcome))),
+        Some(r) => Ok(Some(StoredEvent {
+            request_sha256: blob32(&r.request_sha256)?,
+            outcome: r.outcome,
+            details: r.details,
+        })),
     }
+}
+
+/// The plain-field workspace_events row both legs write through — the device lane via
+/// [`record_event`] (actor = the signing device key id, method `device_signed`), the session lane in
+/// [`super::session_roster`] (actor = the acting principal's verified email, method `web_session`).
+pub(super) struct EventRecord<'a> {
+    pub(super) ws: &'a WorkspaceId,
+    pub(super) op_id: &'a str,
+    pub(super) actor: &'a str,
+    pub(super) gov_op_type: &'a str,
+    pub(super) request_sha256: &'a [u8; 32],
+    pub(super) target: Option<&'a str>,
+    pub(super) outcome: &'a str,
+    pub(super) details: Option<&'a str>,
+    pub(super) method: &'a str,
+    pub(super) created_at: &'a str,
 }
 
 /// Record the governance audit + idempotency row (one per op id; NO secret in `details`).
@@ -1237,6 +1272,35 @@ async fn read_event(
 /// same-`op_id` racers both mutate and only one record the event — an unreceipted second mutation. Failing
 /// hard on the duplicate key (SQLSTATE 23505) instead aborts the loser's transaction, rolling its mutation
 /// back; the loser's `op_id` retry then re-reads this committed row in [`govern_preamble`] and replays.
+pub(super) async fn record_event_raw(
+    tx: &mut Transaction<'_, Postgres>,
+    rec: &EventRecord<'_>,
+) -> Result<()> {
+    let ws_s = rec.ws.as_str();
+    let req = rec.request_sha256.as_slice();
+    sqlx::query!(
+        "INSERT INTO workspace_events \
+           (workspace_id, op_id, actor, gov_op_type, request_sha256, target, outcome, details, method, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        ws_s,
+        rec.op_id,
+        rec.actor,
+        rec.gov_op_type,
+        req,
+        rec.target,
+        rec.outcome,
+        rec.details,
+        rec.method,
+        rec.created_at,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
+}
+
+/// The DEVICE lane's receipt: actor = the SIGNING device key id (the confirmed principal is resolved per
+/// row; the audit "who" is the device that signed — the request is bound to it), method `device_signed`.
 async fn record_event(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
@@ -1244,31 +1308,22 @@ async fn record_event(
     outcome: &str,
     details: Option<&str>,
 ) -> Result<()> {
-    let ws_s = input.ws.as_str();
-    let req = request_sha256.as_slice();
-    let verb = input.signed.op.audit_verb();
-    let target = input.signed.op.audit_target();
-    // The actor is the SIGNING device key id (the confirmed principal is resolved per row; the audit "who"
-    // is the device that signed — the request is bound to it).
-    let actor = input.signed.device_key_id.as_str();
-    sqlx::query!(
-        "INSERT INTO workspace_events \
-           (workspace_id, op_id, actor, gov_op_type, request_sha256, target, outcome, details, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        ws_s,
-        input.op_id,
-        actor,
-        verb,
-        req,
-        target,
-        outcome,
-        details,
-        input.created_at,
+    record_event_raw(
+        tx,
+        &EventRecord {
+            ws: input.ws,
+            op_id: input.op_id,
+            actor: input.signed.device_key_id.as_str(),
+            gov_op_type: input.signed.op.audit_verb(),
+            request_sha256,
+            target: input.signed.op.audit_target(),
+            outcome,
+            details,
+            method: "device_signed",
+            created_at: input.created_at,
+        },
     )
-    .execute(&mut **tx)
     .await
-    .map_err(AuthorityError::internal)?;
-    Ok(())
 }
 
 /// `expires_at` (epoch-ms; `None` = never) → the `u64` the governance frame binds (`None`/negative → 0).

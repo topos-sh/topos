@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT principal AS \"principal!\", role AS \"role!\", status AS \"status!\",\n                      added_at AS \"added_at!\"\n               FROM workspace_member WHERE workspace_id = $1\n               ORDER BY added_at, principal",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "principal!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "added_at!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6b2e414bf7587a6d2ee72572b9dd9c2b729eceffd9e7b15fd47bf05c7e10011a"
+}

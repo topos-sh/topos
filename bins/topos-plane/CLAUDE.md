@@ -118,6 +118,14 @@
   Every wrapper parses the plane's deployment mode STRICTLY — a mode string the constructor could only
   warn-fallback is a typed refusal here (fail closed), so an operator typo can never decide what mode a
   workspace is born with.
+- **The session-roster wrappers** (`roster_cmd.rs`) — the same leak-free, LIB-ONLY surface for the
+  web-session membership ops (a downstream composition's authenticated admin routes call them with a
+  session-verified acting email; there is NO OSS HTTP route): `PlaneState::invite_members` (seats
+  emails at `"member"`/`"reviewer"` — anything else is a typed denial — and returns the standing
+  workspace door link), `remove_member` (idempotent; the last-owner lockout denies typed),
+  `rotate_join_link` ("reset link" — future redemption only), and `read_roster` (a `RosterSummary`:
+  the seats + the owner-only door link, or the uniform `NotFound`). Same strict-mode threading as the
+  standup wrappers; the authority ops themselves uniformly deny a self-host plane.
 - **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
   `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —

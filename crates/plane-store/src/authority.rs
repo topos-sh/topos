@@ -20,6 +20,9 @@ use crate::governance::{
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
+use crate::session_roster::{
+    RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
+};
 use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 use crate::upload::CandidateUpload;
@@ -837,6 +840,122 @@ impl Authority {
             created_at,
         )
         .await
+    }
+
+    /// **Invite members from a verified owner session** — the hosted cloud's "add teammates in settings"
+    /// leg (the composing WEB layer proves the acting email; this op never does). ONE transaction: the
+    /// `request_id` idempotency slot (the same `workspace_events` slot the device lane uses, under a fresh
+    /// session-tagged identity — a cross-leg id collision always fails closed), the in-transaction acting
+    /// gate (the acting email must hold a CONFIRMED **owner** seat — one uniform denial otherwise), the
+    /// standing-door ensure (lazily minted for door-less workspaces), and the invited seats seeded at
+    /// `role` through the shared never-demote row-writer. Returns the standing door token (compose
+    /// `<link_base>/i/<token>`); an owner-role request is unrepresentable in [`SessionInviteRole`].
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
+    /// threaded by the composing caller — never a request field. ALL session roster ops are uniformly
+    /// denied on a self-host plane (self-host membership stays the device-signed invite chain).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn invite_members_session(
+        &self,
+        ws: &WorkspaceId,
+        request_id: &str,
+        acting_email: &str,
+        emails: &[String],
+        role: SessionInviteRole,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<SessionInviteOutcome> {
+        crate::session_roster::invite_members_session(
+            self,
+            ws,
+            request_id,
+            acting_email,
+            emails,
+            role,
+            plane_mode,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Remove a member from a verified owner session.** Same acting gate + idempotency shape as
+    /// [`invite_members_session`](Self::invite_members_session); reuses the device lane's
+    /// last-owner-lockout guard and its exact instant-revoke transaction (membership + per-skill roster +
+    /// read tokens dropped in one txn — removal severs read access as a consequence of losing the seat).
+    /// Removing a merely-invited seat un-invites it; removing an absent principal is an idempotent `Ok`.
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn roster_remove_session(
+        &self,
+        ws: &WorkspaceId,
+        request_id: &str,
+        acting_email: &str,
+        target_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<GovernanceOutcome> {
+        crate::session_roster::roster_remove_session(
+            self,
+            ws,
+            request_id,
+            acting_email,
+            target_email,
+            plane_mode,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Rotate the standing workspace door from a verified owner session** — "reset link". Revokes the
+    /// current door family (the epoch door AND the create-page genesis self-invite, whichever stand),
+    /// bumps the workspace's `link_epoch`, and mints the new deterministic door. Blocks FUTURE redemption
+    /// only: an already-exchanged credential (or a device-auth session already past its entry gate) is
+    /// never severed, and invite links minted on the device leg are deliberately untouched.
+    ///
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn rotate_join_link_session(
+        &self,
+        ws: &WorkspaceId,
+        request_id: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<SessionRotateOutcome> {
+        crate::session_roster::rotate_join_link_session(
+            self,
+            ws,
+            request_id,
+            acting_email,
+            plane_mode,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Read the workspace roster for a verified session** — a pure privileged read (no receipt): every
+    /// seat (email, role, invited/confirmed status, added-at) for any CONFIRMED member; the standing door
+    /// token included ONLY when the acting email holds a confirmed **owner** seat (`None` also when no
+    /// door stands yet). Every miss — a self-host plane, an absent workspace, a non-member — is the single
+    /// indistinguishable [`AuthorityError::NotFound`].
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
+    pub async fn read_roster(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<RosterView> {
+        crate::session_roster::read_roster(self, ws, acting_email, plane_mode).await
     }
 
     /// Resolve an admin-claim link token to its **bootstrap payload** (the `/i/` claim branch): the

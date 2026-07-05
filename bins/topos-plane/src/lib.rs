@@ -37,6 +37,7 @@ mod enroll;
 mod maintenance;
 mod rate_limit;
 mod restore_cmd;
+mod roster_cmd;
 mod router;
 mod routes;
 mod standup_cmd;
@@ -54,6 +55,10 @@ pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use rate_limit::Limits;
 pub use restore_cmd::EpochBumpSummary;
+pub use roster_cmd::{
+    InviteMembersSummary, RemoveMemberSummary, RosterSeatSummary, RosterSummary,
+    RotateJoinLinkSummary,
+};
 pub use router::router;
 pub use standup_cmd::{ApproveSessionSummary, ApproveStandupSummary, CreateWorkspaceSummary};
 pub use state::{PlaneConfig, PlaneState};
