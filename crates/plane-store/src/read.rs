@@ -107,7 +107,9 @@ struct GitLocatorMismatch;
 /// The fields are private on purpose: a consumer (the HTTP layer) holds this as a token and passes it back to
 /// the bound reads (`serve_object` / `read_current` / `read_version_metadata`); it never inspects the
 /// principal (no public accessor exposes it), so the credential cannot be re-used to forge a different scope.
-/// Built ONLY by `resolve_read_token` from a trusted database row — never by parsing a client value.
+/// Built ONLY by the two trusted constructors — `resolve_read_token` (from a trusted database row; the
+/// skill-roster lane) and `ReadScope::for_member` (by `session_read`, strictly AFTER its confirmed-member
+/// probe; the workspace-member lane) — never by parsing a client value.
 #[derive(Debug, Clone)]
 pub struct ReadScope {
     ws: WorkspaceId,
@@ -129,9 +131,20 @@ impl ReadScope {
     pub(crate) fn principal(&self) -> &Principal {
         &self.principal
     }
-    /// The gate lane this scope authorizes through (`pub(crate)` — set only by the trusted constructor).
+    /// The gate lane this scope authorizes through (`pub(crate)` — set only by the trusted constructors).
     pub(crate) fn lane(&self) -> ReadLane {
         self.lane
+    }
+    /// The workspace-member-lane constructor — called ONLY by `session_read`, strictly AFTER its
+    /// confirmed-member probe admitted `principal` (the session preamble is the one entry; this fn does no
+    /// checking of its own). The scope's reads then re-gate on the member lane per statement.
+    pub(crate) fn for_member(ws: WorkspaceId, skill: SkillId, principal: Principal) -> Self {
+        Self {
+            ws,
+            skill,
+            principal,
+            lane: ReadLane::WorkspaceMember,
+        }
     }
 }
 

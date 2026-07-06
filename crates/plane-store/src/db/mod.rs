@@ -60,9 +60,13 @@ pub(in crate::db) async fn retry_backoff(attempt: u32) {
 ///
 /// - [`SkillRoster`](Self::SkillRoster) — the device lane: a per-skill `roster` row exists (the
 ///   read-token scope's gate).
+/// - [`WorkspaceMember`](Self::WorkspaceMember) — the web-session lane: a CONFIRMED `workspace_member`
+///   row exists (skill-blind BY DESIGN — catalog visibility is workspace membership; the composing
+///   caller's session verification is the authentication).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReadLane {
     SkillRoster,
+    WorkspaceMember,
 }
 
 /// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault when the width is wrong (the
@@ -323,7 +327,21 @@ impl Db {
     ) -> Result<bool> {
         match lane {
             ReadLane::SkillRoster => roster_exists(&self.pool, ws, skill, principal).await,
+            ReadLane::WorkspaceMember => {
+                workspace_member_confirmed(&self.pool, ws, principal).await
+            }
         }
+    }
+
+    /// A CONFIRMED `workspace_member` row exists — the session-read preamble's probe (the same predicate
+    /// the [`ReadLane::WorkspaceMember`] gate runs; exposed separately so the preamble can deny BEFORE any
+    /// per-skill work).
+    pub(crate) async fn confirmed_member(
+        &self,
+        ws: &WorkspaceId,
+        principal: &Principal,
+    ) -> Result<bool> {
+        workspace_member_confirmed(&self.pool, ws, principal).await
     }
 
     /// The object-read authorization: the lane's principal gate ([`Self::read_gate`]), then the
@@ -712,6 +730,7 @@ mod proposals;
 mod enroll;
 
 /// The web-session roster SQL (invite / remove / rotate / the roster read).
+pub(crate) mod session_read;
 mod session_roster;
 
 // The governance + admin-claim SQL (owner-signed create-invite + roster/revoke mutations; the first-boot claim).

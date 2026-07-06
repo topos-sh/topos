@@ -676,6 +676,7 @@ mod proposals_root;
 mod read_access;
 mod read_surface;
 mod restore;
+mod session_read;
 mod session_roster;
 mod set_current;
 mod standup;

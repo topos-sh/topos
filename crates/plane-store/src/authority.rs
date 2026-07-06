@@ -20,6 +20,7 @@ use crate::governance::{
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
+use crate::session_read::SkillIndexRow;
 use crate::session_roster::{
     RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
@@ -964,6 +965,118 @@ impl Authority {
         plane_mode: DeploymentMode,
     ) -> Result<RosterView> {
         crate::session_roster::read_roster(self, ws, acting_email, plane_mode).await
+    }
+
+    // ── the web-session READ lane (privileged lib-level, no OSS HTTP route) ─────────────────────────
+    //
+    // The read twin of the session-roster leg: a hosted composition's authenticated admin routes call
+    // these with the session's VERIFIED email — the composing caller's session verification is the
+    // authentication. `plane_mode` is the plane's own posture threaded by the composer, never a request
+    // field. Authorization is a CONFIRMED `workspace_member` row (any role — deliberately broader than
+    // the device lane's per-skill roster: catalog visibility IS workspace membership); self-host,
+    // malformed inputs, unknown workspaces, non-members, and invited-but-unconfirmed seats are ALL the
+    // single indistinguishable [`AuthorityError::NotFound`] (the shared `member_gate` preamble is the one
+    // session entry). Reads mint nothing durable — no receipts, no `workspace_events`.
+
+    /// The workspace catalog for a confirmed member: every skill holding a `current` row, with its
+    /// pointer generation, epoch-ms update time, consent `bundle_digest`, and OPEN non-stale proposal
+    /// count (delegated per skill to the same listing statement, so count == list by construction).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule above; [`AuthorityError::Integrity`]
+    /// on a corrupt stored row; [`AuthorityError::Internal`] on a database fault.
+    pub async fn list_skills_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<Vec<SkillIndexRow>> {
+        crate::session_read::list_skills_session(self, ws, acting_email, plane_mode).await
+    }
+
+    /// A skill's signed `current` pointer for a confirmed member. `Ok(None)` — a cataloged skill whose
+    /// pointer was never signed — is a member-entitled post-gate outcome, distinct from the uniform miss.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule; [`AuthorityError::Integrity`] if the
+    /// stored record is corrupt; [`AuthorityError::Internal`] on a database fault.
+    pub async fn read_current_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<Option<CurrentPointer>> {
+        crate::session_read::read_current_session(self, ws, skill, acting_email, plane_mode).await
+    }
+
+    /// One object's bytes for a confirmed member — the same verify-on-read fetch, gate/reach
+    /// authorization, and re-authorize-on-miss guard as the token lane (reclaimed ⇒ 404, corruption ⇒
+    /// Integrity), with the member lane as the gate.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule (including a malformed object id);
+    /// [`AuthorityError::Integrity`] on provenance/store divergence; [`AuthorityError::Internal`] on a
+    /// database fault.
+    pub async fn serve_object_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &str,
+        object_id_hex: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<Vec<u8>> {
+        crate::session_read::serve_object_session(
+            self,
+            ws,
+            skill,
+            object_id_hex,
+            acting_email,
+            plane_mode,
+        )
+        .await
+    }
+
+    /// A version's authenticated metadata for a confirmed member — the same R1 authorization shape as the
+    /// token lane's version read (an unaccepted/rejected/staled candidate is the uniform miss).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule; [`AuthorityError::Integrity`] on a
+    /// provenance divergence; [`AuthorityError::Internal`] on a database fault.
+    pub async fn read_version_metadata_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &str,
+        version_id_hex: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<VersionMeta> {
+        crate::session_read::read_version_metadata_session(
+            self,
+            ws,
+            skill,
+            version_id_hex,
+            acting_email,
+            plane_mode,
+        )
+        .await
+    }
+
+    /// The OPEN, non-stale proposals on one skill for a confirmed member — the same staleness predicate
+    /// as the token lane's listing (keep == read == list), with the member lane as the gate.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule; [`AuthorityError::Integrity`] on a
+    /// corrupt stored row; [`AuthorityError::Internal`] on a database fault.
+    pub async fn list_open_proposals_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<Vec<OpenProposalSummary>> {
+        crate::session_read::list_open_proposals_session(self, ws, skill, acting_email, plane_mode)
+            .await
     }
 
     /// Resolve an admin-claim link token to its **bootstrap payload** (the `/i/` claim branch): the

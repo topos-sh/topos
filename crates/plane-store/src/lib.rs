@@ -61,7 +61,9 @@
 //   src/db/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write transaction plus its
 //                 pool reads (no `sqlx` type ever crosses out of `mod db`).
 // The twins today: `enroll` (enrollment issuance), `governance` (the owner-signed governance ops + the
-// admin claim), and `set_current` (the pointer-move). Exceptions: `gc`'s SQL lives in `db/lifecycle` (one
+// admin claim), and `set_current` (the pointer-move). `session_read` is the first READ twin — pool reads
+// only, no `run_serializable!`, no op_id/`workspace_events`/receipts, mirroring `read_roster`'s posture
+// (its `db/session_read.rs` holds the one index query; everything else re-uses `read.rs`'s machinery). Exceptions: `gc`'s SQL lives in `db/lifecycle` (one
 // fence, one file); the proposals' orchestration lives in `set_current` (propose/approve are arms of the
 // one pointer-move write; `db/proposals` holds their SQL); and `db/receipts` is SQL-half-only (the receipt
 // read/insert/replay machinery + terminal-outcome writers both `db/set_current` paths call — no
@@ -75,6 +77,7 @@ mod id;
 mod lineage;
 mod read;
 mod restore;
+mod session_read;
 mod session_roster;
 mod set_current;
 mod signer;
@@ -112,6 +115,7 @@ pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId}
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
 pub use restore::EpochBumpReport;
+pub use session_read::SkillIndexRow;
 pub use session_roster::{
     RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
