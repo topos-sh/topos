@@ -65,7 +65,7 @@ const INVITE_OP_2: &str = "b0000000-0000-4000-8000-000000000002";
 /// The exact SessionStart hook command the Claude Code adapter installs (duplicated here on purpose — the
 /// e2e pins the contract; an adapter change must break this loudly).
 const HOOK_COMMAND: &str =
-    "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
+    "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
 
 /// The OpenClaw adapter's config artifacts (duplicated here on purpose, like `HOOK_COMMAND` — the e2e
 /// pins the contract). Provisional until the readiness probe against the pilot's exact OpenClaw build.

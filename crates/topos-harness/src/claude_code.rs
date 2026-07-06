@@ -33,12 +33,16 @@ const COMMAND_IDENTITY: &str = "topos pull";
 /// schema version + command identity.
 const MARKER_ID: &str = "topos:claude-code:currency:1";
 
-/// The exact session-start hook command topos installs. The `command -v topos` guard makes a stale
-/// entry a silent no-op once the binary is gone (post-uninstall safety); `--quiet` keeps stdout empty
-/// (a SessionStart hook's stdout is injected into the session context); the trailing comment is the
-/// idempotency sentinel.
+/// The exact session-start hook command topos installs. The `command -v topos` guard skips the pull
+/// when the binary is gone (post-uninstall safety); the trailing `|| true` then makes the whole line
+/// exit 0 *regardless* — critically when topos is absent (`command -v` itself exits non-zero, and that
+/// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
+/// equally when a pull degrades (plane down): a best-effort currency sweep must never surface as an
+/// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
+/// stdout empty (a SessionStart hook's stdout is injected into the session context); the trailing
+/// comment is the idempotency sentinel.
 const HOOK_COMMAND: &str =
-    "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
+    "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
 
 /// The per-hook timeout (seconds). A real sweep makes network calls (one conditional GET per followed
 /// skill, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a dead
@@ -260,7 +264,21 @@ fn plan_install(current: Option<&[u8]>) -> EditPlan {
         return EditPlan::Leave(TriggerState::Degraded);
     };
     match classify(session_start) {
-        Classification::Managed => EditPlan::Leave(TriggerState::Active), // already ours → no-op, no write
+        Classification::Managed => {
+            // Ours already — but an entry an EARLIER build wrote may carry a stale command string (the
+            // sentinel is version-agnostic on purpose, so we still recognize it). Rewrite it to the
+            // current canonical command; a true no-op (no write) when it already matches. This is how a
+            // fix to `HOOK_COMMAND` reaches installs that predate it — without it, `Managed` would be an
+            // unconditional no-op and the old bytes would live forever.
+            if migrate_managed_command(session_start) {
+                match serialize(&root) {
+                    Some(bytes) => EditPlan::Write(bytes, TriggerState::Active),
+                    None => EditPlan::Leave(TriggerState::Degraded),
+                }
+            } else {
+                EditPlan::Leave(TriggerState::Active) // already canonical → no write
+            }
+        }
         Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged), // leave it
         Classification::Absent => {
             session_start.push(managed_group());
@@ -400,6 +418,33 @@ fn is_managed_command(cmd: &str) -> bool {
     cmd.contains(SENTINEL) && cmd.contains(COMMAND_IDENTITY)
 }
 
+/// Rewrite every topos-managed handler's `command` to the current [`HOOK_COMMAND`], returning whether
+/// anything changed. Idempotent: a handler already carrying the canonical command is left byte-for-byte,
+/// so re-running install after a migration writes nothing. The rewritten string still satisfies
+/// [`is_managed_command`] (it keeps the sentinel + identity), so the entry stays classified as ours.
+fn migrate_managed_command(session_start: &mut [Value]) -> bool {
+    let mut changed = false;
+    for group in session_start.iter_mut() {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for handler in handlers.iter_mut() {
+            let Some(obj) = handler.as_object_mut() else {
+                continue;
+            };
+            let is_ours = obj
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(is_managed_command);
+            if is_ours && obj.get("command").and_then(Value::as_str) != Some(HOOK_COMMAND) {
+                obj.insert("command".to_owned(), Value::String(HOOK_COMMAND.to_owned()));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// The matcher group topos appends: a dedicated `startup` group carrying the one guarded command.
 fn managed_group() -> Value {
     serde_json::json!({
@@ -519,7 +564,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -568,6 +613,46 @@ mod tests {
         );
         assert_eq!(cfg.writes(), 1, "second install writes nothing");
         assert_eq!(cfg.text(), after_first, "bytes unchanged on re-run");
+    }
+
+    #[test]
+    fn install_migrates_a_stale_managed_command_to_the_current_one() {
+        // An entry an earlier build wrote (the guard without the `|| true` exit-0 tail) — same sentinel,
+        // same identity, so still classified as ours.
+        let stale = "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
+        let cfg = MemConfig::with(&format!(
+            "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{stale}\",\"timeout\":60}}]}}]}}}}"
+        ));
+
+        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert!(
+            report.touched_path.is_some(),
+            "a stale entry is rewritten, so the file is touched"
+        );
+        assert_eq!(cfg.writes(), 1, "exactly one migrating write");
+
+        let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
+        let cmd = root["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            cmd, HOOK_COMMAND,
+            "migrated to the current canonical command"
+        );
+        assert!(
+            cmd.ends_with("|| true  # topos:currency"),
+            "the migrated command carries the exit-0 tail"
+        );
+
+        // Re-running is now a true no-op — the migration is idempotent.
+        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert_eq!(again.state, TriggerState::Active);
+        assert!(
+            again.touched_path.is_none(),
+            "no second write after migration"
+        );
+        assert_eq!(cfg.writes(), 1, "migration does not re-fire");
     }
 
     #[test]
