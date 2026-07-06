@@ -13,7 +13,7 @@ use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
 use topos_types::{Generation, SignedCurrentRecord};
 
 use crate::authority::{Authority, run_blocking};
-use crate::db::Location;
+use crate::db::{Location, ReadLane};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -23,13 +23,14 @@ pub(crate) async fn read_object(
     ws: &WorkspaceId,
     skill: &SkillId,
     object_id: ObjectId,
+    lane: ReadLane,
 ) -> Result<Vec<u8>> {
     // Step one (async DB): authorize. The witness commit proves BOTH facts at once — the principal is
     // rostered for the skill, and that skill reaches the object. The borrow on the database is released
     // before the store read below (no git borrow ever crosses an await).
     let witness = match authority
         .db()
-        .authorize_object_read(ws, skill, principal, object_id)
+        .authorize_object_read(ws, skill, principal, object_id, lane)
         .await?
     {
         Some(witness) => witness,
@@ -86,7 +87,7 @@ pub(crate) async fn read_object(
     if let Err(AuthorityError::Integrity(_)) = &fetched
         && authority
             .db()
-            .authorize_object_read(ws, skill, principal, object_id)
+            .authorize_object_read(ws, skill, principal, object_id, lane)
             .await?
             .is_none()
     {
@@ -112,6 +113,7 @@ pub struct ReadScope {
     ws: WorkspaceId,
     skill: SkillId,
     principal: Principal,
+    lane: ReadLane,
 }
 
 impl ReadScope {
@@ -126,6 +128,10 @@ impl ReadScope {
     /// The resolved principal (`pub(crate)` — never public: the scope stays an opaque capability).
     pub(crate) fn principal(&self) -> &Principal {
         &self.principal
+    }
+    /// The gate lane this scope authorizes through (`pub(crate)` — set only by the trusted constructor).
+    pub(crate) fn lane(&self) -> ReadLane {
+        self.lane
     }
 }
 
@@ -201,6 +207,7 @@ pub(crate) async fn resolve_read_token(
             ws,
             skill,
             principal,
+            lane: ReadLane::SkillRoster,
         }),
         None => Err(AuthorityError::NotFound),
     }
@@ -267,6 +274,7 @@ pub(crate) async fn serve_object(
         scope.ws(),
         scope.skill(),
         ObjectId(object_id),
+        scope.lane(),
     )
     .await
 }
@@ -301,7 +309,13 @@ pub(crate) async fn read_version_metadata(
     // R1: rostered ∧ (accepted-trunk OR open-non-stale proposal). Unauthorized/unreachable → the one not-found.
     if !authority
         .db()
-        .authorize_version_read(scope.ws(), scope.skill(), scope.principal(), commit)
+        .authorize_version_read(
+            scope.ws(),
+            scope.skill(),
+            scope.principal(),
+            commit,
+            scope.lane(),
+        )
         .await?
     {
         return Err(AuthorityError::NotFound);
@@ -391,7 +405,7 @@ pub(crate) async fn list_open_proposals(
     }
     let rows = authority
         .db()
-        .list_open_proposals(scope.ws(), scope.skill(), scope.principal())
+        .list_open_proposals(scope.ws(), scope.skill(), scope.principal(), scope.lane())
         .await?;
     Ok(rows
         .into_iter()

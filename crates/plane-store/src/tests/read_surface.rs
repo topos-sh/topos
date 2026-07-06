@@ -368,3 +368,84 @@ async fn read_version_metadata_accepted_proposal_arm_and_unauthorized(pool: PgPo
         Err(AuthorityError::NotFound)
     ));
 }
+
+/// The `commit_object` ≥1-edge join in the version-reachability test is load-bearing: a REJECTED
+/// proposal's candidate keeps its `skill_commit` provenance row (with its digest) forever, but has no
+/// trunk edge and no open proposal — bare-`skill_commit` authorization would leak its metadata. Pinned
+/// here explicitly (the staled-proposal case above pins the `base != current` shape; this pins the
+/// `status != 'open'` shape).
+#[sqlx::test]
+async fn read_version_metadata_rejected_candidate_is_the_uniform_notfound(pool: PgPool) {
+    let fx = Fixture::new(pool, "rt-vmeta-rej").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(43);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "43000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let g = current_commit(&fx, &w, &s).await;
+    let (_r, cp, digest) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "43000000-0000-4000-8000-000000000002",
+        child(
+            g,
+            vec![file("SKILL.md", b"v0"), file("NEW.md", b"proposed")],
+        ),
+        gn(1, 1),
+    )
+    .await;
+
+    let reader = prin("p_reader");
+    fx.authority
+        .db()
+        .seed_roster(&w, &s, &reader)
+        .await
+        .unwrap();
+    fx.authority
+        .db()
+        .seed_read_token(&w, &s, &reader, "tok-rej")
+        .await
+        .unwrap();
+    let scope = fx.authority.resolve_read_token("tok-rej", 0).await.unwrap();
+    let cp_hex = digest::to_hex(&cp.0);
+
+    // Open + non-stale → readable through the proposal arm.
+    assert!(
+        fx.authority
+            .read_version_metadata(&scope, "w_acme", "s_deploy", &cp_hex)
+            .await
+            .is_ok()
+    );
+
+    // Reject it (current untouched — the base still matches, so ONLY the status arm distinguishes).
+    do_reject(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "43000000-0000-4000-8000-000000000003",
+        cp,
+        digest,
+        gn(1, 1),
+    )
+    .await;
+    assert!(matches!(
+        fx.authority
+            .read_version_metadata(&scope, "w_acme", "s_deploy", &cp_hex)
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+}

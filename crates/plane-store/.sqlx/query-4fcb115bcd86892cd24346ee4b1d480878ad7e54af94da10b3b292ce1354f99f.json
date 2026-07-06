@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT w.commit_id AS \"commit_id!: Vec<u8>\" FROM (\n                SELECT sc.commit_id AS commit_id\n                FROM skill_commit  sc\n                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id\n                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND co.object_id = $3\n              UNION ALL\n                SELECT p.commit_id AS commit_id\n                FROM proposal_object po\n                JOIN proposals p  ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id\n                JOIN current    c  ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id\n                WHERE po.workspace_id = $1 AND po.object_id = $3 AND p.skill_id = $2\n                  AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq\n            ) w\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "commit_id!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4fcb115bcd86892cd24346ee4b1d480878ad7e54af94da10b3b292ce1354f99f"
+}

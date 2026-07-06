@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1::int8 AS \"ok!: i64\" FROM (\n                SELECT 1 AS ok\n                FROM skill_commit  sc\n                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id\n                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND sc.commit_id = $3\n              UNION ALL\n                SELECT 1 AS ok\n                FROM proposals p\n                JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id\n                WHERE p.workspace_id = $1 AND p.skill_id = $2\n                  AND p.commit_id = $3 AND p.status = 'open'\n                  AND c.epoch = p.base_epoch AND c.seq = p.base_seq\n            ) w\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cd5a26e8fa34ba51d20ed44b1db48b6e4fedc428ad7b6d68cc93b12e7bf3e584"
+}

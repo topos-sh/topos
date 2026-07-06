@@ -221,7 +221,15 @@ impl Authority {
         skill: &SkillId,
         object_id: ObjectId,
     ) -> Result<Vec<u8>> {
-        crate::read::read_object(self, principal, ws, skill, object_id).await
+        crate::read::read_object(
+            self,
+            principal,
+            ws,
+            skill,
+            object_id,
+            crate::db::ReadLane::SkillRoster,
+        )
+        .await
     }
 
     /// Resolve a presented **read token** to its opaque [`ReadScope`] — the read-credential resolver (the

@@ -136,7 +136,10 @@ async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis(pool: PgP
     a.db().seed_current(&w, &s, commit, 1, 1).await.unwrap(); // exercises the pointer table + its FK
 
     let read = |w: WorkspaceId, s: SkillId, p: Principal, o: ObjectId| async move {
-        a.db().authorize_object_read(&w, &s, &p, o).await.unwrap()
+        a.db()
+            .authorize_object_read(&w, &s, &p, o, crate::db::ReadLane::SkillRoster)
+            .await
+            .unwrap()
     };
     // Full match → the witness commit.
     assert_eq!(
