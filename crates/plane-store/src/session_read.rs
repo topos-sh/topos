@@ -14,7 +14,9 @@
 //! unknown workspace, non-member, invited-but-unconfirmed — is the single indistinguishable
 //! [`AuthorityError::NotFound`]: [`member_gate`] is the ONE session entry, so the uniformity cannot
 //! drift per-op. The only post-gate non-uniform outcomes are member-entitled: `read_current_session`'s
-//! `Ok(None)` (a cataloged skill whose pointer was never signed) and the empty lists. Two benign
+//! `Ok(None)` (no signed pointer exists for this (ws, skill) — a cataloged-but-never-signed skill and an
+//! unknown skill id are deliberately indistinguishable here; the composing wrapper folds both into the
+//! uniform miss) and the empty lists. Two benign
 //! mid-flight-revocation shapes, named so neither is ever "fixed" into an oracle: the skill-scoped
 //! reads re-run the member gate per statement (a just-removed member's in-flight read completes or
 //! misses uniformly — the same accepted gate-to-reach window the token lane carries), while
@@ -108,8 +110,10 @@ pub(crate) async fn list_skills_session(
 }
 
 /// A skill's signed `current` pointer for a confirmed member — [`crate::read::read_current`] verbatim
-/// over the member-lane scope. `Ok(None)` (a cataloged, never-signed pointer) is a member-entitled
-/// post-gate outcome, deliberately distinct from the uniform miss.
+/// over the member-lane scope. `Ok(None)` means no signed pointer exists for this (ws, skill) — a
+/// cataloged-but-never-signed skill and an unknown skill id are deliberately indistinguishable here; the
+/// composing wrapper folds both into the uniform miss. It is a member-entitled post-gate outcome,
+/// deliberately distinct from this layer's uniform `NotFound`.
 pub(crate) async fn read_current_session(
     authority: &Authority,
     ws: &WorkspaceId,

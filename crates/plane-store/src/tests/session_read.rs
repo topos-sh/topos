@@ -359,6 +359,67 @@ async fn genuine_corruption_on_the_member_lane_is_integrity_not_masked_as_404(po
     ));
 }
 
+/// The wrong-bytes tamper pin: the corruption test above DELETES the object; this one swaps the stored
+/// bytes ON DISK under the same recorded id, so the property pinned is the store's get()-time
+/// sha256(bytes) == object_id re-verification — tampered bytes under an honest id must surface
+/// Integrity on the member lane, never the bytes and never the uniform miss.
+#[sqlx::test]
+async fn tampered_bytes_under_a_recorded_id_read_integrity_on_the_member_lane(pool: PgPool) {
+    // A 1-byte threshold routes the published body to the LARGE-OBJECT store, whose final file is a
+    // plain overwritable path (a loose git object is zlib-framed, so the large store is where a
+    // same-id/different-bytes swap is cleanly constructed). `put` re-checks the hash, so the tamper
+    // is a direct filesystem overwrite of the final file.
+    let fx = Fixture::with_large_limits(pool, "sr-tamper", 1, 1 << 30).await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(58);
+    register(&fx, &w, &s, "dk", &key, "p_author").await;
+    let body = b"genuine bytes, published for real";
+    let (_g, _d, obj) = published_skill(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "58000000-0000-4000-8000-000000000001",
+        body,
+    )
+    .await;
+    seat(&fx, &w, "member@acme.com", "member").await;
+    let o_hex = digest::to_hex(&obj.0);
+    assert_eq!(
+        a.db().object_location(&w, obj).await.unwrap(),
+        Some(Location::LargeLocal),
+        "the tamper target must be the offloaded store"
+    );
+    assert_eq!(
+        a.serve_object_session(&w, "s_deploy", &o_hex, "member@acme.com", CLOUD)
+            .await
+            .unwrap(),
+        body
+    );
+
+    // Overwrite the stored file's bytes with DIFFERENT content — same path, same recorded id (the
+    // store's documented final layout: `<large_root>/<ws>/objects/<aa>/<bb>/<64-hex>`).
+    let tampered = fx
+        .dir
+        .join("large")
+        .join("w_acme")
+        .join("objects")
+        .join(&o_hex[0..2])
+        .join(&o_hex[2..4])
+        .join(&o_hex);
+    assert!(tampered.is_file(), "the offloaded final file must exist");
+    std::fs::write(&tampered, b"attacker bytes under the honest id").unwrap();
+
+    // The presence row still says `present`, the member is confirmed, the id is honest — the only
+    // tripwire left is the read-time hash re-verification, and it must alarm, not serve or 404.
+    assert!(matches!(
+        a.serve_object_session(&w, "s_deploy", &o_hex, "member@acme.com", CLOUD)
+            .await,
+        Err(AuthorityError::Integrity(_))
+    ));
+}
+
 #[sqlx::test]
 async fn a_rejected_candidate_version_is_the_uniform_miss_on_the_member_lane(pool: PgPool) {
     let fx = Fixture::new(pool, "sr-rejected").await;

@@ -49,9 +49,10 @@ pub enum SkillsIndexSummary {
 #[derive(Debug, Clone)]
 pub enum SessionCurrentSummary {
     /// The stored `SignedCurrentRecord` JSON, byte-verbatim (what a follower verifies; what the
-    /// token-scoped current route serves). A never-signed pointer is FOLDED into `NotFound` — the
-    /// catalog only lists current-rowed skills, so a composing surface never asks about one
-    /// (pre-first-publish visibility would be a conscious new arm, not this fold).
+    /// token-scoped current route serves). The authority's `Ok(None)` — no signed pointer exists for
+    /// this (ws, skill): a cataloged-but-never-signed skill and an unknown skill id are deliberately
+    /// indistinguishable there — is FOLDED into the uniform `NotFound` here; this wrapper is that
+    /// composing fold (pre-first-publish visibility would be a conscious new arm, not this fold).
     Current { signed_record: Vec<u8> },
     /// The single uniform miss.
     NotFound,
@@ -147,7 +148,7 @@ impl PlaneState {
             Ok(Some(pointer)) => Ok(SessionCurrentSummary::Current {
                 signed_record: pointer.signed_record,
             }),
-            // The deliberate fold: a cataloged, never-signed pointer reads as the uniform miss here.
+            // The deliberate fold: no signed pointer for this (ws, skill) reads as the uniform miss here.
             Ok(None) => Ok(SessionCurrentSummary::NotFound),
             Err(AuthorityError::NotFound) => Ok(SessionCurrentSummary::NotFound),
             Err(error) => Err(anyhow::anyhow!("reading the current pointer: {error}")),

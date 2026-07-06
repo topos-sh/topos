@@ -994,8 +994,10 @@ impl Authority {
         crate::session_read::list_skills_session(self, ws, acting_email, plane_mode).await
     }
 
-    /// A skill's signed `current` pointer for a confirmed member. `Ok(None)` — a cataloged skill whose
-    /// pointer was never signed — is a member-entitled post-gate outcome, distinct from the uniform miss.
+    /// A skill's signed `current` pointer for a confirmed member. `Ok(None)` — no signed pointer exists
+    /// for this (ws, skill): a cataloged-but-never-signed skill and an unknown skill id are deliberately
+    /// indistinguishable here; the composing wrapper folds both into the uniform miss — is a
+    /// member-entitled post-gate outcome, distinct from this layer's uniform `NotFound`.
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] per the lane's uniformity rule; [`AuthorityError::Integrity`] if the

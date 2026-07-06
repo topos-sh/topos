@@ -729,8 +729,10 @@ mod proposals;
 // The enrollment issuance SQL (invites / device-auth / passcodes / grants / redeem).
 mod enroll;
 
-/// The web-session roster SQL (invite / remove / rotate / the roster read).
+// The web-session read lane's SQL (the one skill-index query).
 pub(crate) mod session_read;
+
+// The web-session roster SQL (invite / remove / rotate / the roster read).
 mod session_roster;
 
 // The governance + admin-claim SQL (owner-signed create-invite + roster/revoke mutations; the first-boot claim).
