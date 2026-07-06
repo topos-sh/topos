@@ -146,8 +146,8 @@ async fn concurrent_publishes_one_ok_one_conflict(pool: PgPool) {
     )
     .await;
     let (ra, rb) = tokio::join!(
-        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW),
-        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, None, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, None, CREATED_AT, NOW),
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
     let outcomes = [ra.outcome, rb.outcome];
@@ -290,7 +290,7 @@ async fn revert_advances_seq_and_a_stale_publish_conflicts(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(stale.outcome, TerminalOutcome::Conflict);
@@ -363,7 +363,7 @@ async fn restore_aba_matching_seq_bumped_epoch_conflicts(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(stale.outcome, TerminalOutcome::Conflict);
@@ -411,7 +411,7 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
         gn(1, 1),
     )
     .await;
-    let first = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, CREATED_AT, NOW)
+    let first = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(first.current, Some(gn(1, 2)));
@@ -438,7 +438,7 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
 
     // Retry op K (its ack was lost): the replay returns the ORIGINAL receipt byte-for-byte (the (1,2) signed
     // record), even though current is now (1,3).
-    let retry = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, CREATED_AT, NOW)
+    let retry = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(retry, first);
@@ -486,7 +486,7 @@ async fn a_revoke_before_promotion_blocks_the_move(pool: PgPool) {
     )
     .await;
     fx.authority.db().revoke_device(&w, "dk_a").await.unwrap();
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
@@ -596,7 +596,7 @@ async fn first_parent_mismatch_is_denied_even_when_the_cas_matches(pool: PgPool)
         gn(1, 2),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
@@ -673,7 +673,7 @@ async fn a_two_parent_merge_is_denied(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
@@ -747,7 +747,7 @@ async fn review_required_gates_a_direct_publish(pool: PgPool) {
         gn(1, 1),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, CREATED_AT, NOW)
+    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::ApprovalRequired);
@@ -1089,6 +1089,7 @@ async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest(pool: PgPoo
             &op_id,
             genesis(vec![file("f", b"sneaky")]),
             dev,
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1163,12 +1164,12 @@ async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable(pool
     let b_obj = object_id(b_body);
 
     assert!(
-        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW)
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, None, CREATED_AT, NOW)
             .await
             .unwrap()
             .is_ok()
     );
-    let rb = crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW)
+    let rb = crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, None, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(rb.outcome, TerminalOutcome::Conflict);
@@ -1458,8 +1459,8 @@ async fn concurrent_genesis_standups_one_ok_one_conflict(pool: PgPool) {
     )
     .await;
     let (ra, rb) = tokio::join!(
-        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, CREATED_AT, NOW),
-        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sa, &da, None, CREATED_AT, NOW),
+        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, None, CREATED_AT, NOW),
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
     let outcomes = [ra.outcome, rb.outcome];
@@ -1556,6 +1557,7 @@ async fn a_bad_signature_denied_is_never_persisted_and_a_corrected_retry_succeed
                 signature: bad,
                 expected: gn(0, 0),
             },
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1584,6 +1586,7 @@ async fn a_bad_signature_denied_is_never_persisted_and_a_corrected_retry_succeed
                 signature: good,
                 expected: gn(0, 0),
             },
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1638,6 +1641,7 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
                 signature: [0u8; 64],
                 expected: gn(1, 1),
             },
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1713,6 +1717,7 @@ async fn an_authenticated_denial_stays_durable_and_replays(pool: PgPool) {
             &op_id,
             genesis(files.clone()),
             device.clone(),
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1727,7 +1732,16 @@ async fn an_authenticated_denial_stays_durable_and_replays(pool: PgPool) {
     // A same-op_id retry replays the stored receipt byte-identically.
     let retry = fx
         .authority
-        .publish(&w, &s, &op_id, genesis(files), device, CREATED_AT, NOW)
+        .publish(
+            &w,
+            &s,
+            &op_id,
+            genesis(files),
+            device,
+            None,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap();
     assert_eq!(retry, first);
@@ -1772,6 +1786,7 @@ async fn a_corrupt_stored_receipt_details_alarms_instead_of_replaying(pool: PgPo
             &op_id,
             genesis(files.clone()),
             device.clone(),
+            None,
             CREATED_AT,
             NOW,
         )
@@ -1789,7 +1804,16 @@ async fn a_corrupt_stored_receipt_details_alarms_instead_of_replaying(pool: PgPo
     // The same-op retry must alarm, never replay an altered receipt.
     let r = fx
         .authority
-        .publish(&w, &s, &op_id, genesis(files), device, CREATED_AT, NOW)
+        .publish(
+            &w,
+            &s,
+            &op_id,
+            genesis(files),
+            device,
+            None,
+            CREATED_AT,
+            NOW,
+        )
         .await;
     assert!(
         matches!(r, Err(AuthorityError::Integrity(_))),

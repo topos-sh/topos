@@ -2416,6 +2416,13 @@
             "type": "string",
             "description": "The id of the device key whose signature (in the header) authorizes this op."
           },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata, carried\nfor symmetry with [`PublishRequest`]. It rides the proposal but is never signed, digested, or part of\nthe candidate; the plane records a name only when the pointer actually moves (a later approve/publish)."
+          },
           "expected": {
             "$ref": "#/components/schemas/Generation",
             "description": "The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current."
@@ -2559,6 +2566,13 @@
           "device_key_id": {
             "type": "string",
             "description": "The id of the device key whose signature (in the header) authorizes this op."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata the\nplane stores last-writer-wins and serves for display only (a follower names its folder by it; the\ndashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the device-op\nsigning preimage — a rename never changes a version id, digest, or signature. Absent ⇒ the plane\nkeeps any existing name (never clobbered to NULL)."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",

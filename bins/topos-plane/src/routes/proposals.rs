@@ -61,7 +61,16 @@ pub(crate) async fn propose(
     let (created_at, now) = wire::now_utc();
     let receipt = state
         .authority()
-        .propose(&ws, &skill, &op_id, candidate, device, &created_at, now)
+        .propose(
+            &ws,
+            &skill,
+            &op_id,
+            candidate,
+            device,
+            req.display_name.as_deref(),
+            &created_at,
+            now,
+        )
         .await?;
     Ok((
         StatusCode::OK,

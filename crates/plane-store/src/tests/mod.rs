@@ -408,9 +408,18 @@ async fn publish(
         expected,
     )
     .await;
-    crate::set_current::publish(&fx.authority, ws, skill, &staged, &device, CREATED_AT, NOW)
-        .await
-        .unwrap()
+    crate::set_current::publish(
+        &fx.authority,
+        ws,
+        skill,
+        &staged,
+        &device,
+        None,
+        CREATED_AT,
+        NOW,
+    )
+    .await
+    .unwrap()
 }
 
 /// A normal 1-parent publish candidate.
@@ -557,10 +566,18 @@ async fn do_propose(
         expected,
     )
     .await;
-    let r =
-        crate::set_current::propose(&fx.authority, ws, skill, &staged, &device, CREATED_AT, NOW)
-            .await
-            .unwrap();
+    let r = crate::set_current::propose(
+        &fx.authority,
+        ws,
+        skill,
+        &staged,
+        &device,
+        None,
+        CREATED_AT,
+        NOW,
+    )
+    .await
+    .unwrap();
     (r, staged.version_id, staged.bundle_digest)
 }
 
@@ -667,6 +684,7 @@ async fn do_reject(
 //    canonical_migration is self-contained — it probes raw migration SQL, not the Authority) ──
 mod canonical_migration;
 mod contribute;
+mod display_name;
 mod enrollment_governance;
 mod ingest;
 mod large_object;

@@ -19,6 +19,9 @@ pub(crate) struct SkillIndexDbRow {
     pub(crate) generation: Generation,
     pub(crate) updated_at: i64,
     pub(crate) bundle_digest: [u8; 32],
+    /// The skill's UNSIGNED advisory display name (`current.display_name`), or `None` (the reader falls
+    /// back to the skill id). Never part of the digest or any signature.
+    pub(crate) display_name: Option<String>,
 }
 
 impl Db {
@@ -39,6 +42,7 @@ impl Db {
                    c.epoch         AS "epoch!: i64",
                    c.seq           AS "seq!: i64",
                    c.updated_at    AS "updated_at!: i64",
+                   c.display_name  AS "display_name?",
                    sc.bundle_digest AS "bundle_digest?: Vec<u8>"
             FROM current c
             JOIN skill_commit sc ON sc.workspace_id = c.workspace_id AND sc.commit_id = c.commit_id
@@ -64,6 +68,7 @@ impl Db {
                         &r.bundle_digest
                             .ok_or_else(|| AuthorityError::integrity(MissingIndexDigest))?,
                     )?,
+                    display_name: r.display_name,
                 })
             })
             .collect()

@@ -47,7 +47,16 @@ pub(crate) async fn publish(
     let (created_at, now) = wire::now_utc();
     let receipt = state
         .authority()
-        .publish(&ws, &skill, &op_id, candidate, device, &created_at, now)
+        .publish(
+            &ws,
+            &skill,
+            &op_id,
+            candidate,
+            device,
+            req.display_name.as_deref(),
+            &created_at,
+            now,
+        )
         .await?;
     Ok((
         StatusCode::OK,

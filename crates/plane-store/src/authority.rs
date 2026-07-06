@@ -337,6 +337,10 @@ impl Authority {
     /// transaction (compare-and-set, sign, re-root, durable receipt). Returns the durable, replayable
     /// receipt; a retry with the same `op_id` + bound identity returns it byte-identically.
     ///
+    /// `display_name` is UNSIGNED ADVISORY metadata (the author's skill-folder name) recorded on the
+    /// pointer row last-writer-wins — never in the digest, the candidate, or the device-op preimage; `None`
+    /// keeps any existing name.
+    ///
     /// # Errors
     /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
     /// configured ([`with_plane_key`](Self::with_plane_key)).
@@ -348,6 +352,7 @@ impl Authority {
         op_id: &OpId,
         candidate: CandidateUpload,
         device: DeviceSignedOp,
+        display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
@@ -379,7 +384,17 @@ impl Authority {
         }
         let staged = crate::lifecycle::ingest(self, ws, op_id, candidate, now).await?;
         crate::lifecycle::migrate(self, ws, &staged, now).await?;
-        crate::set_current::publish(self, ws, skill, &staged, &device, created_at, now).await
+        crate::set_current::publish(
+            self,
+            ws,
+            skill,
+            &staged,
+            &device,
+            display_name,
+            created_at,
+            now,
+        )
+        .await
     }
 
     /// Revert the skill's `current` to a known-good prior version — a **forward** commit `{tree: good.tree,
@@ -430,6 +445,9 @@ impl Authority {
     /// [`review_approve`](Self::review_approve) promotes it. Genesis cannot be proposed (publish the first
     /// version directly); a `--propose` against a skill with no `current` is a typed failure that uploads nothing.
     ///
+    /// `display_name` is UNSIGNED ADVISORY metadata carried for symmetry with [`publish`](Self::publish); a
+    /// proposal moves no pointer, so no name is recorded until a later publish/approve advances `current`.
+    ///
     /// # Errors
     /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
     /// configured ([`with_plane_key`](Self::with_plane_key)).
@@ -441,6 +459,7 @@ impl Authority {
         op_id: &OpId,
         candidate: CandidateUpload,
         device: DeviceSignedOp,
+        display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
@@ -475,7 +494,17 @@ impl Authority {
         }
         let staged = crate::lifecycle::ingest(self, ws, op_id, candidate, now).await?;
         crate::lifecycle::migrate(self, ws, &staged, now).await?;
-        crate::set_current::propose(self, ws, skill, &staged, &device, created_at, now).await
+        crate::set_current::propose(
+            self,
+            ws,
+            skill,
+            &staged,
+            &device,
+            display_name,
+            created_at,
+            now,
+        )
+        .await
     }
 
     /// **Approve** an open proposal — promote it to `current` (the sideways move; the contribute motion's

@@ -506,6 +506,7 @@ async fn advance_current(
         input.candidate_commit,
         new_gen,
         &signed_record,
+        input.display_name,
         input.now,
     )
     .await?;
@@ -952,6 +953,7 @@ async fn insert_commit_object(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upsert_current(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
@@ -959,6 +961,7 @@ async fn upsert_current(
     commit: CommitId,
     generation: Generation,
     signed_record: &[u8],
+    display_name: Option<&str>,
     updated_at: i64,
 ) -> Result<()> {
     let ws_s = ws.as_str();
@@ -966,12 +969,17 @@ async fn upsert_current(
     let cid = commit.0.as_slice();
     let epoch = u64_to_i64(generation.epoch)?;
     let seq = u64_to_i64(generation.seq)?;
+    // `display_name` is UNSIGNED advisory metadata (never in the pointer preimage or the digest). On the
+    // update path it is LAST-WRITER-WINS among writers that express a name: `COALESCE(excluded, existing)`
+    // keeps the current name when this move carries none (a revert / approve / a name-less publish), so a
+    // pointer move never blanks a name it didn't mean to touch.
     sqlx::query!(
-        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at, display_name) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          ON CONFLICT (workspace_id, skill_id) DO UPDATE SET \
            commit_id = excluded.commit_id, epoch = excluded.epoch, seq = excluded.seq, \
-           signed_record = excluded.signed_record, updated_at = excluded.updated_at",
+           signed_record = excluded.signed_record, updated_at = excluded.updated_at, \
+           display_name = COALESCE(excluded.display_name, current.display_name)",
         ws_s,
         skill_s,
         cid,
@@ -979,6 +987,7 @@ async fn upsert_current(
         seq,
         signed_record,
         updated_at,
+        display_name,
     )
     .execute(&mut **tx)
     .await

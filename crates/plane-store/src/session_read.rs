@@ -34,8 +34,8 @@ use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 
 /// One skill of the workspace catalog, as [`Authority::list_skills_session`] returns it: the skill, its
 /// `current` pointer facts (version id, generation, epoch-ms update time), the pointed version's consent
-/// `bundle_digest`, and the OPEN non-stale proposal count. NO bytes, NO signed record (that stays on
-/// [`Authority::read_current_session`]), NO proposer identities.
+/// `bundle_digest`, the skill's advisory display name, and the OPEN non-stale proposal count. NO bytes, NO
+/// signed record (that stays on [`Authority::read_current_session`]), NO proposer identities.
 #[derive(Debug, Clone)]
 pub struct SkillIndexRow {
     pub skill_id: String,
@@ -44,6 +44,9 @@ pub struct SkillIndexRow {
     /// Epoch **milliseconds** (the server clock unit) of the last pointer move.
     pub updated_at: i64,
     pub bundle_digest: [u8; 32],
+    /// The skill's UNSIGNED advisory display name (the author's folder name), or `None` (show the skill
+    /// id). Display only — never part of the digest or any signature.
+    pub display_name: Option<String>,
     pub open_proposals: u64,
 }
 
@@ -91,6 +94,7 @@ pub(crate) async fn list_skills_session(
         generation,
         updated_at,
         bundle_digest,
+        display_name,
     } in rows
     {
         // A stored skill_id was validated on the way in; a re-parse failure is store corruption (the
@@ -103,6 +107,7 @@ pub(crate) async fn list_skills_session(
             generation,
             updated_at,
             bundle_digest,
+            display_name,
             open_proposals,
         });
     }

@@ -78,6 +78,7 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool:
             &op("20000000-0000-4000-8000-000000000099"),
             genesis(vec![file("SKILL.md", b"v0")]),
             device,
+            None,
             CREATED_AT,
             NOW,
         )
@@ -916,10 +917,18 @@ async fn the_review_required_loop_direct_is_approval_required_propose_needs_revi
         gn(1, 1),
     )
     .await;
-    let direct =
-        crate::set_current::publish(&fx.authority, &w, &s, &staged, &device, CREATED_AT, NOW)
-            .await
-            .unwrap();
+    let direct = crate::set_current::publish(
+        &fx.authority,
+        &w,
+        &s,
+        &staged,
+        &device,
+        None,
+        CREATED_AT,
+        NOW,
+    )
+    .await
+    .unwrap();
     assert_eq!(direct.outcome, TerminalOutcome::ApprovalRequired);
     assert_eq!(current_commit(&fx, &w, &s).await, g);
     // The remedy: an explicit --propose ⇒ NEEDS_REVIEW.
@@ -1010,9 +1019,18 @@ async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_read
         gn(0, 0),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &staged, &device, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let r = crate::set_current::publish(
+        &fx.authority,
+        &w,
+        &s,
+        &staged,
+        &device,
+        None,
+        CREATED_AT,
+        NOW,
+    )
+    .await
+    .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     fx.authority
         .db()
@@ -1062,9 +1080,18 @@ async fn a_publish_cannot_adopt_another_skills_commit(pool: PgPool) {
         gn(0, 0),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &y, &staged, &device, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let r = crate::set_current::publish(
+        &fx.authority,
+        &w,
+        &y,
+        &staged,
+        &device,
+        None,
+        CREATED_AT,
+        NOW,
+    )
+    .await
+    .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
 }
 

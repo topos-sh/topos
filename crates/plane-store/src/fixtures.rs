@@ -194,7 +194,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, device, created_at, now)
+        self.publish(ws, skill, op_id, candidate, device, None, created_at, now)
             .await
     }
 
@@ -290,7 +290,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, device, created_at, now)
+        self.publish(ws, skill, op_id, candidate, device, None, created_at, now)
             .await
     }
 

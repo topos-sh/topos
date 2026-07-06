@@ -94,6 +94,9 @@ pub(crate) struct PromoteInput<'a> {
     pub candidate_bundle_digest: [u8; 32],
     pub parents: &'a [CommitId],
     pub object_ids: &'a [ObjectId],
+    /// The skill's advisory display name to record on a pointer move (`None` ⇒ keep any existing name).
+    /// UNSIGNED — it is never in the device-op preimage or the bundle digest; only the `current` upsert reads it.
+    pub display_name: Option<&'a str>,
     pub created_at: &'a str,
     pub now: i64,
 }
@@ -107,12 +110,14 @@ pub(crate) struct PromoteInput<'a> {
 /// # Errors
 /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
 /// configured ([`Authority::with_plane_key`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn publish(
     authority: &Authority,
     ws: &WorkspaceId,
     skill: &SkillId,
     staged: &StagedCandidate,
     device: &DeviceSignedOp,
+    display_name: Option<&str>,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
@@ -134,6 +139,7 @@ pub(crate) async fn publish(
             bundle_digest: staged.bundle_digest,
             parents: &staged.parents,
             object_ids: &object_ids,
+            display_name,
         },
         device,
         created_at,
@@ -345,6 +351,8 @@ pub(crate) async fn revert(
             bundle_digest: good_digest,
             parents: &parents,
             object_ids: &object_ids,
+            // A revert restores prior bytes; it never renames the skill — keep any existing display name.
+            display_name: None,
         },
         device,
         created_at,
@@ -374,12 +382,14 @@ pub(crate) struct RejectInput<'a> {
 /// `current`. Same shape as [`publish`] (re-verify renderability before the transaction, then run the one
 /// write), but the device op is `PublishPropose`, so the shared `run`'s propose arm fires — recording the
 /// proposal + its gated object roots and returning NEEDS_REVIEW. `current` is untouched; nothing is signed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn propose(
     authority: &Authority,
     ws: &WorkspaceId,
     skill: &SkillId,
     staged: &StagedCandidate,
     device: &DeviceSignedOp,
+    display_name: Option<&str>,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
@@ -398,6 +408,8 @@ pub(crate) async fn propose(
             bundle_digest: staged.bundle_digest,
             parents: &staged.parents,
             object_ids: &object_ids,
+            // Carried for symmetry; a propose moves no pointer, so the `run` propose arm records no name.
+            display_name,
         },
         device,
         created_at,
@@ -532,6 +544,8 @@ pub(crate) async fn review_approve(
         candidate_bundle_digest: digest,
         parents: std::slice::from_ref(&inputs.base_commit),
         object_ids: &inputs.object_ids,
+        // An approve promotes already-reviewed bytes; it carries no rename — keep any existing display name.
+        display_name: None,
         created_at,
         now,
     };
@@ -649,6 +663,8 @@ struct Candidate<'a> {
     bundle_digest: [u8; 32],
     parents: &'a [CommitId],
     object_ids: &'a [ObjectId],
+    /// The skill's advisory display name to record on a pointer move (`None` ⇒ keep any existing name).
+    display_name: Option<&'a str>,
 }
 
 /// The shared driver: bridge the op id, render-verify the migrated candidate (a pre-transaction filesystem
@@ -704,6 +720,7 @@ async fn drive(
         candidate_bundle_digest: cand.bundle_digest,
         parents: cand.parents,
         object_ids: cand.object_ids,
+        display_name: cand.display_name,
         created_at,
         now,
     };

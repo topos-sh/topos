@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT isk.skill_id AS \"skill_id!\",\n                      COALESCE(c.display_name, isk.name) AS \"name?\"\n               FROM invite_skill isk\n               JOIN invites i ON i.token_sha256 = isk.token_sha256\n               LEFT JOIN current c ON c.workspace_id = i.workspace_id AND c.skill_id = isk.skill_id\n               WHERE isk.token_sha256 = $1\n               ORDER BY isk.skill_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "skill_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "name?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "a93cd2d744b96606a7acee49dff70b4f2bedfc8fc6b4fe1b6ea412d38a600415"
+}

@@ -257,6 +257,8 @@ fn send_op(
                         device_key_id,
                         expected: rec.expected_generation,
                         candidate,
+                        // Advisory folder name — not populated by the client yet (lands later).
+                        display_name: None,
                     },
                     sig,
                 )
@@ -269,6 +271,8 @@ fn send_op(
                         device_key_id,
                         expected: rec.expected_generation,
                         candidate,
+                        // Advisory folder name — not populated by the client yet (lands later).
+                        display_name: None,
                     },
                     sig,
                 )

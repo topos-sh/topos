@@ -105,6 +105,13 @@ pub struct PublishRequest {
     pub expected: Generation,
     /// The full candidate bundle to ingest + publish.
     pub candidate: WireCandidate,
+    /// The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata the
+    /// plane stores last-writer-wins and serves for display only (a follower names its folder by it; the
+    /// dashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the device-op
+    /// signing preimage — a rename never changes a version id, digest, or signature. Absent ⇒ the plane
+    /// keeps any existing name (never clobbered to NULL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -130,6 +137,11 @@ pub struct ProposeRequest {
     pub expected: Generation,
     /// The full candidate bundle to ingest as the proposal's content.
     pub candidate: WireCandidate,
+    /// The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata, carried
+    /// for symmetry with [`PublishRequest`]. It rides the proposal but is never signed, digested, or part of
+    /// the candidate; the plane records a name only when the pointer actually moves (a later approve/publish).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the
@@ -789,15 +801,29 @@ mod tests {
                 author: "d_test".to_owned(),
                 message: "topos: publish".to_owned(),
             },
+            display_name: Some("Deploy".to_owned()),
         };
         let v = serde_json::to_value(&req).unwrap();
         // snake_case field names, candidate nested, and the server-stamped time is absent.
         assert_eq!(v["workspace_id"], "w_demo");
         assert_eq!(v["expected"]["seq"], 42);
         assert_eq!(v["candidate"]["files"][0]["mode"], "100644");
+        assert_eq!(v["display_name"], "Deploy");
         assert!(v.get("created_at").is_none());
         let back: PublishRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back.candidate.parents, vec!["a".repeat(64)]);
+        assert_eq!(back.display_name.as_deref(), Some("Deploy"));
+        // An OLD body without display_name still deserializes (additive-compat), yielding None.
+        let old: PublishRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "w_demo",
+            "skill_id": "s_prdescribe",
+            "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "device_key_id": "dk_demo",
+            "expected": { "epoch": 1, "seq": 42 },
+            "candidate": { "files": [], "parents": [], "author": "d", "message": "m" },
+        }))
+        .unwrap();
+        assert!(old.display_name.is_none());
     }
 
     #[test]

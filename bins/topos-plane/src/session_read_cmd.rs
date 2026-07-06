@@ -32,6 +32,9 @@ pub struct SkillIndexEntrySummary {
     pub updated_at_ms: i64,
     /// The pointed version's consent digest (hex64).
     pub bundle_digest: String,
+    /// The skill's UNSIGNED advisory display name (the author's folder name), or `None` (show the skill
+    /// id). Display only — never part of the digest or any signature.
+    pub display_name: Option<String>,
     pub open_proposals: u64,
 }
 
@@ -116,6 +119,7 @@ impl PlaneState {
                         seq: r.generation.seq,
                         updated_at_ms: r.updated_at,
                         bundle_digest: hex::encode(r.bundle_digest),
+                        display_name: r.display_name,
                         open_proposals: r.open_proposals,
                     })
                     .collect(),
