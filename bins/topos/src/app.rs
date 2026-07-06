@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use serde::Serialize;
@@ -130,12 +131,17 @@ pub fn run() -> ExitCode {
                 resume,
                 approve,
             };
-            finish_follow(
-                json,
-                cmd_name,
-                ops::follow(&ctx, &connectors, link, opts),
-                &diag,
-            )
+            let first = ops::follow(&ctx, &connectors, link, opts);
+            // The INTERACTIVE (non-`--json`) path blocks on a pending device-authorization: poll until the
+            // human approves in the browser, so a person never has to run `follow --resume` by hand. The
+            // agent (`--json`) path is UNCHANGED — it returns the pending state + the `ENROLL_RESUME`
+            // next-action and never blocks (a headless agent process must not hang).
+            let result = if json {
+                first
+            } else {
+                block_until_settled(&ctx, &connectors, manual, first)
+            };
+            finish_follow(json, cmd_name, result, &diag)
         }
         Command::Unfollow { skill } => finish(
             json,
@@ -397,6 +403,59 @@ fn finish_follow(
             ExitCode::SUCCESS
         }
         Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// The interactive `follow`'s poll cadence: while a human opens the browser and approves, poll the
+/// device-authorization grant this often. There is no separate client timeout — the device code's own
+/// expiry makes the plane return a terminal Expired/Denied that surfaces as `Err`, ending the loop.
+const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Block the INTERACTIVE (non-`--json`) `follow` on a pending device-authorization until the browser
+/// approval settles — so a person never has to run `follow --resume` by hand. The agent path never calls
+/// this (it must not hang). Re-uses the tested `ops::follow` op unchanged: it prints the waiting
+/// disclosure to STDERR (stdout stays clean for the final render), then polls `follow --resume` on a fixed
+/// cadence — a still-pending poll loops; an enrolled result or a typed error (the device code's expiry)
+/// ends it and is handed back for the ordinary [`finish_follow`] render. A non-pending first result (a
+/// self-host claim one-shot, an already-enrolled resume, or an error) settles immediately.
+fn block_until_settled(
+    ctx: &Ctx<'_>,
+    connectors: &ops::FollowConnectors<'_>,
+    manual: bool,
+    first: Result<ops::FollowOutcome, ClientError>,
+) -> Result<ops::FollowOutcome, ClientError> {
+    // Only a device-auth pending blocks; everything else (claim one-shot, already-enrolled, error) is
+    // returned as-is. A self-host admin-claim enrolls in one call and is never pending — excluded here.
+    let Ok(out) = &first else {
+        return first;
+    };
+    let Some(pending) = &out.data.pending else {
+        return first;
+    };
+
+    // The human-facing waiting disclosure on STDERR (stdout stays the clean final envelope/TTY).
+    eprintln!(
+        "Open this URL to approve:\n  {}\n  code: {}\n  fingerprint: {} (confirm it matches the page)",
+        pending.verification_uri_complete,
+        pending.user_code,
+        render::group_fingerprint(&pending.device_fingerprint),
+    );
+    eprintln!("Waiting for approval…");
+
+    loop {
+        std::thread::sleep(FOLLOW_POLL_INTERVAL);
+        let opts = ops::FollowOpts {
+            manual,
+            resume: true,
+            approve: Vec::new(),
+        };
+        let next = ops::follow(ctx, connectors, None, opts);
+        match &next {
+            // Still waiting on the human — keep polling.
+            Ok(o) if o.data.pending.is_some() => continue,
+            // Enrolled (Ok, non-pending) or a terminal error — settled; render it.
+            _ => return next,
+        }
     }
 }
 

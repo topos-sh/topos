@@ -90,6 +90,10 @@
       "description": "The workspace-standup sign-in a pending `publish` waits on. **INFERRED.**",
       "type": "object",
       "properties": {
+        "device_fingerprint": {
+          "description": "16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page.",
+          "type": "string"
+        },
         "expires_at": {
           "description": "The sign-in session's expiry as an RFC-3339 string, if it expires.",
           "type": [
@@ -113,7 +117,8 @@
       "required": [
         "status",
         "verification_uri_complete",
-        "user_code"
+        "user_code",
+        "device_fingerprint"
       ]
     },
     "PublishPendingStatus": {

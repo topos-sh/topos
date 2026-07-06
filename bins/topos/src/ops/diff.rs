@@ -87,7 +87,11 @@ fn diff_draft_vs_current(
         .placements
         .first()
         .ok_or_else(|| ClientError::Corrupt("placement map has no path".to_owned()))?;
-    let ScannedBundle { files: draft, .. } = scan::scan(Path::new(placement))?;
+    let ScannedBundle {
+        files: draft,
+        bundle_digest: draft_digest,
+        ..
+    } = scan::scan(Path::new(placement))?;
 
     let base_files: Vec<DiffFile<'_>> = base
         .files
@@ -110,8 +114,12 @@ fn diff_draft_vs_current(
 
     Ok(DiffData {
         source: DiffSource::Local,
+        // The DRAFT is the target endpoint (like `target.digest_hex` on the `<ref>` path): report
+        // ITS digest — the byte-exact value `publish --approve <skill>@<digest>` consents to — not
+        // the base's. When the draft equals current the scan reproduces the current digest, so a
+        // no-change diff is unaffected.
         version_id: lock.base_commit.clone(),
-        bundle_digest: lock.bundle_digest.clone(),
+        bundle_digest: to_hex(&draft_digest),
         diff,
     })
 }

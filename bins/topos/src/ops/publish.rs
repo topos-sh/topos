@@ -30,7 +30,8 @@ use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::follow::{
-    EnrollConnect, complete_uri, machine_name, promote_core, resolve_api_base, tofu_decide_key,
+    EnrollConnect, complete_uri, device_fingerprint, machine_name, promote_core, resolve_api_base,
+    tofu_decide_key,
 };
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
@@ -432,6 +433,7 @@ fn standup_begin(
         approved_digest,
         complete,
         start.auth.user_code,
+        device_fingerprint(&signer),
         expires_at_millis,
     ))
 }
@@ -466,15 +468,20 @@ fn standup_resume(
     // affects the NEXT standup, never a half-done one).
     let enroll_src = (standup.enroll)(&wal.base_url);
     match enroll_src.poll_token(&wal.device_code)? {
-        // Still waiting on the human — re-emit the pending receipt verbatim; the WAL stays put.
-        TokenPoll::Pending | TokenPoll::SlowDown => Ok(pending_outcome(
-            ctx,
-            skill_name,
-            approved_digest,
-            wal.verification_uri_complete,
-            wal.user_code,
-            wal.expires_at_millis,
-        )),
+        // Still waiting on the human — re-emit the pending receipt verbatim; the WAL stays put. The
+        // device key is deterministic, so the re-emitted fingerprint matches the one on the sign-in page.
+        TokenPoll::Pending | TokenPoll::SlowDown => {
+            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            Ok(pending_outcome(
+                ctx,
+                skill_name,
+                approved_digest,
+                wal.verification_uri_complete,
+                wal.user_code,
+                device_fingerprint(&signer),
+                wal.expires_at_millis,
+            ))
+        }
         TokenPoll::Denied => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(
@@ -630,6 +637,7 @@ fn pending_outcome(
     approved_digest: &str,
     verification_uri_complete: String,
     user_code: String,
+    device_fingerprint: String,
     expires_at_millis: i64,
 ) -> PublishOutcome {
     // The sidecar skill id is the receipt's stable handle (matching the enrolled receipt's skill_id).
@@ -647,6 +655,7 @@ fn pending_outcome(
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete,
                 user_code,
+                device_fingerprint,
                 expires_at: Some(fmt_rfc3339_millis(expires_at_millis)),
             }),
             standup: None,

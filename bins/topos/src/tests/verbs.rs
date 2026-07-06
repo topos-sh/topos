@@ -463,6 +463,40 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
 }
 
 #[test]
+fn diff_reports_the_draft_digest_not_the_base() {
+    // A bare `diff` compares draft ↔ current; its `bundle_digest` must be the DRAFT's digest — the
+    // byte-exact value `publish --approve <skill>@<digest>` consents to (the bytes being shipped),
+    // NOT the base/current version's (which would yield CONSENT_MISMATCH on any real change).
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("diff-digest");
+    let add = ops::add(&h.ctx(), &root).unwrap();
+
+    // Edit the draft so it diverges from current.
+    std::fs::write(
+        root.join("SKILL.md"),
+        "---\nname: pr-describe\n---\n\n# PR describe\n\nWrite a GREAT PR description.\n",
+    )
+    .unwrap();
+
+    let edited = ops::diff(&h.ctx(), "pr-describe", None).unwrap();
+
+    // The reported digest equals an independent scan of the on-disk draft (adopt-in-place → `root`)…
+    let draft_digest = topos_core::digest::to_hex(&crate::scan::scan(&root).unwrap().bundle_digest);
+    assert_eq!(
+        edited.bundle_digest, draft_digest,
+        "diff reports the draft's byte-exact digest"
+    );
+    // …and differs from the base/current version's digest (the value publish would have rejected).
+    assert_ne!(
+        edited.bundle_digest, add.bundle_digest,
+        "the draft digest is not the base digest"
+    );
+    // The diffed endpoint (version_id) stays the base commit — only the consent digest moved.
+    assert_eq!(edited.version_id, add.version_id);
+}
+
+#[test]
 fn log_reports_local_action_and_git_history() {
     let src = editable_source();
     let root = src.0.join("pr-describe");

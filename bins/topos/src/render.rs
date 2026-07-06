@@ -443,8 +443,11 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
             s.push_str(&format!("\nplane: {plane}"));
         }
         s.push_str(&format!(
-            "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}",
-            pending.verification_uri_complete, pending.user_code
+            "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}\n  \
+             fingerprint: {} (confirm it matches the page before approving)",
+            pending.verification_uri_complete,
+            pending.user_code,
+            group_fingerprint(&pending.device_fingerprint),
         ));
         return s;
     }
@@ -557,10 +560,11 @@ pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) ->
     };
     format!(
         "No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, and \
-         approve (you become the workspace owner):\n  {}\n  code: {}\nNothing is published yet; then \
-         re-run:\n  {}",
+         approve (you become the workspace owner):\n  {}\n  code: {}\n  fingerprint: {} (confirm it \
+         matches the page before approving)\nNothing is published yet; then re-run:\n  {}",
         pending.verification_uri_complete,
         pending.user_code,
+        group_fingerprint(&pending.device_fingerprint),
         resume_argv.join(" "),
     )
 }
@@ -799,6 +803,18 @@ fn short(hex: &str) -> &str {
     hex.get(..12).unwrap_or(hex)
 }
 
+/// Group a device fingerprint into space-separated 4-char chunks for eyeball comparison against the
+/// verification page (e.g. `e4aaf52f5c391ce9` → `e4aa f52f 5c39 1ce9`). `pub(crate)` — the bin's
+/// interactive blocking `follow` prints the same grouped form to stderr while it polls.
+pub(crate) fn group_fingerprint(fp: &str) -> String {
+    fp.chars()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use topos_types::Generation;
@@ -810,7 +826,7 @@ mod tests {
 
     use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
 
-    use super::{list_tty, log_tty, pull_tty};
+    use super::{follow_tty, group_fingerprint, list_tty, log_tty, pull_tty};
 
     fn g(epoch: u64, seq: u64) -> Generation {
         Generation { epoch, seq }
@@ -1078,5 +1094,45 @@ mod tests {
         assert!(!out.contains("second line"), "{out}");
         // Unknown shapes fall back to their raw JSON line — never dropped.
         assert!(out.contains("{\"unknown\":true}"), "{out}");
+    }
+
+    #[test]
+    fn group_fingerprint_chunks_hex_into_fours() {
+        assert_eq!(group_fingerprint("e4aaf52f5c391ce9"), "e4aa f52f 5c39 1ce9");
+        assert_eq!(group_fingerprint(""), "");
+        // A non-multiple-of-four length keeps the trailing short chunk (never panics).
+        assert_eq!(group_fingerprint("abcdef"), "abcd ef");
+    }
+
+    #[test]
+    fn follow_tty_pending_discloses_the_grouped_fingerprint() {
+        use topos_types::results::{EnrollmentPending, FollowData};
+
+        use crate::ops::FollowOutcome;
+
+        let out = FollowOutcome {
+            data: FollowData {
+                workspace_id: "w_acme".to_owned(),
+                enrolled: false,
+                skills: Vec::new(),
+                deployment_mode: None,
+                workspace_display_name: Some("Acme Inc".to_owned()),
+                verified_domain: None,
+                verified_domain_status: None,
+                plane_base_url: Some("https://api.topos.sh".to_owned()),
+                pending: Some(EnrollmentPending {
+                    verification_uri_complete: "https://topos.sh/verify/WXYZ-1234".to_owned(),
+                    user_code: "WXYZ-1234".to_owned(),
+                    device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
+                    expires_at: None,
+                }),
+                currency: None,
+            },
+            resumed: Vec::new(),
+        };
+        let text = follow_tty(&out);
+        // The fingerprint prints GROUPED in fours for eyeball comparison against the verification page.
+        assert!(text.contains("e4aa f52f 5c39 1ce9"), "{text}");
+        assert!(text.contains("confirm it matches the page"), "{text}");
     }
 }

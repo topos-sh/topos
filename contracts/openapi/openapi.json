@@ -2504,9 +2504,14 @@
         "required": [
           "status",
           "verification_uri_complete",
-          "user_code"
+          "user_code",
+          "device_fingerprint"
         ],
         "properties": {
+          "device_fingerprint": {
+            "type": "string",
+            "description": "16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page."
+          },
           "expires_at": {
             "type": [
               "string",

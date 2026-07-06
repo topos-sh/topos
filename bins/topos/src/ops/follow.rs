@@ -226,7 +226,12 @@ fn begin(
     let complete = auth
         .verification_uri_complete
         .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
-    Ok(pending_followdata(&context, &auth.user_code, complete))
+    Ok(pending_followdata(
+        &context,
+        &auth.user_code,
+        complete,
+        device_fingerprint(&signer),
+    ))
 }
 
 /// The TOFU decision (I-TOFU), shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
@@ -337,7 +342,15 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                                 .into(),
                         )
                     })?;
-                    Ok(pending_followdata(&context, &user_code, complete))
+                    // The device key is deterministic (load-or-generate returns the same key), so the
+                    // re-surfaced pending discloses the same fingerprint the human sees on the page.
+                    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+                    Ok(pending_followdata(
+                        &context,
+                        &user_code,
+                        complete,
+                        device_fingerprint(&signer),
+                    ))
                 }
                 // A terminal denial / expiry — sweep the WAL, surface a typed error.
                 TokenPoll::Denied => {
@@ -1042,6 +1055,7 @@ fn pending_followdata(
     context: &enroll::EnrollContext,
     user_code: &str,
     verification_uri_complete: String,
+    device_fingerprint: String,
 ) -> FollowData {
     FollowData {
         workspace_id: context.workspace_id.clone(),
@@ -1055,6 +1069,7 @@ fn pending_followdata(
         pending: Some(EnrollmentPending {
             verification_uri_complete,
             user_code: user_code.to_owned(),
+            device_fingerprint,
             // No RFC-3339 formatter client-side; the WAL holds the absolute expiry for the recovery sweep.
             expires_at: None,
         }),
@@ -1100,6 +1115,19 @@ pub(super) fn machine_name(signer: &DeviceSigner) -> String {
     format!("topos CLI ({})", signer.device_key_id())
 }
 
+/// The 16-hex device fingerprint the plane shows on its verification page — the first 16 hex chars of
+/// `sha256(device_public_key)`. The device key id is `dk_` + the 32 hex of that same digest, so the
+/// fingerprint is exactly the leading half of the id's hex portion. Returned raw (no grouping); the TTY
+/// renderer groups it for eyeball comparison. A human cross-checks it against the page before approving.
+pub(super) fn device_fingerprint(signer: &DeviceSigner) -> String {
+    let id = signer.device_key_id();
+    id.strip_prefix("dk_")
+        .unwrap_or(id)
+        .chars()
+        .take(16)
+        .collect()
+}
+
 /// `now` as epoch-millis (saturating), via the injected clock.
 fn now_millis(ctx: &Ctx<'_>) -> i64 {
     i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX)
@@ -1107,7 +1135,43 @@ fn now_millis(ctx: &Ctx<'_>) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_api_base, validate_base_url};
+    use super::{device_fingerprint, resolve_api_base, validate_base_url};
+
+    /// The device fingerprint is the leading 16 hex of the device key id's hex portion (`dk_` + 32 hex);
+    /// grouped in fours by the TTY renderer, it is what a human cross-checks against the verification page.
+    #[test]
+    fn device_fingerprint_is_the_first_16_hex_of_the_key_id() {
+        use crate::device_signer::DeviceSigner;
+        use crate::fs_seam::RealFs;
+        use crate::sidecar::Layout;
+
+        let dir = std::env::temp_dir().join(format!(
+            "topos-fp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let signer = DeviceSigner::load_or_generate(&RealFs, &Layout::new(&dir)).unwrap();
+
+        let fp = device_fingerprint(&signer);
+        // Exactly the first 16 hex of the id (id = `dk_` + 32 hex of sha256(pubkey)).
+        let id_hex = signer.device_key_id().strip_prefix("dk_").unwrap();
+        assert_eq!(fp, id_hex[..16]);
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // The grouped display (raw id → grouped): 4×4 hex separated by single spaces.
+        let grouped = crate::render::group_fingerprint(&fp);
+        assert_eq!(grouped.split(' ').count(), 4);
+        assert!(grouped.split(' ').all(|chunk| chunk.len() == 4));
+        assert_eq!(grouped.replace(' ', ""), fp);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The re-root resolver: normalizes trailing slashes (the pin compares are exact strings), applies
     /// the same URL gate as the link base, and refuses the one thing a re-root could newly smuggle in —

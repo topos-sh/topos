@@ -281,6 +281,8 @@ pub struct EnrollmentPending {
     pub verification_uri_complete: String,
     /// The short code shown for cross-checking on the verification page.
     pub user_code: String,
+    /// 16-hex fingerprint of this device's public key; a human cross-checks it against the verification page.
+    pub device_fingerprint: String,
     /// The session expiry as an RFC-3339 string, if it expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -381,6 +383,8 @@ pub struct PublishPending {
     pub verification_uri_complete: String,
     /// The code embedded in the URL, shown for cross-checking on the sign-in page.
     pub user_code: String,
+    /// 16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page.
+    pub device_fingerprint: String,
     /// The sign-in session's expiry as an RFC-3339 string, if it expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -534,6 +538,7 @@ mod tests {
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete: "https://topos.sh/verify/CODE".to_owned(),
                 user_code: "CODE".to_owned(),
+                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
                 expires_at: Some("2026-07-03T00:15:00Z".to_owned()),
             }),
             standup: None,
@@ -543,6 +548,7 @@ mod tests {
         assert!(v.get("current_generation").is_none());
         assert_eq!(v["pending"]["status"], "signin_required");
         assert_eq!(v["pending"]["user_code"], "CODE");
+        assert_eq!(v["pending"]["device_fingerprint"], "e4aaf52f5c391ce9");
         // A COMPLETED standup publish: version + generation present, plus the owner disclosure.
         let done = PublishData {
             skill_id: "topos_t00".to_owned(),

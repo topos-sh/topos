@@ -117,6 +117,10 @@
       "description": "A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which\nembeds the `user_code`), then the client re-polls. **INFERRED.**",
       "type": "object",
       "properties": {
+        "device_fingerprint": {
+          "description": "16-hex fingerprint of this device's public key; a human cross-checks it against the verification page.",
+          "type": "string"
+        },
         "expires_at": {
           "description": "The session expiry as an RFC-3339 string, if it expires.",
           "type": [
@@ -135,7 +139,8 @@
       },
       "required": [
         "verification_uri_complete",
-        "user_code"
+        "user_code",
+        "device_fingerprint"
       ]
     },
     "FollowOffer": {

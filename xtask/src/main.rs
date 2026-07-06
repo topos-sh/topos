@@ -272,6 +272,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `d_test`, the fixed adopt message) — the local verbs reproduce these byte-for-byte.
     let fx_version = "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5";
     let fx_digest = "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369";
+    // The digest of the one-line DRAFT edit below (`clear` → `GREAT`) — what a bare `diff` reports so
+    // `publish --approve <skill>@<digest>` consents to the bytes being shipped, not the base version's.
+    let fx_draft_digest = "0c6cdac7150f974c8acb9d608516adfb5181655ce0316464300fa82bbb5c19fe";
 
     // `add` of the fixture skill (offline; no plane op, so no receipt).
     let add_ok = JsonEnvelope {
@@ -435,7 +438,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(DiffData {
             source: DiffSource::Local,
             version_id: fx_version.to_owned(),
-            bundle_digest: fx_digest.to_owned(),
+            bundle_digest: fx_draft_digest.to_owned(),
             diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
         })
         .expect("DiffData serializes"),
@@ -582,6 +585,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete: "https://topos.sh/verify/hxk3v9q2m8w4t6r5".to_owned(),
                 user_code: "hxk3v9q2m8w4t6r5".to_owned(),
+                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
                 expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
             }),
             standup: None,

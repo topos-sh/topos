@@ -3,7 +3,7 @@
   "command": "diff",
   "ok": true,
   "data": {
-    "bundle_digest": "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369",
+    "bundle_digest": "0c6cdac7150f974c8acb9d608516adfb5181655ce0316464300fa82bbb5c19fe",
     "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n",
     "source": "local",
     "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
