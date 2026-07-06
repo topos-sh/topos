@@ -27,6 +27,34 @@ use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 /// terminal (which would poison replay).
 pub(in crate::db) const MAX_TXN_RETRIES: u32 = 10;
 
+/// Full-jitter backoff bounds for those retries: attempt `n` sleeps a uniform-random duration in
+/// `[0, min(BASE << (n-1), CAP)]`. Immediate re-runs retry in lockstep — two writers that collided
+/// once keep colliding on every synchronized attempt and can burn the whole budget in milliseconds
+/// (observed as `standup` racing-test flakes under full-suite load); a randomized pause desynchronizes
+/// them so one commits while the other waits. Full jitter maximizes spread, the happy path never
+/// sleeps, and the worst single pause (250ms) stays far below any client timeout.
+pub(in crate::db) const RETRY_BACKOFF_BASE_MS: u64 = 10;
+pub(in crate::db) const RETRY_BACKOFF_CAP_MS: u64 = 250;
+
+/// The pure half of the backoff: the jitter window's inclusive upper bound for 1-based `attempt`.
+pub(in crate::db) fn retry_backoff_cap_ms(attempt: u32) -> u64 {
+    // Doubling past the cap is pointless, so the shift saturates well before overflow (10 << 5 > 250).
+    let shift = attempt.saturating_sub(1).min(5);
+    (RETRY_BACKOFF_BASE_MS << shift).min(RETRY_BACKOFF_CAP_MS)
+}
+
+/// Sleep the jittered backoff before retry `attempt`. Entropy failure degrades to the full cap —
+/// a spread loss, never a correctness loss (the retry itself is what re-proves the invariants).
+pub(in crate::db) async fn retry_backoff(attempt: u32) {
+    let cap_ms = retry_backoff_cap_ms(attempt);
+    let mut buf = [0u8; 8];
+    let delay_ms = match getrandom::getrandom(&mut buf) {
+        Ok(()) => u64::from_le_bytes(buf) % (cap_ms + 1),
+        Err(_) => cap_ms,
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+}
+
 /// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault when the width is wrong (the
 /// schema's `CHECK (octet_length(…) = 32)` forbids it; a violation is store corruption). The ONE shared
 /// definition — every `mod db` sibling imports this one.
@@ -52,7 +80,8 @@ pub(crate) struct Db {
 /// The one write-transaction entrypoint — run `$body` (which uses the bound `$tx`, e.g.
 /// `foo_txn(&mut $tx, …).await`) as ONE `SERIALIZABLE` transaction, retrying on a serialization failure
 /// (SQLSTATE `40001`) or deadlock (`40P01`) — raised by a statement OR by `COMMIT` (Postgres's deferred SSI
-/// checks can fire only at commit) — up to [`MAX_TXN_RETRIES`].
+/// checks can fire only at commit) — up to [`MAX_TXN_RETRIES`], with a [full-jitter pause](retry_backoff)
+/// before each re-run so concurrent writers desynchronize instead of colliding in lockstep.
 ///
 /// This replaces SQLite's global-writer-lock `BEGIN IMMEDIATE`: Postgres does not serialize writers, so
 /// every read-then-write invariant SQLite got for free — the whole-`(epoch,seq)` CAS, the last-owner
@@ -93,6 +122,7 @@ macro_rules! run_serializable {
                         {
                             __attempt += 1;
                             $self.note_retry();
+                            $crate::db::retry_backoff(__attempt).await;
                         } else {
                             break ::core::result::Result::Err(
                                 $crate::error::AuthorityError::internal(__e),
@@ -107,6 +137,7 @@ macro_rules! run_serializable {
                     {
                         __attempt += 1;
                         $self.note_retry();
+                        $crate::db::retry_backoff(__attempt).await;
                     } else {
                         break ::core::result::Result::Err(__e);
                     }
@@ -636,6 +667,27 @@ mod governance;
 // to the feature-gated `Authority` shims a downstream test crate drives.
 #[cfg(any(test, feature = "test-fixtures"))]
 mod seed;
+
+#[cfg(test)]
+mod retry_backoff_tests {
+    use super::{MAX_TXN_RETRIES, RETRY_BACKOFF_CAP_MS, retry_backoff_cap_ms};
+
+    /// The jitter window doubles from the base and saturates at the cap — and the whole budget's
+    /// worst-case pause stays bounded (no attempt may stall a write beyond the cap).
+    #[test]
+    fn backoff_window_doubles_then_saturates() {
+        assert_eq!(retry_backoff_cap_ms(1), 10);
+        assert_eq!(retry_backoff_cap_ms(2), 20);
+        assert_eq!(retry_backoff_cap_ms(3), 40);
+        assert_eq!(retry_backoff_cap_ms(5), 160);
+        assert_eq!(retry_backoff_cap_ms(6), 250);
+        for attempt in 6..=MAX_TXN_RETRIES + 1 {
+            assert_eq!(retry_backoff_cap_ms(attempt), RETRY_BACKOFF_CAP_MS);
+        }
+        // Degenerate input (the macro always passes >= 1) still yields a sane window.
+        assert_eq!(retry_backoff_cap_ms(0), 10);
+    }
+}
 
 #[cfg(test)]
 mod retry_classification_tests {

@@ -5,6 +5,17 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## Jittered backoff in the serializable retry loop
+
+`run_serializable!` retried a serialization failure immediately, so two writers that collided once
+retried in lockstep and collided again — on a loaded machine the whole 10-attempt budget could burn
+in milliseconds and a raw `40001` leaked out as a 500 (observed as an intermittent full-suite
+failure of the standup cap-boundary racing test; single-run and CI always green). Each re-run is
+now preceded by a full-jitter exponential pause (uniform in `[0, min(10ms · 2^(n−1), 250ms)]`): the
+happy path never sleeps, colliding writers desynchronize so one commits while the other waits, and
+the worst single pause stays far below any client timeout. The retry cap and its
+never-a-receipted-terminal contract are unchanged; the window arithmetic is unit-pinned.
+
 ## Canonical principal form — one mailbox, one identity
 
 Principals (emails, and the device-rooted `dev.dk_…` ids) were stored and compared byte-exact, so

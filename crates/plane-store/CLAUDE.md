@@ -108,7 +108,9 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   decision function), read-only; the pointer-move/contribute writes enforce the same rule transactionally.
 - **Transaction discipline.** Every write runs through the private `run_serializable!` macro
   (`src/db/mod.rs`): a `SERIALIZABLE`-isolation transaction with a bounded retry on a serialization failure
-  (SQLSTATE `40001`) or deadlock (`40P01`), whether raised by a statement or by `COMMIT`. It is a **macro**,
+  (SQLSTATE `40001`) or deadlock (`40P01`), whether raised by a statement or by `COMMIT` — each re-run
+  preceded by a full-jitter exponential pause (10ms doubling, 250ms cap; immediate lockstep re-runs let two
+  colliding writers burn the whole budget under load). It is a **macro**,
   not a generic runner fn, so each caller's future stays `Send` (an `AsyncFnMut` runner can't bound the
   closure future `Send` on stable). Because Postgres does not serialize writers, every read-then-write
   invariant is re-proven by SSI + retry — the whole-`(epoch, seq)` CAS, the last-owner write-skew guard, the
