@@ -28,6 +28,10 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   `workspace_events` audit + idempotency), and the **workspace-standup genesis ops** — the one-time
   `admin_claim` mint/redeem, `create_workspace`, `approve_standup`, and the shared
   `seat_workspace_and_owner` genesis seat.
+- `session_read.rs` / `db/session_read.rs` — the WEB-SESSION read lane (privileged lib-level, no OSS
+  HTTP route), the first READ twin: pool reads only, no `run_serializable!`, no op_id /
+  `workspace_events` / receipts. `db/session_read.rs` holds the ONE new query (the skill index);
+  everything else re-uses `read.rs`'s machinery over the member lane of the gate/reach split.
 - `session_roster.rs` / `db/session_roster.rs` — the WEB-SESSION roster leg (privileged lib-level, no
   OSS HTTP route): invite-at-member-or-reviewer / remove / rotate-the-standing-door / the roster read,
   authorized by an in-transaction confirmed-OWNER acting gate (no signature — the composing caller's
@@ -324,6 +328,30 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   reuse / epoch-pinned rotate replay, lockout + same-txn token drop, genesis-door continuity, the
   lazy epoch mint, rotation-blocks-future-only (an already-issued grant completes; a rotated door's
   entry gates 404), and the receipt method/actor matrix.
+- **The web-session READ lane (member-scoped session reads).** Five PRIVILEGED lib-level read ops
+  (no OSS HTTP route — a hosted composition's authenticated admin routes call them):
+  **`list_skills_session`** (the workspace catalog — every skill holding a `current` row, with its
+  pointer generation, epoch-ms update time, consent `bundle_digest`, and OPEN non-stale proposal
+  count), **`read_current_session`**, **`serve_object_session`**, **`read_version_metadata_session`**,
+  and **`list_open_proposals_session`**. ONE shared `member_gate` preamble authorizes them all —
+  self-host uniformly denied, canonical principal fold, then a CONFIRMED `workspace_member` probe —
+  and every pre-gate miss (self-host / malformed email or skill / unknown workspace / non-member /
+  invited-unconfirmed) is the single indistinguishable `NotFound`. **Deliberately BROADER than the
+  device lane, by decision: catalog visibility IS workspace membership** — any confirmed member, any
+  role, with or without per-skill `roster` rows, reads the workspace's full catalog and every skill's
+  content; per-skill `roster` remains the device lane's (read-token) gate, and the two gates are
+  disjoint by test. Mechanically, the three read authorizations are split into a principal GATE
+  (`ReadLane::{SkillRoster, WorkspaceMember}` dispatch — zero new gate SQL) and ONE lane-blind
+  reachability statement each (`object_witness` / `version_readable` / `open_proposal_rows`), so both
+  lanes share identical reachability SQL and the `open ∧ base == current` staleness predicate stays at
+  its FIVE tracked copies; the index's proposal count delegates per skill to the SAME listing
+  statement (count == list by construction — a deliberate O(skills) fan-out on a cold route). The
+  read-time re-authorize guard re-gates on the caller's lane: a reclaimed object reads 404 and genuine
+  corruption stays an Integrity alarm on BOTH lanes (both directions pinned by `tests/session_read.rs`,
+  alongside the full miss-uniformity matrix, the staled-proposal list/count parity, the
+  rejected-candidate 404 through both lanes, and the NULL-digest-under-current Integrity probe). Reads
+  mint nothing durable. The gate→reach two-statement window (a principal revoked between them completes
+  one in-flight read) is the same accepted posture as the authorize-then-fetch TOCTOU.
 - **Canonical principal form — one mailbox, one identity.** `Principal::parse` folds every principal
   to the kernel's ASCII-lowercase form (`topos_core::sign::canonical_principal` — the same fold the
   client signer applies to every email-valued preimage input, so governance signatures verify over

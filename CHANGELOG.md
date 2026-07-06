@@ -5,6 +5,27 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## The web-session read lane — member-scoped session reads
+
+A hosted composition's web tier could render a skill only through a pasted per-skill read token; the
+plane now also serves PRIVILEGED lib-level member-scoped reads (the read twin of the session-roster
+leg): the workspace skill index (per skill: the current pointer facts, the consent digest, the OPEN
+non-stale proposal count), current / version metadata / object bytes / proposals listing — authorized
+by ONE shared preamble (self-host uniformly denied, canonical principal fold, a CONFIRMED
+workspace-member probe; every pre-gate miss is the single indistinguishable not-found), deliberately
+broader than the device lane's per-skill roster (catalog visibility IS workspace membership, an
+explicit decision stated loudly in the module docs). Under it, the three read authorizations were
+split into a principal GATE (a `ReadLane` dispatch: skill-roster vs workspace-member) and ONE
+lane-blind reachability statement each, so both lanes share identical reachability SQL — the
+`open AND base == current` staleness predicate keeps its five tracked copies, the index count
+delegates per skill to the same listing statement (count == list by construction), and the
+re-authorize-on-miss guard re-gates on the caller's lane (reclaimed reads 404; corruption stays an
+Integrity alarm — both directions pinned, plus a rejected-candidate-version 404 pin through both
+lanes). `topos-plane` wraps the five ops leak-free (`session_read_cmd.rs`), returning the stored
+signed record verbatim and PRE-SERIALIZED `/v1` wire JSON via the same mappers the token routes use —
+parity by construction. Reads mint no receipts and no events; no OSS HTTP route (the wrappers are the
+seam a hosted composition's authenticated admin routes call).
+
 ## Jittered backoff in the serializable retry loop
 
 `run_serializable!` retried a serialization failure immediately, so two writers that collided once

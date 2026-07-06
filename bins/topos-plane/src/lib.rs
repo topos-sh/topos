@@ -40,6 +40,7 @@ mod restore_cmd;
 mod roster_cmd;
 mod router;
 mod routes;
+mod session_read_cmd;
 mod standup_cmd;
 mod state;
 mod wire;
@@ -60,6 +61,10 @@ pub use roster_cmd::{
     RotateJoinLinkSummary,
 };
 pub use router::router;
+pub use session_read_cmd::{
+    SessionCurrentSummary, SessionObjectSummary, SessionProposalsSummary, SessionVersionSummary,
+    SkillIndexEntrySummary, SkillsIndexSummary,
+};
 pub use standup_cmd::{ApproveSessionSummary, ApproveStandupSummary, CreateWorkspaceSummary};
 pub use state::{PlaneConfig, PlaneState};
 

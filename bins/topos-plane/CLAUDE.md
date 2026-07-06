@@ -126,6 +126,17 @@
   `rotate_join_link` ("reset link" — future redemption only), and `read_roster` (a `RosterSummary`:
   the seats + the owner-only door link, or the uniform `NotFound`). Same strict-mode threading as the
   standup wrappers; the authority ops themselves uniformly deny a self-host plane.
+- **The session-read wrappers** (`session_read_cmd.rs`) — the read twin of the roster wrappers, the
+  same leak-free, LIB-ONLY surface for the web-session MEMBER-SCOPED reads (no OSS HTTP route):
+  `PlaneState::list_skills_session` (the workspace catalog — per skill: the `current` version id,
+  generation, epoch-ms update time, consent digest, open-proposal count), `read_current_session` (the
+  stored `SignedCurrentRecord` bytes VERBATIM — a never-signed pointer is deliberately FOLDED into the
+  uniform `NotFound`, since the catalog only lists current-rowed skills), `read_version_session` +
+  `list_proposals_session` (PRE-SERIALIZED wire JSON via the SAME mappers the token-scoped `/v1`
+  routes use — parity by construction, a composing route relays the bytes verbatim), and
+  `read_object_session` (verified raw bytes). Same strict-mode threading; the authority ops uniformly
+  deny a self-host plane and gate on a CONFIRMED workspace member (any role — deliberately broader
+  than the device lane's per-skill roster).
 - **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
   `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —
