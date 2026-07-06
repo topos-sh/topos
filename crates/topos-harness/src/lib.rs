@@ -36,6 +36,49 @@ pub struct PlacementTarget {
     pub dir: PathBuf,
 }
 
+/// Advisory naming hints for a follower's first-receive placement: the skill's plane-supplied display name
+/// (the author's folder name) and a workspace slug to disambiguate a name collision. BOTH are UNTRUSTED,
+/// unsigned strings (unlike the validated `skill_id`) — an adapter MUST route them through
+/// [`sanitize_skill_dir`] before using them as a path component. Absent (or unsafe) falls the placement
+/// back to the validated `skill_id`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlacementNaming<'a> {
+    pub name: Option<&'a str>,
+    pub workspace_slug: Option<&'a str>,
+}
+
+/// Fold an UNTRUSTED, unsigned name (a plane-supplied skill display name / workspace slug) into a SAFE
+/// single path component for a skills folder — or `None` when nothing safe remains (the caller then falls
+/// back to the validated id). The result is guaranteed to be ONE component: it keeps only ASCII
+/// alphanumerics + `_`, folds every run of anything else (whitespace, `.`, `/`, `\`, punctuation, control,
+/// non-ASCII) to a single interior `-`, and carries no leading/trailing `-` — so it can never contain a
+/// path separator, can never be `.`/`..`, and can never escape the skills dir. Length-capped.
+#[must_use]
+pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
+    const MAX: usize = 64;
+    let mut out = String::new();
+    let mut pending_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(ch);
+            if out.len() >= MAX {
+                break;
+            }
+        } else {
+            // Everything else folds to a single separating dash — so no run of dots can ever form `.`/`..`
+            // and no `/`, `\`, or other separator can survive into the component.
+            pending_dash = true;
+        }
+    }
+    // Leading/trailing dashes are already prevented above; trim defensively anyway.
+    let trimmed = out.trim_matches('-');
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 /// The narrow filesystem port an adapter needs to read + atomically replace a harness **config** file
 /// (e.g. `~/.claude/settings.json`) — never a skill bundle. Defined here in the low crate and
 /// implemented by the CLI (the high crate) over its one fault-injectable syscall seam, so the adapter
@@ -71,11 +114,14 @@ pub trait ConfigStore {
 pub trait HarnessAdapter {
     fn id(&self) -> HarnessId;
     fn discover(&self) -> Vec<DiscoveredPlacement>;
-    /// Where this harness places `skill_id`'s bytes. `skill_id` becomes a single path component of the
-    /// default target — callers must pass a validated id (see the trait-level contract).
+    /// Where this harness places `skill_id`'s bytes. A pure follower's first receive prefers the skill's
+    /// real (sanitized) display name from `naming` so the agent invokes it by name; the adapter MUST
+    /// route `naming`'s untrusted strings through [`sanitize_skill_dir`] and fall back to the validated
+    /// `skill_id` (a single path component) when the name is absent/unsafe or every candidate collides.
     fn placement_for(
         &self,
         skill_id: &str,
+        naming: PlacementNaming<'_>,
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget;
     fn currency_kind(&self) -> CurrencyKind;

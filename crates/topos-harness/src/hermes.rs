@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
-use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// Hermes's user config file, under the resolved home. (Probed: v0.17.0 reads
 /// `~/.hermes/config.yaml`; its `hooks:` block is the only registration surface — there is no
@@ -308,6 +308,9 @@ impl HarnessAdapter for Hermes<'_> {
     fn placement_for(
         &self,
         skill_id: &str,
+        // The reference (Claude Code) adapter names the follower folder by the display name; this pilot
+        // adapter's concrete dir shape stays id-keyed until its readiness probe.
+        _naming: PlacementNaming<'_>,
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         match discovered {
@@ -1279,12 +1282,14 @@ personalities: {}
             layer: Some("devops".to_owned()),
         };
         assert_eq!(
-            a.placement_for("topos_abc", Some(&disc)).dir,
+            a.placement_for("topos_abc", PlacementNaming::default(), Some(&disc))
+                .dir,
             PathBuf::from("/h/skills/devops/deploy"),
             "a discovered categorized dir is reused verbatim"
         );
         assert_eq!(
-            a.placement_for("topos_abc", None).dir,
+            a.placement_for("topos_abc", PlacementNaming::default(), None)
+                .dir,
             PathBuf::from("/h/skills/general/topos_abc"),
             "the no-discovery default is the categorized general shelf"
         );

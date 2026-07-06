@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
-use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// The user-scope layer label recorded for a discovered/placed OpenClaw skill (the resolved layer;
 /// a project/enterprise layer stays representable later — `DiscoveredPlacement.layer` is already
@@ -301,6 +301,9 @@ impl HarnessAdapter for OpenClaw<'_> {
     fn placement_for(
         &self,
         skill_id: &str,
+        // Name-based placement is the reference (Claude Code) adapter's; this pilot adapter's concrete
+        // dir shape stays id-keyed until its readiness probe, so the display name is not used here yet.
+        _naming: PlacementNaming<'_>,
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         match discovered {
@@ -1181,11 +1184,13 @@ mod tests {
             layer: Some(LAYER_USER.to_owned()),
         };
         assert_eq!(
-            a.placement_for("topos_abc", Some(&disc)).dir,
+            a.placement_for("topos_abc", PlacementNaming::default(), Some(&disc))
+                .dir,
             PathBuf::from("/h/skills/pr-describe")
         );
         assert_eq!(
-            a.placement_for("topos_abc", None).dir,
+            a.placement_for("topos_abc", PlacementNaming::default(), None)
+                .dir,
             PathBuf::from("/h/skills/topos_abc")
         );
     }

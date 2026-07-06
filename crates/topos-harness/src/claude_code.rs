@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
-use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
+use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// The user-scope layer label recorded for a discovered/placed Claude Code skill. (`project`,
 /// `enterprise`, … become representable later without a contract change — `DiscoveredPlacement.layer`
@@ -91,6 +91,33 @@ impl<'a> ClaudeCode<'a> {
 
     fn skills_dir(&self) -> PathBuf {
         self.home.join("skills")
+    }
+
+    /// The no-discovery placement dir for a pure follower's first receive. Claude Code invokes a skill by
+    /// its FOLDER name, so prefer the skill's real (sanitized) display name; on a collision with a
+    /// DIFFERENT existing dir (another skill, or the user's own), disambiguate by the workspace slug; fall
+    /// back to the globally-unique `skill_id` (which can never collide). Only a FREE dir is ever chosen,
+    /// so a first receive never clobbers an existing skill. The `naming` strings are untrusted and are
+    /// sanitized to a single safe component before any join.
+    fn follower_placement_dir(&self, skill_id: &str, naming: PlacementNaming<'_>) -> PathBuf {
+        let skills = self.skills_dir();
+        if let Some(name) = naming.name.and_then(crate::sanitize_skill_dir) {
+            let by_name = skills.join(&name);
+            if !by_name.exists() {
+                return by_name;
+            }
+            // Collision: a different skill (or the user's own dir) already holds this name. Namespace by
+            // the workspace so the two coexist (both parts are already sanitized single components).
+            if let Some(ws) = naming.workspace_slug.and_then(crate::sanitize_skill_dir) {
+                let namespaced = skills.join(format!("{ws}-{name}"));
+                if !namespaced.exists() {
+                    return namespaced;
+                }
+            }
+        }
+        // Unnamed / unsafe name / every candidate taken → the unique id (a validated single component that
+        // can never collide with another skill).
+        skills.join(skill_id)
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -183,18 +210,16 @@ impl HarnessAdapter for ClaudeCode<'_> {
     fn placement_for(
         &self,
         skill_id: &str,
+        naming: PlacementNaming<'_>,
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         match discovered {
             Some(d) => PlacementTarget {
                 dir: d.path.clone(),
             },
-            // No-discovered default: global `<home>/skills/<skill_id>` (a pure follower's first-receive
-            // baseline records this target). The id is joined as a single path component — per the trait
-            // contract the caller passes an already-validated id (the CLI parses every wire/persisted id
-            // before it reaches an adapter).
+            // No-discovered default: a pure follower's first-receive baseline records this target.
             None => PlacementTarget {
-                dir: self.skills_dir().join(skill_id),
+                dir: self.follower_placement_dir(skill_id, naming),
             },
         }
     }
@@ -842,9 +867,119 @@ mod tests {
             layer: Some(LAYER_USER.to_owned()),
         };
         assert_eq!(
-            a.placement_for("topos_abc", Some(&disc)).dir,
+            a.placement_for("topos_abc", PlacementNaming::default(), Some(&disc))
+                .dir,
             PathBuf::from("/h/skills/pr-describe")
         );
+    }
+
+    #[test]
+    fn placement_names_a_free_folder_by_the_sanitized_display_name() {
+        let cfg = MemConfig::default();
+        // A home with nothing on disk, so no candidate ever collides.
+        let a = adapter(&PathBuf::from("/nonexistent-home"), &cfg);
+        let naming = PlacementNaming {
+            name: Some("deploy-helper"),
+            workspace_slug: Some("acme"),
+        };
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            PathBuf::from("/nonexistent-home/skills/deploy-helper"),
+            "a free real name becomes the folder verbatim (so the agent invokes it by name)"
+        );
+    }
+
+    #[test]
+    fn placement_falls_back_to_the_id_for_an_absent_or_unsafe_name() {
+        let cfg = MemConfig::default();
+        let a = adapter(&PathBuf::from("/h"), &cfg);
+        // No name → the validated id.
+        assert_eq!(
+            a.placement_for("topos_abc", PlacementNaming::default(), None)
+                .dir,
+            PathBuf::from("/h/skills/topos_abc")
+        );
+        // A name that sanitizes to nothing → the id (never an empty/unsafe component).
+        let junk = PlacementNaming {
+            name: Some("../../"),
+            workspace_slug: None,
+        };
+        assert_eq!(
+            a.placement_for("topos_abc", junk, None).dir,
+            PathBuf::from("/h/skills/topos_abc"),
+            "an all-unsafe name never redirects the placement"
+        );
+        // A traversal-looking name is folded to ONE safe component under skills/ — it can never escape.
+        let weird = PlacementNaming {
+            name: Some("../evil/x"),
+            workspace_slug: None,
+        };
+        let dir = a.placement_for("topos_abc", weird, None).dir;
+        assert_eq!(dir, PathBuf::from("/h/skills/evil-x"));
+        assert_eq!(
+            dir.strip_prefix("/h/skills").unwrap().components().count(),
+            1,
+            "the placement is always a single component under the skills dir"
+        );
+    }
+
+    #[test]
+    fn placement_namespaces_by_workspace_on_a_collision_then_falls_back_to_the_id() {
+        let home = TempHome::new();
+        home.skill("deploy-helper"); // a DIFFERENT skill already holds the plain name
+        let cfg = MemConfig::default();
+        let a = adapter(&home.0, &cfg);
+
+        // Collision on the plain name → namespaced by the (sanitized) workspace slug, never clobbering.
+        let naming = PlacementNaming {
+            name: Some("deploy-helper"),
+            workspace_slug: Some("robert's workspace"),
+        };
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            home.0
+                .join("skills")
+                .join("robert-s-workspace-deploy-helper"),
+        );
+
+        // Now the namespaced form is taken too → the globally-unique id is the ultimate safe fallback.
+        home.skill("robert-s-workspace-deploy-helper");
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            home.0.join("skills").join("topos_abc"),
+            "when every named candidate is taken, the unique id never collides",
+        );
+    }
+
+    #[test]
+    fn sanitize_skill_dir_is_always_one_safe_component_or_none() {
+        use crate::sanitize_skill_dir;
+        assert_eq!(
+            sanitize_skill_dir("deploy-helper").as_deref(),
+            Some("deploy-helper")
+        );
+        assert_eq!(
+            sanitize_skill_dir("My Cool Skill!").as_deref(),
+            Some("My-Cool-Skill")
+        );
+        // Separators + traversal can never survive as separators.
+        assert_eq!(sanitize_skill_dir("../../evil").as_deref(), Some("evil"));
+        assert_eq!(sanitize_skill_dir("a/b\\c").as_deref(), Some("a-b-c"));
+        assert_eq!(sanitize_skill_dir("a...b").as_deref(), Some("a-b"));
+        assert_eq!(sanitize_skill_dir(".hidden").as_deref(), Some("hidden"));
+        // Nothing safe → None (the caller falls back to the id).
+        assert_eq!(sanitize_skill_dir(""), None);
+        assert_eq!(sanitize_skill_dir(".."), None);
+        assert_eq!(sanitize_skill_dir("///"), None);
+        // The invariant: a produced name is a single component, never a dot-name.
+        for raw in ["../x", "a/b", ".hidden", "..", "x/../y", "  ", "a b c"] {
+            if let Some(s) = sanitize_skill_dir(raw) {
+                assert!(
+                    !s.contains('/') && !s.contains('\\') && s != "." && s != "..",
+                    "{raw} -> {s} must be one safe component"
+                );
+            }
+        }
     }
 
     #[test]

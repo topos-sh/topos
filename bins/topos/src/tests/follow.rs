@@ -108,7 +108,12 @@ impl HarnessAdapter for TmpHarness {
     fn discover(&self) -> Vec<DiscoveredPlacement> {
         Vec::new()
     }
-    fn placement_for(&self, skill_id: &str, _d: Option<&DiscoveredPlacement>) -> PlacementTarget {
+    fn placement_for(
+        &self,
+        skill_id: &str,
+        _n: topos_harness::PlacementNaming<'_>,
+        _d: Option<&DiscoveredPlacement>,
+    ) -> PlacementTarget {
         PlacementTarget {
             dir: self.skills_root.join(skill_id),
         }

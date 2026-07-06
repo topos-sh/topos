@@ -550,6 +550,7 @@ mod tests {
         fn placement_for(
             &self,
             skill_id: &str,
+            _n: topos_harness::PlacementNaming<'_>,
             _d: Option<&DiscoveredPlacement>,
         ) -> PlacementTarget {
             PlacementTarget {

@@ -713,7 +713,12 @@ pub(super) fn promote_core(
     // WAL-resumed promote revalidates) — only the validated newtype reaches the path joins below.
     for cred in read_creds {
         let skill_id = crate::id::SkillId::parse(&cred.skill_id)?;
-        lay_first_receive_baseline(ctx, &skill_id, display_name(context, &cred.skill_id))?;
+        lay_first_receive_baseline(
+            ctx,
+            &skill_id,
+            display_name(context, &cred.skill_id),
+            &context.workspace_display_name,
+        )?;
     }
 
     // 6) Delete the WAL — enrollment is complete.
@@ -736,6 +741,7 @@ fn lay_first_receive_baseline(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     name: String,
+    workspace_slug: &str,
 ) -> Result<(), ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
@@ -755,8 +761,19 @@ fn lay_first_receive_baseline(
     super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
 
     // The adapter keeps a `&str` seam; the id here is the validated newtype, honoring its "callers pass
-    // an already-validated id" contract.
-    let placement = ctx.harness.placement_for(skill_id.as_str(), None).dir;
+    // an already-validated id" contract. The display name + workspace slug are UNTRUSTED advisory hints —
+    // the adapter sanitizes them and falls back to the id, so they can never redirect the placement.
+    let placement = ctx
+        .harness
+        .placement_for(
+            skill_id.as_str(),
+            topos_harness::PlacementNaming {
+                name: Some(&name),
+                workspace_slug: Some(workspace_slug),
+            },
+            None,
+        )
+        .dir;
     doc::write_doc(
         ctx.fs,
         &sp.sync,

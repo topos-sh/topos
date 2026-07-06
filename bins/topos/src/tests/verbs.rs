@@ -46,7 +46,12 @@ impl HarnessAdapter for NoHarness {
     fn discover(&self) -> Vec<DiscoveredPlacement> {
         Vec::new()
     }
-    fn placement_for(&self, skill_id: &str, _: Option<&DiscoveredPlacement>) -> PlacementTarget {
+    fn placement_for(
+        &self,
+        skill_id: &str,
+        _n: topos_harness::PlacementNaming<'_>,
+        _: Option<&DiscoveredPlacement>,
+    ) -> PlacementTarget {
         PlacementTarget {
             dir: PathBuf::from(skill_id),
         }
@@ -1129,6 +1134,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         fn placement_for(
             &self,
             skill_id: &str,
+            _n: topos_harness::PlacementNaming<'_>,
             _: Option<&DiscoveredPlacement>,
         ) -> PlacementTarget {
             PlacementTarget {

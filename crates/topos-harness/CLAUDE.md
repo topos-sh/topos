@@ -5,8 +5,12 @@ Does discovery + byte-exact placement targeting + the currency-trigger (un)insta
 Claude Code; first-`topos`-touch for OpenClaw; per-turn for Hermes).
 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
-`~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for`,
-`currency_kind` = `SessionStart`, and the idempotent, content-blind `install_currency_trigger` /
+`~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for` (a pure
+follower's first receive names the folder by the skill's **sanitized display name** — Claude Code invokes a
+skill by its folder name — namespacing by workspace on a name collision and falling back to the validated
+id; the display name + workspace slug are UNTRUSTED and routed through `sanitize_skill_dir` to one safe path
+component, so they can never redirect the placement), `currency_kind` = `SessionStart`, and the idempotent,
+content-blind `install_currency_trigger` /
 `remove_currency_trigger` strict-JSON edit of `settings.json` (check-before-add against a `# topos:currency`
 sentinel; fail-closed on a malformed/wrong-typed config; `uninstall_footprint` discloses the config path
 only when our entry is present, and never as a delete target). `$CLAUDE_CONFIG_DIR` (else `$HOME/.claude`)
