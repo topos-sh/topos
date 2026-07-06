@@ -800,6 +800,9 @@ fn build_publish_op(
         bundle_digest: digest_hex,
         expected_generation: expected,
         good: None,
+        // The author's folder name — advisory, so the plane can name the followers' folders + dashboard
+        // entry after it (a revert/review carries no name and preserves the stored one).
+        display_name: Some(lock.name.clone()),
         last_receipt: None,
     })
 }

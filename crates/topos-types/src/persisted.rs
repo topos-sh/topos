@@ -268,6 +268,11 @@ pub struct OpRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub good: Option<String>,
+    /// The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a
+    /// replay re-sends the identical value. UNSIGNED — it names the follower's folder + the dashboard entry,
+    /// never the digest or the signed frame. `None` for a revert/review and for pre-existing WALs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

@@ -14,6 +14,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "display_name": {
+      "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. UNSIGNED — it names the follower's folder + the dashboard entry,\nnever the digest or the signed frame. `None` for a revert/review and for pre-existing WALs.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "expected_generation": {
       "description": "The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.",
       "$ref": "#/$defs/Generation"

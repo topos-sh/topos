@@ -314,6 +314,8 @@ fn migration_dispatch_is_fail_closed() {
         bundle_digest: hex(2),
         expected_generation: Generation { epoch: 1, seq: 1 },
         good: None,
+        // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
+        display_name: Some("deploy-helper".to_owned()),
         last_receipt: None,
     });
 }

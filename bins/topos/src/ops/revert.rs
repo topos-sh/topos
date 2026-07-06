@@ -156,6 +156,8 @@ pub(crate) fn revert(
                 bundle_digest: to_hex(&good_digest),
                 expected_generation: expected,
                 good: Some(good_hex.clone()),
+                // A revert renames nothing — carry no name so the plane preserves the stored one.
+                display_name: None,
                 last_receipt: None,
             }
         }

@@ -116,6 +116,8 @@ pub(crate) fn review(
                 bundle_digest: to_hex(&bundle_digest),
                 expected_generation: expected,
                 good: None,
+                // A review renames nothing — carry no name so the plane preserves the stored one.
+                display_name: None,
                 last_receipt: None,
             }
         }

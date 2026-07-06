@@ -160,6 +160,7 @@ mod tests {
             bundle_digest: "b".repeat(64),
             expected_generation: Generation { epoch: 1, seq: 1 },
             good: None,
+            display_name: None,
             last_receipt: None,
         }
     }

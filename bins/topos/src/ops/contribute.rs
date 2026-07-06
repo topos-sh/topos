@@ -257,8 +257,8 @@ fn send_op(
                         device_key_id,
                         expected: rec.expected_generation,
                         candidate,
-                        // Advisory folder name — not populated by the client yet (lands later).
-                        display_name: None,
+                        // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
+                        display_name: rec.display_name.clone(),
                     },
                     sig,
                 )
@@ -271,8 +271,8 @@ fn send_op(
                         device_key_id,
                         expected: rec.expected_generation,
                         candidate,
-                        // Advisory folder name — not populated by the client yet (lands later).
-                        display_name: None,
+                        // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
+                        display_name: rec.display_name.clone(),
                     },
                     sig,
                 )
@@ -841,6 +841,7 @@ mod tests {
             bundle_digest: "b".repeat(64),
             expected_generation: Generation { epoch: 1, seq: 1 },
             good: None,
+            display_name: None,
             last_receipt: None,
         };
 
