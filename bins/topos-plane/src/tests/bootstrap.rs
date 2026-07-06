@@ -154,7 +154,8 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
     assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert_eq!(headers.get("vary").unwrap(), "accept");
 
-    // curl / an agent's web fetch (bare */*) ⇒ the markdown instruction document.
+    // curl / an agent's web fetch (bare */*) ⇒ the instruction document (text/plain, so a browser
+    // displays it inline).
     let (status, headers, bytes) =
         send(ctx.app(), get(&format!("/i/{token}"), &[("accept", "*/*")])).await;
     assert_eq!(status, StatusCode::OK);
@@ -164,8 +165,8 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("text/markdown"),
-        "markdown for */*"
+            .starts_with("text/plain"),
+        "the instruction document for */*"
     );
     assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert_eq!(headers.get("vary").unwrap(), "accept");
@@ -175,8 +176,11 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
     assert!(doc.contains("releases/latest/download/install.sh"));
     assert!(doc.contains("Acme"));
     assert!(doc.contains("follow --resume"));
+    // The human hand-off rides the same document — this IS the browser face.
+    assert!(doc.contains("paste this link to your agent"));
 
-    // A browser Accept takes the markdown door too (the hosted web front serves its own HTML page).
+    // A browser Accept takes the same document door (there is no HTML face — a hosted web front
+    // relays this same representation).
     let (_, headers, _) = send(
         ctx.app(),
         get(
@@ -191,7 +195,7 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("text/markdown")
+            .starts_with("text/plain")
     );
 
     // NO Accept at all stays the machine-contract JSON (bare HTTP libraries; older clients).

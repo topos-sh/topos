@@ -5,6 +5,19 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## The share-link document is the browser face too — human hand-off first, served as text/plain
+
+`GET /i/{token}`'s non-JSON representation — the agent-instruction document — now opens with the
+human's one move (**"paste this link to your agent and ask it to follow"**; the claim variant says
+"the link you were given", never echoing the one-time bearer token) before the agent's numbered
+steps, and is served as `text/plain; charset=utf-8` instead of `text/markdown`: browsers display
+plain text inline where `text/markdown` triggers a download, and the document IS the browser face —
+no HTML page exists, here or on a hosted front. Why: real agent web-fetch tools ask for
+`text/markdown, text/html, */*`, so any Accept fork that routes `text/html` to a human-facing page
+sends the *agent* there too, and an agent on a fresh machine then never sees the install line. One
+representation for every non-JSON reader ends that class of misrouting; the JSON machine contract
+(explicit `application/json`, or no Accept at all) is unchanged.
+
 ## The web-session read lane — member-scoped session reads
 
 A hosted composition's web tier could render a skill only through a pasted per-skill read token; the

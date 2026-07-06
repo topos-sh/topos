@@ -35,11 +35,13 @@
   the invite table: `enrollment_method: "admin_claim"`, no skills, the same uniform 404 for
   consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors). The route
   **content-negotiates**: an Accept asking for JSON (or no Accept) gets the versioned `BootstrapData`
-  contract; anything else — curl's `*/*`, a browser, an agent's web fetch — gets a `text/markdown`
-  **agent-instruction document** (`routes/bootstrap_doc.rs`, a pure renderer over the same authority
-  read: install `topos` if missing via the checksummed installer line, `follow` the link, surface the
-  verification URL to the human, land offers per-digest; the CLAIM variant warns first-redeemer-becomes-
-  owner and NEVER echoes the token or link — the same custody rule as the JSON `token_id` placeholder).
+  contract; anything else — curl's `*/*`, a browser, an agent's web fetch — gets a markdown
+  **agent-instruction document** served as `text/plain` so browsers display it inline — the document IS
+  the browser face, no HTML page exists (`routes/bootstrap_doc.rs`, a pure renderer over the same
+  authority read: the human paste-this-to-your-agent hand-off first, then install `topos` if missing via
+  the checksummed installer line, `follow` the link, surface the verification URL to the human, land
+  offers per-digest; the CLAIM variant warns first-redeemer-becomes-owner and NEVER echoes the token or
+  link — the same custody rule as the JSON `token_id` placeholder).
   Both 200s are `Cache-Control: no-store` + `Vary: accept` + `X-Robots-Tag: noindex`; errors stay the
   uniform JSON envelope on every Accept; the
   enrollment flow `POST /v1/device/authorize` (now intent-dispatching: an `enroll` start needs its

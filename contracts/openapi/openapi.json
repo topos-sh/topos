@@ -28,7 +28,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a `text/markdown` agent-instruction document rendered from the same data.",
+            "description": "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.",
             "content": {
               "application/json": {
                 "schema": {

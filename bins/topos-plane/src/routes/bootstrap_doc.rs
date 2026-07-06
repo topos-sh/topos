@@ -1,10 +1,13 @@
-//! The agent-readable representation of `GET /i/{token}` — a markdown instruction document a browserless
-//! agent (or a curious human) gets when it fetches a share link without asking for JSON.
+//! The agent-readable representation of `GET /i/{token}` — a markdown instruction document served to
+//! every fetch of a share link that doesn't ask for JSON: browserless agents AND browsers alike (there
+//! is no separate HTML face — one document, human hand-off first, agent steps after).
 //!
 //! The product moment this serves: a teammate pastes a bare `/i/` link to their agent and says "follow
 //! this". The agent GETs the link and must learn, from the body alone, everything it needs — what the link
 //! is, how to install `topos` if it is missing, and how to drive the enrollment — while the consent floor
-//! stays intact (nothing lands without a disclosed digest and a human yes; the document SAYS so).
+//! stays intact (nothing lands without a disclosed digest and a human yes; the document SAYS so). A human
+//! who opens the link in a browser reads the same document, so it opens with the human's one move (paste
+//! this to your agent) before the agent's numbered steps.
 //!
 //! Rendering is a pure function of the already-authorized bootstrap payload: same authority read, second
 //! representation, no extra disclosure — with ONE deliberate asymmetry. An INVITE document echoes the full
@@ -80,7 +83,9 @@ pub(crate) fn agent_instructions(data: &BootstrapData, link: Option<&str>) -> St
         doc.push_str(&format!(
             "This is a ONE-TIME workspace claim: the FIRST device to redeem it stands up \
              \u{201c}{name}\u{201d} and becomes its OWNER. Treat the link as a secret — do not repost \
-             it, and redeem it only if the human asked you to.\n\n"
+             it, and redeem it only if the human asked you to.\n\n\
+             **If you are a human reading this:** paste the link you were given to your agent and ask \
+             it to follow — the steps below do the rest.\n\n"
         ));
     } else if data.offered_skills.is_empty() {
         doc.push_str(&format!(
@@ -101,6 +106,15 @@ pub(crate) fn agent_instructions(data: &BootstrapData, link: Option<&str>) -> St
         ));
     }
 
+    if !is_claim {
+        // The human hand-off comes FIRST (a browser shows this same document): one move, then the
+        // agent's numbered steps.
+        doc.push_str(
+            "**If you are a human reading this:** paste this link to your agent and ask it to \
+             follow — the steps below walk it through installing `topos`, signing you in, and \
+             landing the skills, each behind your explicit yes.\n\n",
+        );
+    }
     doc.push_str(
         "**If you are an AI agent: run the steps below with your shell tool, non-interactively \
          (`--json`). Nothing installs silently — every skill lands only after its content digest is \
@@ -213,6 +227,14 @@ mod tests {
             }],
         );
         let doc = agent_instructions(&data, Some("https://links.test/i/tok-abc"));
+        // The human hand-off opens the door — and precedes the agent address (a browser shows this
+        // same document; the human's one move comes first).
+        let human = doc
+            .find("If you are a human reading this")
+            .expect("human line");
+        let agent = doc.find("If you are an AI agent").expect("agent line");
+        assert!(human < agent, "human hand-off before the agent steps");
+        assert!(doc.contains("paste this link to your agent"));
         assert!(doc.contains("topos --version"));
         assert!(doc.contains("releases/latest/download/install.sh"));
         assert!(doc.contains("topos follow 'https://links.test/i/tok-abc' --json"));
@@ -234,6 +256,8 @@ mod tests {
         let doc = agent_instructions(&data, None);
         assert!(doc.contains("ONE-TIME workspace claim"));
         assert!(doc.contains("becomes its OWNER"));
+        // The human hand-off references the link the human already holds — never an echo.
+        assert!(doc.contains("paste the link you were given"));
         assert!(doc.contains("the link you just fetched"));
         assert!(!doc.contains("ENROLLMENT_PENDING"));
         assert!(!doc.contains("--resume"));

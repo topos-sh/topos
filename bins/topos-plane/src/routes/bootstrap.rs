@@ -10,8 +10,11 @@
 //!   client drives (it sends `Accept: application/json` explicitly);
 //! - anything else (`*/*` from curl and agent web-fetch tools, `text/html` from a browser) gets a
 //!   **markdown agent-instruction document** ([`bootstrap_doc`]) — the paste-a-link-to-your-agent door:
-//!   install `topos` if missing, redeem the link, surface the verification URL to the human, land the
-//!   offers per-digest. Errors (404/429/500) stay the uniform JSON envelope on every representation.
+//!   the human hand-off first, then install `topos` if missing, redeem the link, surface the
+//!   verification URL to the human, land the offers per-digest. Served as `text/plain` — browsers
+//!   DISPLAY that inline while `text/markdown` triggers a download (the GitHub-raw precedent), and the
+//!   document is the browser face too: there is no separate HTML page, here or on a hosted front.
+//!   Errors (404/429/500) stay the uniform JSON envelope on every representation.
 //!
 //! Both 200s carry `Cache-Control: no-store` + `Vary: Accept` (a token-bearing URL must never be cached)
 //! and `X-Robots-Tag: noindex`.
@@ -32,7 +35,7 @@ use crate::wire::{self, error::PlaneHttpError, map};
     tag = "enrollment",
     params(("token" = String, Path, description = "The opaque `/i/<token>` invite or admin-claim token.")),
     responses(
-        (status = 200, description = "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a `text/markdown` agent-instruction document rendered from the same data.", body = topos_types::bootstrap::BootstrapData),
+        (status = 200, description = "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.", body = topos_types::bootstrap::BootstrapData),
         (status = 404, description = "No such invite or claim, or it is revoked/consumed/expired (always the JSON envelope, any Accept).", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
         (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),
@@ -74,10 +77,12 @@ pub(crate) async fn read_invite_bootstrap(
         // above; an empty echoed token id IS the claim discriminator).
         let link = (!echoed_token_id.is_empty()).then(|| format!("{link_base}/i/{token}"));
         let doc = bootstrap_doc::agent_instructions(&data, link.as_deref());
+        // text/plain, deliberately: browsers display it inline (the whole point of the browser face
+        // being this document), where text/markdown would trigger a download.
         (
             [(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static("text/markdown; charset=utf-8"),
+                HeaderValue::from_static("text/plain; charset=utf-8"),
             )],
             doc,
         )

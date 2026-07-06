@@ -266,10 +266,10 @@ fn e2e_a_share_host_link_re_roots_and_serves_the_agent_doc() {
     );
     assert_ne!(plane.link_base_url, plane.base_url);
 
-    // (2) A non-JSON fetch of the link — what a browserless agent does first — is the markdown
-    // instruction document, served over the real socket.
+    // (2) A non-JSON fetch of the link — what a browserless agent does first — is the instruction
+    // document (text/plain, so a browser displays the same face inline), served over the real socket.
     let doc = http_get_markdown(&link);
-    assert!(doc.contains("text/markdown"), "content-type: {doc}");
+    assert!(doc.contains("text/plain"), "content-type: {doc}");
     assert!(doc.contains("releases/latest/download/install.sh"));
     assert!(doc.contains(&format!("topos follow '{link}' --json")));
 
