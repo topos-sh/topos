@@ -773,7 +773,7 @@ async fn session_reject_refuses_empty_reasons_accepted_targets_and_wrong_bases_n
 
 #[sqlx::test]
 async fn cross_lane_op_id_reuse_fails_closed_in_both_directions(pool: PgPool) {
-    let fx = Fixture::new(pool, "srv-cross").await;
+    let fx = Fixture::new(pool.clone(), "srv-cross").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(65);
     let key2 = dev_key(75);
@@ -868,6 +868,33 @@ async fn cross_lane_op_id_reuse_fails_closed_in_both_directions(pool: PgPool) {
         "another device's op_id is not this device's slot"
     );
     assert_eq!(current_commit(&fx, &w, &s).await, p3);
+
+    // DEVICE PROPOSE reusing a session-held id: the refusal must also RELEASE the incoming
+    // candidate's own migrate lease — the propose staged real bytes under this op_id before the
+    // transaction could classify the reuse, and a key-reuse refusal abandons that candidate exactly
+    // like a receipted terminal does (without the release its objects would stay GC-rooted forever).
+    let (reused, _, _) = do_propose(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        shared_rid,
+        child(p3, vec![file("a.md", b"p4")]),
+        gn(1, 4),
+    )
+    .await;
+    assert_eq!(reused.outcome, TerminalOutcome::PermanentFailure);
+    assert_eq!(code_of(&reused).as_deref(), Some("OP_ID_REUSED"));
+    let leases = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM promotion_lease WHERE workspace_id = $1 AND op_id = $2",
+    )
+    .bind(w.as_str())
+    .bind(shared_rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(leases, 0, "the abandoned candidate's lease is released");
 }
 
 #[sqlx::test]

@@ -258,6 +258,14 @@ async fn run(
     {
         Replay::Hit(receipt) => return Ok(receipt),
         Replay::Mismatch(original_at) => {
+            // A key-reuse refusal ABANDONS the incoming candidate, exactly like the receipted
+            // terminals below: a publish/propose/revert already migrated its bytes under a committed
+            // lease keyed by this op_id (the slot owner's own lease is long gone — its terminal
+            // writer released it), so without this release the rejected candidate's objects would
+            // stay GC-rooted forever. An approve leases nothing — skip it, as everywhere else.
+            if !matches!(input.op, DeviceOp::ReviewApprove) {
+                delete_lease(tx, input.ws, input.op_id).await?;
+            }
             return Ok(permanent_key_reuse(input.op_id, &bound, &original_at));
         }
         Replay::Fresh => {}
