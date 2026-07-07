@@ -395,10 +395,24 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   signature over the candidate, but the plane still signs the moved pointer and followers still re-verify
   bytes against the approved digest — the receipt's `method`/`actor` is the audit trail for which leg
   acted. Public Authority ops `review_approve_session` / `review_reject_session` /
-  `read_proposal_detail_session`. Driven in-process by `src/tests/session_review.rs` (the role-gate +
+  `read_proposal_detail_session` — **and `revert_session`** (the web one-click "roll back to this
+  version"): the SAME confirmed owner|reviewer gate on the shared pointer-move transaction, but a
+  **forward promote** that bypasses the review gate + four-eyes by design (the safety net). It
+  actor-parameterizes `set_current::revert` (the device lane keeps `Authority::revert` byte-identical) and
+  the txn's Session arm now admits `Revert` as well as `ReviewApprove`. Because a revert CONSTRUCTS a
+  forward commit before the txn, its idempotency is a session twin of `replay_revert`
+  (`replay_revert_session` — keyed on acting email + `request_sha256` under a fresh
+  `TOPOS_SESSION_REVERT_V1` tag, since the forward commit id re-parents on live `current` and changes per
+  retry), and a **cheap pre-stage owner|reviewer fence** turns a plain member away BEFORE the staging
+  (synthesized, never persisted — the pre-stage variant of the recording rule; the in-txn gate stays
+  authoritative). A concurrent duplicate that re-stages a lease past the in-txn replay HIT now releases it
+  (the strand fix, mirrored to the Mismatch arm). Driven in-process by `src/tests/session_review.rs` (the role-gate +
   recording-rule matrix, cross-lane four-eyes both directions, stale/ABA CONFLICTs through the session
   lane, cross-lane id reuse in all four directions, the divergent-reason tripwire, both concurrency
-  races, the detail read incl. the open-row preference) and `src/tests/receipts_migration.rs` (the 0012
+  races, the detail read incl. the open-row preference, **and the revert leg: reviewer happy path +
+  byte-identical replay, the owner|reviewer/member/stranger role matrix with the member's synthesized
+  refusal, the not-accepted-target refusal, the stale CAS CONFLICT, cross-lane op-id closure, and
+  self-host deny**) and `src/tests/receipts_migration.rs` (the 0012
   probe: rename/backfill/CHECKs/index), plus the request-identity unit tests (`session_review.rs`) and
   the wrapper classification-table test (`topos-plane`).
 - **Canonical principal form — one mailbox, one identity.** `Principal::parse` folds every principal

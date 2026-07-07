@@ -23,6 +23,7 @@ use crate::actor::WriteActor;
 use crate::authority::Authority;
 use crate::enroll::{DeploymentMode, parse_op_id};
 use crate::error::Result;
+use crate::governance::Role;
 use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
 use crate::set_current::{self, SetCurrentReceipt, device_op_command};
 use topos_core::sign::DeviceOp;
@@ -31,6 +32,15 @@ use topos_core::sign::DeviceOp;
 /// from every kernel signing-frame tag AND the roster leg's tag, so no stored identity from another
 /// domain can ever byte-match a review request.
 const SESSION_REVIEW_TAG: &[u8] = b"TOPOS_SESSION_REVIEW_V1\0";
+
+/// The domain tag of the session REVERT request identity — a FRESH tag, distinct from the review tag
+/// (and every kernel/roster tag), so a revert request can never byte-match an approve/reject request under
+/// a reused id: the two session write verbs live in separate idempotency domains.
+const SESSION_REVERT_TAG: &[u8] = b"TOPOS_SESSION_REVERT_V1\0";
+
+/// The forward-commit message a session revert records — the SAME fixed string the CLI's device revert
+/// uses (`bins/topos`'s `REVERT_MESSAGE`), so team history reads identically whichever lane rolled back.
+const SESSION_REVERT_MESSAGE: &str = "topos: revert";
 
 /// The ONE uniform acting-gate denial: a non-member, a merely-invited seat, an absent workspace, and a
 /// self-host caller past the posture belt all read the same (the static reason is for the composing
@@ -80,6 +90,41 @@ fn review_request_sha256(
         SESSION_REVIEW_TAG.len() + parts.iter().map(|p| p.len() + 8).sum::<usize>(),
     );
     buf.extend_from_slice(SESSION_REVIEW_TAG);
+    for part in parts {
+        buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        buf.extend_from_slice(part);
+    }
+    topos_core::digest::sha256(&buf)
+}
+
+/// The session REVERT request identity: sha256 over [`SESSION_REVERT_TAG`] + u64-be length-prefixed parts
+/// (ws, acting email, skill, the GOOD TARGET commit id, expected epoch/seq). Binds the target COMMIT (not
+/// just its tree digest — two accepted versions can share a tree, so the commit id is what makes the request
+/// a unique target key; codex design-gate finding 2), and its fresh tag makes it impossible for a revert
+/// request to byte-match a review approve/reject under a reused id. Deterministic — a lost-ack retry
+/// recomputes the identical identity; any divergent target/generation mismatches and fails closed.
+fn revert_request_sha256(
+    ws: &WorkspaceId,
+    acting: &Principal,
+    skill: &SkillId,
+    good: CommitId,
+    expected: Generation,
+) -> [u8; 32] {
+    let epoch_be = expected.epoch.to_be_bytes();
+    let seq_be = expected.seq.to_be_bytes();
+    let parts: Vec<&[u8]> = vec![
+        b"revert",
+        ws.as_str().as_bytes(),
+        acting.as_str().as_bytes(),
+        skill.as_str().as_bytes(),
+        good.0.as_slice(),
+        epoch_be.as_slice(),
+        seq_be.as_slice(),
+    ];
+    let mut buf = Vec::with_capacity(
+        SESSION_REVERT_TAG.len() + parts.iter().map(|p| p.len() + 8).sum::<usize>(),
+    );
+    buf.extend_from_slice(SESSION_REVERT_TAG);
     for part in parts {
         buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
         buf.extend_from_slice(part);
@@ -319,6 +364,98 @@ pub(crate) async fn review_reject_session(
         Some(reason),
         &op_id,
         created_at,
+    )
+    .await
+}
+
+/// **Revert a skill's `current` to a known-good prior version from a verified session** — the browser's
+/// "Roll back to this version" (the orchestration half of [`Authority::revert_session`]). `good` is the full
+/// target commit id; `expected` is the live `current` generation the caller's version page rendered against —
+/// a moved pointer refuses with the same `CONFLICT` the CLI gets. Revert bypasses the review gate + four-eyes
+/// by design (it restores already-consented bytes — the safety net); the session gate here is the SAME
+/// confirmed **owner|reviewer** seat the approve lane enforces (a deliberate lane asymmetry: the device lane
+/// gates revert on per-skill roster).
+///
+/// Unlike approve (which promotes an already-rooted proposal), a revert CONSTRUCTS + leases a forward commit
+/// BEFORE the transaction, so this leg runs a CHEAP PRE-STAGE owner|reviewer fence (a pool read) to turn a
+/// confirmed plain member away BEFORE that git work — synthesized, never persisted, exactly like the
+/// non-member gate above; the in-transaction role gate stays authoritative (it re-checks server-trusted rows,
+/// catching a role that changes between the fence and the txn). This is the lane's gate-before-reach posture
+/// applied to a staging write (codex design-gate finding 3).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revert_session(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    good: CommitId,
+    expected: Generation,
+    request_id: &str,
+    acting_email: &str,
+    plane_mode: DeploymentMode,
+    created_at: &str,
+    now: i64,
+) -> Result<SetCurrentReceipt> {
+    let acting = match session_preamble(
+        authority,
+        ws,
+        skill,
+        good,
+        expected,
+        DeviceOp::Revert,
+        request_id,
+        acting_email,
+        plane_mode,
+        created_at,
+    )
+    .await?
+    {
+        Ok(acting) => acting,
+        Err(refusal) => return Ok(refusal),
+    };
+
+    // The pre-stage owner|reviewer fence. A confirmed member who is neither owner nor reviewer gets the
+    // machine-branchable `REVIEWER_ROLE_REQUIRED` — synthesized (a pre-stage session refusal writes nothing:
+    // the only actor that mints a durable revert receipt on this lane is an authorized owner|reviewer, and a
+    // member's denied attempt must not grow the ledger or stage a forward commit). A role that changes
+    // between here and the transaction is caught by the authoritative in-txn gate.
+    let is_reviewer = matches!(
+        authority.db().member_role(ws, &acting).await?,
+        Some((role, status))
+            if status == "confirmed"
+                && (role == Role::Owner.as_str() || role == Role::Reviewer.as_str())
+    );
+    if !is_reviewer {
+        return Ok(synth_denied(
+            DeviceOp::Revert,
+            skill,
+            good,
+            expected,
+            request_id,
+            created_at,
+            code_details(REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG),
+        ));
+    }
+
+    let request_sha256 = revert_request_sha256(ws, &acting, skill, good, expected);
+    // `parse_op_id` in the preamble proved the canonical form, so this parse cannot fail for a well-formed id.
+    let op_id = OpId::parse(request_id).map_err(crate::error::AuthorityError::internal)?;
+    set_current::revert(
+        authority,
+        ws,
+        skill,
+        good,
+        WriteActor::Session {
+            acting: &acting,
+            request_sha256,
+        },
+        expected,
+        // The forward commit's author is the acting principal (the session lane's identity — the device lane
+        // records the device key id); the message is the shared fixed revert string, for uniform history.
+        acting.as_str(),
+        SESSION_REVERT_MESSAGE,
+        &op_id,
+        created_at,
+        now,
     )
     .await
 }

@@ -76,6 +76,26 @@ pub enum SessionProposalDetailSummary {
     NotFound,
 }
 
+/// The outcome of [`PlaneState::revert_session`]. Plain owned fields only. Distinct from
+/// [`SessionReviewSummary`] because a revert PROMOTES (`Reverted`, never `Approved`/`Rejected`) and its
+/// member-entitled refusals are the reviewer-role gate + the target refusals, not the four-eyes/not-open
+/// family (codex design-gate finding 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRevertSummary {
+    /// The revert moved `current` to the target's bytes (or the identical request replayed its OK).
+    Reverted,
+    /// The compare-and-set refused a moved pointer — the same stale refusal the CLI's revert gets.
+    Conflict,
+    /// A member-entitled typed refusal: the reviewer-role gate, a non-accepted / digest-less / no-current
+    /// target, or a reused request id. `reason` is the plane's static string, relayed verbatim.
+    Denied {
+        /// The static, typed reason (a plane→composition byte contract; never an oracle).
+        reason: String,
+    },
+    /// The uniform miss: a malformed id, an unproven caller, or a self-host plane — disclosing nothing.
+    NotFound,
+}
+
 /// Classify a review receipt into the wrapper summary (the single table both verbs share).
 fn classify(receipt: &SetCurrentReceipt, is_approve: bool) -> SessionReviewSummary {
     let code = receipt
@@ -130,6 +150,60 @@ fn classify(receipt: &SetCurrentReceipt, is_approve: bool) -> SessionReviewSumma
         // No other terminal outcome is reachable on the session review verbs; fold the remainder
         // to the uniform miss rather than invent a new disclosure.
         _ => SessionReviewSummary::NotFound,
+    }
+}
+
+/// Classify a REVERT receipt into [`SessionRevertSummary`]. Mirrors [`classify`], but a revert has no
+/// four-eyes / not-open family: its member-entitled failures are the reviewer-role gate and the target
+/// refusals (no recorded digest / not an accepted version / no current), all disclosable to the authorized
+/// owner|reviewer that reached the staging path (never an oracle — a reviewer already reads the catalog).
+fn classify_revert(receipt: &SetCurrentReceipt) -> SessionRevertSummary {
+    let code = receipt
+        .details
+        .as_ref()
+        .and_then(|d| d.get("code"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let message = receipt
+        .details
+        .as_ref()
+        .and_then(|d| d.get("message"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    match receipt.outcome {
+        TerminalOutcome::Ok => SessionRevertSummary::Reverted,
+        TerminalOutcome::Conflict => SessionRevertSummary::Conflict,
+        TerminalOutcome::Denied => {
+            // The uniform acting-gate denial (non-member / self-host / unparseable email) discloses nothing.
+            if message.as_deref() == Some(SESSION_REVIEW_ACTING_DENIED) {
+                return SessionRevertSummary::NotFound;
+            }
+            // Member-entitled: the reviewer-role gate (code + message). Relay the most specific string.
+            let reason = match (code.as_deref(), message) {
+                (Some(REVIEWER_ROLE_REQUIRED_CODE), Some(m)) => m,
+                (_, Some(m)) => m,
+                (Some(c), None) => c.to_owned(),
+                (None, None) => "denied".to_owned(),
+            };
+            SessionRevertSummary::Denied { reason }
+        }
+        TerminalOutcome::PermanentFailure => {
+            if code.as_deref() == Some("OP_ID_REUSED") {
+                SessionRevertSummary::Denied {
+                    reason: "op id reused with a different request".to_owned(),
+                }
+            } else {
+                // A synthesized pre-transaction refusal about the TARGET (no recorded digest / not an
+                // accepted version / no current pointer) — reached only past the owner|reviewer pre-gate, so
+                // the specific reason is member-entitled.
+                SessionRevertSummary::Denied {
+                    reason: message
+                        .unwrap_or_else(|| "the revert target is not a valid version".to_owned()),
+                }
+            }
+        }
+        // No other terminal outcome is reachable on the session revert verb; fold to the uniform miss.
+        _ => SessionRevertSummary::NotFound,
     }
 }
 
@@ -270,6 +344,54 @@ impl PlaneState {
                 resolved_at: detail.resolved_at,
             },
         )))
+    }
+
+    /// Revert a skill's `current` to a known-good prior version from a session-verified email (the
+    /// browser's "Roll back to this version"). `good_version_id_hex` names the target commit;
+    /// `expected_epoch`/`expected_seq` are the live current generation the caller's version page rendered
+    /// against — a moved pointer refuses with [`SessionRevertSummary::Conflict`]. Restricted to a confirmed
+    /// owner|reviewer seat (the plane's in-transaction gate + a pre-stage fence). Idempotent per
+    /// `request_id` (a canonical UUID).
+    ///
+    /// # Errors
+    /// An unparseable plane mode (typed, fail closed) or a stringified authority fault; every protocol
+    /// refusal is a typed summary, never an error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn revert_session(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+        good_version_id_hex: &str,
+        expected_epoch: u64,
+        expected_seq: u64,
+        request_id: &str,
+        acting_email: &str,
+    ) -> anyhow::Result<SessionRevertSummary> {
+        let mode = self.strict_mode()?;
+        let Some((ws, skill, good)) = parse_review_ids(workspace_id, skill_id, good_version_id_hex)
+        else {
+            return Ok(SessionRevertSummary::NotFound);
+        };
+        let (created_at, now) = wire::now_utc();
+        let receipt = self
+            .authority()
+            .revert_session(
+                &ws,
+                &skill,
+                good,
+                topos_types::Generation {
+                    epoch: expected_epoch,
+                    seq: expected_seq,
+                },
+                request_id,
+                acting_email,
+                mode,
+                &created_at,
+                now,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("reverting the skill: {error}"))?;
+        Ok(classify_revert(&receipt))
     }
 }
 

@@ -344,6 +344,29 @@ impl Db {
         workspace_member_confirmed(&self.pool, ws, principal).await
     }
 
+    /// The principal's `(role, status)` on this workspace, or `None` for no seat — a POOL read the session
+    /// revert leg uses as a cheap pre-stage owner|reviewer fence (it constructs a forward commit before the
+    /// transaction, so an unauthorized member must be turned away BEFORE that git work; the in-txn gate stays
+    /// authoritative). Mirrors the in-txn [`governance::read_member_role`](super::governance::read_member_role)
+    /// query against the pool.
+    pub(crate) async fn member_role(
+        &self,
+        ws: &WorkspaceId,
+        principal: &Principal,
+    ) -> Result<Option<(String, String)>> {
+        let (ws_s, prin) = (ws.as_str(), principal.as_str());
+        let row = sqlx::query!(
+            r#"SELECT role AS "role!", status AS "status!" FROM workspace_member
+               WHERE workspace_id = $1 AND principal = $2"#,
+            ws_s,
+            prin,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.map(|r| (r.role, r.status)))
+    }
+
     /// The object-read authorization: the lane's principal gate ([`Self::read_gate`]), then the
     /// principal-free reachability witness ([`Self::object_witness`]). Returns the **witness** commit id
     /// iff the gate admits the principal AND the skill makes the object readable. An empty result is the

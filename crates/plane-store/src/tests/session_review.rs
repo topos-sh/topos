@@ -1441,3 +1441,364 @@ async fn session_pretxn_misses_are_synthesized_never_durable(pool: PgPool) {
     );
     assert!(receipts_for(&pool, "w_acme", "not-a-uuid").await.is_empty());
 }
+
+// ── the web-session REVERT leg — one-click "roll back to this version" ───────────────────────────
+//
+// Revert is a FORWARD promote that bypasses the review gate (the safety net); on the session lane it
+// carries the SAME confirmed owner|reviewer gate as approve, plus a cheap pre-stage fence so a plain
+// member never triggers the forward-commit staging. These witness: the reviewer happy path + byte-
+// identical replay, the owner|reviewer/member/stranger role matrix (a member's refusal is SYNTHESIZED,
+// unlike approve's durable one — the pre-stage recording rule), the not-accepted-target refusal, the
+// stale CAS CONFLICT (no signature to fail), cross-lane op-id closure, and self-host denial.
+
+/// A session revert on the CLOUD posture, panicking only on a store fault.
+async fn revert_session(
+    fx: &Fixture,
+    w: &WorkspaceId,
+    s: &SkillId,
+    good: CommitId,
+    expected: Generation,
+    rid: &str,
+    email: &str,
+) -> crate::SetCurrentReceipt {
+    fx.authority
+        .revert_session(w, s, good, expected, rid, email, CLOUD, CREATED_AT, NOW)
+        .await
+        .unwrap()
+}
+
+/// Stand two ACCEPTED trunk versions: genesis (`v0`, bytes `b"v0"`) landing `current` at (1,1), then a
+/// direct-publish child (`v1`, bytes `b"v1"`) at (1,2). Returns `(v0, v1, v0_digest)`; the caller must
+/// have `register`ed the `dk` device.
+async fn two_versions(
+    fx: &Fixture,
+    w: &WorkspaceId,
+    s: &SkillId,
+    key: &ed25519_dalek::SigningKey,
+    op0: &str,
+    op1: &str,
+) -> (CommitId, CommitId, [u8; 32]) {
+    let r0 = publish(
+        fx,
+        key,
+        "dk",
+        w,
+        s,
+        op0,
+        genesis(vec![file("SKILL.md", b"v0")]),
+        gn(0, 0),
+    )
+    .await;
+    let v0 = current_commit(fx, w, s).await;
+    publish(
+        fx,
+        key,
+        "dk",
+        w,
+        s,
+        op1,
+        child(v0, vec![file("SKILL.md", b"v1")]),
+        gn(1, 1),
+    )
+    .await;
+    let v1 = current_commit(fx, w, s).await;
+    (v0, v1, r0.bundle_digest.expect("genesis records a digest"))
+}
+
+#[sqlx::test]
+async fn a_session_revert_by_a_reviewer_moves_current_forward_and_replays_byte_identically(
+    pool: PgPool,
+) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-ok").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(70);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    let (v0, v1, v0_digest) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "70000000-0000-4000-8000-000000000001",
+        "70000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // current is v1 at (1,2). A reviewer rolls back to v0 from the browser ⇒ a FORWARD move to (1,3)
+    // carrying v0's bytes (a NEW commit, nothing deleted); the pointer never moves backward.
+    let rid = "70000000-0000-4000-8000-000000000003";
+    let r = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
+    assert_eq!(r.outcome, TerminalOutcome::Ok);
+    assert_eq!(r.current, Some(gn(1, 3)));
+    assert_eq!(
+        r.bundle_digest,
+        Some(v0_digest),
+        "the forward commit restores v0's bytes"
+    );
+    let forward = r.version_id.expect("an OK revert names its forward commit");
+    assert_ne!(forward, v0, "revert is a NEW forward commit, not v0 itself");
+    assert_eq!(current_commit(&fx, &w, &s).await, forward);
+
+    // The receipt is recorded on the SESSION lane (method + acting email), not device-signed.
+    let rows = receipts_for(&pool, "w_acme", rid).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1.as_str(), rows[0].3.as_str()),
+        ("reviewer@acme.com", "web_session", "OK")
+    );
+    assert!(
+        rows[0].2.is_some(),
+        "the session receipt binds a request_sha256"
+    );
+
+    // A lost-ack retry (same request id) replays the byte-identical OK — the pre-txn stable replay,
+    // keyed on the acting email + request identity (NOT the forward commit, which re-parents on current).
+    let replayed = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
+    assert_eq!(replayed, r);
+    assert_eq!(
+        current_commit(&fx, &w, &s).await,
+        forward,
+        "no double-apply"
+    );
+    assert_eq!(receipts_for(&pool, "w_acme", rid).await.len(), 1);
+    let _ = v1;
+}
+
+#[sqlx::test]
+async fn session_revert_needs_owner_or_reviewer_and_a_members_refusal_is_synthesized(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-role").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(71);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "owner@acme.com", "owner").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    seat(&fx, &w, "member@acme.com", "member").await;
+    let (v0, v1, _d) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "71000000-0000-4000-8000-000000000001",
+        "71000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // A confirmed plain MEMBER: the pre-stage fence refuses with a machine-branchable role denial that
+    // is SYNTHESIZED, never persisted — a revert stages a forward commit before the txn, so an
+    // unauthorized member is turned away before that git work and never grows the ledger (the lane's
+    // gate-before-reach posture; deliberately unlike approve's durable member denial, which stages
+    // nothing).
+    let rid_m = "71000000-0000-4000-8000-000000000003";
+    let rm = revert_session(&fx, &w, &s, v0, gn(1, 2), rid_m, "member@acme.com").await;
+    assert_eq!(rm.outcome, TerminalOutcome::Denied);
+    assert_eq!(code_of(&rm).as_deref(), Some("REVIEWER_ROLE_REQUIRED"));
+    assert!(
+        receipts_for(&pool, "w_acme", rid_m).await.is_empty(),
+        "a member's pre-stage revert refusal is synthesized, never persisted"
+    );
+
+    // A stranger with no seat: the ONE uniform acting denial, likewise synthesized.
+    let rid_x = "71000000-0000-4000-8000-000000000004";
+    let rx = revert_session(&fx, &w, &s, v0, gn(1, 2), rid_x, "stranger@acme.com").await;
+    assert_eq!(rx.outcome, TerminalOutcome::Denied);
+    assert!(receipts_for(&pool, "w_acme", rid_x).await.is_empty());
+
+    // Neither refusal moved `current`.
+    assert_eq!(current_commit(&fx, &w, &s).await, v1);
+
+    // An OWNER rolls back to v0 ⇒ (1,3); then a REVIEWER rolls forward to v1 ⇒ (1,4). Both promote.
+    let ro = revert_session(
+        &fx,
+        &w,
+        &s,
+        v0,
+        gn(1, 2),
+        "71000000-0000-4000-8000-000000000005",
+        "owner@acme.com",
+    )
+    .await;
+    assert_eq!(ro.outcome, TerminalOutcome::Ok);
+    assert_eq!(ro.current, Some(gn(1, 3)));
+    let rr = revert_session(
+        &fx,
+        &w,
+        &s,
+        v1,
+        gn(1, 3),
+        "71000000-0000-4000-8000-000000000006",
+        "reviewer@acme.com",
+    )
+    .await;
+    assert_eq!(rr.outcome, TerminalOutcome::Ok);
+    assert_eq!(rr.current, Some(gn(1, 4)));
+}
+
+#[sqlx::test]
+async fn a_session_revert_to_a_non_accepted_version_is_refused_without_a_durable_row(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-notacc").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(72);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    // genesis + an OPEN proposal (never accepted): its candidate is rooted via proposal_object, NEVER
+    // commit_object — so it is not an accepted trunk version.
+    let (g, cp, _d) = open_proposal(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "72000000-0000-4000-8000-000000000001",
+        "72000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // Rolling back to the un-accepted proposal candidate ⇒ PERMANENT_FAILURE (forward-promoting its tree
+    // would smuggle un-reviewed bytes past the gate). Synthesized on the session lane — no durable row.
+    let rid = "72000000-0000-4000-8000-000000000003";
+    let r = revert_session(&fx, &w, &s, cp, gn(1, 1), rid, "reviewer@acme.com").await;
+    assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
+    assert_eq!(
+        msg_of(&r).as_deref(),
+        Some("revert target is not an accepted version")
+    );
+    assert!(
+        receipts_for(&pool, "w_acme", rid).await.is_empty(),
+        "a session pre-transaction target refusal is synthesized, never persisted"
+    );
+    assert_eq!(current_commit(&fx, &w, &s).await, g, "current is unmoved");
+}
+
+#[sqlx::test]
+async fn a_stale_session_revert_conflicts_with_the_live_generation(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-stale").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(73);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    let (v0, v1, _d) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "73000000-0000-4000-8000-000000000001",
+        "73000000-0000-4000-8000-000000000002",
+    )
+    .await;
+    // Another publish advances `current` to (1,3): the reviewer's page rendered against (1,2) is stale.
+    publish(
+        &fx,
+        &key,
+        "dk",
+        &w,
+        &s,
+        "73000000-0000-4000-8000-000000000003",
+        child(v1, vec![file("SKILL.md", b"v2")]),
+        gn(1, 2),
+    )
+    .await;
+
+    // The session revert at the STALE expected (1,2) ⇒ a clean CONFLICT carrying the live (1,3). Unlike
+    // the device lane (where a stale parent surfaces as a signature DENIED), the keyless session lane
+    // falls straight through to the whole-(epoch,seq) CAS — the same CONFLICT approve gets.
+    let rid = "73000000-0000-4000-8000-000000000004";
+    let r = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
+    assert_eq!(r.outcome, TerminalOutcome::Conflict);
+    assert_eq!(r.current, Some(gn(1, 3)));
+}
+
+#[sqlx::test]
+async fn a_device_revert_cannot_reuse_a_session_reverts_request_id(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-xlane").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(74);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    let (v0, v1, _d) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "74000000-0000-4000-8000-000000000001",
+        "74000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // A reviewer rolls back to v0 with request id R ⇒ (1,3), a web_session receipt on slot R.
+    let shared = "74000000-0000-4000-8000-000000000003";
+    let sr = revert_session(&fx, &w, &s, v0, gn(1, 2), shared, "reviewer@acme.com").await;
+    assert_eq!(sr.outcome, TerminalOutcome::Ok);
+
+    // A DEVICE revert that reuses R as its op id fails closed: the lane-blind (ws, op_id) replay probe
+    // sees the session's web_session row and refuses the device caller as OP_ID_REUSED (its own staged
+    // forward-commit lease released on the Mismatch arm — no strand). The two lanes never replay each
+    // other.
+    let dop = op(shared);
+    let dsig = sign_revert(&fx, &key, "dk", &w, &s, v1, &dop, gn(1, 3)).await;
+    let ddev = DeviceSignedOp {
+        device_key_id: "dk".to_owned(),
+        op: DeviceOp::Revert,
+        signature: dsig,
+        expected: gn(1, 3),
+    };
+    let rd = fx
+        .authority
+        .revert(
+            &w,
+            &s,
+            v1,
+            ddev,
+            "d_test",
+            "topos revert",
+            &dop,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rd.outcome, TerminalOutcome::PermanentFailure);
+    assert_eq!(code_of(&rd).as_deref(), Some("OP_ID_REUSED"));
+    // Only the original session receipt lives on slot R.
+    let rows = receipts_for(&pool, "w_acme", shared).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.as_str(), "web_session");
+}
+
+#[sqlx::test]
+async fn revert_session_is_uniformly_denied_on_self_host(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "srv-rev-selfhost").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(75);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    let (v0, v1, _d) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "75000000-0000-4000-8000-000000000001",
+        "75000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // Self-host review stays the CLI: the session revert is uniformly denied in-op, synthesized, and
+    // moves nothing (self-host membership is the bearer/invite chain, not a web session).
+    let rid = "75000000-0000-4000-8000-000000000003";
+    let r = fx
+        .authority
+        .revert_session(
+            &w,
+            &s,
+            v0,
+            gn(1, 2),
+            rid,
+            "reviewer@acme.com",
+            DeploymentMode::SelfHost,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    assert!(receipts_for(&pool, "w_acme", rid).await.is_empty());
+    assert_eq!(current_commit(&fx, &w, &s).await, v1, "current is unmoved");
+}

@@ -67,7 +67,7 @@ pub use session_read_cmd::{
     SkillIndexEntrySummary, SkillsIndexSummary,
 };
 pub use session_review_cmd::{
-    SessionProposalDetail, SessionProposalDetailSummary, SessionReviewSummary,
+    SessionProposalDetail, SessionProposalDetailSummary, SessionRevertSummary, SessionReviewSummary,
 };
 pub use standup_cmd::{ApproveSessionSummary, ApproveStandupSummary, CreateWorkspaceSummary};
 pub use state::{PlaneConfig, PlaneState};

@@ -146,11 +146,16 @@
   open proposal — the reject `reason` is MANDATORY) return a typed `SessionReviewSummary`
   (`Approved` / `Rejected` / `Conflict` — the same stale-base refusal the CLI gets — / `Denied { reason }`
   / `NotFound`), and `read_proposal_session` returns the proposal detail (status + base + proposer +
-  resolution + the review-required policy) or the uniform `NotFound`. Classification posture:
-  malformed/unknown ids, an unproven caller, self-host, and an unknown candidate all fold to `NotFound`
-  (disclosing nothing); the member-entitled protocol refusals (the reviewer-role gate, four-eyes, a
-  resolved target, an empty reason, a reused request id) stay typed `Denied` so the composing surface can
-  say why. Same strict-mode threading as the roster/read wrappers.
+  resolution + the review-required policy) or the uniform `NotFound`. `PlaneState::revert_session` (the
+  web one-click "roll back to this version") returns a dedicated `SessionRevertSummary`
+  (`Reverted` / `Conflict` / `Denied { reason }` / `NotFound`) — distinct from the review summary because a
+  revert promotes (never approves/rejects) and its member-entitled refusals are the reviewer-role gate + the
+  target refusals (a non-accepted / digest-less / no-current target), not the four-eyes/not-open family.
+  Classification posture: malformed/unknown ids, an unproven caller, self-host, and an unknown candidate all
+  fold to `NotFound` (disclosing nothing); the member-entitled protocol refusals (the reviewer-role gate,
+  four-eyes, a resolved target, an empty reason, a reused request id, a non-accepted revert target) stay
+  typed `Denied` so the composing surface can say why. Same strict-mode threading as the roster/read
+  wrappers.
 - **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
   `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —

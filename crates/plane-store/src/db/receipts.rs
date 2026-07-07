@@ -71,6 +71,56 @@ impl Db {
         }))
     }
 
+    /// Idempotent replay for a **web-session revert** — the session twin of
+    /// [`replay_revert`](Self::replay_revert). Keyed on the acting principal's email (the session lane's
+    /// `op_receipts.actor`) under `method = 'web_session'`, and compared on the STABLE request identity
+    /// (command + skill + target tree digest + expected generation) AND the `request_sha256` — the session
+    /// lane's full-request identity. The `request_sha256` is load-bearing here (not just belt-and-suspenders):
+    /// two DIFFERENT accepted commits can share a tree/digest, so `(command, skill, good_digest, expected)`
+    /// alone is not a unique target key, whereas `revert_request_sha256` binds the target COMMIT id (codex
+    /// design-gate finding 2). Run this BEFORE rebuilding the forward commit, exactly as
+    /// [`replay_revert`](Self::replay_revert): the forward commit id re-parents on the live `current` and so
+    /// changes after the first revert commits, and the in-transaction replay — which compares the commit —
+    /// would then burn the op as `OP_ID_REUSED` instead of replaying the original `OK`. `Some` replays a prior
+    /// result (a true retry — or a permanent `OP_ID_REUSED` on a divergent same-id payload); `None` proceeds.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn replay_revert_session(
+        &self,
+        ws: &WorkspaceId,
+        acting: &str,
+        op_id: &str,
+        skill: &SkillId,
+        good_digest: [u8; 32],
+        expected: Generation,
+        request_sha256: [u8; 32],
+    ) -> Result<Option<SetCurrentReceipt>> {
+        let Some((stored, stored_sha)) =
+            get_receipt_session(self.pool(), ws, acting, op_id).await?
+        else {
+            return Ok(None);
+        };
+        let stable_match = stored.command == "revert"
+            && stored.skill_id == skill.as_str()
+            && stored.bundle_digest == Some(good_digest)
+            && stored.expected == expected
+            && stored_sha == Some(request_sha256);
+        Ok(Some(if stable_match {
+            stored.into_receipt()
+        } else {
+            // The reuse receipt's bound identity is the revert's STABLE request key (no forward commit id,
+            // which re-parents on the live `current`); `permanent_key_reuse` carries no version regardless.
+            // The ORIGINAL receipt's `created_at` keeps the reuse receipt byte-stable across retries.
+            let bound = BoundIdentity {
+                command: "revert",
+                skill_id: skill.as_str(),
+                commit: None,
+                bundle_digest: Some(good_digest),
+                expected,
+            };
+            permanent_key_reuse(op_id, &bound, &stored.created_at)
+        }))
+    }
+
     /// Fast-path replay of a prior **gated** (`APPROVAL_REQUIRED`) direct-publish outcome, keyed on the
     /// STABLE (command, skill, expected) — so a retry of a gated op stays sticky across a `review_required`
     /// flip without re-gating (which would mismatch a `commit = None` gate receipt and burn `OP_ID_REUSED`)
@@ -765,6 +815,74 @@ where
             .transpose()
             .map_err(|_| AuthorityError::integrity(BadDetails))?,
     }))
+}
+
+/// The SESSION-only point lookup (the pre-txn `replay_revert_session` fast path) — mirrors [`get_receipt`]
+/// but filters `method = 'web_session'` and ALSO returns the stored `request_sha256` (the session lane's
+/// full-request identity the caller compares). The explicit method filter keeps a device receipt out of a
+/// session flow even if the two lanes ever shared an actor string (the mirror of `get_receipt`'s own
+/// `method = 'device_signed'` guard).
+async fn get_receipt_session<'e, E>(
+    executor: E,
+    ws: &WorkspaceId,
+    acting: &str,
+    op_id: &str,
+) -> Result<Option<(StoredReceipt, Option<[u8; 32]>)>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ws_s = ws.as_str();
+    let row = sqlx::query!(
+        r#"SELECT command AS "command!", skill_id AS "skill_id!",
+                  commit_id AS "commit_id?: Vec<u8>", bundle_digest AS "bundle_digest?: Vec<u8>",
+                  expected_epoch AS "expected_epoch!: i64", expected_seq AS "expected_seq!: i64",
+                  outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
+                  current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
+                  key_id AS "key_id?", created_at AS "created_at!", details AS "details?",
+                  request_sha256 AS "request_sha256?: Vec<u8>"
+           FROM op_receipts
+           WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'web_session'"#,
+        ws_s,
+        acting,
+        op_id,
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(AuthorityError::internal)?;
+    let Some(r) = row else { return Ok(None) };
+    let current = match (r.current_epoch, r.current_seq) {
+        (Some(e), Some(s)) => Some(Generation {
+            epoch: i64_to_u64(e)?,
+            seq: i64_to_u64(s)?,
+        }),
+        _ => None,
+    };
+    let request_sha256 = r.request_sha256.map(|b| blob32(&b)).transpose()?;
+    let stored = StoredReceipt {
+        op_id: op_id.to_owned(),
+        command: r.command,
+        skill_id: r.skill_id,
+        commit: r.commit_id.map(|b| blob32(&b)).transpose()?.map(CommitId),
+        bundle_digest: r.bundle_digest.map(|b| blob32(&b)).transpose()?,
+        expected: Generation {
+            epoch: i64_to_u64(r.expected_epoch)?,
+            seq: i64_to_u64(r.expected_seq)?,
+        },
+        outcome: parse_outcome(&r.outcome)?,
+        current,
+        signed_record: r.signed_record,
+        key_id: r.key_id,
+        created_at: r.created_at,
+        // A stored `details` that no longer parses is store corruption: alarm, never replay altered
+        // (identical rationale to `get_receipt`).
+        details: r
+            .details
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| AuthorityError::integrity(BadDetails))?,
+    };
+    Ok(Some((stored, request_sha256)))
 }
 
 pub(super) async fn insert_receipt(

@@ -256,7 +256,24 @@ async fn run(
     )
     .await?
     {
-        Replay::Hit(receipt) => return Ok(receipt),
+        Replay::Hit(receipt) => {
+            // A concurrent DUPLICATE whose pre-txn stable replay (`replay_revert` / `replay_revert_session`)
+            // missed the still-in-flight original may have re-staged a forward-commit/publish lease under
+            // this op_id before the original's receipt became visible; the original already released its own
+            // lease at its terminal writer, so this re-staged one must be released here too — otherwise it
+            // strands, GC-rooting already-`commit_object`-rooted objects forever (codex design-gate finding 1).
+            // INVARIANT this rests on: every Hit-replayable outcome either roots its objects elsewhere
+            // (`commit_object` on OK/publish/revert, `proposal_object` on NEEDS_REVIEW) or legitimately
+            // abandoned them (CONFLICT/DENIED released their lease already) — so the lease under this op_id is
+            // never the sole root of a live version. A future op that rooted objects SOLELY via a lease
+            // outliving its terminal writer would be silently unrooted here and must not reach this arm.
+            // The delete is idempotent (a no-op if absent). An approve leases nothing — skip it, exactly as
+            // the Mismatch arm below and every terminal writer do.
+            if !matches!(input.op, DeviceOp::ReviewApprove) {
+                delete_lease(tx, input.ws, input.op_id).await?;
+            }
+            return Ok(receipt);
+        }
         Replay::Mismatch(original_at) => {
             // A key-reuse refusal ABANDONS the incoming candidate, exactly like the receipted
             // terminals below: a publish/propose/revert already migrated its bytes under a committed
@@ -350,9 +367,12 @@ async fn run(
             (device.principal, genesis_standup, current)
         }
         WriteActor::Session { acting, .. } => {
-            // The public session API constructs ONLY a review approve; any other op here is an internal
-            // mis-route, a fault — never a receipt.
-            if !matches!(input.op, DeviceOp::ReviewApprove) {
+            // The public session API constructs ONLY a review approve or a revert (both promote to
+            // `current` under the SAME owner|reviewer gate); any other op here is an internal mis-route, a
+            // fault — never a receipt. Revert bypasses the review gate and four-eyes by design (it restores
+            // already-consented bytes — the safety net); the op tail already routes it to `promote`, and
+            // review-required fires only for a direct publish, so no extra branching is needed here.
+            if !matches!(input.op, DeviceOp::ReviewApprove | DeviceOp::Revert) {
                 return Err(AuthorityError::internal(SessionOpNotReviewable));
             }
             // The in-txn role gate (authoritative; the orchestration's pool-level pre-gate is the cheap

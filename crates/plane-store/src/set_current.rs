@@ -142,7 +142,12 @@ pub(crate) async fn publish(
             object_ids: &object_ids,
             display_name,
         },
-        device,
+        WriteActor::Device {
+            device_key_id: &device.device_key_id,
+            signature: &device.signature,
+        },
+        device.op,
+        device.expected,
         created_at,
         now,
     )
@@ -185,6 +190,11 @@ pub(crate) async fn reject_non_publish_op(
 /// promote — the git commit does not persist it). A `good` with no recorded digest (a legacy version) or no
 /// `current` to revert from is a typed `PERMANENT_FAILURE`.
 ///
+/// The `actor` names the lane (device-signed, or a verified web session) and `expected` is that lane's CAS
+/// target generation. The forward commit is server-constructed identically for BOTH lanes, so a keyless web
+/// session names only the full `good` id. Every pre-transaction failure routes through [`pretxn_fail`], so
+/// it is DURABLE for a device (its replay surface) and SYNTHESIZED for a session (the recording rule).
+///
 /// # Errors
 /// As [`publish`]; plus a git-store fault constructing the forward commit.
 #[allow(clippy::too_many_arguments)]
@@ -193,18 +203,15 @@ pub(crate) async fn revert(
     ws: &WorkspaceId,
     skill: &SkillId,
     good: CommitId,
-    device: &DeviceSignedOp,
+    actor: WriteActor<'_>,
+    expected: Generation,
     author: &str,
     message: &str,
     op_id: &OpId,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
-    debug_assert!(
-        matches!(device.op, DeviceOp::Revert),
-        "set_current::revert requires a Revert device op"
-    );
-    let command = device_op_command(device.op);
+    let command = device_op_command(DeviceOp::Revert);
 
     // good's tree digest (recorded on its provenance row; render needs a KNOWN digest, so it cannot
     // discover this), SCOPED TO THIS SKILL — reverting to another skill's commit is refused here, so the
@@ -214,61 +221,81 @@ pub(crate) async fn revert(
         .skill_commit_bundle_digest(ws, skill, good)
         .await?
     else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(good),
-                None,
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("revert target has no recorded bundle digest"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(good),
+            None,
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("revert target has no recorded bundle digest"),
+            created_at,
+        )
+        .await;
     };
 
     // Idempotent replay BEFORE rebuilding the forward commit. The forward commit re-parents on the LIVE
     // `current`, so after the first revert commits a retry would derive a DIFFERENT commit id, and the
     // in-transaction replay (which compares the commit) would burn the op as OP_ID_REUSED rather than
-    // replaying the original OK. Keying on the stable (command, skill, target digest, expected) replays it.
-    if let Some(replayed) = authority
-        .db()
-        .replay_revert(
-            ws,
-            &device.device_key_id,
-            op_id.as_str(),
-            skill,
-            good_digest,
-            device.expected,
-        )
-        .await?
-    {
+    // replaying the original OK. Keying on the stable (command, skill, target digest, expected) replays it —
+    // per lane: the device slot by device key id, the session slot by acting email + `request_sha256`.
+    let replayed = match &actor {
+        WriteActor::Device { device_key_id, .. } => {
+            authority
+                .db()
+                .replay_revert(
+                    ws,
+                    device_key_id,
+                    op_id.as_str(),
+                    skill,
+                    good_digest,
+                    expected,
+                )
+                .await?
+        }
+        WriteActor::Session {
+            acting,
+            request_sha256,
+        } => {
+            authority
+                .db()
+                .replay_revert_session(
+                    ws,
+                    acting.as_str(),
+                    op_id.as_str(),
+                    skill,
+                    good_digest,
+                    expected,
+                    *request_sha256,
+                )
+                .await?
+        }
+    };
+    if let Some(replayed) = replayed {
         return Ok(replayed);
     }
 
     // The current pointer is the forward commit's first parent.
     let Some(current) = authority.db().read_current_commit(ws, skill).await? else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                None,
-                None,
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("cannot revert a skill with no current pointer"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            None,
+            None,
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("cannot revert a skill with no current pointer"),
+            created_at,
+        )
+        .await;
     };
 
     // good's object set (from its reachability edges — no git_oid reverse-map) + its tree structure
@@ -283,22 +310,21 @@ pub(crate) async fn revert(
     // commit roots nothing). Refuse it before constructing anything. (Every real bundle carries >= 1 file —
     // the no-empty-bundle policy — so an empty `commit_object` set is an exact "not accepted" test.)
     if object_ids.is_empty() {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(good),
-                Some(good_digest),
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("revert target is not an accepted version"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(good),
+            Some(good_digest),
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("revert target is not an accepted version"),
+            created_at,
+        )
+        .await;
     }
 
     // Scope the (non-`Send`) gix `Store` to this synchronous block so it drops before the
@@ -355,7 +381,9 @@ pub(crate) async fn revert(
             // A revert restores prior bytes; it never renames the skill — keep any existing display name.
             display_name: None,
         },
-        device,
+        actor,
+        DeviceOp::Revert,
+        expected,
         created_at,
         now,
     )
@@ -415,7 +443,12 @@ pub(crate) async fn propose(
             // Carried for symmetry; a propose moves no pointer, so the `run` propose arm records no name.
             display_name,
         },
-        device,
+        WriteActor::Device {
+            device_key_id: &device.device_key_id,
+            signature: &device.signature,
+        },
+        device.op,
+        device.expected,
         created_at,
         now,
     )
@@ -730,31 +763,34 @@ struct Candidate<'a> {
 async fn drive(
     authority: &Authority,
     cand: Candidate<'_>,
-    device: &DeviceSignedOp,
+    actor: WriteActor<'_>,
+    op: DeviceOp,
+    expected: Generation,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
-    let command = device_op_command(device.op);
+    let command = device_op_command(op);
 
-    // The op_id must bridge to the 16 bytes the device-op signature binds. A non-bridgeable op id (not a
-    // canonical UUID) could have migrated but can never be verified — a permanent, receipted failure.
+    // The op_id must bridge to the 16 bytes the device-op signature binds (and, on the session lane, is the
+    // request id the composing route already proved canonical). A non-bridgeable op id (not a canonical
+    // UUID) could have migrated but can never be verified — a permanent failure, DURABLE for a device (its
+    // replay surface) and SYNTHESIZED for a session (the recording rule), routed through `pretxn_fail`.
     let Some(op_id_bytes) = parse_op_id(cand.op_id.as_str()) else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                cand.ws,
-                &device.device_key_id,
-                cand.op_id.as_str(),
-                command,
-                cand.skill,
-                Some(cand.commit),
-                Some(cand.bundle_digest),
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("op_id is not a canonical UUID"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            cand.ws,
+            cand.op_id.as_str(),
+            command,
+            cand.skill,
+            Some(cand.commit),
+            Some(cand.bundle_digest),
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("op_id is not a canonical UUID"),
+            created_at,
+        )
+        .await;
     };
 
     // Re-verify the migrated candidate is renderable BEFORE the transaction (the migrate path defers this
@@ -770,12 +806,9 @@ async fn drive(
         skill: cand.skill,
         op_id: cand.op_id.as_str(),
         op_id_bytes,
-        actor: WriteActor::Device {
-            device_key_id: &device.device_key_id,
-            signature: &device.signature,
-        },
-        op: device.op,
-        expected: device.expected,
+        actor,
+        op,
+        expected,
         candidate_commit: cand.commit,
         candidate_bundle_digest: cand.bundle_digest,
         parents: cand.parents,

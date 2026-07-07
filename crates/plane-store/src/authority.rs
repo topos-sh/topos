@@ -432,7 +432,20 @@ impl Authority {
             .await;
         }
         crate::set_current::revert(
-            self, ws, skill, good, &device, author, message, op_id, created_at, now,
+            self,
+            ws,
+            skill,
+            good,
+            crate::actor::WriteActor::Device {
+                device_key_id: &device.device_key_id,
+                signature: &device.signature,
+            },
+            device.expected,
+            author,
+            message,
+            op_id,
+            created_at,
+            now,
         )
         .await
     }
@@ -680,6 +693,47 @@ impl Authority {
             acting_email,
             plane_mode,
             created_at,
+        )
+        .await
+    }
+
+    /// **Revert a skill's `current` to a known-good prior version from a verified web session** — the
+    /// browser's "Roll back to this version". `good` is the full target commit id; `expected` is the live
+    /// `current` generation the caller's version page rendered against (a moved pointer refuses with
+    /// `CONFLICT`). Revert bypasses the review gate + four-eyes by design (it restores already-consented
+    /// bytes — the safety net); the session gate is the SAME confirmed **owner|reviewer** seat the approve
+    /// lane enforces, checked in-transaction (with a cheap pre-stage fence so a plain member never triggers
+    /// the forward-commit staging). The plane signs the moved pointer; followers re-verify the restored
+    /// bytes against the target's digest — consent stays end-to-end, and the receipt records
+    /// `method = web_session` + the acting principal. Idempotent per `request_id` (a canonical UUID).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
+    /// configured ([`Authority::with_plane_key`]). Every protocol outcome is a receipt, not an error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn revert_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        good: CommitId,
+        expected: topos_types::Generation,
+        request_id: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        crate::session_review::revert_session(
+            self,
+            ws,
+            skill,
+            good,
+            expected,
+            request_id,
+            acting_email,
+            plane_mode,
+            created_at,
+            now,
         )
         .await
     }
