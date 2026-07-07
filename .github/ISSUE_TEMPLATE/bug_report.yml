@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in the topos CLI or the topos-plane server behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not report security vulnerabilities here** — use the private channel
+        in [SECURITY.md](https://github.com/topos-sh/topos/security/policy) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        Steps to reproduce:
+        1. `topos ...`
+        2. ...
+
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - topos (CLI)
+        - topos-plane (server)
+        - installer / packaging
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `topos --version` (or the plane image tag / commit).
+      placeholder: "topos 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture (e.g. macOS arm64, Linux x86_64), and the harness if relevant.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: |
+        Relevant output. The CLI logs to `~/.topos/log.jsonl`; `TOPOS_DEBUG=1` prints the full error chain.
+        **Redact any tokens, invite links, or secrets before pasting.**
+      render: shell
+    validations:
+      required: false

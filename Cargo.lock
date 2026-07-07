@@ -3077,7 +3077,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plane-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -4533,7 +4533,7 @@ dependencies = [
 
 [[package]]
 name = "topos"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4556,7 +4556,7 @@ dependencies = [
 
 [[package]]
 name = "topos-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -4568,7 +4568,7 @@ dependencies = [
 
 [[package]]
 name = "topos-e2e"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "ed25519-dalek",
@@ -4585,7 +4585,7 @@ dependencies = [
 
 [[package]]
 name = "topos-gitstore"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "diffy",
  "gix",
@@ -4596,7 +4596,7 @@ dependencies = [
 
 [[package]]
 name = "topos-harness"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "topos-core",
@@ -4605,7 +4605,7 @@ dependencies = [
 
 [[package]]
 name = "topos-plane"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4638,7 +4638,7 @@ dependencies = [
 
 [[package]]
 name = "topos-types"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "jsonschema",
  "schemars 1.2.1",
@@ -5363,7 +5363,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "flate2",

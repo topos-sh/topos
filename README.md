@@ -1,5 +1,8 @@
 # Topos
 
+[![CI](https://github.com/topos-sh/topos/actions/workflows/ci.yml/badge.svg)](https://github.com/topos-sh/topos/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A layer for AI agents to **share their behaviors** across a team — so every agent stays current with the
 same company processes and everyone gets a consistent experience. A *behavior* (a "skill") is a bundle of
 files (`SKILL.md` + scripts + reference docs); the **whole bundle** is the unit of trust.
@@ -309,6 +312,27 @@ bump). Two things to watch:
   pointer's `epoch + 1`), so a repeated restore can never re-issue a generation followers already
   recorded. Keep the helper's printed output with your backup records.
 
+## Trust & security
+
+A behavior you follow is code and prose that runs inside your agent, so integrity and consent are the whole
+point of the tool. In short: a bundle's identity is a **byte-exact sha256** over every file (different bytes
+are never "the same"), the plane **signs** every `current` pointer and a follower **pins the plane key** on
+first follow and verifies every move, and **nothing lands that was not disclosed and pinned** — no silent
+overwrites, ever. What Topos does *not* do is judge whether an approved behavior is safe to run: it
+guarantees disclosure and integrity, not a sandbox or a second permission system. The full trust model —
+what it protects, what it deliberately does not, and how to run a plane safely — is in
+[`SECURITY.md`](SECURITY.md), which is also where you report a vulnerability (privately).
+
+## Project docs
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the design: crate graph, trust boundaries, the consent + sync model.
+- [`SECURITY.md`](SECURITY.md) — the trust model and how to report a vulnerability.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and propose changes.
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — community expectations.
+- [`CHANGELOG.md`](CHANGELOG.md) — the increment-by-increment delivery history.
+
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE).
+Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Copyright 2026 Robert Krajewski.
+
+Contributions are inbound = outbound under Apache-2.0 (no CLA); see [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -2,8 +2,8 @@
 
 Delivery history, **newest first** — the increment-by-increment story of how this repository was built.
 This file is *history*, not status: the current state of every area lives in the root `CLAUDE.md` status
-table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
-entry is one shipped increment.
+table and in each crate's own `CLAUDE.md`. Version **0.1.0** is the first public release; the entries below
+are the increment-by-increment history that leads up to it, each one a shipped increment.
 
 ## The web-session review lane — browser-side approve/reject on a hosted composition
 
