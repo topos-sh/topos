@@ -16,6 +16,7 @@ use topos_types::{Generation, TerminalOutcome};
 use super::Db;
 use super::blob32;
 use super::set_current::{CurrentRow, delete_lease, i64_to_u64, u64_to_i64};
+use crate::actor::{ReceiptActor, ReceiptMethod};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, SkillId, WorkspaceId};
 use crate::set_current::{PretxnReceipt, PromoteInput, RejectInput, SetCurrentReceipt};
@@ -157,7 +158,14 @@ async fn record_pretxn_body(
         bundle_digest: r.bundle_digest,
         expected: r.expected,
     };
-    let outcome = match replay(tx, r.ws, r.device_key_id, r.op_id, &bound).await? {
+    // Pre-txn receipts are DEVICE-only by construction (the session lane's pre-txn failures are
+    // synthesized, never persisted — see `crate::set_current`'s pre-txn sink).
+    let who = ReceiptActor {
+        actor: r.device_key_id,
+        method: ReceiptMethod::DeviceSigned,
+        request_sha256: None,
+    };
+    let outcome = match replay(tx, r.ws, &who, r.op_id, &bound).await? {
         Replay::Hit(receipt) => receipt,
         Replay::Mismatch(original_at) => permanent_key_reuse(r.op_id, &bound, &original_at),
         Replay::Fresh => {
@@ -175,7 +183,7 @@ async fn record_pretxn_body(
                 created_at: r.created_at.to_owned(),
                 details: r.details.clone(),
             };
-            insert_receipt(tx, r.ws, r.device_key_id, &stored).await?;
+            insert_receipt(tx, r.ws, &who, &stored).await?;
             stored.into_receipt()
         }
     };
@@ -338,6 +346,30 @@ pub(super) async fn permanent(
     .await
 }
 
+/// A DURABLE typed DENIED carrying a machine-branchable `code` beside the message (the session lane's
+/// role-gate denial: the caller is a CONFIRMED member — entitled to a recorded, replayable answer — but
+/// holds no reviewer/owner seat).
+pub(super) async fn denied_code(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &PromoteInput<'_>,
+    bound: &BoundIdentity<'_>,
+    code: &str,
+    msg: &str,
+) -> Result<SetCurrentReceipt> {
+    let details = Some(serde_json::json!({ "code": code, "message": msg }));
+    write_terminal(
+        tx,
+        input,
+        bound,
+        TerminalOutcome::Denied,
+        None,
+        None,
+        None,
+        details,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn write_terminal(
     tx: &mut Transaction<'_, Postgres>,
@@ -363,7 +395,7 @@ async fn write_terminal(
         created_at: input.created_at.to_owned(),
         details,
     };
-    insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    insert_receipt(tx, input.ws, &input.actor.receipt_actor(), &stored).await?;
     // Release the candidate's promotion lease: a terminal non-OK abandons this candidate, and its lease was
     // made non-expiring by a successful migrate, so without this its objects would be GC-rooted forever. The
     // delete is idempotent (a no-op if the lease is absent or only expiring). A retry of the SAME op_id
@@ -433,7 +465,7 @@ pub(super) async fn reject_terminal(
         created_at: r.created_at.to_owned(),
         details: Some(serde_json::json!({ "code": code })),
     };
-    insert_receipt(tx, r.ws, r.device_key_id, &stored).await?;
+    insert_receipt(tx, r.ws, &r.actor.receipt_actor(), &stored).await?;
     Ok(stored.into_receipt())
 }
 
@@ -475,7 +507,33 @@ pub(super) async fn reject_denied(
         created_at: r.created_at.to_owned(),
         details: detail(msg),
     };
-    insert_receipt(tx, r.ws, r.device_key_id, &stored).await?;
+    insert_receipt(tx, r.ws, &r.actor.receipt_actor(), &stored).await?;
+    Ok(stored.into_receipt())
+}
+
+/// The reject transaction's DURABLE typed DENIED with a machine-branchable `code` (the session lane's
+/// role-gate denial — the twin of [`denied_code`]).
+pub(super) async fn reject_denied_code(
+    tx: &mut Transaction<'_, Postgres>,
+    r: &RejectInput<'_>,
+    code: &str,
+    msg: &str,
+) -> Result<SetCurrentReceipt> {
+    let stored = StoredReceipt {
+        op_id: r.op_id.to_owned(),
+        command: crate::set_current::device_op_command(r.op).to_owned(),
+        skill_id: r.skill.as_str().to_owned(),
+        commit: Some(r.commit),
+        bundle_digest: Some(r.bundle_digest),
+        expected: r.expected,
+        outcome: TerminalOutcome::Denied,
+        current: None,
+        signed_record: None,
+        key_id: None,
+        created_at: r.created_at.to_owned(),
+        details: Some(serde_json::json!({ "code": code, "message": msg })),
+    };
+    insert_receipt(tx, r.ws, &r.actor.receipt_actor(), &stored).await?;
     Ok(stored.into_receipt())
 }
 
@@ -502,27 +560,108 @@ pub(super) enum Replay {
     Fresh,
 }
 
+/// The LANE-BLIND classifying replay: ONE `(workspace, op id)` probe (via `op_receipts_by_ws_op`) that
+/// closes every reuse direction. The caller's OWN slot (`method` AND `actor` match) replays on a full
+/// identity match — the bound-identity columns AND the `request_sha256` (`None == NULL` on the device
+/// lane; byte-equal on the session lane, which is what makes a divergent-REASON retry fail closed) — and
+/// mismatches otherwise. With NO own slot: a session caller is refused by ANY existing row (the session
+/// slot is global per `(ws, op_id)` — the roster-leg rule), while a device caller is refused only by a
+/// `web_session` row (other devices' rows stay invisible — the per-device slot semantics are preserved
+/// bit-for-bit). Races converge via SSI + the serializable runner's retry; no new unique constraint.
 pub(super) async fn replay(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    device_key_id: &str,
+    who: &ReceiptActor<'_>,
     op_id: &str,
     bound: &BoundIdentity<'_>,
 ) -> Result<Replay> {
-    match get_receipt(&mut **tx, ws, device_key_id, op_id).await? {
-        None => Ok(Replay::Fresh),
-        Some(stored) => {
-            if stored.command == bound.command
+    let ws_s = ws.as_str();
+    let rows = sqlx::query!(
+        r#"SELECT actor AS "actor!", method AS "method!",
+                  request_sha256 AS "request_sha256?: Vec<u8>",
+                  command AS "command!", skill_id AS "skill_id!",
+                  commit_id AS "commit_id?: Vec<u8>", bundle_digest AS "bundle_digest?: Vec<u8>",
+                  expected_epoch AS "expected_epoch!: i64", expected_seq AS "expected_seq!: i64",
+                  outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
+                  current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
+                  key_id AS "key_id?", created_at AS "created_at!", details AS "details?"
+           FROM op_receipts WHERE workspace_id = $1 AND op_id = $2
+           ORDER BY created_at, actor"#,
+        ws_s,
+        op_id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    if rows.is_empty() {
+        return Ok(Replay::Fresh);
+    }
+    if let Some(own) = rows
+        .iter()
+        .find(|r| r.method == who.method.as_str() && r.actor == who.actor)
+    {
+        let sha_matches = match (&who.request_sha256, &own.request_sha256) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.as_slice() == b.as_slice(),
+            _ => false,
+        };
+        let current = match (own.current_epoch, own.current_seq) {
+            (Some(e), Some(s)) => Some(Generation {
+                epoch: i64_to_u64(e)?,
+                seq: i64_to_u64(s)?,
+            }),
+            _ => None,
+        };
+        let stored = StoredReceipt {
+            op_id: op_id.to_owned(),
+            command: own.command.clone(),
+            skill_id: own.skill_id.clone(),
+            commit: own
+                .commit_id
+                .as_deref()
+                .map(blob32)
+                .transpose()?
+                .map(CommitId),
+            bundle_digest: own.bundle_digest.as_deref().map(blob32).transpose()?,
+            expected: Generation {
+                epoch: i64_to_u64(own.expected_epoch)?,
+                seq: i64_to_u64(own.expected_seq)?,
+            },
+            outcome: parse_outcome(&own.outcome)?,
+            current,
+            signed_record: own.signed_record.clone(),
+            key_id: own.key_id.clone(),
+            created_at: own.created_at.clone(),
+            // See `get_receipt`: an unparseable stored `details` must alarm, never replay altered.
+            details: own
+                .details
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|_| AuthorityError::integrity(BadDetails))?,
+        };
+        return Ok(
+            if sha_matches
+                && stored.command == bound.command
                 && stored.skill_id == bound.skill_id
                 && stored.commit == bound.commit
                 && stored.bundle_digest == bound.bundle_digest
                 && stored.expected == bound.expected
             {
-                Ok(Replay::Hit(stored.into_receipt()))
+                Replay::Hit(stored.into_receipt())
             } else {
-                Ok(Replay::Mismatch(stored.created_at))
-            }
-        }
+                Replay::Mismatch(stored.created_at)
+            },
+        );
+    }
+    // No own slot. The rows are deterministically ordered, so the refusal's `created_at` (which keys the
+    // synthesized reuse receipt's byte stability) is stable across retries.
+    match who.method {
+        ReceiptMethod::WebSession => Ok(Replay::Mismatch(rows[0].created_at.clone())),
+        ReceiptMethod::DeviceSigned => match rows.iter().find(|r| r.method == "web_session") {
+            Some(w) => Ok(Replay::Mismatch(w.created_at.clone())),
+            None => Ok(Replay::Fresh),
+        },
     }
 }
 
@@ -564,6 +703,9 @@ impl StoredReceipt {
 
 // --- the op_receipts row SQL (workspace-scoped; the one durable receipt slot per (device, op id)) ---
 
+/// The DEVICE-only point lookup (the pre-txn replay fast paths: `replay_revert` /
+/// `replay_gated_publish` / `published_ok_exists`). The explicit `method = 'device_signed'` keeps a
+/// session receipt out of a device flow even if the two lanes ever shared an actor string.
 async fn get_receipt<'e, E>(
     executor: E,
     ws: &WorkspaceId,
@@ -581,7 +723,8 @@ where
                   outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
                   current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
                   key_id AS "key_id?", created_at AS "created_at!", details AS "details?"
-           FROM op_receipts WHERE workspace_id = $1 AND device_key_id = $2 AND op_id = $3"#,
+           FROM op_receipts
+           WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'device_signed'"#,
         ws_s,
         device_key_id,
         op_id,
@@ -627,7 +770,7 @@ where
 pub(super) async fn insert_receipt(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    device_key_id: &str,
+    who: &ReceiptActor<'_>,
     r: &StoredReceipt,
 ) -> Result<()> {
     let ws_s = ws.as_str();
@@ -639,14 +782,18 @@ pub(super) async fn insert_receipt(
     let current_epoch = r.current.map(|g| u64_to_i64(g.epoch)).transpose()?;
     let current_seq = r.current.map(|g| u64_to_i64(g.seq)).transpose()?;
     let details = r.details.as_ref().map(ToString::to_string);
+    let method = who.method.as_str();
+    let request_sha256 = who.request_sha256.map(|s| s.to_vec());
     sqlx::query!(
-        "INSERT INTO op_receipts (workspace_id, device_key_id, op_id, command, skill_id, commit_id, \
-            bundle_digest, expected_epoch, expected_seq, outcome, current_epoch, current_seq, \
-            signed_record, key_id, created_at, details) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+        "INSERT INTO op_receipts (workspace_id, actor, op_id, method, request_sha256, command, \
+            skill_id, commit_id, bundle_digest, expected_epoch, expected_seq, outcome, \
+            current_epoch, current_seq, signed_record, key_id, created_at, details) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
         ws_s,
-        device_key_id,
+        who.actor,
         r.op_id,
+        method,
+        request_sha256,
         r.command,
         r.skill_id,
         commit,

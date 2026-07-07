@@ -139,6 +139,18 @@
   `read_object_session` (verified raw bytes). Same strict-mode threading; the authority ops uniformly
   deny a self-host plane and gate on a CONFIRMED workspace member (any role — deliberately broader
   than the device lane's per-skill roster).
+- **The session-review wrappers** (`session_review_cmd.rs`) — the write twin of the session-read
+  wrappers, the same leak-free, LIB-ONLY surface for the PRIVILEGED web-session review ops (a downstream
+  composition's authenticated admin routes call them with a session-verified acting email; there is NO
+  OSS HTTP route): `PlaneState::review_approve_session` / `review_reject_session` (approve / reject an
+  open proposal — the reject `reason` is MANDATORY) return a typed `SessionReviewSummary`
+  (`Approved` / `Rejected` / `Conflict` — the same stale-base refusal the CLI gets — / `Denied { reason }`
+  / `NotFound`), and `read_proposal_session` returns the proposal detail (status + base + proposer +
+  resolution + the review-required policy) or the uniform `NotFound`. Classification posture:
+  malformed/unknown ids, an unproven caller, self-host, and an unknown candidate all fold to `NotFound`
+  (disclosing nothing); the member-entitled protocol refusals (the reviewer-role gate, four-eyes, a
+  resolved target, an empty reason, a reused request id) stay typed `Denied` so the composing surface can
+  say why. Same strict-mode threading as the roster/read wrappers.
 - **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
   `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —

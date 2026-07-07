@@ -14,6 +14,7 @@
 use topos_core::sign::{self, Commit, DeviceOp};
 use topos_types::{Generation, TerminalOutcome};
 
+use crate::actor::WriteActor;
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, SkillId, WorkspaceId};
@@ -86,9 +87,9 @@ pub(crate) struct PromoteInput<'a> {
     pub skill: &'a SkillId,
     pub op_id: &'a str,
     pub op_id_bytes: [u8; 16],
-    pub device_key_id: &'a str,
+    /// Which lane the request arrived on — the txn body branches on it ONLY at its authz step.
+    pub actor: WriteActor<'a>,
     pub op: DeviceOp,
-    pub signature: &'a [u8; 64],
     pub expected: Generation,
     pub candidate_commit: CommitId,
     pub candidate_bundle_digest: [u8; 32],
@@ -369,12 +370,15 @@ pub(crate) struct RejectInput<'a> {
     pub skill: &'a SkillId,
     pub commit: CommitId,
     pub bundle_digest: [u8; 32],
-    pub device_key_id: &'a str,
+    /// Which lane the request arrived on — `reject_run` branches on it ONLY at its authz step.
+    pub actor: WriteActor<'a>,
     pub op: DeviceOp,
     pub op_id: &'a str,
     pub op_id_bytes: [u8; 16],
-    pub signature: &'a [u8; 64],
     pub expected: Generation,
+    /// The session lane's mandatory rejection reason (`Some(trimmed non-empty)`); the device lane
+    /// carries `None` (CLI reason parity is deliberately not built).
+    pub reason: Option<&'a str>,
     pub created_at: &'a str,
 }
 
@@ -433,15 +437,16 @@ pub(crate) async fn review_approve(
     ws: &WorkspaceId,
     skill: &SkillId,
     commit: CommitId,
-    device: &DeviceSignedOp,
+    actor: WriteActor<'_>,
+    expected: Generation,
     op_id: &OpId,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
-    let base = device.expected;
-    let command = device_op_command(device.op);
+    let base = expected;
+    let command = device_op_command(DeviceOp::ReviewApprove);
 
-    // The proposal commit's recorded digest (server-trusted, written at propose) — needed to verify the
+    // The proposal commit's recorded digest (server-trusted, written at propose) — needed to verify a
     // device-op signature, bound the receipt, and render. Absent ⇒ this skill has no such commit ⇒ a typed
     // permanent failure (there is nothing to approve).
     let Some(digest) = authority
@@ -449,22 +454,21 @@ pub(crate) async fn review_approve(
         .skill_commit_bundle_digest(ws, skill, commit)
         .await?
     else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(commit),
-                None,
-                base,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("no such proposal commit for this skill"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            None,
+            base,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("no such proposal commit for this skill"),
+            created_at,
+        )
+        .await;
     };
 
     // The proposal's IMMUTABLE promote inputs (its base commit + the rooted object set). Absent ⇒ no proposal
@@ -474,41 +478,39 @@ pub(crate) async fn review_approve(
         .proposal_approve_inputs(ws, skill, commit, base)
         .await?
     else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(commit),
-                Some(digest),
-                base,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("no proposal for this candidate and base"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            Some(digest),
+            base,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("no proposal for this candidate and base"),
+            created_at,
+        )
+        .await;
     };
 
     let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(commit),
-                Some(digest),
-                base,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("op_id is not a canonical UUID"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            Some(digest),
+            base,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("op_id is not a canonical UUID"),
+            created_at,
+        )
+        .await;
     };
 
     // Re-verify the proposal's bytes are renderable BEFORE the transaction — availability (Step E) is DB-only
@@ -536,9 +538,8 @@ pub(crate) async fn review_approve(
         skill,
         op_id: op_id.as_str(),
         op_id_bytes,
-        device_key_id: &device.device_key_id,
-        op: device.op,
-        signature: &device.signature,
+        actor,
+        op: DeviceOp::ReviewApprove,
         expected: base,
         candidate_commit: commit,
         candidate_bundle_digest: digest,
@@ -555,55 +556,56 @@ pub(crate) async fn review_approve(
 /// Drive a `review --reject` / proposer-withdraw: flip an open proposal to `rejected` — signing nothing,
 /// moving no pointer. Resolves the proposal commit's recorded digest (for the device-op signature + the bound
 /// receipt identity), then runs the standalone reject transaction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn review_reject(
     authority: &Authority,
     ws: &WorkspaceId,
     skill: &SkillId,
     commit: CommitId,
-    device: &DeviceSignedOp,
+    actor: WriteActor<'_>,
+    expected: Generation,
+    reason: Option<&str>,
     op_id: &OpId,
     created_at: &str,
 ) -> Result<SetCurrentReceipt> {
-    let command = device_op_command(device.op);
+    let command = device_op_command(DeviceOp::ReviewReject);
     let Some(digest) = authority
         .db()
         .skill_commit_bundle_digest(ws, skill, commit)
         .await?
     else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(commit),
-                None,
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("no such proposal commit for this skill"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            None,
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("no such proposal commit for this skill"),
+            created_at,
+        )
+        .await;
     };
     let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
-        return authority
-            .db()
-            .record_pretxn(pretxn(
-                ws,
-                &device.device_key_id,
-                op_id.as_str(),
-                command,
-                skill,
-                Some(commit),
-                Some(digest),
-                device.expected,
-                TerminalOutcome::PermanentFailure,
-                detail_msg("op_id is not a canonical UUID"),
-                created_at,
-            ))
-            .await;
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            Some(digest),
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("op_id is not a canonical UUID"),
+            created_at,
+        )
+        .await;
     };
     authority
         .db()
@@ -612,15 +614,71 @@ pub(crate) async fn review_reject(
             skill,
             commit,
             bundle_digest: digest,
-            device_key_id: &device.device_key_id,
-            op: device.op,
+            actor,
+            op: DeviceOp::ReviewReject,
             op_id: op_id.as_str(),
             op_id_bytes,
-            signature: &device.signature,
-            expected: device.expected,
+            expected,
+            reason,
             created_at,
         })
         .await
+}
+
+/// Write a pre-transaction terminal outcome through the actor's lane: DURABLE for a device (the replay
+/// surface for those outcomes), SYNTHESIZED — same fields, never persisted — for a session. A
+/// web-verified email proves nothing about membership in the target workspace, so a session pre-txn
+/// failure must not grow `op_receipts` (the session-lane recording rule); a deterministic re-run is owed
+/// instead of a byte-stable replay.
+#[allow(clippy::too_many_arguments)]
+async fn pretxn_fail(
+    authority: &Authority,
+    actor: &WriteActor<'_>,
+    ws: &WorkspaceId,
+    op_id: &str,
+    command: &str,
+    skill: &SkillId,
+    commit: Option<CommitId>,
+    bundle_digest: Option<[u8; 32]>,
+    expected: Generation,
+    outcome: TerminalOutcome,
+    details: Option<serde_json::Value>,
+    created_at: &str,
+) -> Result<SetCurrentReceipt> {
+    match actor {
+        WriteActor::Device { device_key_id, .. } => {
+            authority
+                .db()
+                .record_pretxn(pretxn(
+                    ws,
+                    device_key_id,
+                    op_id,
+                    command,
+                    skill,
+                    commit,
+                    bundle_digest,
+                    expected,
+                    outcome,
+                    details,
+                    created_at,
+                ))
+                .await
+        }
+        WriteActor::Session { .. } => Ok(SetCurrentReceipt {
+            op_id: op_id.to_owned(),
+            command: command.to_owned(),
+            skill_id: skill.as_str().to_owned(),
+            version_id: commit,
+            bundle_digest,
+            expected,
+            outcome,
+            current: None,
+            signed_record: None,
+            key_id: None,
+            created_at: created_at.to_owned(),
+            details,
+        }),
+    }
 }
 
 /// Reject an op routed to the wrong entry point (e.g. a `propose` whose device op is not `PublishPropose`) — a
@@ -712,9 +770,11 @@ async fn drive(
         skill: cand.skill,
         op_id: cand.op_id.as_str(),
         op_id_bytes,
-        device_key_id: &device.device_key_id,
+        actor: WriteActor::Device {
+            device_key_id: &device.device_key_id,
+            signature: &device.signature,
+        },
         op: device.op,
-        signature: &device.signature,
         expected: device.expected,
         candidate_commit: cand.commit,
         candidate_bundle_digest: cand.bundle_digest,

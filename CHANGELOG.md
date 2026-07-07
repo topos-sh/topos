@@ -5,6 +5,46 @@ This file is *history*, not status: the current state of every area lives in the
 table and in each crate's own `CLAUDE.md`. There are no version numbers yet (nothing is released); each
 entry is one shipped increment.
 
+## The web-session review lane — browser-side approve/reject on a hosted composition
+
+A hosted composition's web tier could render a proposal (the read lane) but only the pasted-token CLI
+could act on it; the plane now also serves PRIVILEGED lib-level review writes (the write twin of the
+session-read leg): **approve** and **reject** an open proposal from a verified web session, plus a
+proposal-detail read. The write TERMINATES in the SAME serializable pointer-move transaction the
+device-signed CLI runs — one approve predicate, one `(epoch, seq)` CAS, one plane-signed pointer, one
+four-eyes gate — branching on a new `WriteActor` (device vs session) ONLY at the authorization step: the
+device arm is byte-identical, and the session arm is an in-transaction confirmed **owner-or-reviewer**
+workspace-seat gate — the FIRST enforcement of the reviewer role (a deliberate lane asymmetry: the CLI
+lane keeps its per-skill roster). The orchestration mirrors the session-roster leg's trust shape:
+self-host uniformly denied, a canonical-UUID `request_id` idempotency under a fresh
+`TOPOS_SESSION_REVIEW_V1` domain tag (so no stored identity from another domain can byte-match a review
+request), a pool-level confirmed-member pre-gate before any proposal/digest/render work, and a MANDATORY
+non-empty reject reason. The recording rule keeps the ledger honest: an unproven caller's refusal is
+synthesized and NEVER persisted (a web-verified email proves nothing about membership in the target
+workspace — it must not grow the receipts table or squat op-id slots), while a confirmed plain member's
+role refusal is a durable typed `REVIEWER_ROLE_REQUIRED` denial.
+
+- **Migration `0012`** renames `op_receipts.device_key_id → actor` (the slot always held the acting
+  identity — a signing device key id, or now the session's verified email), adds a `method` discriminant
+  (`device_signed` / `web_session`), a `request_sha256` (the session lane's full-request identity; NULL on
+  the device lane, whose identity is the signed device-op frame), a reserved `step_up_attestation` column,
+  and a `(workspace_id, op_id)` index; and adds `proposals.resolved_reason` + `resolved_at` (a device
+  reject writes NULL — the CLI keeps its surface). The receipt is henceforth the audit trail for WHICH
+  leg acted.
+- **The replay probe went lane-blind** — one `(workspace, op_id)` lookup that fails closed in BOTH
+  directions on cross-lane id reuse (a device op id and a session request id never replay each other),
+  while each lane's own slot still replays byte-identically on a full `(method, actor, request_sha256)`
+  match (the per-device slots are preserved).
+- **Proposer disclosure is session-lane-only.** The proposal-detail read discloses the proposer +
+  resolution facts + the `review_required` policy at read time; the thin `/v1` proposals listing stays
+  proposer-free and byte-unchanged.
+- **The wire, OpenAPI, schemas, and fixtures are all byte-unchanged** (the drift gates prove it) — the
+  review leg is lib-only, with NO OSS HTTP route (a composition's authenticated admin routes are the
+  callers). `topos-plane` wraps the three ops leak-free (`session_review_cmd.rs`), returning typed
+  `Approved` / `Rejected` / `Conflict` / `Denied { reason }` / `NotFound` summaries. Consent stays
+  end-to-end: a session approve carries no reviewer signature over the candidate, but the plane still
+  signs the moved pointer and followers still re-verify bytes against the approved digest before applying.
+
 ## The share-link document is the browser face too — human hand-off first, served as text/plain
 
 `GET /i/{token}`'s non-JSON representation — the agent-instruction document — now opens with the

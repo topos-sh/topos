@@ -68,6 +68,7 @@
 // one pointer-move write; `db/proposals` holds their SQL); and `db/receipts` is SQL-half-only (the receipt
 // read/insert/replay machinery + terminal-outcome writers both `db/set_current` paths call — no
 // orchestration twin).
+mod actor;
 mod authority;
 mod db;
 mod enroll;
@@ -78,6 +79,7 @@ mod lineage;
 mod read;
 mod restore;
 mod session_read;
+mod session_review;
 mod session_roster;
 mod set_current;
 mod signer;
@@ -115,7 +117,10 @@ pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId}
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
 pub use restore::EpochBumpReport;
-pub use session_read::SkillIndexRow;
+pub use session_read::{ProposalDetailSession, SkillIndexRow};
+pub use session_review::{
+    REASON_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_CODE, SESSION_REVIEW_ACTING_DENIED,
+};
 pub use session_roster::{
     RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };

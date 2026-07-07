@@ -781,7 +781,7 @@ mod retry_classification_tests {
     async fn only_convergent_unique_violations_are_retryable(pool: PgPool) {
         // op_receipts_pkey → a unique violation the runner treats as retryable.
         let receipt = "INSERT INTO op_receipts \
-            (workspace_id, device_key_id, op_id, command, skill_id, expected_epoch, expected_seq, \
+            (workspace_id, actor, op_id, command, skill_id, expected_epoch, expected_seq, \
              outcome, created_at) \
             VALUES ('w_a', 'dk', 'op1', 'publish', 's_a', 1, 1, 'OK', '2026-06-30T00:00:00Z')";
         sqlx::query(receipt)

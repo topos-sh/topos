@@ -192,3 +192,65 @@ pub(crate) async fn list_open_proposals_session(
     let scope = member_scope(ws, skill, acting)?;
     crate::read::list_open_proposals(authority, &scope, ws.as_str(), scope.skill().as_str()).await
 }
+
+/// One proposal's detail for a confirmed member — the review surface's read: status + base + proposer
+/// (deliberately session-lane-only: the thin `/v1` listing stays proposer-free) + the resolution facts +
+/// the workspace's `review_required` policy at read time (display-only; the in-txn gate is the
+/// authority). `Ok(None)` means no proposal of this candidate was ever opened on this skill — a
+/// member-entitled post-gate outcome the composing wrapper folds into its uniform miss.
+#[derive(Debug, Clone)]
+pub struct ProposalDetailSession {
+    /// The candidate commit (the proposal's `@hash`).
+    pub version_id: [u8; 32],
+    /// The STORED status (`open` / `accepted` / `rejected`) — `stale` stays derived, by the reader,
+    /// from `open` + a base that no longer equals the live current generation.
+    pub status: String,
+    /// The base generation the proposal was opened against.
+    pub base: Generation,
+    /// When the proposal was opened (ISO-8601).
+    pub created_at: String,
+    /// The proposer's canonical email (the four-eyes surface).
+    pub proposer: String,
+    /// The workspace's review-required policy at read time (display-only).
+    pub review_required: bool,
+    /// Who resolved it (`None` while open; pre-lane resolved rows may carry `None` timestamps/reasons).
+    pub resolved_by: Option<String>,
+    /// The session reject's mandatory reason (`None` on accepts, device rejects, and pre-lane rows).
+    pub resolved_reason: Option<String>,
+    /// When it was resolved (ISO-8601; `None` on open and pre-lane rows).
+    pub resolved_at: Option<String>,
+}
+
+/// The proposal-detail read (see [`ProposalDetailSession`]): the shared member gate, then the ONE
+/// preference-ordered row (open > accepted > latest rejected) for `(skill, candidate)`.
+pub(crate) async fn read_proposal_detail_session(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &str,
+    version_id_hex: &str,
+    acting_email: &str,
+    plane_mode: DeploymentMode,
+) -> Result<Option<ProposalDetailSession>> {
+    let acting = member_gate(authority, ws, acting_email, plane_mode).await?;
+    let scope = member_scope(ws, skill, acting)?;
+    let commit = crate::read::parse_hex32(version_id_hex).ok_or(AuthorityError::NotFound)?;
+    let Some(row) = authority
+        .db()
+        .read_proposal_detail(ws, scope.skill(), crate::id::CommitId(commit))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let review_required = authority.db().workspace_review_required(ws).await?;
+    Ok(Some(ProposalDetailSession {
+        version_id: commit,
+        status: row.status.as_str().to_owned(),
+        base: row.base,
+        created_at: row.created_at,
+        proposer: row.proposer,
+        review_required,
+        resolved_by: row.resolved_by,
+        resolved_reason: row.resolved_reason,
+        resolved_at: row.resolved_at,
+    }))
+}

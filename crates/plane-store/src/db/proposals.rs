@@ -224,6 +224,69 @@ impl Db {
     }
 }
 
+/// One proposal's stored facts, as the session detail read discloses them to a confirmed member —
+/// including the `proposer` (deliberately withheld from the thin `/v1` listing; the session lane
+/// discloses it for the four-eyes surface) and the resolution columns.
+#[derive(Debug, Clone)]
+pub(crate) struct ProposalDetailRow {
+    pub status: ProposalStatus,
+    pub base: Generation,
+    pub created_at: String,
+    pub proposer: String,
+    pub resolved_by: Option<String>,
+    pub resolved_reason: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+impl Db {
+    /// The ONE row the detail read shows for a candidate: two rows CAN coexist for one `(skill, commit)`
+    /// (the partial-unique is per base — a rejected attempt plus a re-propose on a newer base), so the
+    /// preference order is load-bearing — an OPEN row must never be shadowed by any terminal row
+    /// regardless of timestamps: open > accepted > latest rejected, tie-break latest `created_at`.
+    pub(crate) async fn read_proposal_detail(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+    ) -> Result<Option<ProposalDetailRow>> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        let cid = commit.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT status AS "status!", base_epoch AS "base_epoch!: i64",
+                      base_seq AS "base_seq!: i64", created_at AS "created_at!",
+                      proposer AS "proposer!", resolved_by AS "resolved_by?",
+                      resolved_reason AS "resolved_reason?", resolved_at AS "resolved_at?"
+               FROM proposals
+               WHERE workspace_id = $1 AND skill_id = $2 AND commit_id = $3
+               ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+                        created_at DESC
+               LIMIT 1"#,
+            ws_s,
+            skill_s,
+            cid,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(ProposalDetailRow {
+                status: parse_status(&r.status)?,
+                base: Generation {
+                    epoch: i64_to_u64(r.base_epoch)?,
+                    seq: i64_to_u64(r.base_seq)?,
+                },
+                created_at: r.created_at,
+                proposer: r.proposer,
+                resolved_by: r.resolved_by,
+                resolved_reason: r.resolved_reason,
+                resolved_at: r.resolved_at,
+            })),
+        }
+    }
+}
+
 /// Insert a fresh `open` proposal (provenance — `skill_commit` — must already be written: the foreign key).
 /// `id` IS the opening op_id. `base` is recorded as the candidate's base generation (born non-stale, since
 /// the caller proved `current.es == base` via the compare-and-set just above).
@@ -394,23 +457,30 @@ pub(super) async fn resolve_proposal(
     }
 }
 
-/// Transition a proposal's stored status (`open → accepted | rejected`), stamping the resolving principal.
+/// Transition a proposal's stored status (`open → accepted | rejected`), stamping the resolving principal,
+/// the resolution time, and — on a session reject — the mandatory reason (`None` everywhere else: an
+/// accept has no reason field, and device rejects deliberately carry none).
 pub(super) async fn set_proposal_status(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     id: &str,
     status: ProposalStatus,
     resolved_by: &Principal,
+    resolved_reason: Option<&str>,
+    resolved_at: &str,
 ) -> Result<()> {
     let ws_s = ws.as_str();
     let status_s = status.as_str();
     let resolver = resolved_by.as_str();
     sqlx::query!(
-        "UPDATE proposals SET status = $3, resolved_by = $4 WHERE workspace_id = $1 AND id = $2",
+        "UPDATE proposals SET status = $3, resolved_by = $4, resolved_reason = $5, resolved_at = $6 \
+         WHERE workspace_id = $1 AND id = $2",
         ws_s,
         id,
         status_s,
         resolver,
+        resolved_reason,
+        resolved_at,
     )
     .execute(&mut **tx)
     .await

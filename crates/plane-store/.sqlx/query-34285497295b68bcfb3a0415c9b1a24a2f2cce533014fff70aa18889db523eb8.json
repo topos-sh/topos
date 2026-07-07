@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO op_receipts (workspace_id, actor, op_id, method, request_sha256, command, skill_id, commit_id, bundle_digest, expected_epoch, expected_seq, outcome, current_epoch, current_seq, signed_record, key_id, created_at, details) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Text",
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34285497295b68bcfb3a0415c9b1a24a2f2cce533014fff70aa18889db523eb8"
+}

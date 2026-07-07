@@ -37,6 +37,15 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   authorized by an in-transaction confirmed-OWNER acting gate (no signature — the composing caller's
   session verification is the authentication), `request_id`-idempotent through the same
   `workspace_events` slot under a fresh session-tagged identity, uniformly denied on self-host.
+- `session_review.rs` (+ `actor.rs`) — the WEB-SESSION review leg (privileged lib-level, no OSS HTTP
+  route): approve/reject an OPEN proposal from a verified session. Orchestration ONLY, with **no db twin**
+  — the write terminates in the SAME `db/set_current.rs` `run` / reject transaction (branching on the
+  `WriteActor` lane at its authorization step alone), its receipts run through `db/receipts.rs` (the
+  `actor` / `method` / `request_sha256` slot) and the resolution columns through `db/proposals.rs`; the
+  review READ sibling (`read_proposal_detail_session`) lives in `session_read.rs` over the same member
+  gate. `actor.rs` is the shared lane vocabulary (`WriteActor` Device|Session + the ONE `ReceiptActor`
+  projection — every terminal writer derives its `(actor, method, request_sha256)` triple there, so the
+  lane vocabulary cannot drift per writer).
 - `set_current.rs` / `db/set_current.rs` — the pointer-move: `db/set_current.rs` keeps `run`'s ordered
   arms (replay → authz → CAS → availability → lineage → the op tails) as its single story, plus the reject
   transaction; the proposals' orchestration lives here too (propose/approve are arms of the one write).
@@ -352,6 +361,46 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   rejected-candidate 404 through both lanes, and the NULL-digest-under-current Integrity probe). Reads
   mint nothing durable. The gate→reach two-statement window (a principal revoked between them completes
   one in-flight read) is the same accepted posture as the authorize-then-fetch TOCTOU.
+- **The web-session REVIEW leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
+  a hosted composition's authenticated admin routes call them; self-host uniformly denied in-op):
+  **`review_approve_session`** / **`review_reject_session`** (approve / reject an OPEN proposal from a
+  verified session) + **`read_proposal_detail_session`** (the review surface's read). The write
+  TERMINATES in the SAME serializable pointer-move transaction the device lane runs (`db/set_current.rs`'s
+  `run` and the reject transaction) — one approve predicate, one `(epoch,seq)` CAS, one plane-signed
+  pointer, one four-eyes gate — branching on the new `WriteActor` (Device|Session; `actor.rs`) ONLY at the
+  authorization step: the device arm is byte-identical to before, and the session arm is an
+  in-transaction confirmed **owner|reviewer** workspace-seat gate — **the FIRST enforcement of the
+  reviewer role** (a deliberate lane asymmetry: the device lane keeps its per-skill roster). Orchestration
+  (`session_review.rs`) mirrors the roster leg's trust shape: uniform self-host deny, a canonical-UUID
+  `request_id` idempotency under a fresh `TOPOS_SESSION_REVIEW_V1` domain tag (distinct from every kernel
+  and roster tag, so no stored identity from another domain can byte-match a review request), a
+  POOL-LEVEL confirmed-member pre-gate BEFORE any proposal/digest/render work (the in-txn role gate stays
+  the authority), and a MANDATORY non-empty reject reason. **The recording rule**: an unproven caller's
+  refusal is SYNTHESIZED, never persisted (a web-verified email proves nothing about membership in the
+  target workspace — it must not grow `op_receipts` or squat op-id slots), while a CONFIRMED plain
+  member's role refusal is a DURABLE typed `REVIEWER_ROLE_REQUIRED` denial (a member is entitled to a
+  recorded, replayable answer). Migration `0012` renames `op_receipts.device_key_id → actor` (the slot
+  always held the acting identity — a signing device key id, or now the session's verified EMAIL),
+  adds the `method` discriminant (`device_signed` | `web_session`) + `request_sha256` (the session lane's
+  full-request identity; NULL on the device lane, whose identity is the signed device-op frame) + a
+  reserved `step_up_attestation` column + the `(workspace_id, op_id)` index, and adds
+  `proposals.resolved_reason` + `resolved_at` (a device reject writes NULL — the CLI keeps its surface).
+  The receipt replay probe is now **lane-blind** per `(workspace, op_id)`: cross-lane id reuse fails
+  closed in BOTH directions (a device op id and a session request id never replay each other), while each
+  lane's own slot still replays byte-identically on a full `(method, actor, request_sha256)` match — the
+  per-device slots are preserved. `read_proposal_detail_session` (its read sibling, in `session_read.rs`
+  over the shared member gate) discloses the proposer + resolution + `review_required` policy at read time
+  — **proposer disclosure on the session lane only** (the thin `/v1` proposals listing stays
+  proposer-free and byte-unchanged). Consent stays end-to-end: a session approve carries no reviewer
+  signature over the candidate, but the plane still signs the moved pointer and followers still re-verify
+  bytes against the approved digest — the receipt's `method`/`actor` is the audit trail for which leg
+  acted. Public Authority ops `review_approve_session` / `review_reject_session` /
+  `read_proposal_detail_session`. Driven in-process by `src/tests/session_review.rs` (the role-gate +
+  recording-rule matrix, cross-lane four-eyes both directions, stale/ABA CONFLICTs through the session
+  lane, cross-lane id reuse in all four directions, the divergent-reason tripwire, both concurrency
+  races, the detail read incl. the open-row preference) and `src/tests/receipts_migration.rs` (the 0012
+  probe: rename/backfill/CHECKs/index), plus the request-identity unit tests (`session_review.rs`) and
+  the wrapper classification-table test (`topos-plane`).
 - **Canonical principal form — one mailbox, one identity.** `Principal::parse` folds every principal
   to the kernel's ASCII-lowercase form (`topos_core::sign::canonical_principal` — the same fold the
   client signer applies to every email-valued preimage input, so governance signatures verify over
@@ -380,8 +429,10 @@ values, so the authority code above it is storage-shaped, never SQL-shaped.
 The large-object store's **S3-compatible remote backend** (a second `LargeObjectStore` impl + a
 `large-remote` `location` arm — a no-op extraction) and its **idempotent online backfill** (copy → verify →
 flip `location` → `git repack`), both additive + client-invisible; **multi-reviewer governance**
-(`min_approvers` / N-approver / reviewer roles / queues / a rendered diff UI — single-approver only today, no
-role column; the client contribute loop + the proposals-listing read route that feeds it are now BUILT); the
+(`min_approvers` / N-approver / queues / a rendered diff UI — single-approver only today; the reviewer ROLE
+is now enforced as the session-review acting gate (a confirmed owner|reviewer seat), but multi-approver
+flows and role-scoped queues stay planned; the client contribute loop + the proposals-listing read route
+that feeds it are now BUILT); the
 **HTTP plane's still-to-come surface** over the issuance core (the audit outbox — the enrollment +
 governance request/response DTOs, the mailer, and one generic OSS OIDC connector all landed in
 `topos-plane` earlier, and the workspace-policy

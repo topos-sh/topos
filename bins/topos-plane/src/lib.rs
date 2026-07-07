@@ -41,6 +41,7 @@ mod roster_cmd;
 mod router;
 mod routes;
 mod session_read_cmd;
+mod session_review_cmd;
 mod standup_cmd;
 mod state;
 mod wire;
@@ -64,6 +65,9 @@ pub use router::router;
 pub use session_read_cmd::{
     SessionCurrentSummary, SessionObjectSummary, SessionProposalsSummary, SessionVersionSummary,
     SkillIndexEntrySummary, SkillsIndexSummary,
+};
+pub use session_review_cmd::{
+    SessionProposalDetail, SessionProposalDetailSummary, SessionReviewSummary,
 };
 pub use standup_cmd::{ApproveSessionSummary, ApproveStandupSummary, CreateWorkspaceSummary};
 pub use state::{PlaneConfig, PlaneState};

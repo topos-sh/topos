@@ -433,7 +433,7 @@ pub(crate) async fn list_open_proposals(
 /// Parse EXACTLY 64 lowercase-hex characters into a 32-byte content id. `None` on any other length or a
 /// non-lowercase-hex byte — the read routes map this to the uniform not-found (a malformed id is never a
 /// distinguishable error, and a non-canonical spelling is simply not a known id).
-fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
     }

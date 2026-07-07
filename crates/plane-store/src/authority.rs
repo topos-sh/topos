@@ -540,8 +540,21 @@ impl Authority {
             )
             .await;
         }
-        crate::set_current::review_approve(self, ws, skill, commit, &device, op_id, created_at, now)
-            .await
+        crate::set_current::review_approve(
+            self,
+            ws,
+            skill,
+            commit,
+            crate::actor::WriteActor::Device {
+                device_key_id: &device.device_key_id,
+                signature: &device.signature,
+            },
+            device.expected,
+            op_id,
+            created_at,
+            now,
+        )
+        .await
     }
 
     /// **Reject** (or proposer-**withdraw**) an open proposal — flip it to `rejected`, moving no pointer and
@@ -573,7 +586,131 @@ impl Authority {
             )
             .await;
         }
-        crate::set_current::review_reject(self, ws, skill, commit, &device, op_id, created_at).await
+        crate::set_current::review_reject(
+            self,
+            ws,
+            skill,
+            commit,
+            crate::actor::WriteActor::Device {
+                device_key_id: &device.device_key_id,
+                signature: &device.signature,
+            },
+            device.expected,
+            None,
+            op_id,
+            created_at,
+        )
+        .await
+    }
+
+    // ── the web-session REVIEW leg (privileged lib-level, no OSS HTTP route) ─────────────────────────
+    //
+    // The write twin of the session READ lane: a hosted composition's authenticated admin routes call
+    // these with the session's VERIFIED email — the composing caller's session verification is the
+    // authentication; the in-transaction gate (a confirmed OWNER or REVIEWER workspace seat — the first
+    // enforcement of the reviewer role) is the authorization. The write terminates in the SAME
+    // serializable transaction as the device lane (one approve predicate, one CAS, one plane-signed
+    // pointer, one four-eyes gate); `plane_mode` is the plane's own posture threaded by the composer,
+    // never a request field; self-host is uniformly denied.
+
+    /// **Approve an open proposal from a verified web session** — the browser's "Make current".
+    /// `expected` is the generation the caller's rendered diff was computed against; a moved pointer
+    /// refuses with the same `CONFLICT` the CLI gets, and the four-eyes gate under `review_required`
+    /// applies across lanes (the proposer's canonical email may not approve its own proposal).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
+    /// configured ([`Authority::with_plane_key`]). Every protocol outcome is a receipt, not an error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn review_approve_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        candidate: CommitId,
+        expected: topos_types::Generation,
+        request_id: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+        now: i64,
+    ) -> Result<SetCurrentReceipt> {
+        crate::session_review::review_approve_session(
+            self,
+            ws,
+            skill,
+            candidate,
+            expected,
+            request_id,
+            acting_email,
+            plane_mode,
+            created_at,
+            now,
+        )
+        .await
+    }
+
+    /// **Reject an open proposal from a verified web session**, with a MANDATORY non-empty `reason`
+    /// (recorded on the proposal row; device rejects carry none). `expected` is the proposal's base
+    /// generation — reject moves no pointer, so there is no CAS conflict: a mismatched base is the
+    /// typed "no open proposal for this candidate and base" denial.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a store fault. Every protocol outcome is a receipt, not an error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn review_reject_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        candidate: CommitId,
+        expected: topos_types::Generation,
+        reason: &str,
+        request_id: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<SetCurrentReceipt> {
+        crate::session_review::review_reject_session(
+            self,
+            ws,
+            skill,
+            candidate,
+            expected,
+            reason,
+            request_id,
+            acting_email,
+            plane_mode,
+            created_at,
+        )
+        .await
+    }
+
+    /// **One proposal's detail for a confirmed member** — the review surface's read: status + base +
+    /// the proposer (session-lane-only disclosure; the thin `/v1` listing stays proposer-free) + the
+    /// resolution facts + the `review_required` policy at read time. `Ok(None)` — no proposal of this
+    /// candidate was ever opened on this skill — is a member-entitled post-gate outcome the composing
+    /// wrapper folds into its uniform miss.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] uniformly on every pre-gate miss (self-host / malformed email or
+    /// skill or version id / unknown workspace / non-member); [`AuthorityError::Internal`] on a store
+    /// fault.
+    pub async fn read_proposal_detail_session(
+        &self,
+        ws: &WorkspaceId,
+        skill: &str,
+        version_id_hex: &str,
+        acting_email: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<Option<crate::session_read::ProposalDetailSession>> {
+        crate::session_read::read_proposal_detail_session(
+            self,
+            ws,
+            skill,
+            version_id_hex,
+            acting_email,
+            plane_mode,
+        )
+        .await
     }
 
     // ── enrollment + governance issuance (every op decided in-Authority; requires with_enrollment_config) ──

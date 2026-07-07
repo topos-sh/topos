@@ -15,18 +15,24 @@ use topos_types::{
     TerminalOutcome, WIRE_SCHEMA_VERSION,
 };
 
+use super::governance::read_member_role;
 use super::proposals::{
     ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
     read_open_proposal, resolve_proposal, set_proposal_status,
 };
 use super::receipts::{
-    BoundIdentity, Replay, StoredReceipt, approval_required, conflict, denied, denied_preauth,
-    first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse, reject_denied,
-    reject_denied_preauth, reject_terminal, replay, retryable,
+    BoundIdentity, Replay, StoredReceipt, approval_required, conflict, denied, denied_code,
+    denied_preauth, first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse,
+    reject_denied, reject_denied_code, reject_denied_preauth, reject_terminal, replay, retryable,
 };
 use super::{Db, blob32};
+use crate::actor::WriteActor;
 use crate::error::{AuthorityError, Result};
+use crate::governance::Role;
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::session_review::{
+    REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG, SESSION_REVIEW_ACTING_DENIED,
+};
 use crate::set_current::{PromoteInput, RejectInput, SetCurrentReceipt};
 use crate::signer::PlaneSigner;
 
@@ -239,8 +245,17 @@ async fn run(
     };
 
     // (1) Replay — return the stored receipt on a bound-identity match; a same-op_id different identity is a
-    // permanent key-reuse (the receipt slot belongs to the original op, never overwritten).
-    match replay(tx, input.ws, input.device_key_id, input.op_id, &bound).await? {
+    // permanent key-reuse (the receipt slot belongs to the original op, never overwritten). The probe is
+    // lane-blind (see `replay`): a device op id and a session request id fail closed against each other.
+    match replay(
+        tx,
+        input.ws,
+        &input.actor.receipt_actor(),
+        input.op_id,
+        &bound,
+    )
+    .await?
+    {
         Replay::Hit(receipt) => return Ok(receipt),
         Replay::Mismatch(original_at) => {
             return Ok(permanent_key_reuse(input.op_id, &bound, &original_at));
@@ -251,59 +266,114 @@ async fn run(
     // (2) Policy — read inside the txn (the source of truth; a preflight may have read a now-stale value).
     let review_required = read_review_required(tx, input.ws).await?;
 
-    // (3) Authorization — authoritative + in-txn. Resolve the device to a NON-REVOKED public key bound to a
-    // principal, verify the device-op signature over SERVER-trusted fields, and require the principal is
-    // rostered. A revoke committed before this txn is serialized ahead of it and blocks the move. A
-    // PRE-AUTHENTICATION failure (unknown/revoked device, invalid signature) is DENIED **without a durable
-    // receipt** — see `denied_preauth`; the authenticated-but-unauthorized denials below stay receipted.
-    let Some(device) = resolve_device(tx, input.ws, input.device_key_id).await? else {
-        return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
-    };
-    if device.revoked {
-        return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
-    }
-    let fields = DeviceOpFields {
-        workspace_id: input.ws.as_str(),
-        skill_id: input.skill.as_str(),
-        op: input.op,
-        op_id: input.op_id_bytes,
-        device_key_id: input.device_key_id,
-        expected_epoch: input.expected.epoch,
-        expected_seq: input.expected.seq,
-        commit_id: input.candidate_commit.0,
-        bundle_digest: input.candidate_bundle_digest,
-    };
-    if !verify_device_op(&fields, input.signature, &device.public_key) {
-        return denied_preauth(tx, input, &bound, "device signature invalid").await;
-    }
-    // (3b) The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
-    // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish) by a
-    // CONFIRMED workspace member — a fresh skill has no roster yet, so its first publisher must be seated
-    // by workspace membership, then self-rostered. The self-INSERT is DEFERRED to just before the op tail:
-    // every terminal writer below (denied/conflict/retryable) COMMITS its receipt, so an inline insert here
-    // would commit an orphan roster row alongside a later availability/lineage DENIED.
-    let current = read_current(tx, input.ws, input.skill).await?;
-    let genesis_standup =
-        if super::roster_exists(&mut **tx, input.ws, input.skill, &device.principal).await? {
-            false
-        } else {
-            let genesis_shaped = current.is_none()
-                && matches!(input.op, DeviceOp::PublishDirect)
-                && input.parents.is_empty();
-            if !genesis_shaped {
-                return denied(tx, input, &bound, "principal not rostered for the skill").await;
+    // (3 + 3b) Authorization — authoritative + in-txn, and the ONE place the transaction branches on the
+    // lane. Both arms read `current` only after their authentication step, so an unauthorized caller never
+    // learns the live generation; both hoist the acting principal the actor-blind tails consume.
+    //
+    // DELIBERATE LANE ASYMMETRY (stated once, here): the device arm's gate is per-skill `roster`
+    // membership (genesis-aware, unchanged); the session arm's gate is the WORKSPACE role — a confirmed
+    // owner or reviewer seat, the first enforcement of the reviewer role. A session reviewer needs no
+    // per-skill roster row (the session read lane's catalog-visibility-is-membership decision, carried to
+    // the review write).
+    let (acting, genesis_standup, current) = match &input.actor {
+        WriteActor::Device {
+            device_key_id,
+            signature,
+        } => {
+            // Resolve the device to a NON-REVOKED public key bound to a principal, verify the device-op
+            // signature over SERVER-trusted fields, and require the principal is rostered. A revoke
+            // committed before this txn is serialized ahead of it and blocks the move. A
+            // PRE-AUTHENTICATION failure (unknown/revoked device, invalid signature) is DENIED **without a
+            // durable receipt** — see `denied_preauth`; the authenticated-but-unauthorized denials below
+            // stay receipted.
+            let Some(device) = resolve_device(tx, input.ws, device_key_id).await? else {
+                return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
+            };
+            if device.revoked {
+                return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
             }
-            if !super::workspace_member_confirmed(&mut **tx, input.ws, &device.principal).await? {
-                return denied(
-                    tx,
-                    input,
-                    &bound,
-                    "principal is not a confirmed workspace member",
-                )
-                .await;
+            let fields = DeviceOpFields {
+                workspace_id: input.ws.as_str(),
+                skill_id: input.skill.as_str(),
+                op: input.op,
+                op_id: input.op_id_bytes,
+                device_key_id,
+                expected_epoch: input.expected.epoch,
+                expected_seq: input.expected.seq,
+                commit_id: input.candidate_commit.0,
+                bundle_digest: input.candidate_bundle_digest,
+            };
+            if !verify_device_op(&fields, signature, &device.public_key) {
+                return denied_preauth(tx, input, &bound, "device signature invalid").await;
             }
-            true
-        };
+            // The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
+            // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish)
+            // by a CONFIRMED workspace member — a fresh skill has no roster yet, so its first publisher
+            // must be seated by workspace membership, then self-rostered. The self-INSERT is DEFERRED to
+            // just before the op tail: every terminal writer below (denied/conflict/retryable) COMMITS its
+            // receipt, so an inline insert here would commit an orphan roster row alongside a later
+            // availability/lineage DENIED.
+            let current = read_current(tx, input.ws, input.skill).await?;
+            let genesis_standup =
+                if super::roster_exists(&mut **tx, input.ws, input.skill, &device.principal).await?
+                {
+                    false
+                } else {
+                    let genesis_shaped = current.is_none()
+                        && matches!(input.op, DeviceOp::PublishDirect)
+                        && input.parents.is_empty();
+                    if !genesis_shaped {
+                        return denied(tx, input, &bound, "principal not rostered for the skill")
+                            .await;
+                    }
+                    if !super::workspace_member_confirmed(&mut **tx, input.ws, &device.principal)
+                        .await?
+                    {
+                        return denied(
+                            tx,
+                            input,
+                            &bound,
+                            "principal is not a confirmed workspace member",
+                        )
+                        .await;
+                    }
+                    true
+                };
+            (device.principal, genesis_standup, current)
+        }
+        WriteActor::Session { acting, .. } => {
+            // The public session API constructs ONLY a review approve; any other op here is an internal
+            // mis-route, a fault — never a receipt.
+            if !matches!(input.op, DeviceOp::ReviewApprove) {
+                return Err(AuthorityError::internal(SessionOpNotReviewable));
+            }
+            // The in-txn role gate (authoritative; the orchestration's pool-level pre-gate is the cheap
+            // fence). A non-member / merely-invited / unknown-workspace caller gets the ONE uniform
+            // denial, synthesized — never persisted (the session recording rule: a web-verified email
+            // proves nothing about THIS workspace, and a durable row would let any account grow the
+            // ledger). A CONFIRMED plain member is entitled to a recorded, replayable answer: the durable
+            // typed role denial.
+            match read_member_role(tx, input.ws, acting).await? {
+                Some((role, status)) if status == "confirmed" => {
+                    if role != Role::Owner.as_str() && role != Role::Reviewer.as_str() {
+                        return denied_code(
+                            tx,
+                            input,
+                            &bound,
+                            REVIEWER_ROLE_REQUIRED_CODE,
+                            REVIEWER_ROLE_REQUIRED_MSG,
+                        )
+                        .await;
+                    }
+                }
+                _ => {
+                    return denied_preauth(tx, input, &bound, SESSION_REVIEW_ACTING_DENIED).await;
+                }
+            }
+            let current = read_current(tx, input.ws, input.skill).await?;
+            ((*acting).clone(), false, current)
+        }
+    };
 
     // (4) Compare-and-set on the WHOLE (epoch, seq). Absent pointer ⇒ the genesis branch (a zero-parent
     // create-at-(1,1)); a present pointer whose generation differs ⇒ CONFLICT carrying the LIVE generation.
@@ -438,7 +508,7 @@ async fn run(
     // stay the LAST statement before the op tail — a future receipted-terminal between here and the promote
     // would re-open the orphan-row window.
     if genesis_standup {
-        super::insert_roster(&mut **tx, input.ws, input.skill, &device.principal).await?;
+        super::insert_roster(&mut **tx, input.ws, input.skill, &acting).await?;
     }
 
     // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,
@@ -450,18 +520,9 @@ async fn run(
         DeviceOp::PublishDirect | DeviceOp::Revert => {
             promote(tx, input, signer, new_gen, &bound).await
         }
-        DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &device.principal).await,
+        DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &acting).await,
         DeviceOp::ReviewApprove => {
-            approve_arm(
-                tx,
-                input,
-                signer,
-                new_gen,
-                &bound,
-                review_required,
-                &device.principal,
-            )
-            .await
+            approve_arm(tx, input, signer, new_gen, &bound, review_required, &acting).await
         }
         DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
     }
@@ -524,7 +585,7 @@ async fn advance_current(
         created_at: input.created_at.to_owned(),
         details: None,
     };
-    insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    insert_receipt(tx, input.ws, &input.actor.receipt_actor(), &stored).await?;
     Ok(stored.into_receipt())
 }
 
@@ -612,7 +673,7 @@ async fn propose_arm(
         created_at: input.created_at.to_owned(),
         details: None,
     };
-    insert_receipt(tx, input.ws, input.device_key_id, &stored).await?;
+    insert_receipt(tx, input.ws, &input.actor.receipt_actor(), &stored).await?;
     delete_lease(tx, input.ws, input.op_id).await?;
     Ok(stored.into_receipt())
 }
@@ -673,6 +734,8 @@ async fn approve_arm(
         &proposal.id,
         ProposalStatus::Accepted,
         reviewer,
+        None,
+        input.created_at,
     )
     .await?;
     Ok(receipt)
@@ -693,7 +756,8 @@ async fn reject_run(
     };
 
     // (1) Replay — a same-op_id retry replays the stored receipt; a different bound identity is key-reuse.
-    match replay(tx, r.ws, r.device_key_id, r.op_id, &bound).await? {
+    // The probe is lane-blind (see `replay`), exactly as in `run`.
+    match replay(tx, r.ws, &r.actor.receipt_actor(), r.op_id, &bound).await? {
         Replay::Hit(receipt) => return Ok(receipt),
         Replay::Mismatch(original_at) => {
             return Ok(permanent_key_reuse(r.op_id, &bound, &original_at));
@@ -701,40 +765,82 @@ async fn reject_run(
         Replay::Fresh => {}
     }
 
-    // (2) Authorization — the SAME in-transaction device-op verification the promotion runs (a non-revoked
-    // registered key bound to a rostered principal), over the `ReviewReject`-typed frame. A revoke serialized
-    // ahead of this blocks the reject. A pre-authentication failure is DENIED without a durable receipt
-    // (mirroring `run`'s `denied_preauth`; a reject has no lease, so nothing is even released) — the roster
-    // denial below names a verified device and stays receipted.
-    let Some(device) = resolve_device(tx, r.ws, r.device_key_id).await? else {
-        return Ok(reject_denied_preauth(r, "device unknown or revoked"));
+    // (2) Authorization — the reject twin of `run`'s one lane fork (the same deliberate lane asymmetry:
+    // device = per-skill roster; session = confirmed owner|reviewer workspace seat).
+    let acting: Principal = match &r.actor {
+        WriteActor::Device {
+            device_key_id,
+            signature,
+        } => {
+            // The SAME in-transaction device-op verification the promotion runs (a non-revoked registered
+            // key bound to a rostered principal), over the `ReviewReject`-typed frame. A revoke serialized
+            // ahead of this blocks the reject. A pre-authentication failure is DENIED without a durable
+            // receipt (mirroring `run`'s `denied_preauth`; a reject has no lease, so nothing is even
+            // released) — the roster denial below names a verified device and stays receipted.
+            let Some(device) = resolve_device(tx, r.ws, device_key_id).await? else {
+                return Ok(reject_denied_preauth(r, "device unknown or revoked"));
+            };
+            if device.revoked {
+                return Ok(reject_denied_preauth(r, "device unknown or revoked"));
+            }
+            let fields = DeviceOpFields {
+                workspace_id: r.ws.as_str(),
+                skill_id: r.skill.as_str(),
+                op: r.op,
+                op_id: r.op_id_bytes,
+                device_key_id,
+                expected_epoch: r.expected.epoch,
+                expected_seq: r.expected.seq,
+                commit_id: r.commit.0,
+                bundle_digest: r.bundle_digest,
+            };
+            if !verify_device_op(&fields, signature, &device.public_key) {
+                return Ok(reject_denied_preauth(r, "device signature invalid"));
+            }
+            if !super::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
+                return reject_denied(tx, r, "principal not rostered for the skill").await;
+            }
+            device.principal
+        }
+        WriteActor::Session { acting, .. } => {
+            // The public session API constructs ONLY a review reject here (see `run`'s session belt).
+            if !matches!(r.op, DeviceOp::ReviewReject) {
+                return Err(AuthorityError::internal(SessionOpNotReviewable));
+            }
+            // The same session role gate as `run`: uniform synthesized denial for anyone unproven in THIS
+            // workspace; a durable typed role denial for a confirmed plain member.
+            match read_member_role(tx, r.ws, acting).await? {
+                Some((role, status)) if status == "confirmed" => {
+                    if role != Role::Owner.as_str() && role != Role::Reviewer.as_str() {
+                        return reject_denied_code(
+                            tx,
+                            r,
+                            REVIEWER_ROLE_REQUIRED_CODE,
+                            REVIEWER_ROLE_REQUIRED_MSG,
+                        )
+                        .await;
+                    }
+                }
+                _ => return Ok(reject_denied_preauth(r, SESSION_REVIEW_ACTING_DENIED)),
+            }
+            (*acting).clone()
+        }
     };
-    if device.revoked {
-        return Ok(reject_denied_preauth(r, "device unknown or revoked"));
-    }
-    let fields = DeviceOpFields {
-        workspace_id: r.ws.as_str(),
-        skill_id: r.skill.as_str(),
-        op: r.op,
-        op_id: r.op_id_bytes,
-        device_key_id: r.device_key_id,
-        expected_epoch: r.expected.epoch,
-        expected_seq: r.expected.seq,
-        commit_id: r.commit.0,
-        bundle_digest: r.bundle_digest,
-    };
-    if !verify_device_op(&fields, r.signature, &device.public_key) {
-        return Ok(reject_denied_preauth(r, "device signature invalid"));
-    }
-    if !super::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
-        return reject_denied(tx, r, "principal not rostered for the skill").await;
-    }
 
     // (3) Resolve + classify the proposal (under the write lock). One reject path serves reviewer-reject and
     // proposer-withdraw; `resolved_by` records the acting principal either way.
     match resolve_proposal(tx, r.ws, r.skill, r.commit, r.expected).await? {
         Some((id, ProposalStatus::Open)) => {
-            set_proposal_status(tx, r.ws, &id, ProposalStatus::Rejected, &device.principal).await?;
+            set_proposal_status(
+                tx,
+                r.ws,
+                &id,
+                ProposalStatus::Rejected,
+                &acting,
+                r.reason,
+                r.created_at,
+            )
+            .await?;
             reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_REJECTED").await
         }
         // Idempotent: a lost-ack retry under a NEW op_id (the original op_id replays at step 1) — already done.
@@ -1072,3 +1178,7 @@ struct ProposeWithoutBase;
 #[derive(Debug, thiserror::Error)]
 #[error("review --reject must not be promoted through the pointer-move transaction")]
 struct RejectNotPromotable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a session actor reached a non-review op (an internal mis-route, not a request)")]
+struct SessionOpNotReviewable;

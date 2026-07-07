@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT command AS \"command!\", skill_id AS \"skill_id!\",\n                  commit_id AS \"commit_id?: Vec<u8>\", bundle_digest AS \"bundle_digest?: Vec<u8>\",\n                  expected_epoch AS \"expected_epoch!: i64\", expected_seq AS \"expected_seq!: i64\",\n                  outcome AS \"outcome!\", current_epoch AS \"current_epoch?: i64\",\n                  current_seq AS \"current_seq?: i64\", signed_record AS \"signed_record?: Vec<u8>\",\n                  key_id AS \"key_id?\", created_at AS \"created_at!\", details AS \"details?\"\n           FROM op_receipts WHERE workspace_id = $1 AND device_key_id = $2 AND op_id = $3",
+  "query": "SELECT command AS \"command!\", skill_id AS \"skill_id!\",\n                  commit_id AS \"commit_id?: Vec<u8>\", bundle_digest AS \"bundle_digest?: Vec<u8>\",\n                  expected_epoch AS \"expected_epoch!: i64\", expected_seq AS \"expected_seq!: i64\",\n                  outcome AS \"outcome!\", current_epoch AS \"current_epoch?: i64\",\n                  current_seq AS \"current_seq?: i64\", signed_record AS \"signed_record?: Vec<u8>\",\n                  key_id AS \"key_id?\", created_at AS \"created_at!\", details AS \"details?\"\n           FROM op_receipts\n           WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'device_signed'",
   "describe": {
     "columns": [
       {
@@ -92,5 +92,5 @@
       true
     ]
   },
-  "hash": "760150d547953919297d58b78a47d187f2bc94d0ddebf6d583ebd2299897e39e"
+  "hash": "f0145456e84df11fbba989fe692e875f947f98a1371b2f34d79da79097d66ef5"
 }
