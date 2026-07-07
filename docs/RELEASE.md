@@ -5,12 +5,14 @@ check an item off in the same change that lands it.
 
 ## Launch-gate artifacts (authored fresh, in-repo)
 
-- [ ] `SECURITY.md` — the trust model (what the digest/signature/consent chain does and does not protect
-      against) + a vulnerability-reporting channel.
-- [ ] `ARCHITECTURE.md` — the public design doc: the crate graph, the trust boundaries (client is never an
-      authority; the plane is a composable library), the sync/consent model.
-- [ ] `CONTRIBUTING.md` — how to build (`cargo xtask ci`), run the Postgres-backed suite
-      (`DATABASE_URL` + `cargo test`), and propose changes.
+- [x] `SECURITY.md` — a focused vulnerability-reporting policy (GitHub private advisories). DONE. The trust
+      model itself (what the digest/signature/consent chain does and does not protect against) lives in
+      `ARCHITECTURE.md` + the README's "Trust & security" section, not in `SECURITY.md`.
+- [x] `ARCHITECTURE.md` — the public design doc: the crate graph, the trust boundaries (client is never an
+      authority; the plane is a composable library), the sync/consent model. DONE.
+- [x] `CONTRIBUTING.md` — how to build (`cargo xtask ci`), run the Postgres-backed suite
+      (`DATABASE_URL` + `cargo test`), and propose changes (inbound = outbound, no CLA). DONE. A
+      a `NOTICE` (copyright), issue/PR templates, and `CODEOWNERS` landed alongside.
 
 ## History hygiene (before the first public push)
 
@@ -30,10 +32,12 @@ check an item off in the same change that lands it.
 - [x] **First-boot workspace standup**: DONE — the binary mints the one-time claim in-band
       (`topos-plane mint-claim` prints the `/i/` link exactly once; the token never enters tracing), and
       one `topos follow <claim-link>` seats the first owner. The README's self-host walkthrough shows it.
-- [ ] **TLS posture**: the plane serves plain HTTP — the reverse-proxy termination pattern must be
-      documented as the supported deployment (it is, in the README; restate it in `SECURITY.md`).
-- [ ] **At-rest key posture**: the plane signing key + enrollment secret are plaintext `0600` seeds;
-      either encrypt at rest or state the posture in `SECURITY.md`.
+- [x] **TLS posture**: the plane serves plain HTTP — the reverse-proxy termination pattern is documented as
+      the supported deployment in the README's self-hosting section. DONE.
+- [ ] **At-rest key posture**: the plane signing key + enrollment secret are plaintext `0600` seeds
+      (at-rest encryption not implemented). Accepted for v0. NOTE: the README's Backups prose (which stated
+      this and the key-loss caveat) was trimmed, so the posture is currently documented nowhere
+      user-facing — decide whether to restate it briefly or leave it.
 
 ## Already in place (verify green at the gate)
 

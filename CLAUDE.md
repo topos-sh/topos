@@ -22,7 +22,7 @@ publishes; a follower's real two-call `follow` arms the harness currency trigger
 self-hostable compose stack, a checksummed installer, and a tag-triggered release pipeline. Deferred,
 honestly: TLS terminates at a reverse proxy by default (an EXPERIMENTAL, default-off built-in ACME
 listener exists but is unproven on a real box) and the large-object store's S3-compatible remote backend.
-Delivery history lives in `CHANGELOG.md`; the per-area detail lives in the owning `CLAUDE.md`s:
+The per-area detail lives in the owning `CLAUDE.md`s:
 
 | Area | Current state (one line) | Detail |
 |---|---|---|
@@ -59,8 +59,8 @@ are the seam, and hosted compositions serve their own pages over them (the hoste
 Planned" lists — are *living status*: update them in the **same change** that lands, removes, or alters what
 they describe. A `CLAUDE.md` that still calls landed work "planned" (or planned work "landed") is a bug, not
 just drift. The code is the source of truth; when this summary and the tree disagree, `cargo test` + the
-crate's own `CLAUDE.md` win — fix the prose to match. Shipped-increment *narrative* belongs in
-`CHANGELOG.md` (newest first), never re-accreted here.
+crate's own `CLAUDE.md` win — fix the prose to match. Shipped-increment *narrative* belongs in the commit
+history, never re-accreted here.
 
 ## Progressive disclosure — read the CLAUDE.md in the folder you're working in
 
@@ -74,7 +74,6 @@ enter the folder:
 - `tests/` — the workspace-level loopback-HTTP e2e suites.
 
 `AGENTS.md` in each folder is a symlink to that folder's `CLAUDE.md` (for agents that read `AGENTS.md`).
-`CHANGELOG.md` at the root is the delivery history (newest first).
 
 ## Build / test / lint
 

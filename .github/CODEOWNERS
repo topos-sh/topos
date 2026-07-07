@@ -1,0 +1,4 @@
+# Default owner for everything in the repo. Requested for review on every PR.
+# NOTE: the @topos-sh/maintainers team must exist and have write access to this
+# repo for GitHub to honor it (otherwise the rule is silently ignored).
+* @topos-sh/maintainers
