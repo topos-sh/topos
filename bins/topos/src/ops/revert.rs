@@ -15,7 +15,9 @@ use topos_types::results::RevertData;
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
-use super::{VersionRef, resolve_skill, resolve_version_ref};
+use super::{
+    VersionRef, resolve_skill_in_workspace, resolve_version_ref, write_workspace_for_skill,
+};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -37,6 +39,7 @@ pub(crate) fn revert(
     to: &str,
     approve: &str,
     confirm: bool,
+    workspace: Option<&str>,
 ) -> Result<RevertData, ClientError> {
     // Argv is validated FIRST (a malformed hash or token is a usage error however un-enrolled the
     // machine is). Both `--to` and the `--approve` hash accept the full 64-hex id OR a short prefix
@@ -56,14 +59,6 @@ pub(crate) fn revert(
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    let workspace_id = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| u.workspace_id)
-        .ok_or_else(|| {
-            ClientError::Enrollment(
-                "could not determine your workspace; complete enrollment with `topos follow` first"
-                    .into(),
-            )
-        })?;
     let skill_name = match skill_arg {
         Some(s) if s != approve_skill => {
             return Err(ClientError::ApprovalMismatch {
@@ -76,7 +71,10 @@ pub(crate) fn revert(
         None => &approve_skill,
     };
 
-    let (id, _lock) = resolve_skill(ctx, skill_name)?;
+    // The `--workspace` filter disambiguates a name shared across workspaces; the SIGNED scope is the
+    // skill's OWN workspace (the forward-revert commit is built against that workspace's live current).
+    let (id, _lock) = resolve_skill_in_workspace(ctx, skill_name, workspace)?;
+    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 

@@ -14,6 +14,13 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
+    /// Act in a specific workspace when this install follows skills from more than one on the same plane.
+    /// Selects the workspace for the ambient write verbs (a genesis `publish`, `invite`) and disambiguates
+    /// a skill name shared across workspaces (`publish`/`review`/`revert`). Optional — with a single
+    /// workspace it is inferred.
+    #[arg(long, global = true, value_name = "ID")]
+    pub(crate) workspace: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Command,
 }

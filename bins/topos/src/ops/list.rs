@@ -161,13 +161,13 @@ pub(crate) fn list(
                         })
                 })
                 .collect();
-            let workspace = match instance.workspace_display_name {
-                Some(name) => name,
-                // The display name is optional disclosure; the enrolled workspace id is in user.json.
-                None => enroll::read_user(ctx.fs, &ctx.layout)?
-                    .map(|u| u.workspace_id)
-                    .unwrap_or_else(|| "workspace".to_owned()),
-            };
+            // The workspace disclosure now lives per-membership in user.json (instance.json is the plane
+            // record only). For the header, name the FIRST joined workspace; a multi-workspace list view
+            // lands in a later leg.
+            let workspace = enroll::read_user(ctx.fs, &ctx.layout)?
+                .and_then(|u| u.workspaces.into_iter().next())
+                .map(|m| m.display_name.unwrap_or(m.workspace_id))
+                .unwrap_or_else(|| "workspace".to_owned());
             Some(ListEnrollment {
                 workspace,
                 base_url: instance.base_url,

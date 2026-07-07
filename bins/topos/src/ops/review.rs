@@ -13,7 +13,7 @@ use topos_types::results::{ReviewData, ReviewDecision};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect};
-use super::{parse_hex32_arg, resolve_skill};
+use super::{parse_hex32_arg, resolve_skill_in_workspace, write_workspace_for_skill};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -32,6 +32,7 @@ pub(crate) fn review(
     connect: &ContributeConnect<'_>,
     target: &str,
     approve: bool,
+    workspace: Option<&str>,
 ) -> Result<ReviewData, ClientError> {
     // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
     // (a malformed target is a usage error however un-enrolled the machine is). Unlike the go-back /
@@ -50,15 +51,10 @@ pub(crate) fn review(
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    let workspace_id = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| u.workspace_id)
-        .ok_or_else(|| {
-            ClientError::Enrollment(
-                "could not determine your workspace; complete enrollment with `topos follow` first"
-                    .into(),
-            )
-        })?;
-    let (id, _lock) = resolve_skill(ctx, &skill_name)?;
+    // Resolve the proposal's skill (a `--workspace` filter disambiguates a name shared across
+    // workspaces), then bind the SIGNED scope to that skill's OWN workspace — never an ambient guess.
+    let (id, _lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
+    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 

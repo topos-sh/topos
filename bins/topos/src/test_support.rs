@@ -30,7 +30,7 @@ use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
-use crate::enroll::{self, FollowEntry, FollowModeDoc, Follows, Instance, UserDoc};
+use crate::enroll::{self, FollowEntry, FollowModeDoc, Follows, Instance, Membership, UserDoc};
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
 use crate::plane::{
@@ -968,6 +968,7 @@ impl FollowHarness {
                 None,
                 false,
                 approve,
+                None,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1011,6 +1012,7 @@ impl FollowHarness {
                 vec![email.to_owned()],
                 None,
                 skills.iter().map(|s| (*s).to_owned()).collect(),
+                None,
             )
             .map(|d| d.invite_link)
             .map_err(|e| e.to_string())
@@ -1035,13 +1037,15 @@ impl FollowHarness {
             .and_then(|u| u.principal)
     }
 
-    /// The enrolled workspace id (from `user.json`; `None` before promote).
+    /// The first enrolled workspace id (from `user.json`; `None` before promote). One membership in the
+    /// single-workspace flows the fixtures drive.
     #[must_use]
     pub fn user_workspace(&self) -> Option<String> {
         enroll::read_user(&self.fs, &self.layout())
             .ok()
             .flatten()
-            .map(|u| u.workspace_id)
+            .and_then(|u| u.workspaces.into_iter().next())
+            .map(|m| m.workspace_id)
     }
 
     /// POST a token to `/v1/admin-claim` over the REAL transport (this rig's device key) — the
@@ -1192,9 +1196,6 @@ impl ContributeHarness {
                 plane_key_id: "pk_test".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "device_code".to_owned(),
-                workspace_display_name: Some("Test".to_owned()),
-                verified_domain: None,
-                verified_domain_status: VerifiedDomainStatus::Unverified,
             },
         )
         .expect("write instance.json");
@@ -1203,13 +1204,17 @@ impl ContributeHarness {
             &layout,
             &UserDoc {
                 schema_version: 1,
-                workspace_id: workspace_id.to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
                 email: None,
                 principal: None,
-                roles: Vec::new(),
-                invite_rooted: true,
-                enrolled_at: 1,
+                workspaces: vec![Membership {
+                    workspace_id: workspace_id.to_owned(),
+                    display_name: Some("Test".to_owned()),
+                    roles: Vec::new(),
+                    verified_domain: None,
+                    verified_domain_status: VerifiedDomainStatus::Unverified,
+                    invite_rooted: true,
+                    enrolled_at: 1,
+                }],
             },
         )
         .expect("write user.json");
@@ -1374,7 +1379,7 @@ impl ContributeHarness {
                 base_url: "http://127.0.0.1:0".to_owned(),
             };
             match ops::publish(
-                ctx, contribute, governance, &standup, None, propose, approve,
+                ctx, contribute, governance, &standup, None, propose, approve, None,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1398,7 +1403,7 @@ impl ContributeHarness {
         approve: bool,
     ) -> Result<ReviewData, String> {
         self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
-            ops::review(ctx, contribute, target, approve).map_err(|e| e.to_string())
+            ops::review(ctx, contribute, target, approve, None).map_err(|e| e.to_string())
         })
     }
 
@@ -1414,7 +1419,7 @@ impl ContributeHarness {
         confirm: bool,
     ) -> Result<RevertData, String> {
         self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
-            ops::revert(ctx, contribute, None, to, approve, confirm).map_err(|e| e.to_string())
+            ops::revert(ctx, contribute, None, to, approve, confirm, None).map_err(|e| e.to_string())
         })
     }
 

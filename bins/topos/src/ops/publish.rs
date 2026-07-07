@@ -35,7 +35,7 @@ use super::follow::{
 };
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
-use super::{parse_hex32, resolve_skill};
+use super::{parse_hex32, resolve_skill, resolve_skill_in_workspace, write_workspace_for_skill};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -82,6 +82,7 @@ const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 /// [`ClientError::PublishBlocked`] if an unresolved merge conflict is present; [`ClientError::Conflict`] /
 /// [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's typed verdict; a signing /
 /// transport / store failure otherwise.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
@@ -90,6 +91,7 @@ pub(crate) fn publish(
     skill_arg: Option<&str>,
     propose: bool,
     approve: &str,
+    workspace: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
     // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup; absent + propose ⇒ the
@@ -120,11 +122,14 @@ pub(crate) fn publish(
     {
         return standup_publish(ctx, connect, gov_connect, standup, skill_arg, approve);
     }
-    enrolled_publish(ctx, connect, gov_connect, skill_arg, propose, approve, None)
+    enrolled_publish(
+        ctx, connect, gov_connect, skill_arg, propose, approve, None, workspace,
+    )
 }
 
 /// The ordinary ENROLLED publish (the pre-standup body, unchanged in behavior). `standup_receipt` is the
 /// disclosure a workspace-creating invocation attaches to its Published outcome (`None` normally).
+#[allow(clippy::too_many_arguments)]
 fn enrolled_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
@@ -133,23 +138,20 @@ fn enrolled_publish(
     propose: bool,
     approve: &str,
     standup_receipt: Option<StandupReceipt>,
+    workspace: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    let workspace_id = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| u.workspace_id)
-        .ok_or_else(|| {
-            ClientError::Enrollment(
-                "could not determine your workspace; complete enrollment with `topos follow` first"
-                    .into(),
-            )
-        })?;
 
     let (skill_name, approved_digest) = agree_skill_and_digest(skill_arg, approve)?;
     let skill_name = skill_name.as_str();
 
-    let (id, lock) = resolve_skill(ctx, skill_name)?;
+    // The `--workspace` filter disambiguates a name shared across workspaces. A FOLLOWED skill signs in
+    // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no follow entry)
+    // is AMBIENT — the single membership or the `--workspace`-selected one.
+    let (id, lock) = resolve_skill_in_workspace(ctx, skill_name, workspace)?;
+    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
@@ -234,6 +236,8 @@ fn enrolled_publish(
             Vec::new(),
             None,
             vec![rec.skill_id.clone()],
+            // Mint the door in the SAME workspace this genesis publish signed in.
+            Some(workspace_id.as_str()),
         )
         .ok()
         .map(|inv| inv.invite_link);
@@ -626,6 +630,8 @@ fn continue_enrolled(
         false,
         approve,
         standup_receipt,
+        // The standup created exactly ONE workspace membership — resolve it ambiently (no `--workspace`).
+        None,
     )
 }
 

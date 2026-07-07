@@ -52,16 +52,37 @@ pub(crate) use uninstall::{UninstallOutcome, uninstall};
 use topos_types::persisted::{Lock, RecordedTuple, SyncState};
 
 use crate::ctx::Ctx;
-use crate::doc;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::sidecar::SkillPaths;
+use crate::{doc, enroll};
 
-/// Resolve a skill name to its `(id, lock)` across the tracked skills. A name is the user-facing handle;
-/// two same-name skills are distinct, so an ambiguous name is a typed error carrying the count. The
-/// returned id is the VALIDATED newtype (parsed from the directory name), so every downstream path join
-/// is charset-proven; a dir whose name fails the parse was never minted by topos and is skipped.
+/// Resolve a skill name to its `(id, lock)` across the tracked skills, WITHOUT a workspace filter — the
+/// common case (the local verbs that do not act in a workspace: `add`, `log`, `diff`, `unfollow`, `pull`,
+/// `follow --approve`). See [`resolve_skill_in_workspace`] for the filtered form the write verbs use.
 fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(SkillId, Lock), ClientError> {
+    resolve_skill_in_workspace(ctx, name, None)
+}
+
+/// Resolve a skill name to its `(id, lock)`, optionally narrowed to one workspace. A name is the
+/// user-facing handle; two same-name skills are distinct, so an ambiguous name is a typed error carrying
+/// the count. The returned id is the VALIDATED newtype (parsed from the directory name), so every
+/// downstream path join is charset-proven; a dir whose name fails the parse was never minted by topos and
+/// is skipped.
+///
+/// When `workspace = Some(ws)`, a candidate whose `follows.json` entry names a DIFFERENT workspace is
+/// dropped BEFORE the duplicate-name check — this is how one install following the same skill NAME in two
+/// workspaces disambiguates via `--workspace`. A candidate with NO follow entry (a purely local /
+/// genesis skill) is unscoped and survives any filter, so a `--workspace`-qualified genesis publish still
+/// resolves its local skill. The deterministic-error-on-ambiguity behavior is preserved when the filter
+/// still leaves more than one.
+fn resolve_skill_in_workspace(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<(SkillId, Lock), ClientError> {
+    // The skill_id → workspace_id join comes from the follow-state; only read it when a filter is active.
+    let followed = workspace.map(|_| ctx.follow.followed()).unwrap_or_default();
     let mut matches: Vec<(SkillId, Lock)> = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
@@ -76,6 +97,13 @@ fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(SkillId, Lock), ClientErr
         if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&id).lock)?
             && lock.name == name
         {
+            // Drop a FOLLOWED candidate scoped to a different workspace; keep an unscoped (no-entry) one.
+            if let Some(ws) = workspace
+                && let Some((_, fc)) = followed.iter().find(|(fid, _)| fid == id.as_str())
+                && fc.workspace_id != ws
+            {
+                continue;
+            }
             matches.push((id, lock));
         }
     }
@@ -91,6 +119,55 @@ fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(SkillId, Lock), ClientErr
             count,
         }),
     }
+}
+
+/// The workspace a FOLLOWED skill lives in (its expected signed-pointer scope), from the follow-state —
+/// or `None` when the skill has no follow entry (a purely local / genesis skill). A retained-but-paused
+/// (`following == false`) entry still resolves: the workspace outlives an `unfollow`.
+pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String> {
+    ctx.follow
+        .followed()
+        .into_iter()
+        .find(|(id, _)| id == skill_id)
+        .map(|(_, fc)| fc.workspace_id)
+}
+
+/// The workspace a followed skill lives in, or a typed error if it is not followed (the plane-read scope a
+/// `diff <ref>` / a proposal review needs).
+///
+/// # Errors
+/// [`ClientError::Plane`] if `skill_id` is not a followed skill (no workspace to scope the read).
+pub(crate) fn workspace_of(ctx: &Ctx<'_>, skill_id: &str) -> Result<String, ClientError> {
+    followed_workspace(ctx, skill_id).ok_or_else(|| {
+        ClientError::Plane(format!(
+            "'{skill_id}' is not a followed skill; a plane read needs its workspace"
+        ))
+    })
+}
+
+/// The workspace a `publish` / `review` / `revert` signs its op in for an already-resolved skill:
+/// - a FOLLOWED skill signs in its own follow-entry workspace (the pointer scope — it MUST be the skill's
+///   own workspace, not an ambient guess);
+/// - a skill with NO follow entry (a genesis publish of a locally-`add`ed skill) is AMBIENT: the single
+///   membership, or the `--workspace`-selected one.
+///
+/// # Errors
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::WorkspaceSelection`] if the install has
+/// joined several workspaces and `explicit` neither names one nor is the sole choice.
+pub(crate) fn write_workspace_for_skill(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    explicit: Option<&str>,
+) -> Result<String, ClientError> {
+    if let Some(ws) = followed_workspace(ctx, skill_id) {
+        return Ok(ws);
+    }
+    let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
+        ClientError::Enrollment(
+            "could not determine your workspace; complete enrollment with `topos follow` first".into(),
+        )
+    })?;
+    Ok(user.resolve_write_workspace(explicit)?.workspace_id.clone())
 }
 
 /// Parse 64 lowercase-hex chars into a 32-byte id (a sidecar doc field) via the shared `hex` codec.

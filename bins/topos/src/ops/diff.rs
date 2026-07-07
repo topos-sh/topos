@@ -140,7 +140,7 @@ fn resolve_endpoint(
     let skill_id = id.as_str();
     let ep = endpoint.strip_prefix('@').unwrap_or(endpoint);
     let version_id = if ep == "current" {
-        let workspace_id = workspace_of(ctx, skill_id)?;
+        let workspace_id = super::workspace_of(ctx, skill_id)?;
         contribute::fresh_current(ctx, skill_id, &workspace_id)?.0
     } else {
         // The endpoint is user-typed argv — a malformed hash is a usage error, never CORRUPT_STATE
@@ -176,21 +176,6 @@ fn resolve_endpoint(
             })
             .collect(),
     })
-}
-
-/// The workspace a followed skill lives in (its expected pointer scope) — needed to authenticate the plane's
-/// live `current` for a `<ref>` diff.
-fn workspace_of(ctx: &Ctx<'_>, skill_id: &str) -> Result<String, ClientError> {
-    ctx.follow
-        .followed()
-        .into_iter()
-        .find(|(id, _)| id == skill_id)
-        .map(|(_, fc)| fc.workspace_id)
-        .ok_or_else(|| {
-            ClientError::Plane(format!(
-                "'{skill_id}' is not a followed skill; a plane diff needs its workspace"
-            ))
-        })
 }
 
 fn diff_files(files: &[DiffFileOwned]) -> Vec<DiffFile<'_>> {

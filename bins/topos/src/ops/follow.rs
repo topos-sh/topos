@@ -646,7 +646,13 @@ pub(super) fn promote_core(
     enrolled_at: i64,
     signer: &DeviceSigner,
 ) -> Result<topos_types::TriggerReport, ClientError> {
-    // 1) instance.json — PUBLIC (the plane key is a public key) → ordinary perms.
+    // TODO(leg-2): widen identity lock across promotion + WAL-until-coherent — the steps below write
+    // instance.json, follows.json, and user.json as separate durable files, so a crash mid-sequence can
+    // leave a torn promotion. This leg keeps the existing write order + per-file locking; the next leg
+    // makes the multi-file promotion crash-coherent.
+
+    // 1) instance.json — PUBLIC (the plane key is a public key) → ordinary perms. PLANE-scoped only now;
+    // the per-workspace disclosure moved to the user.json membership written in step 3.
     enroll::write_instance(
         ctx.fs,
         &ctx.layout,
@@ -657,9 +663,6 @@ pub(super) fn promote_core(
             plane_key_id: context.plane_key_id.clone(),
             deployment_mode: context.deployment_mode,
             enrollment_method: context.enrollment_method.clone(),
-            workspace_display_name: Some(context.workspace_display_name.clone()),
-            verified_domain: context.verified_domain.clone(),
-            verified_domain_status: context.verified_domain_status,
         },
     )?;
 
@@ -678,23 +681,37 @@ pub(super) fn promote_core(
         .collect();
     enroll::write_follows_merged(ctx.fs, &ctx.layout, &additions)?;
 
-    // 3) user.json — metadata only (no secret) → ordinary perms. The seated principal (when the plane
-    // disclosed one) is persisted for the receipt disclosures; an email-shaped principal also fills
-    // `email` (a device-rooted `dev.…` id is NOT an email and never pretends to be one).
-    enroll::write_user(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::UserDoc {
-            schema_version: PERSISTED_SCHEMA_VERSION,
+    // 3) user.json — metadata only (no secret) → ordinary perms. READ-MERGE-WRITE the memberships so a
+    // second follow (into another workspace on the same plane) ADDS a membership rather than dropping the
+    // first. The per-INSTALL identity (principal/email) is refreshed only when this promote carries a
+    // principal (an email-shaped one also fills `email`; a device-rooted `dev.…` id is NOT an email and
+    // never pretends to be one — and never clobbers a previously-seated email).
+    let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_else(|| enroll::UserDoc {
+        schema_version: PERSISTED_SCHEMA_VERSION,
+        email: None,
+        principal: None,
+        workspaces: Vec::new(),
+    });
+    user.schema_version = PERSISTED_SCHEMA_VERSION;
+    if let Some(p) = principal {
+        user.principal = Some(p.to_owned());
+        if p.contains('@') {
+            user.email = Some(p.to_owned());
+        }
+    }
+    enroll::upsert_membership(
+        &mut user,
+        enroll::Membership {
             workspace_id: context.workspace_id.clone(),
-            deployment_mode: context.deployment_mode,
-            email: principal.filter(|p| p.contains('@')).map(str::to_owned),
-            principal: principal.map(str::to_owned),
+            display_name: Some(context.workspace_display_name.clone()),
             roles: Vec::new(),
+            verified_domain: context.verified_domain.clone(),
+            verified_domain_status: context.verified_domain_status,
             invite_rooted: matches!(context.root, enroll::EnrollRoot::Invite),
             enrolled_at,
         },
-    )?;
+    );
+    enroll::write_user(ctx.fs, &ctx.layout, &user)?;
 
     // 4) Record the device key reference in host.json (the PUBLIC key + a pointer to the 0600 seed).
     identity::set_device_key(
@@ -909,11 +926,10 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientErr
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
         .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to approve".into()))?;
     let contexts = enroll::follow_contexts(&follows);
-    let workspace_id = follows
-        .follows
-        .first()
-        .map(|f| f.workspace_id.clone())
-        .unwrap_or_default();
+    // The disclosed workspace is the FIRST approved skill's OWN follow-entry workspace (per-skill) — never
+    // a global first-follow, which would name the wrong workspace once the install follows skills across
+    // several workspaces on the same plane.
+    let mut workspace_id = String::new();
 
     let mut skills = Vec::new();
     let mut resumed = Vec::new();
@@ -923,6 +939,9 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientErr
         let (skill_id, lock) = super::resolve_skill(ctx, name)?;
         let mut was_resumed = false;
         if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| id == skill_id.as_str()) {
+            if workspace_id.is_empty() {
+                workspace_id = follow_ctx.workspace_id.clone();
+            }
             if follow_ctx.following {
                 // The explicit accept IS the I-TOFU first-receive yes (places the bytes).
                 sync_engine::sync_one(ctx, &skill_id, follow_ctx, Invocation::Accept)?;

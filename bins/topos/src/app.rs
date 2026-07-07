@@ -25,6 +25,9 @@ use crate::{enroll, identity, logfile, ops, render};
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
+    // The global `--workspace <id>` — which workspace the ambient write verbs act in (and the filter that
+    // disambiguates a skill name shared across workspaces). Optional; inferred with a single workspace.
+    let workspace = cli.workspace;
     let command = cli.command;
     let cmd_name = command.name();
 
@@ -163,6 +166,7 @@ pub fn run() -> ExitCode {
                 emails,
                 role.map(RoleArg::to_workspace_role),
                 skills,
+                workspace.as_deref(),
             ),
             render::invite_tty,
             &diag,
@@ -202,6 +206,7 @@ pub fn run() -> ExitCode {
                     skill.as_deref(),
                     propose,
                     &approve,
+                    workspace.as_deref(),
                 ),
                 &diag,
             )
@@ -217,7 +222,7 @@ pub fn run() -> ExitCode {
             finish(
                 json,
                 cmd_name,
-                ops::review(&ctx, &connect_contribute, &target, approve),
+                ops::review(&ctx, &connect_contribute, &target, approve, workspace.as_deref()),
                 render::review_tty,
                 &diag,
             )
@@ -237,6 +242,7 @@ pub fn run() -> ExitCode {
                 &to,
                 &approve,
                 confirm,
+                workspace.as_deref(),
             ),
             render::revert_tty,
             &diag,

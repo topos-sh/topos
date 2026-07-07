@@ -47,8 +47,11 @@ fn default_domain_status() -> VerifiedDomainStatus {
     VerifiedDomainStatus::Unverified
 }
 
-/// `instance.json` — the plane this client is enrolled with + the pinned plane public key. Public metadata
-/// only (the plane key is a PUBLIC Ed25519 key — ordinary file perms are fine).
+/// `instance.json` — the PLANE this client is enrolled with + the pinned plane public key. Plane-scoped
+/// only (v0 is one plane per install); every PER-WORKSPACE fact (display name, verified-domain provenance,
+/// membership metadata) lives on a [`Membership`] in `user.json`, so one install can follow skills from
+/// several workspaces on the same plane. Public metadata only (the plane key is a PUBLIC Ed25519 key —
+/// ordinary file perms are fine).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Instance {
     pub schema_version: u32,
@@ -65,15 +68,32 @@ pub(crate) struct Instance {
     /// The enrollment method the plane advertised (e.g. `"device_code"`); disclosure only.
     #[serde(default)]
     pub enrollment_method: String,
-    /// The workspace display name (for the agent's disclosure).
+}
+
+/// One workspace this install has joined on the pinned plane — the per-workspace half of an enrollment.
+/// A single `user.json` carries a `Vec<Membership>`, so following skills from a second workspace ADDS a
+/// membership rather than overwriting the first. Non-secret metadata only (the read tokens live in
+/// `follows.json`); derives `Serialize`/`Deserialize` with NO `deny_unknown_fields` (forward-compatible).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Membership {
+    /// The workspace id (a path-safe identifier — the signed-pointer scope + the write op's workspace).
+    pub workspace_id: String,
+    /// The workspace display name, for the agent's disclosure (moved from `instance.json`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_display_name: Option<String>,
-    /// The workspace's org-domain claim, if any — the relay-phishing provenance shown next to the URL.
+    pub display_name: Option<String>,
+    /// This device's roles in the workspace, if the wire ever carries them (the redeem does not in v0).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    /// The workspace's org-domain claim, if any — the relay-phishing provenance (moved from `instance.json`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_domain: Option<String>,
-    /// The domain-verification state.
+    /// The domain-verification state (moved from `instance.json`).
     #[serde(default = "default_domain_status")]
     pub verified_domain_status: VerifiedDomainStatus,
+    /// Whether THIS membership was rooted in an `/i/` invite (vs a standup / claim).
+    pub invite_rooted: bool,
+    /// When this membership's enrollment completed, epoch-millis.
+    pub enrolled_at: i64,
 }
 
 /// `follows.json` — the durable follow-state: the skills this client follows, each with its workspace,
@@ -162,8 +182,9 @@ pub(crate) fn read_follows(
 }
 
 /// Read `identity/user.json`, or `None` if absent. Metadata only (no secret) → ordinary `read_doc`.
-/// Fail-closed on an unknown/newer `schema_version`. The `invite` verb reads the enrolled `workspace_id`
-/// (the governance frame's scope) from here.
+/// Fail-closed on an unknown/newer `schema_version` AND on a stale single-workspace document (missing the
+/// required `workspaces` field ⇒ [`ClientError::Corrupt`]). The ambient write verbs (`invite`, a genesis
+/// `publish`) pick their workspace from the memberships here via [`UserDoc::resolve_write_workspace`].
 pub(crate) fn read_user(fs: &dyn FsOps, layout: &Layout) -> Result<Option<UserDoc>, ClientError> {
     doc::read_doc(fs, &layout.user_path())
 }
@@ -437,26 +458,96 @@ impl std::fmt::Debug for PendingEnrollment {
     }
 }
 
-/// `identity/user.json` — the enrolled principal's NON-secret metadata. No secret → ordinary perms.
+/// `identity/user.json` — the enrolled device's identity (per-INSTALL) plus its workspace memberships.
+/// No secret → ordinary perms.
+///
+/// **`workspaces` is a REQUIRED field (no serde default) by design.** `schema_version` stays `1`, so a
+/// STALE single-workspace `user.json` (which carried `workspace_id` and no `workspaces`) is still handed
+/// to serde by [`crate::atomic::load_versioned`] — and the missing required `workspaces` field makes serde
+/// fail the parse, surfacing as [`ClientError::Corrupt`] rather than silently loading an empty-membership
+/// document. No users exist yet, so breaking the shape is intended; the fail-closed load is the guarantee.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct UserDoc {
     pub schema_version: u32,
-    pub workspace_id: String,
-    pub deployment_mode: DeploymentMode,
-    /// The confirmed email, if the wire ever carries one (the redeem response does not in v0).
+    /// The confirmed email, if the wire ever carries one (the redeem response does not in v0). Per-install
+    /// identity (not per-workspace) — the device acts under one principal across every membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// The principal the redeem seated this device as (a confirmed email, or a device-rooted id like
     /// `dev.dk_…`) — the disclosure the standup receipt prints ("workspace X — owner Y").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
-    /// Workspace roles, if the wire ever carries them (the redeem response does not in v0).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<String>,
-    /// Whether this membership was rooted in an `/i/` invite (always true for the device-flow follow).
-    pub invite_rooted: bool,
-    /// When enrollment completed, epoch-millis.
-    pub enrolled_at: i64,
+    /// The workspaces this install has joined on the pinned plane. REQUIRED (no `#[serde(default)]`) — see
+    /// the type comment: it is the fail-closed fence against a stale single-workspace document.
+    pub workspaces: Vec<Membership>,
+}
+
+impl UserDoc {
+    /// This install's membership in `workspace_id`, or `None` if it has not joined that workspace.
+    pub(crate) fn membership(&self, workspace_id: &str) -> Option<&Membership> {
+        self.workspaces
+            .iter()
+            .find(|m| m.workspace_id == workspace_id)
+    }
+
+    /// The single workspace an ambient write op (a genesis publish, an invite) acts in.
+    ///
+    /// - `explicit = Some(ws)` → that membership, or a clear error if this install has not joined it;
+    /// - `explicit = None` → the sole membership if there is exactly one; a [`ClientError::WorkspaceSelection`]
+    ///   telling the agent to pass `--workspace <id>` (listing the joined ids) if there is more than one;
+    ///   a [`ClientError::Enrollment`] "not enrolled" if there are none.
+    ///
+    /// # Errors
+    /// As above — never a silent guess when the choice is ambiguous.
+    pub(crate) fn resolve_write_workspace(
+        &self,
+        explicit: Option<&str>,
+    ) -> Result<&Membership, ClientError> {
+        if self.workspaces.is_empty() {
+            return Err(ClientError::Enrollment(
+                "not enrolled in any workspace; run `topos follow <link>` first".into(),
+            ));
+        }
+        match explicit {
+            Some(ws) => self.membership(ws).ok_or_else(|| {
+                ClientError::WorkspaceSelection(format!(
+                    "this install has not joined workspace '{ws}'; joined workspaces: {}",
+                    self.workspace_ids().join(", ")
+                ))
+            }),
+            None => match self.workspaces.as_slice() {
+                [only] => Ok(only),
+                _ => Err(ClientError::WorkspaceSelection(format!(
+                    "this install follows skills in multiple workspaces ({}); pass `--workspace <id>` \
+                     to choose one",
+                    self.workspace_ids().join(", ")
+                ))),
+            },
+        }
+    }
+
+    /// The joined workspace ids, in stored order — for the ambiguity guidance message.
+    fn workspace_ids(&self) -> Vec<&str> {
+        self.workspaces
+            .iter()
+            .map(|m| m.workspace_id.as_str())
+            .collect()
+    }
+}
+
+/// Insert `m` into `user.workspaces`, REPLACING an existing membership with the same `workspace_id` (a
+/// re-follow / token refresh) or appending it (a first follow into a new workspace) — deduped by
+/// `workspace_id`, so a second follow never drops the first.
+pub(crate) fn upsert_membership(user: &mut UserDoc, m: Membership) {
+    if let Some(existing) = user
+        .workspaces
+        .iter_mut()
+        .find(|e| e.workspace_id == m.workspace_id)
+    {
+        *existing = m;
+    } else {
+        user.workspaces.push(m);
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -478,6 +569,14 @@ pub(crate) fn write_instance(
 /// READ-MERGE-WRITE `follows.json` under the `"identity"` lock: ADD/UPDATE each entry in `additions`
 /// (dedupe by `skill_id` — a later entry replaces an earlier one), preserving every untouched entry, then
 /// write the whole list `0600`. A second `follow` to another skill therefore never clobbers the first.
+///
+/// A skill id is unique to ONE workspace (it is a plane-minted UUID), and the sidecar keys skills by id
+/// alone — so an addition that would land a `skill_id` ALREADY followed under a DIFFERENT `workspace_id`
+/// is refused (a forged/confused plane response, or a hand-edited doc): silently replacing the entry would
+/// re-scope an already-materialized skill. Nothing is written on refusal (the merged list is in-memory).
+///
+/// # Errors
+/// [`ClientError::Corrupt`] on a cross-workspace `skill_id` collision; otherwise the [`FsOps`] failure.
 pub(crate) fn write_follows_merged(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -489,6 +588,13 @@ pub(crate) fn write_follows_merged(
         .unwrap_or_default();
     for add in additions {
         if let Some(existing) = merged.iter_mut().find(|e| e.skill_id == add.skill_id) {
+            if existing.workspace_id != add.workspace_id {
+                return Err(ClientError::Corrupt(format!(
+                    "skill '{}' is already followed in a different workspace; a skill id belongs to \
+                     exactly one workspace",
+                    add.skill_id
+                )));
+            }
             *existing = add.clone();
         } else {
             merged.push(add.clone());
@@ -659,9 +765,27 @@ mod tests {
             plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
-            workspace_display_name: Some("Acme".to_owned()),
-            verified_domain: Some("acme.com".to_owned()),
-            verified_domain_status: VerifiedDomainStatus::Verified,
+        }
+    }
+
+    fn sample_membership(workspace_id: &str, display_name: Option<&str>) -> Membership {
+        Membership {
+            workspace_id: workspace_id.to_owned(),
+            display_name: display_name.map(str::to_owned),
+            roles: Vec::new(),
+            verified_domain: None,
+            verified_domain_status: VerifiedDomainStatus::Unverified,
+            invite_rooted: true,
+            enrolled_at: 1,
+        }
+    }
+
+    fn user_with(workspaces: Vec<Membership>) -> UserDoc {
+        UserDoc {
+            schema_version: 1,
+            email: None,
+            principal: None,
+            workspaces,
         }
     }
 
@@ -1110,5 +1234,98 @@ mod tests {
         write_wal(&fs, &layout, &claim).unwrap();
         sweep_expired_wal(&fs, &layout, i64::MAX).unwrap();
         assert!(read_wal(&fs, &layout).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stale_single_workspace_user_json_fails_closed_not_parsed_empty() {
+        // The crash-safety fence: `schema_version` stays 1, so a STALE single-workspace user.json is still
+        // handed to serde by `load_versioned` — and the missing REQUIRED `workspaces` field must make the
+        // parse fail (Corrupt), never silently load an empty-membership document.
+        let stale = br#"{"schema_version":1,"workspace_id":"w_x","invite_rooted":true,"enrolled_at":1}"#;
+        assert!(
+            matches!(
+                load_versioned::<UserDoc>(stale, PERSISTED_SCHEMA_VERSION),
+                Err(ClientError::Corrupt(_))
+            ),
+            "a stale single-workspace user.json must fail closed, not parse as empty memberships"
+        );
+        // The new shape (even with zero memberships) parses.
+        let ok = br#"{"schema_version":1,"workspaces":[]}"#;
+        assert!(load_versioned::<UserDoc>(ok, PERSISTED_SCHEMA_VERSION).is_ok());
+    }
+
+    #[test]
+    fn resolve_write_workspace_selects_by_count_and_explicit() {
+        // 0 memberships → a not-enrolled error (not a workspace-selection one).
+        let none = user_with(Vec::new());
+        assert!(matches!(
+            none.resolve_write_workspace(None),
+            Err(ClientError::Enrollment(_))
+        ));
+        // Exactly 1 → that one, no `--workspace` needed.
+        let one = user_with(vec![sample_membership("w_a", Some("A"))]);
+        assert_eq!(one.resolve_write_workspace(None).unwrap().workspace_id, "w_a");
+        // >1 without an explicit choice → a workspace-selection error naming `--workspace` + the ids.
+        let two = user_with(vec![
+            sample_membership("w_a", None),
+            sample_membership("w_b", None),
+        ]);
+        let err = two.resolve_write_workspace(None).unwrap_err();
+        assert!(matches!(err, ClientError::WorkspaceSelection(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("--workspace") && msg.contains("w_a") && msg.contains("w_b"), "{msg}");
+        // >1 WITH a valid explicit → that one.
+        assert_eq!(
+            two.resolve_write_workspace(Some("w_b")).unwrap().workspace_id,
+            "w_b"
+        );
+        // An explicit id this install never joined → a workspace-selection error.
+        assert!(matches!(
+            two.resolve_write_workspace(Some("w_c")),
+            Err(ClientError::WorkspaceSelection(_))
+        ));
+    }
+
+    #[test]
+    fn upsert_membership_replaces_same_workspace_and_appends_a_new_one() {
+        let mut user = user_with(Vec::new());
+        upsert_membership(&mut user, sample_membership("w_a", Some("A")));
+        assert_eq!(user.workspaces.len(), 1);
+        // Same workspace_id REPLACES (a re-follow / display-name refresh), never appends a duplicate.
+        upsert_membership(&mut user, sample_membership("w_a", Some("A-renamed")));
+        assert_eq!(user.workspaces.len(), 1);
+        assert_eq!(
+            user.membership("w_a").unwrap().display_name.as_deref(),
+            Some("A-renamed")
+        );
+        // A different workspace_id APPENDS (a second follow never drops the first).
+        upsert_membership(&mut user, sample_membership("w_b", None));
+        assert_eq!(user.workspaces.len(), 2);
+        assert!(user.membership("w_a").is_some() && user.membership("w_b").is_some());
+    }
+
+    #[test]
+    fn write_follows_merged_rejects_a_cross_workspace_duplicate_skill_id() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("xws-dup"));
+        let entry = |ws: &str| FollowEntry {
+            skill_id: "s_dup".to_owned(),
+            workspace_id: ws.to_owned(),
+            read_token: "rt".to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+        };
+        write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
+        // The SAME skill_id arriving under a DIFFERENT workspace is refused (a skill id is unique to one
+        // workspace) — and nothing is overwritten.
+        let err = write_follows_merged(&fs, &layout, &[entry("w_b")]).unwrap_err();
+        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+        let follows = read_follows(&fs, &layout).unwrap().unwrap();
+        assert_eq!(follows.follows.len(), 1);
+        assert_eq!(follows.follows[0].workspace_id, "w_a");
+        // The SAME skill_id under the SAME workspace still updates cleanly (a token refresh).
+        write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
+        assert_eq!(read_follows(&fs, &layout).unwrap().unwrap().follows.len(), 1);
     }
 }

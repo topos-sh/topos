@@ -1055,7 +1055,7 @@ fn unfollow_of_a_tracked_but_never_followed_skill_is_a_clean_success() {
 
 #[test]
 fn list_discloses_enrollment_follow_state_and_hook() {
-    use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance};
+    use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance, Membership, UserDoc};
     use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 
     let src = editable_source();
@@ -1069,7 +1069,8 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     assert!(out.enrollment.is_none());
     assert!(out.data.followed.is_empty());
 
-    // Seed what a real `follow` promote writes: instance.json + a followed entry for the tracked skill.
+    // Seed what a real `follow` promote writes: instance.json + user.json (the workspace membership) + a
+    // followed entry for the tracked skill.
     enroll::write_instance(
         ctx.fs,
         &ctx.layout,
@@ -1080,9 +1081,25 @@ fn list_discloses_enrollment_follow_state_and_hook() {
             plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
-            workspace_display_name: Some("Acme".to_owned()),
-            verified_domain: None,
-            verified_domain_status: VerifiedDomainStatus::Unverified,
+        },
+    )
+    .unwrap();
+    enroll::write_user(
+        ctx.fs,
+        &ctx.layout,
+        &UserDoc {
+            schema_version: 1,
+            email: None,
+            principal: None,
+            workspaces: vec![Membership {
+                workspace_id: "w_acme".to_owned(),
+                display_name: Some("Acme".to_owned()),
+                roles: Vec::new(),
+                verified_domain: None,
+                verified_domain_status: VerifiedDomainStatus::Unverified,
+                invite_rooted: true,
+                enrolled_at: 1,
+            }],
         },
     )
     .unwrap();
@@ -1176,7 +1193,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance};
     use crate::plane::{EnrollSource, PlaneSource};
     use crate::plane_http::SkillCred;
-    use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
+    use topos_types::bootstrap::DeploymentMode;
 
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -1196,9 +1213,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
-            workspace_display_name: Some("Acme".to_owned()),
-            verified_domain: None,
-            verified_domain_status: VerifiedDomainStatus::Unverified,
         },
     )
     .unwrap();

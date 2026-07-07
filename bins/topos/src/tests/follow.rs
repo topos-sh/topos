@@ -596,18 +596,14 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
     assert_eq!(data.skills[0].offer.bundle_digest.len(), 64);
 
     let layout = rig.layout();
-    // instance.json — TOFU-pinned to the bootstrap key, carrying the new disclosure fields.
+    // instance.json — TOFU-pinned to the bootstrap key; the PLANE record only now (the per-workspace
+    // disclosure moved to the user.json membership asserted below).
     let instance = enroll::read_instance(&rig.fs, &layout)
         .unwrap()
         .expect("instance.json");
     assert_eq!(instance.base_url, BASE_URL);
     assert_eq!(instance.plane_key, to_hex(&plane_pubkey()));
     assert_eq!(instance.deployment_mode, DeploymentMode::Cloud);
-    assert_eq!(instance.workspace_display_name.as_deref(), Some("Acme Inc"));
-    assert_eq!(
-        instance.verified_domain_status,
-        VerifiedDomainStatus::Verified
-    );
     // instance.json is PUBLIC (ordinary perms — the plane key is a public key).
     assert_eq!(mode_of(&layout.instance_path()), 0o644);
 
@@ -632,8 +628,11 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
     let user: enroll::UserDoc = doc::read_doc(&rig.fs, &layout.user_path())
         .unwrap()
         .unwrap();
-    assert_eq!(user.workspace_id, WS);
-    assert!(user.invite_rooted);
+    // The workspace disclosure now lives on the per-workspace membership.
+    let m = user.membership(WS).expect("the workspace membership");
+    assert_eq!(m.display_name.as_deref(), Some("Acme Inc"));
+    assert_eq!(m.verified_domain_status, VerifiedDomainStatus::Verified);
+    assert!(m.invite_rooted);
     // The redeem now discloses the seated principal; an email-shaped one also fills `email`.
     assert_eq!(user.principal.as_deref(), Some("alice@acme.com"));
     assert_eq!(user.email.as_deref(), Some("alice@acme.com"));

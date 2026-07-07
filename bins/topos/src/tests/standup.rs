@@ -446,6 +446,7 @@ fn run_publish(
         skill_arg,
         propose,
         approve,
+        None,
     )
 }
 
@@ -596,15 +597,14 @@ fn reinvoke_granted_redeems_promotes_and_publishes_in_one_invocation() {
     let instance = enroll::read_instance(&rig.fs, &layout).unwrap().unwrap();
     assert_eq!(instance.base_url, HOSTED);
     assert_eq!(instance.plane_key, to_hex(&plane_pubkey()));
-    assert_eq!(
-        instance.workspace_display_name.as_deref(),
-        Some("robert's workspace")
-    );
     let user = enroll::read_user(&rig.fs, &layout).unwrap().unwrap();
-    assert_eq!(user.workspace_id, STANDUP_WS);
+    let m = user
+        .membership(STANDUP_WS)
+        .expect("the standup workspace membership");
+    assert_eq!(m.display_name.as_deref(), Some("robert's workspace"));
     assert_eq!(user.principal.as_deref(), Some("robert@example.com"));
     assert_eq!(user.email.as_deref(), Some("robert@example.com"));
-    assert!(!user.invite_rooted, "a standup is not invite-rooted");
+    assert!(!m.invite_rooted, "a standup is not invite-rooted");
     assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
 }
 
@@ -679,6 +679,7 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
         None,
         true,
         &approve,
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
@@ -707,9 +708,6 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
             plane_key_id: "pk".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
-            workspace_display_name: None,
-            verified_domain: None,
-            verified_domain_status: VerifiedDomainStatus::Unverified,
         },
     )
     .unwrap();
@@ -728,6 +726,7 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
         None,
         false,
         &approve,
+        None,
     )
     .unwrap_err();
     assert!(
@@ -918,7 +917,8 @@ fn a_claim_link_enrolls_in_one_invocation() {
         user.email.is_none(),
         "a device-rooted principal is not an email"
     );
-    assert!(!user.invite_rooted, "a claim is not invite-rooted");
+    let m = user.workspaces.first().expect("one claim membership");
+    assert!(!m.invite_rooted, "a claim is not invite-rooted");
     assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
 }
 
@@ -1106,9 +1106,6 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
             plane_key_id: "pk_hosted".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
-            workspace_display_name: Some("robert's workspace".to_owned()),
-            verified_domain: None,
-            verified_domain_status: VerifiedDomainStatus::Unverified,
         },
     )
     .unwrap();
@@ -1160,6 +1157,7 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
         None,
         false,
         &approve,
+        None,
     )
     .expect("the torn promotion heals and the genesis publish lands");
     let ops::PublishOutcome::Published(data) = outcome else {
@@ -1183,8 +1181,10 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
     let user = enroll::read_user(&rig.fs, &layout)
         .unwrap()
         .expect("user.json was written");
-    assert_eq!(user.workspace_id, STANDUP_WS);
-    assert!(!user.invite_rooted);
+    let m = user
+        .membership(STANDUP_WS)
+        .expect("the standup workspace membership");
+    assert!(!m.invite_rooted);
     assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
 }
 

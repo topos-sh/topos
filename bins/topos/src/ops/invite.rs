@@ -79,6 +79,7 @@ pub(crate) fn invite(
     emails: Vec<String>,
     role: Option<WorkspaceRole>,
     skills: Vec<String>,
+    workspace: Option<&str>,
 ) -> Result<InviteData, ClientError> {
     // The argv boundary: refuse a malformed skill id before signing or contacting anything.
     validate_skill_tokens(&skills)?;
@@ -94,17 +95,16 @@ pub(crate) fn invite(
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    // Infer the workspace (the governance frame's scope) from the enrolled `user.json`. `instance.json`
-    // carries the plane but not the workspace id, so a present-instance-but-no-user state is a partial
-    // enrollment we guide the user to complete rather than guess at.
-    let workspace_id = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| u.workspace_id)
-        .ok_or_else(|| {
-            ClientError::Enrollment(
-                "could not determine your workspace; complete enrollment with `topos follow` first"
-                    .into(),
-            )
-        })?;
+    // Pick the workspace (the governance frame's scope) from the enrolled `user.json` memberships:
+    // `--workspace <id>` when the install has joined several, else the sole one. `instance.json` carries
+    // the plane but no workspace, so a present-instance-but-no-user state is a partial enrollment we guide
+    // the user to complete rather than guess at.
+    let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
+        ClientError::Enrollment(
+            "could not determine your workspace; complete enrollment with `topos follow` first".into(),
+        )
+    })?;
+    let workspace_id = user.resolve_write_workspace(workspace)?.workspace_id.clone();
 
     // The device key (the client's only private-key edge) — its id is the one the plane re-derives + selects
     // to verify the governance signature against the registered (owner) public key.
@@ -319,9 +319,6 @@ mod tests {
                     plane_key_id: "pk_acme".to_owned(),
                     deployment_mode: DeploymentMode::Cloud,
                     enrollment_method: "device_code".to_owned(),
-                    workspace_display_name: Some("Acme".to_owned()),
-                    verified_domain: None,
-                    verified_domain_status: VerifiedDomainStatus::Unverified,
                 },
             )
             .unwrap();
@@ -330,13 +327,17 @@ mod tests {
                 &self.layout(),
                 &enroll::UserDoc {
                     schema_version: 1,
-                    workspace_id: WS.to_owned(),
-                    deployment_mode: DeploymentMode::Cloud,
                     email: None,
                     principal: None,
-                    roles: Vec::new(),
-                    invite_rooted: true,
-                    enrolled_at: 1,
+                    workspaces: vec![enroll::Membership {
+                        workspace_id: WS.to_owned(),
+                        display_name: Some("Acme".to_owned()),
+                        roles: Vec::new(),
+                        verified_domain: None,
+                        verified_domain_status: VerifiedDomainStatus::Unverified,
+                        invite_rooted: true,
+                        enrolled_at: 1,
+                    }],
                 },
             )
             .unwrap();
@@ -386,6 +387,7 @@ mod tests {
             emails.iter().map(|s| (*s).to_owned()).collect(),
             role,
             skills.iter().map(|s| (*s).to_owned()).collect(),
+            None,
         );
         let cap = captured.borrow().clone();
         (out, cap)
