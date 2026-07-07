@@ -1634,6 +1634,67 @@ async fn session_revert_needs_owner_or_reviewer_and_a_members_refusal_is_synthes
 }
 
 #[sqlx::test]
+async fn a_recorded_session_revert_replays_even_after_the_actor_is_demoted(pool: PgPool) {
+    // The idempotency contract survives a role change: a reviewer whose successful revert's ack was lost,
+    // then demoted to a plain member, retries the SAME request_id and is owed the stored `Reverted` — NOT a
+    // fresh role denial. The pre-stage replay runs BEFORE the role fence (mirroring the in-txn path's
+    // replay-before-authz), so a recorded result always replays.
+    let fx = Fixture::new(pool.clone(), "srv-rev-demote").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(76);
+    register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
+    seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
+    let (v0, _v1, _d) = two_versions(
+        &fx,
+        &w,
+        &s,
+        &key,
+        "76000000-0000-4000-8000-000000000001",
+        "76000000-0000-4000-8000-000000000002",
+    )
+    .await;
+
+    // The reviewer rolls back to v0 ⇒ a durable web_session OK on slot R.
+    let rid = "76000000-0000-4000-8000-000000000003";
+    let ok = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
+    assert_eq!(ok.outcome, TerminalOutcome::Ok);
+
+    // Demote her to a plain member (an owner reroled her seat between the lost ack and the retry).
+    sqlx::query(
+        "UPDATE workspace_member SET role = 'member' WHERE workspace_id = $1 AND principal = $2",
+    )
+    .bind("w_acme")
+    .bind("reviewer@acme.com")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The SAME request replays the byte-identical OK — the pre-stage replay precedes the role fence, so the
+    // demotion never turns a recorded success into a denial.
+    let replayed = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
+    assert_eq!(replayed, ok);
+    assert_eq!(
+        code_of(&replayed),
+        None,
+        "a replayed OK carries no denial code"
+    );
+
+    // A FRESH request from the now-demoted member IS refused (the fence still gates a new revert).
+    let fresh = revert_session(
+        &fx,
+        &w,
+        &s,
+        _v1,
+        ok.current.unwrap(),
+        "76000000-0000-4000-8000-000000000004",
+        "reviewer@acme.com",
+    )
+    .await;
+    assert_eq!(fresh.outcome, TerminalOutcome::Denied);
+    assert_eq!(code_of(&fresh).as_deref(), Some("REVIEWER_ROLE_REQUIRED"));
+}
+
+#[sqlx::test]
 async fn a_session_revert_to_a_non_accepted_version_is_refused_without_a_durable_row(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "srv-rev-notacc").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));

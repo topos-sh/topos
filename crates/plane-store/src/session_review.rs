@@ -413,11 +413,42 @@ pub(crate) async fn revert_session(
         Err(refusal) => return Ok(refusal),
     };
 
-    // The pre-stage owner|reviewer fence. A confirmed member who is neither owner nor reviewer gets the
-    // machine-branchable `REVIEWER_ROLE_REQUIRED` — synthesized (a pre-stage session refusal writes nothing:
-    // the only actor that mints a durable revert receipt on this lane is an authorized owner|reviewer, and a
-    // member's denied attempt must not grow the ledger or stage a forward commit). A role that changes
-    // between here and the transaction is caught by the authoritative in-txn gate.
+    let request_sha256 = revert_request_sha256(ws, &acting, skill, good, expected);
+
+    // Replay BEFORE the role fence — mirroring the in-transaction path, whose `run` replays BEFORE its role
+    // gate. A recorded result for THIS request must replay byte-identically on a lost-ack retry REGARDLESS
+    // of a later role change: an owner|reviewer whose successful revert's ack was lost, then demoted to a
+    // plain member, retries the same `request_id` and is owed the stored `Reverted`, never a fresh role
+    // denial (codex review P2). The stable match needs good's recorded tree digest; an ABSENT one means no
+    // stored OK can exist (a session digest-absent failure is synthesized, never persisted), so fall through
+    // to the fence. (`set_current::revert` re-runs this same stable replay for a FRESH request — a cheap
+    // no-op here on the common path.)
+    if let Some(good_digest) = authority
+        .db()
+        .skill_commit_bundle_digest(ws, skill, good)
+        .await?
+        && let Some(replayed) = authority
+            .db()
+            .replay_revert_session(
+                ws,
+                acting.as_str(),
+                request_id,
+                skill,
+                good_digest,
+                expected,
+                request_sha256,
+            )
+            .await?
+    {
+        return Ok(replayed);
+    }
+
+    // The pre-stage owner|reviewer fence (only a FRESH request reaches it — a recorded one replayed above).
+    // A confirmed member who is neither owner nor reviewer gets the machine-branchable
+    // `REVIEWER_ROLE_REQUIRED` — synthesized (a pre-stage session refusal writes nothing: the only actor
+    // that mints a durable revert receipt on this lane is an authorized owner|reviewer, and a member's
+    // denied attempt must not grow the ledger or stage a forward commit). A role that changes between here
+    // and the transaction is caught by the authoritative in-txn gate.
     let is_reviewer = matches!(
         authority.db().member_role(ws, &acting).await?,
         Some((role, status))
@@ -436,7 +467,6 @@ pub(crate) async fn revert_session(
         ));
     }
 
-    let request_sha256 = revert_request_sha256(ws, &acting, skill, good, expected);
     // `parse_op_id` in the preamble proved the canonical form, so this parse cannot fail for a well-formed id.
     let op_id = OpId::parse(request_id).map_err(crate::error::AuthorityError::internal)?;
     set_current::revert(
