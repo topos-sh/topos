@@ -646,10 +646,36 @@ pub(super) fn promote_core(
     enrolled_at: i64,
     signer: &DeviceSigner,
 ) -> Result<topos_types::TriggerReport, ClientError> {
-    // TODO(leg-2): widen identity lock across promotion + WAL-until-coherent — the steps below write
-    // instance.json, follows.json, and user.json as separate durable files, so a crash mid-sequence can
-    // leave a torn promotion. This leg keeps the existing write order + per-file locking; the next leg
-    // makes the multi-file promotion crash-coherent.
+    // Crash-coherence of a (possibly second, same-plane) promotion. Every step below is a SINGLE
+    // atomic-per-file durable write (or an idempotent read-merge-write). The `Redeemed` enrollment WAL —
+    // written BEFORE this fn and deleted only in step 6 — is the transaction log: a crash at any step
+    // leaves every touched file byte-for-byte pre- or post-write (never torn), and the next
+    // `follow --resume` REPLAYS this whole sequence from the WAL until it converges. Each step is
+    // idempotent under that replay:
+    //   1) instance.json — atomic write of identical bytes (the plane is the same on a re-promote);
+    //   2) follows.json  — read-merge-write, deduped by skill_id, so this workspace's row is added-or-
+    //                      refreshed and an already-followed workspace's rows are never dropped;
+    //   3) user.json     — read-upsert-write, deduped by workspace_id, so this membership is added-or-
+    //                      refreshed and any already-joined workspace's membership is never dropped;
+    //   4) host.json     — re-records the same device-key reference (identical bytes);
+    //   5) baselines     — a skill dir that already exists is left untouched; a partial staging is rebuilt;
+    //   6) delete the WAL — the LAST durable step, so "WAL absent" proves steps 1-5 all completed.
+    // The write ORDER is load-bearing: follows.json (step 2) lands before the membership (step 3), so a
+    // committed membership always implies its read credential is already on disk. Proven by the crash-gate
+    // test `second_enrollment_promote_is_crash_coherent_and_never_drops_the_first`.
+    //
+    // Residual (documented, not closed): the steps are atomic PER FILE, not as one transaction, so a
+    // DIFFERENT command running CONCURRENTLY during this promotion could observe the transient gap where
+    // follows.json already carries this workspace but user.json does not yet. This is benign and
+    // self-healing: every file is atomic (no torn reads), the WAL heals the gap on the next resume, and the
+    // worst an ambient write can observe is a fail-closed WorkspaceSelection/Enrollment error — user.json
+    // is all-or-nothing, so a membership is either fully present or absent, never a wrong-workspace
+    // signature and never corruption. Widening the identity lock across steps 1-3 to make them one critical
+    // section would need a lock-free inner variant split out of `write_follows_merged` (it re-takes that
+    // lock, so calling it under a held lock would deadlock) plus holding the guard across the instance /
+    // follows / user writes and dropping it before step 4 (`set_device_key` re-takes the same lock) —
+    // meaningful new internal surface to close a sub-second window whose worst case is already a clean,
+    // self-healing error, so this stays a documented residual rather than a lock-widening refactor.
 
     // 1) instance.json — PUBLIC (the plane key is a public key) → ordinary perms. PLANE-scoped only now;
     // the per-workspace disclosure moved to the user.json membership written in step 3.

@@ -27,7 +27,7 @@ use topos_types::{
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::fs_seam::RealFs;
+use crate::fs_seam::{FaultFs, FsOps, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
     DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowMode,
@@ -456,8 +456,18 @@ impl Rig {
         Layout::new(&self.home.0)
     }
     fn ctx<'a>(&'a self, plane: &'a dyn PlaneSource, follow: &'a dyn FollowSource) -> Ctx<'a> {
+        self.ctx_fs(&self.fs, plane, follow)
+    }
+    /// A [`Ctx`] over an arbitrary [`FsOps`] (the crash gate injects a [`FaultFs`] to fault the Nth
+    /// durable op of a promotion).
+    fn ctx_fs<'a>(
+        &'a self,
+        fs: &'a dyn FsOps,
+        plane: &'a dyn PlaneSource,
+        follow: &'a dyn FollowSource,
+    ) -> Ctx<'a> {
         Ctx {
-            fs: &self.fs,
+            fs,
             ids: &self.ids,
             clock: &self.clock,
             device_id: "d_test".into(),
@@ -1227,4 +1237,244 @@ fn approve_places_the_named_first_receive_offer() {
         std::fs::read(placement.join("SKILL.md")).unwrap(),
         b"# deploy\n"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multi-workspace promotion crash gate.
+//
+// A SECOND same-plane enrollment (workspace B: a DIFFERENT `workspace_id` on the SAME `base_url` + SAME
+// pinned plane key) must promote crash-coherently — atomic-per-file + idempotent replay from the
+// `Redeemed` WAL — and never drop the first workspace (A). These exercise `promote_core` from the
+// Redeemed-WAL recovery arm (no re-poll / re-redeem — `PanicEnroll` proves it).
+// ---------------------------------------------------------------------------------------------
+
+/// Workspace B: a second workspace on the same plane, offering its own skill.
+const WS_B: &str = "w_beta";
+const B_SKILL: &str = "s_report";
+
+/// Fully enroll workspace A (skill `s_deploy`) through the real two-call device flow, so instance.json is
+/// TOFU-pinned, follows.json + user.json carry A, host.json holds the device key, and A's first-receive
+/// baseline is laid. Leaves no WAL (A's own promote deleted it).
+fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
+    let link = format!("{BASE_URL}/i/tok_a");
+    run_follow(
+        rig,
+        &fake(&[("s_deploy", "deploy")], Poll::Pending),
+        plane,
+        Some(&link),
+        opts(false, false, &[]),
+    )
+    .expect("A: begin");
+    run_follow(
+        rig,
+        &fake(&[("s_deploy", "deploy")], Poll::Granted),
+        plane,
+        None,
+        opts(false, true, &[]),
+    )
+    .expect("A: resume promotes");
+}
+
+/// Hand-write workspace B's `Redeemed` WAL exactly as the lockout fence records it BEFORE promotion — the
+/// same install/device (so the device key id + principal match), a DIFFERENT `workspace_id` on the SAME
+/// base URL + pinned key. A re-`follow --resume` promotes from this without re-redeeming.
+fn write_workspace_b_redeemed_wal(rig: &Rig) {
+    let context = enroll::EnrollContext {
+        base_url: BASE_URL.into(),
+        pinned_plane_key: to_hex(&plane_pubkey()),
+        plane_key_id: "pk_acme".into(),
+        deployment_mode: DeploymentMode::Cloud,
+        enrollment_method: "device_code".into(),
+        workspace_id: WS_B.into(),
+        workspace_display_name: "Beta Team".into(),
+        verified_domain: None,
+        verified_domain_status: VerifiedDomainStatus::Unverified,
+        offered_skills: vec![enroll::OfferedSkill {
+            skill_id: B_SKILL.into(),
+            name: Some("report".into()),
+        }],
+        mode: enroll::FollowModeDoc::Auto,
+        root: enroll::EnrollRoot::Invite,
+    };
+    let wal = enroll::PendingEnrollment {
+        schema_version: 1,
+        state: enroll::EnrollPhase::Redeemed {
+            context,
+            read_creds: vec![enroll::RedeemedCredDoc {
+                skill_id: B_SKILL.into(),
+                read_token: format!("rt_secret_{B_SKILL}"),
+                expires_at: None,
+            }],
+            device_key_id: device_key_id_for(&device_pubkey(rig)),
+            principal: Some("alice@acme.com".into()),
+            enrolled_at_millis: 2,
+        },
+    };
+    enroll::write_wal(&rig.fs, &rig.layout(), &wal).unwrap();
+}
+
+/// Drive `follow --resume` over an arbitrary fs (the crash gate injects a [`FaultFs`]). A Redeemed-WAL
+/// resume never re-contacts the plane for enrollment (`PanicEnroll` proves it); the plane connector serves
+/// only the post-promote, best-effort offer disclosure.
+fn resume_over_fs(
+    rig: &Rig,
+    fs: &dyn FsOps,
+    plane: &FixturePlane,
+) -> Result<topos_types::results::FollowData, ClientError> {
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx_fs(fs, &inert_p, &inert_f);
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(PanicEnroll) };
+    let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
+        Box::new(plane.clone())
+    };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        plane: &plane_connect,
+    };
+    ops::follow(&ctx, &connectors, None, opts(false, true, &[])).map(|o| o.data)
+}
+
+/// Assert the fully converged state: BOTH memberships (each with the right id + display name), BOTH follows
+/// (each tagged with its own workspace, A never dropped), BOTH first-receive baselines, and no WAL.
+fn assert_ab_converged(rig: &Rig) {
+    let layout = rig.layout();
+
+    let user = enroll::read_user(&rig.fs, &layout)
+        .unwrap()
+        .expect("user.json");
+    assert_eq!(user.workspaces.len(), 2, "both memberships present");
+    let a = user.membership(WS).expect("workspace A membership survived");
+    assert_eq!(a.display_name.as_deref(), Some("Acme Inc"));
+    let b = user.membership(WS_B).expect("workspace B membership landed");
+    assert_eq!(b.display_name.as_deref(), Some("Beta Team"));
+
+    let follows = enroll::read_follows(&rig.fs, &layout)
+        .unwrap()
+        .expect("follows.json");
+    assert_eq!(follows.follows.len(), 2, "both follows present");
+    let fa = follows
+        .follows
+        .iter()
+        .find(|f| f.skill_id == "s_deploy")
+        .expect("A's follow survived");
+    assert_eq!(fa.workspace_id, WS);
+    assert!(fa.following);
+    let fb = follows
+        .follows
+        .iter()
+        .find(|f| f.skill_id == B_SKILL)
+        .expect("B's follow landed");
+    assert_eq!(fb.workspace_id, WS_B);
+    assert!(fb.following);
+
+    assert!(
+        rig.fs.exists(&layout.skill_dir(&sid("s_deploy"))),
+        "A's first-receive baseline exists"
+    );
+    assert!(
+        rig.fs.exists(&layout.skill_dir(&sid(B_SKILL))),
+        "B's first-receive baseline exists"
+    );
+
+    assert!(
+        enroll::read_wal(&rig.fs, &layout).unwrap().is_none(),
+        "the WAL is cleared once the promotion completes"
+    );
+}
+
+#[test]
+fn a_second_same_plane_workspace_enrollment_adds_a_membership_and_merges_follows() {
+    // The happy path: enrolled in A, then follow into a DIFFERENT workspace B on the SAME plane. The
+    // second promote UPSERTS a membership + MERGES a follow — it never overwrites A.
+    let rig = Rig::new("mws-happy");
+    let mut plane = FixturePlane::default();
+    plane.serve_genesis("s_deploy", GENESIS_FILES);
+    enroll_workspace_a(&rig, &plane);
+    write_workspace_b_redeemed_wal(&rig);
+
+    resume_over_fs(&rig, &rig.fs, &plane).expect("B resume promotes");
+
+    assert_ab_converged(&rig);
+}
+
+/// Fault EACH durable step of workspace B's promotion, then replay the Redeemed WAL to completion and
+/// assert the converged state is coherent — A always intact, B either fully landed or cleanly resumable,
+/// never a stuck partial and never a dropped first workspace.
+#[test]
+fn second_enrollment_promote_is_crash_coherent_and_never_drops_the_first() {
+    // Count the promote's durable ops from a clean run (fail_at == 0 never faults) and confirm convergence.
+    let n_ops = {
+        let rig = Rig::new("mws-count");
+        let mut plane = FixturePlane::default();
+        plane.serve_genesis("s_deploy", GENESIS_FILES);
+        enroll_workspace_a(&rig, &plane);
+        write_workspace_b_redeemed_wal(&rig);
+        let fs = FaultFs::new(0);
+        resume_over_fs(&rig, &fs, &plane).expect("clean B resume promotes");
+        assert_ab_converged(&rig);
+        fs.ops_attempted()
+    };
+    assert!(n_ops > 5, "expected several durable promote ops, got {n_ops}");
+
+    for fail_at in 1..=n_ops {
+        let rig = Rig::new(&format!("mws-{fail_at}"));
+        let mut plane = FixturePlane::default();
+        plane.serve_genesis("s_deploy", GENESIS_FILES);
+        enroll_workspace_a(&rig, &plane);
+        write_workspace_b_redeemed_wal(&rig);
+        let layout = rig.layout();
+
+        // Fault the Nth durable op of B's promote (it may error mid-sequence).
+        let fs = FaultFs::new(fail_at);
+        let _ = resume_over_fs(&rig, &fs, &plane);
+
+        // DURING-CRASH coherence (before any heal). Both docs are atomic, so they always load and A is
+        // never lost; B is either fully landed or cleanly resumable — never a stuck partial.
+        let user = enroll::read_user(&rig.fs, &layout)
+            .unwrap()
+            .expect("user.json still loads after the crash");
+        assert!(
+            user.membership(WS).is_some(),
+            "fail_at={fail_at}: A's membership survives the crash"
+        );
+        let follows = enroll::read_follows(&rig.fs, &layout)
+            .unwrap()
+            .expect("follows.json still loads after the crash");
+        assert!(
+            follows.follows.iter().any(|f| f.skill_id == "s_deploy"),
+            "fail_at={fail_at}: A's follow survives the crash"
+        );
+
+        let b_member = user.membership(WS_B).is_some();
+        let wal_present = enroll::read_wal(&rig.fs, &layout).unwrap().is_some();
+        // Ordering invariant: follows.json (step 2) lands before the membership (step 3), so a committed B
+        // membership ALWAYS implies B's read creds are already on disk (an ambient write that resolves to B
+        // can never find a membership without its follow credential).
+        if b_member {
+            assert!(
+                follows.follows.iter().any(|f| f.skill_id == B_SKILL),
+                "fail_at={fail_at}: a B membership must imply a B follow (follows written first)"
+            );
+        }
+        // The WAL is the transaction log, deleted LAST: a not-yet-written B membership proves the crash
+        // landed before the WAL was cleared, so the enrollment is still resumable (never a lost partial).
+        if !b_member {
+            assert!(
+                wal_present,
+                "fail_at={fail_at}: an incomplete B promote must leave the Redeemed WAL for resume"
+            );
+        }
+
+        // Heal: replay the Redeemed WAL to completion (idempotent). If the WAL is already gone, B fully
+        // landed on the faulted run (the WAL is deleted only after every other step), so there is nothing
+        // left to resume.
+        if wal_present {
+            resume_over_fs(&rig, &rig.fs, &plane)
+                .unwrap_or_else(|e| panic!("fail_at={fail_at}: healing resume failed: {e:?}"));
+        }
+
+        // Converged: both memberships, both follows (A intact), both baselines, WAL gone.
+        assert_ab_converged(&rig);
+    }
 }
