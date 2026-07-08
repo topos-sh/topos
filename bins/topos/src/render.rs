@@ -1097,7 +1097,10 @@ mod tests {
         // The Acme group holds the followed + the paused rows (before the local group's line).
         let acme_at = text.find("Acme:").unwrap();
         let local_at = text.find("local (not shared):").unwrap();
-        assert!(acme_at < local_at, "workspace group precedes local:\n{text}");
+        assert!(
+            acme_at < local_at,
+            "workspace group precedes local:\n{text}"
+        );
         assert!(text.contains("docs@ababababab"), "{text}");
         assert!(text.contains("(following, auto)"), "{text}");
         assert!(

@@ -205,7 +205,8 @@ pub(crate) fn write_workspace_for_skill(
     }
     let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment(
-            "could not determine your workspace; complete enrollment with `topos follow` first".into(),
+            "could not determine your workspace; complete enrollment with `topos follow` first"
+                .into(),
         )
     })?;
     Ok(user.resolve_write_workspace(explicit)?.workspace_id.clone())
@@ -468,8 +469,7 @@ mod tests {
         use crate::plane::{FollowContext, FollowMode, FollowSource, InertPlane};
         use crate::sidecar::Layout;
 
-        const ZERO_HEX: &str =
-            "0000000000000000000000000000000000000000000000000000000000000000";
+        const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
         struct FixtureFollow(Vec<(String, FollowContext)>);
         impl FollowSource for FixtureFollow {
@@ -553,7 +553,8 @@ mod tests {
             let fs = RealFs;
             lay_skill(&fs, &home, "topos_a", "docs");
             lay_skill(&fs, &home, "topos_b", "docs");
-            let follow = FixtureFollow(vec![followed("topos_a", "w_a"), followed("topos_b", "w_b")]);
+            let follow =
+                FixtureFollow(vec![followed("topos_a", "w_a"), followed("topos_b", "w_b")]);
 
             with_ctx(&home, &follow, |ctx| {
                 assert!(matches!(

@@ -123,7 +123,14 @@ pub(crate) fn publish(
         return standup_publish(ctx, connect, gov_connect, standup, skill_arg, approve);
     }
     enrolled_publish(
-        ctx, connect, gov_connect, skill_arg, propose, approve, None, workspace,
+        ctx,
+        connect,
+        gov_connect,
+        skill_arg,
+        propose,
+        approve,
+        None,
+        workspace,
     )
 }
 

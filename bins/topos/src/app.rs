@@ -225,7 +225,13 @@ pub fn run() -> ExitCode {
             finish(
                 json,
                 cmd_name,
-                ops::review(&ctx, &connect_contribute, &target, approve, workspace.as_deref()),
+                ops::review(
+                    &ctx,
+                    &connect_contribute,
+                    &target,
+                    approve,
+                    workspace.as_deref(),
+                ),
                 render::review_tty,
                 &diag,
             )

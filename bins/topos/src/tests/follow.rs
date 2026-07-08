@@ -1488,9 +1488,13 @@ fn assert_ab_converged(rig: &Rig) {
         .unwrap()
         .expect("user.json");
     assert_eq!(user.workspaces.len(), 2, "both memberships present");
-    let a = user.membership(WS).expect("workspace A membership survived");
+    let a = user
+        .membership(WS)
+        .expect("workspace A membership survived");
     assert_eq!(a.display_name.as_deref(), Some("Acme Inc"));
-    let b = user.membership(WS_B).expect("workspace B membership landed");
+    let b = user
+        .membership(WS_B)
+        .expect("workspace B membership landed");
     assert_eq!(b.display_name.as_deref(), Some("Beta Team"));
 
     let follows = enroll::read_follows(&rig.fs, &layout)
@@ -1559,7 +1563,10 @@ fn second_enrollment_promote_is_crash_coherent_and_never_drops_the_first() {
         assert_ab_converged(&rig);
         fs.ops_attempted()
     };
-    assert!(n_ops > 5, "expected several durable promote ops, got {n_ops}");
+    assert!(
+        n_ops > 5,
+        "expected several durable promote ops, got {n_ops}"
+    );
 
     for fail_at in 1..=n_ops {
         let rig = Rig::new(&format!("mws-{fail_at}"));

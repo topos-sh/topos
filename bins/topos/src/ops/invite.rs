@@ -101,10 +101,14 @@ pub(crate) fn invite(
     // the user to complete rather than guess at.
     let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment(
-            "could not determine your workspace; complete enrollment with `topos follow` first".into(),
+            "could not determine your workspace; complete enrollment with `topos follow` first"
+                .into(),
         )
     })?;
-    let workspace_id = user.resolve_write_workspace(workspace)?.workspace_id.clone();
+    let workspace_id = user
+        .resolve_write_workspace(workspace)?
+        .workspace_id
+        .clone();
 
     // The device key (the client's only private-key edge) — its id is the one the plane re-derives + selects
     // to verify the governance signature against the registered (owner) public key.

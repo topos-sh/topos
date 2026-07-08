@@ -334,7 +334,18 @@ pub(crate) async fn mint_invite(
     skill: &str,
     at: &str,
 ) -> String {
-    mint_invite_with_role(authority, ws, signer, op_id, email, skill, None, Role::Member, at).await
+    mint_invite_with_role(
+        authority,
+        ws,
+        signer,
+        op_id,
+        email,
+        skill,
+        None,
+        Role::Member,
+        at,
+    )
+    .await
 }
 
 /// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The signing frame

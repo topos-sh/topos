@@ -1573,7 +1573,8 @@ impl ContributeHarness {
         confirm: bool,
     ) -> Result<RevertData, String> {
         self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
-            ops::revert(ctx, contribute, None, to, approve, confirm, None).map_err(|e| e.to_string())
+            ops::revert(ctx, contribute, None, to, approve, confirm, None)
+                .map_err(|e| e.to_string())
         })
     }
 

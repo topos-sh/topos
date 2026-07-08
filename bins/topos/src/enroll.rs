@@ -1257,7 +1257,8 @@ mod tests {
         // The crash-safety fence: `schema_version` stays 1, so a STALE single-workspace user.json is still
         // handed to serde by `load_versioned` — and the missing REQUIRED `workspaces` field must make the
         // parse fail (Corrupt), never silently load an empty-membership document.
-        let stale = br#"{"schema_version":1,"workspace_id":"w_x","invite_rooted":true,"enrolled_at":1}"#;
+        let stale =
+            br#"{"schema_version":1,"workspace_id":"w_x","invite_rooted":true,"enrolled_at":1}"#;
         assert!(
             matches!(
                 load_versioned::<UserDoc>(stale, PERSISTED_SCHEMA_VERSION),
@@ -1280,7 +1281,10 @@ mod tests {
         ));
         // Exactly 1 → that one, no `--workspace` needed.
         let one = user_with(vec![sample_membership("w_a", Some("A"))]);
-        assert_eq!(one.resolve_write_workspace(None).unwrap().workspace_id, "w_a");
+        assert_eq!(
+            one.resolve_write_workspace(None).unwrap().workspace_id,
+            "w_a"
+        );
         // >1 without an explicit choice → a workspace-selection error naming `--workspace` + the ids.
         let two = user_with(vec![
             sample_membership("w_a", None),
@@ -1289,10 +1293,15 @@ mod tests {
         let err = two.resolve_write_workspace(None).unwrap_err();
         assert!(matches!(err, ClientError::WorkspaceSelection(_)));
         let msg = err.to_string();
-        assert!(msg.contains("--workspace") && msg.contains("w_a") && msg.contains("w_b"), "{msg}");
+        assert!(
+            msg.contains("--workspace") && msg.contains("w_a") && msg.contains("w_b"),
+            "{msg}"
+        );
         // >1 WITH a valid explicit → that one.
         assert_eq!(
-            two.resolve_write_workspace(Some("w_b")).unwrap().workspace_id,
+            two.resolve_write_workspace(Some("w_b"))
+                .unwrap()
+                .workspace_id,
             "w_b"
         );
         // An explicit id this install never joined → a workspace-selection error.
@@ -1342,7 +1351,10 @@ mod tests {
         assert_eq!(follows.follows[0].workspace_id, "w_a");
         // The SAME skill_id under the SAME workspace still updates cleanly (a token refresh).
         write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
-        assert_eq!(read_follows(&fs, &layout).unwrap().unwrap().follows.len(), 1);
+        assert_eq!(
+            read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
+            1
+        );
     }
 
     #[test]
@@ -1375,6 +1387,9 @@ mod tests {
             follows: vec![entry("s_a", "w_a"), entry("s_b", "w_b")],
         };
         doc::write_doc_private(&fs, &layout.follows_path(), &ok).unwrap();
-        assert_eq!(read_follows(&fs, &layout).unwrap().unwrap().follows.len(), 2);
+        assert_eq!(
+            read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
+            2
+        );
     }
 }

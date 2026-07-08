@@ -472,7 +472,11 @@ const SHARED_NAME: &str = "common";
 
 /// The `s_shared_a` draft the `--workspace A` publish ships (a forward child of A's genesis).
 const SHARED_DRAFT: &[(&str, bool, &[u8])] = &[
-    ("SKILL.md", false, b"# common\nShared skill, edited in Acme.\n"),
+    (
+        "SKILL.md",
+        false,
+        b"# common\nShared skill, edited in Acme.\n",
+    ),
     ("run.sh", true, b"#!/bin/sh\necho common v2\n"),
 ];
 
@@ -539,7 +543,11 @@ fn publish_disambiguates_a_shared_skill_name_by_workspace() {
         .iter()
         .filter(|e| e.skill == SHARED_NAME)
         .collect();
-    assert_eq!(commons.len(), 2, "two tracked skills share the name 'common'");
+    assert_eq!(
+        commons.len(),
+        2,
+        "two tracked skills share the name 'common'"
+    );
     let mut scopes: Vec<String> = commons
         .iter()
         .filter_map(|e| e.workspace_id.clone())
