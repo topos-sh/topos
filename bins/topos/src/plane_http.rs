@@ -885,6 +885,71 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
     })
 }
 
+// =================================================================================================
+// UreqReleases — the real release source for `topos upgrade` (the native self-updater). Speaks the
+// GitHub REST API for latest-tag resolution + raw asset GETs over the same blocking agent as the plane
+// transports (its own rustls+ring stack — no new dependency edge). GitHub 403s a request without a
+// `User-Agent`, so every request carries this build's. The checksum verify + atomic replace stay in the
+// op; this is a dumb byte fetcher.
+// =================================================================================================
+
+/// The user-agent GitHub requires (it 403s a request without one). Carries this build's version.
+const RELEASE_USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
+
+/// The blocking `ureq` release source: the GitHub API for latest-tag resolution + raw asset GETs.
+pub(crate) struct UreqReleases {
+    agent: ureq::Agent,
+}
+
+impl UreqReleases {
+    pub(crate) fn new() -> Self {
+        Self {
+            agent: ureq::Agent::new_with_config(agent_config()),
+        }
+    }
+}
+
+impl crate::release::ReleaseSource for UreqReleases {
+    fn latest_tag(&self) -> Result<String, ClientError> {
+        let url = "https://api.github.com/repos/topos-sh/topos/releases/latest";
+        let resp = self
+            .agent
+            .get(url)
+            .header("User-Agent", RELEASE_USER_AGENT)
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|e| ClientError::Plane(format!("release check: {e}")))?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            return Err(ClientError::Plane(format!(
+                "release check: HTTP {status} from {url}"
+            )));
+        }
+        let body = read_body(resp).map_err(plane_err)?;
+        #[derive(serde::Deserialize)]
+        struct Rel {
+            tag_name: String,
+        }
+        let rel: Rel = serde_json::from_slice(&body)
+            .map_err(|e| ClientError::Plane(format!("release check: malformed response: {e}")))?;
+        Ok(rel.tag_name)
+    }
+
+    fn download(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+        let resp = self
+            .agent
+            .get(url)
+            .header("User-Agent", RELEASE_USER_AGENT)
+            .call()
+            .map_err(|e| ClientError::Plane(format!("download {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        if !(200..=299).contains(&status) {
+            return Err(ClientError::Plane(format!("download {url}: HTTP {status}")));
+        }
+        read_body(resp).map_err(plane_err)
+    }
+}
+
 /// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

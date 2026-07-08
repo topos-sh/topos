@@ -162,6 +162,22 @@ pub(crate) enum ClientError {
     /// op provably did NOT land), so its op-WAL is dropped rather than replayed forever.
     #[error("the plane rejected the request (HTTP {0})")]
     PlaneRejected(u16),
+    /// A self-update download (`topos upgrade`) did not match the sha256 the release `SHA256SUMS` lists —
+    /// refused BEFORE the binary is touched (the mandatory, never-skippable integrity gate). The message is
+    /// all-public (the asset name + the two hashes), so it is safe to show verbatim.
+    #[error(
+        "downloaded {asset}: sha256 mismatch (expected {expected}, got {actual}) — refusing to install"
+    )]
+    ChecksumMismatch {
+        asset: String,
+        expected: String,
+        actual: String,
+    },
+    /// `topos upgrade` could not replace the running binary because its install location is not
+    /// writable — typically a package-managed or read-only install. The message is actionable guidance
+    /// (the binary's path + how to reinstall); a path is not a secret, so it is shown VERBATIM.
+    #[error("{0}")]
+    UpgradeUnwritable(String),
     /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
@@ -211,6 +227,10 @@ impl ClientError {
             ClientError::PendingOp { .. } => "PENDING_OP",
             ClientError::WorkspaceSelection(_) => "WORKSPACE_SELECTION",
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",
+            // A self-update checksum mismatch is an integrity failure (same family as verify-on-read).
+            ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
+            // A not-writable install location is a filesystem-shaped, permanent failure.
+            ClientError::UpgradeUnwritable(_) => "IO_ERROR",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
         }
@@ -245,6 +265,10 @@ impl ClientError {
             ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,
             // A definitive 4xx rejection — the op cannot succeed as-is.
             ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
+            // A tampered/corrupt download will not heal on a retry against the same bad bytes.
+            ClientError::ChecksumMismatch { .. } => TerminalOutcome::PermanentFailure,
+            // A read-only / package-managed install location will not heal on a retry.
+            ClientError::UpgradeUnwritable(_) => TerminalOutcome::PermanentFailure,
             // The plane's terminal outcome, surfaced verbatim (not flattened to a transport error).
             ClientError::PlaneTerminal { outcome, .. } => *outcome,
             _ => TerminalOutcome::PermanentFailure,

@@ -53,6 +53,11 @@ thiserror.workspace = true
 ed25519-dalek = { workspace = true, features = ["std", "zeroize"] }
 getrandom.workspace = true
 zeroize.workspace = true
+# The self-update asset codec (`topos upgrade`): unpack the release tarball in memory. `flate2` keeps its
+# DEFAULT features (the pure-Rust `miniz_oxide` backend — no C zlib edge, honoring the workspace's
+# unsafe-forbid + no-C-deps posture); both stay clear of check-arch's ban list.
+tar = "0.4"
+flate2 = "1"
 
 [lints]
 workspace = true

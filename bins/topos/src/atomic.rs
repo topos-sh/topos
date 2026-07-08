@@ -70,6 +70,28 @@ pub(crate) fn atomic_write_private(
     Ok(())
 }
 
+/// Crash-safe replace of an EXECUTABLE file: stage a sibling temp (mode 0755, forced past umask),
+/// fsync it, atomically rename it over `target`, then fsync the directory. On Unix a running process
+/// keeps its old inode, so replacing the live binary is safe. `tmp` MUST be a sibling of `target`
+/// (same filesystem) so the rename is atomic — the caller picks a unique, namespaced temp name.
+///
+/// # Errors
+/// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
+pub(crate) fn atomic_write_executable(
+    fs: &dyn FsOps,
+    target: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    fs.write_staged(tmp, bytes, true)?; // 0755 from creation
+    fs.fsync_file(tmp)?;
+    fs.rename(tmp, target)?;
+    if let Some(dir) = target.parent() {
+        fs.fsync_dir(dir)?;
+    }
+    Ok(())
+}
+
 /// The temp path for a target: the same path with [`TMP_SUFFIX`] appended (same directory, so the rename
 /// is same-filesystem; a recognizable suffix recovery can sweep).
 pub(crate) fn temp_path(target: &Path) -> PathBuf {
@@ -167,6 +189,34 @@ mod tests {
         atomic_write_private(&fs, &p, b"{\"k\":1}").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"{\"k\":1}");
         assert_eq!(mode_of(&p), 0o600);
+    }
+
+    /// A fault at ANY step of `atomic_write_executable` (the self-updater's binary replace) leaves the
+    /// target byte-for-byte pre OR post — never a torn/partial binary — and always keeps its 0755 mode. On
+    /// Unix a running process holds its old inode, so a crash mid-upgrade never wedges the live binary.
+    #[test]
+    fn faultfs_mid_write_executable_never_leaves_a_torn_binary() {
+        for fail_at in 1..=4 {
+            let dir = scratch(&format!("awxf{fail_at}"));
+            let p = dir.join("topos");
+            let tmp = dir.join(".topos-upgrade.tmp");
+            let real = RealFs;
+            real.write_staged(&p, b"OLD", true).unwrap(); // pre-state, 0755
+            let ff = FaultFs::new(fail_at);
+            let _ = atomic_write_executable(&ff, &p, &tmp, b"NEWBINARY"); // faults at step `fail_at`
+
+            // The target is exactly the pre or the post bytes (never a mix) and keeps its executable mode.
+            let now = std::fs::read(&p).unwrap();
+            assert!(
+                now == b"OLD" || now == b"NEWBINARY",
+                "fail_at={fail_at}: target neither pre nor post (torn)"
+            );
+            assert_eq!(
+                mode_of(&p),
+                0o755,
+                "fail_at={fail_at}: target lost its 0755 mode"
+            );
+        }
     }
 
     /// A fault at ANY step of `atomic_write_private` leaves the target byte-for-byte pre OR post (never

@@ -227,6 +227,20 @@ are asserted byte-equal in tests.
   an explicit local `pull <skill>@<hash>` (a user-initiated go-back) remains available on an unfollowed
   copy. Golden `--json` fixture + a byte-identity test (the placement bytes hash equal across unfollow).
 
+- **The `upgrade` maintenance command** (`ops/upgrade`, `release`, `plane_http::UreqReleases`) — the native
+  self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin — which allows a
+  pinned downgrade), downloads that tag's `topos-<triple>.tar.gz` + its `SHA256SUMS`, verifies the
+  download's sha256 against the manifest (mandatory, never skippable — a mismatch is a typed
+  `INTEGRITY_ERROR` refused BEFORE the binary is touched), extracts the `topos` entry in memory (never
+  unpacking attacker paths to disk), and atomically replaces the running binary via a same-dir
+  staged-temp → fsync → rename-over → fsync-dir (the existing crash gate covers it; a running process
+  keeps its old inode). `--check` reports availability and stops. The upstream sits behind an injectable
+  `ReleaseSource` seam, so the whole flow is unit-tested with a fake (no HTTP); `build.rs` embeds the
+  compiled target triple so the updater fetches THIS platform's asset. A default GitHub base is compiled
+  in, overridable via `TOPOS_INSTALL_BASE_URL` for a local mirror / air-gap (a non-HTTPS base is warned,
+  the checksum still enforced). NOT a behavior verb — it touches no skills, no plane, no account, and
+  mints no device identity.
+
 ## Planned (lands later)
 
 Signing-at-rest lands later; **multi-reviewer

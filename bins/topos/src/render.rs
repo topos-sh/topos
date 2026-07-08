@@ -554,6 +554,27 @@ pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
     out
 }
 
+pub(crate) fn upgrade_tty(o: &crate::ops::UpgradeOutcome) -> String {
+    use crate::ops::UpgradeAction::*;
+    let mut s = match o.action {
+        Checked if o.update_available => format!(
+            "A newer topos is available: {} -> {}.\nRun `topos upgrade` to install it.",
+            o.current_version,
+            o.latest_version.as_deref().unwrap_or("?")
+        ),
+        Checked | AlreadyCurrent => format!("topos is up to date ({}).", o.current_version),
+        Upgraded => format!(
+            "Upgraded topos {} -> {}.",
+            o.current_version,
+            o.latest_version.as_deref().unwrap_or("?")
+        ),
+    };
+    if let Some(w) = &o.warning {
+        s.push_str(&format!("\nwarning: {w}"));
+    }
+    s
+}
+
 pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
     let data = &out.data;
     // A pending enrollment: surface the verification URL WITH the workspace + verified-domain provenance

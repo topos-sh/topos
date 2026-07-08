@@ -317,6 +317,27 @@ pub fn run() -> ExitCode {
                 &diag,
             )
         }
+        Command::Upgrade { check, version } => {
+            // A MAINTENANCE command: it replaces the binary itself. It mints no device identity (kept out
+            // of the device-id match above) and never touches a skill / the plane / the account.
+            let releases = connect_releases();
+            let base_url = std::env::var("TOPOS_INSTALL_BASE_URL").ok();
+            let result = std::env::current_exe()
+                .map_err(ClientError::from)
+                .and_then(|exe| {
+                    ops::upgrade(
+                        &ctx,
+                        releases.as_ref(),
+                        &exe,
+                        ops::UpgradeOpts {
+                            check,
+                            version,
+                            base_url,
+                        },
+                    )
+                });
+            finish(json, cmd_name, result, render::upgrade_tty, &diag)
+        }
     }
 }
 
@@ -334,6 +355,12 @@ fn connect_governance(base_url: &str) -> Box<dyn GovernanceSource> {
 
 fn connect_contribute(base_url: &str) -> Box<dyn ContributeSource> {
     Box::new(UreqDeviceClient::new(base_url.to_owned()))
+}
+
+/// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the
+/// updater's default download base is compiled in (overridable via `TOPOS_INSTALL_BASE_URL`).
+fn connect_releases() -> Box<dyn crate::release::ReleaseSource> {
+    Box::new(crate::plane_http::UreqReleases::new())
 }
 
 /// The hosted plane's compiled-in base URL — used ONLY by the un-enrolled `publish` standup branch (an

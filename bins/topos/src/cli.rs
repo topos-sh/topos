@@ -168,6 +168,18 @@ pub(crate) enum Command {
         #[arg(long)]
         footprint: bool,
     },
+    /// Update the `topos` binary itself to the latest release, verifying the download's sha256 against the
+    /// release SHA256SUMS (never skippable) and replacing the running binary atomically. A MAINTENANCE
+    /// command — it touches no skills, no plane, no account, and mints no device identity.
+    Upgrade {
+        /// Only check whether a newer release exists; report and exit without downloading or replacing.
+        #[arg(long)]
+        check: bool,
+        /// Install a specific release tag (e.g. v0.2.0) instead of the latest — allows a pinned downgrade.
+        /// Bypasses the latest-version check and downloads that tag directly.
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+    },
 }
 
 /// The workspace role an invite grants, as a CLI arg — maps 1:1 to [`WorkspaceRole`]. The client signs the
@@ -210,6 +222,7 @@ impl Command {
             Command::Log { .. } => "log",
             Command::Pull { .. } => "pull",
             Command::Uninstall { .. } => "uninstall",
+            Command::Upgrade { .. } => "upgrade",
         }
     }
 }

@@ -32,6 +32,7 @@ pub(crate) mod op_wal;
 pub(crate) mod ops;
 pub(crate) mod plane;
 pub(crate) mod plane_http;
+pub(crate) mod release;
 pub(crate) mod render;
 pub(crate) mod scan;
 pub(crate) mod sidecar;

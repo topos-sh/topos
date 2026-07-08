@@ -31,6 +31,7 @@ mod review;
 mod sync_engine;
 mod unfollow;
 mod uninstall;
+mod upgrade;
 
 pub(crate) use add::add;
 pub(crate) use diff::diff;
@@ -48,6 +49,7 @@ pub(crate) use revert::revert;
 pub(crate) use review::review;
 pub(crate) use unfollow::unfollow;
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
+pub(crate) use upgrade::{UpgradeAction, UpgradeOpts, UpgradeOutcome, upgrade};
 
 use topos_types::persisted::{Lock, RecordedTuple, SyncState};
 
