@@ -420,8 +420,9 @@ fn catalog_err_label(e: &PlaneError) -> &'static str {
 /// Discover skills sitting in a known harness's skill dir (across the baked registry) that no tracked skill
 /// already records — the `add`-able inventory. Dedups a physically-shared dir (e.g. `.agents/skills`) to
 /// one row by canonical path. Real-fs (like the adapters' own `discover`), so a per-dir scan failure is
-/// silently skipped, never an error.
-fn discover_untracked(
+/// silently skipped, never an error. `pub(crate)` so `add <skill>` name resolution shares the SAME
+/// discovered inventory `list` prints (one source of truth for what a name can resolve to).
+pub(crate) fn discover_untracked(
     ctx: &Ctx<'_>,
     roots: &DiscoveryRoots,
 ) -> Result<Vec<UntrackedEntry>, ClientError> {

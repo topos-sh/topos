@@ -78,7 +78,7 @@ fn end_to_end_add_then_list_over_json() {
     copy_tree(&fixture(), &skill);
 
     // add — drives clap, TOPOS_HOME, the recover+identity startup, and the success envelope.
-    let (ok, v) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run(&home, &["--json", "add", "--path", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true);
@@ -128,7 +128,11 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let before = std::fs::read(&skill_md).unwrap();
 
     // add → recognized as Claude Code, currency armed, hook written to settings.json.
-    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run_in(
+        &home,
+        &claude,
+        &["--json", "add", "--path", skill.to_str().unwrap()],
+    );
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
     assert_eq!(v["data"]["harness"], "claude-code");
@@ -172,11 +176,107 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     );
 
     // A second add of the same dir is refused (already tracked), not silently duplicated.
-    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run_in(
+        &home,
+        &claude,
+        &["--json", "add", "--path", skill.to_str().unwrap()],
+    );
     assert!(!ok, "re-adding the same dir exits nonzero");
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
 
     let _ = std::fs::remove_dir_all(&claude);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Run `topos` with discovery pinned to a hermetic, EMPTY `$HOME` (so no real harness on the dev's machine
+/// is "present") and a Claude config home holding the laid skills. The other per-harness home overrides are
+/// scrubbed so discovery resolves ONLY the injected Claude Code dir — a name never resolves to a stray real
+/// skill.
+fn run_disc(
+    topos_home: &Path,
+    disc_home: &Path,
+    claude: &Path,
+    args: &[&str],
+) -> serde_json::Value {
+    let out = Command::new(bin())
+        .env("TOPOS_HOME", topos_home)
+        .env("HOME", disc_home)
+        .current_dir(disc_home)
+        .env("CLAUDE_CONFIG_DIR", claude)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CODEX_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("VIBE_HOME")
+        .env_remove("AUTOHAND_HOME")
+        .env_remove("APPDATA")
+        .env_remove("FLATPAK_XDG_CONFIG_HOME")
+        .args(args)
+        .output()
+        .expect("spawn topos");
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("non-JSON stdout: {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+#[test]
+fn end_to_end_add_by_name_resolves_a_discovered_skill() {
+    let home = scratch("byname-home");
+    let disc = scratch("byname-disc"); // an EMPTY discovery HOME — only the Claude config below is present
+    let claude = scratch("byname-claude");
+    let skill = claude.join("skills").join("deploy");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# deploy\n\nShip it.\n").unwrap();
+
+    // `topos list` discovers it as untracked, tagged with the registry slug (the `@harness` token).
+    let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
+    let untracked = v["data"]["untracked"].as_array().expect("untracked array");
+    assert_eq!(untracked.len(), 1, "{untracked:?}");
+    assert_eq!(untracked[0]["name"], "deploy");
+    assert_eq!(untracked[0]["harness"], "claude-code");
+
+    // `topos add deploy` — resolves the NAME against that inventory and adopts it (Claude Code recognized,
+    // currency armed), with no path typed.
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "deploy"]);
+    assert_eq!(v["command"], "add");
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["data"]["name"], "deploy");
+    assert_eq!(v["data"]["harness"], "claude-code");
+    assert_eq!(v["data"]["tracked"], true);
+
+    // Now tracked → discovery no longer lists it as untracked, and re-adopting by name reports it tracked.
+    let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
+    assert_eq!(v["data"]["tracked"][0]["skill"], "deploy");
+    assert!(v["data"]["untracked"].as_array().unwrap().is_empty());
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "deploy"]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
+    // The DISAMBIGUATED re-add reports the SAME code (an agent branches identically whether or not it
+    // typed `@harness`) — not HARNESS_NOT_FOUND just because discovery excludes the tracked placement.
+    let v = run_disc(
+        &home,
+        &disc,
+        &claude,
+        &["--json", "add", "deploy@claude-code"],
+    );
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
+
+    // A name nowhere in the inventory fails closed with the discovery-specific code (not NO_SUCH_SKILL,
+    // which is about tracked skills).
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "ghost"]);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "NO_UNTRACKED_SKILL");
+
+    // A positional that looks like a path is steered to the `--path` escape hatch — a `./` prefix and a
+    // `/` separator are both rejected BEFORE discovery (so a path-shaped input can never adopt a
+    // same-named discovered skill).
+    for pathy in ["./deploy", "sub/deploy"] {
+        let v = run_disc(&home, &disc, &claude, &["--json", "add", pathy]);
+        assert_eq!(v["ok"], false, "{pathy}: {v}");
+        assert_eq!(v["error"]["code"], "PATH_NOT_NAME", "{pathy}");
+    }
+
+    let _ = std::fs::remove_dir_all(&claude);
+    let _ = std::fs::remove_dir_all(&disc);
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -250,7 +350,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     let missing = format!("/definitely-missing-topos-{}", std::process::id());
 
     // --json: the fixed message on stdout; the full context (path + cause) in the diagnostics log.
-    let out = run_raw(&home, &["add", &missing, "--json"], false);
+    let out = run_raw(&home, &["add", "--path", &missing, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "IO_ERROR");
@@ -270,7 +370,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     assert!(detail.contains(&missing), "{detail}");
 
     // TTY: redacted line + the pointer at the log; the path never reaches stderr un-asked.
-    let out = run_raw(&home, &["add", &missing], false);
+    let out = run_raw(&home, &["add", "--path", &missing], false);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("error: a filesystem operation failed"),
@@ -281,7 +381,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     assert!(!stderr.contains(&missing), "stays redacted: {stderr}");
 
     // TOPOS_DEBUG=1: the full chain ALSO reaches stderr, while stdout stays the clean envelope.
-    let out = run_raw(&home, &["add", &missing, "--json"], true);
+    let out = run_raw(&home, &["add", "--path", &missing, "--json"], true);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(
         v["error"]["context"]["message"],

@@ -81,6 +81,53 @@ pub(crate) enum ClientError {
     /// No tracked skill matches the given name.
     #[error("no tracked skill named '{name}'")]
     NoSuchSkill { name: String },
+    /// `add <skill>` resolved a name against discovery and found nothing adoptable — no untracked skill of
+    /// that name sits in any known harness dir. Usage guidance shown VERBATIM (the name is the user's own
+    /// argv token). Distinct from [`ClientError::NoSuchSkill`] (which is about *tracked* skills).
+    #[error(
+        "no untracked skill named '{name}' — run `topos list` to see what's adoptable, or adopt a \
+         directory with `topos add --path <dir>`"
+    )]
+    NoUntrackedSkill { name: String },
+    /// `add <skill>` named a skill that is already tracked (so discovery excludes it) — the right move is
+    /// to edit it in place, not re-adopt. The name-oriented twin of [`ClientError::AlreadyTracked`]; both
+    /// carry the `ALREADY_TRACKED` code so an agent branches the same on either.
+    #[error(
+        "a skill named '{name}' is already tracked — edit it in place (`topos diff {name}`), or adopt a \
+         different directory with `topos add --path <dir>`"
+    )]
+    AlreadyTrackedName { name: String },
+    /// `add <skill>` resolved a name that sits under more than one harness's skill dir. The caller must
+    /// disambiguate with `<skill>@<harness>`. The `harnesses` are the registry slugs, shown VERBATIM.
+    #[error(
+        "the skill name '{name}' is found in {} harnesses ({}) — disambiguate with `topos add {name}@<harness>`",
+        harnesses.len(), harnesses.join(", ")
+    )]
+    AmbiguousHarness {
+        name: String,
+        harnesses: Vec<String>,
+    },
+    /// `add <skill>[@<harness>]` resolved to more than one directory within a SINGLE harness (a name in
+    /// both the user- and project-scope dir, say). `@<harness>` cannot split them, so the caller adopts one
+    /// explicitly by path. The `paths` are the user's own directories, shown VERBATIM.
+    #[error(
+        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one with `topos add --path <dir>`",
+        paths.len(), paths.join(", ")
+    )]
+    AmbiguousScope {
+        name: String,
+        harness: String,
+        paths: Vec<String>,
+    },
+    /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
+    /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
+    #[error("{0}")]
+    HarnessNotFound(String),
+    /// `add <arg>` was given a positional that looks like a path (a `/`, a leading `.`/`~`, or an existing
+    /// path on disk) rather than a skill name — the user likely meant the `--path` escape hatch. Usage
+    /// guidance shown VERBATIM (the arg is the user's own token).
+    #[error("'{arg}' looks like a path — to adopt a directory, use `topos add --path {arg}`")]
+    PathNotName { arg: String },
     /// The placement cannot be materialized safely (a non-directory sits where a skill dir belongs, a
     /// symlink cannot be resolved to a directory, or the filesystem supports no safe swap) — refused
     /// rather than risk clobbering or a torn write.
@@ -211,6 +258,13 @@ impl ClientError {
             ClientError::AlreadyTracked { .. } => "ALREADY_TRACKED",
             ClientError::AmbiguousName { .. } => "AMBIGUOUS_NAME",
             ClientError::NoSuchSkill { .. } => "NO_SUCH_SKILL",
+            ClientError::NoUntrackedSkill { .. } => "NO_UNTRACKED_SKILL",
+            // The name-oriented twin of AlreadyTracked shares its code (agents branch the same on either).
+            ClientError::AlreadyTrackedName { .. } => "ALREADY_TRACKED",
+            ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
+            ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
+            ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
+            ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",
@@ -239,7 +293,11 @@ impl ClientError {
     /// The terminal outcome the agent branches on.
     pub(crate) fn outcome(&self) -> TerminalOutcome {
         match self {
-            ClientError::AmbiguousName { .. } => TerminalOutcome::AmbiguousName,
+            // Every name-ambiguity shape (across tracked skills, across harnesses, across scopes) is the
+            // same terminal class — the agent disambiguates and retries.
+            ClientError::AmbiguousName { .. }
+            | ClientError::AmbiguousHarness { .. }
+            | ClientError::AmbiguousScope { .. } => TerminalOutcome::AmbiguousName,
             // A transient filesystem or plane-read failure is retryable — whether it surfaced
             // client-side, in the store, or reading the plane.
             ClientError::Io(_)

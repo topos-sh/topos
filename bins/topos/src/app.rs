@@ -106,13 +106,27 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Add { path } => finish(
-            json,
-            cmd_name,
-            ops::add(&ctx, &path),
-            render::add_tty,
-            &diag,
-        ),
+        Command::Add { target, path } => {
+            // `--path` adopts the explicit directory (today's behavior). A `target` positional is a skill
+            // NAME resolved against the SAME untracked inventory `list` discovers, then adopted by the one
+            // unchanged `ops::add` path. clap's required `source` group guarantees exactly one is present.
+            let result = match (target, path) {
+                (_, Some(path)) => ops::add(&ctx, &path),
+                (Some(target), None) => match list_discovery(false) {
+                    // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
+                    // agree on the name even for a harness the active adapter does not recognize.
+                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &target)
+                        .and_then(|(p, name)| ops::add_with_name(&ctx, &p, Some(&name))),
+                    None => Err(ClientError::InvalidArgument(
+                        "cannot resolve a skill name without $HOME set — adopt a directory with \
+                         `topos add --path <dir>`"
+                            .into(),
+                    )),
+                },
+                (None, None) => unreachable!("clap requires the add `source` group"),
+            };
+            finish(json, cmd_name, result, render::add_tty, &diag)
+        }
         Command::Follow { target, manual } => {
             // The transports are built per-base-URL (known only after the op parses the link / reads the
             // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer

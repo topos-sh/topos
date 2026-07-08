@@ -62,7 +62,13 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
 
 fn next_actions(err: &ClientError) -> Vec<NextAction> {
     match err {
-        ClientError::AmbiguousName { .. } => vec![NextAction {
+        // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
+        // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
+        ClientError::AmbiguousName { .. }
+        | ClientError::AmbiguousHarness { .. }
+        | ClientError::AmbiguousScope { .. }
+        | ClientError::NoUntrackedSkill { .. }
+        | ClientError::HarnessNotFound(_) => vec![NextAction {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
@@ -287,7 +293,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     }
     // Untracked skills discovered in any known harness's skill dir — the `add`-able inventory.
     if !data.untracked.is_empty() {
-        s.push_str("\nUntracked skills — run `topos add <path>` to adopt:\n");
+        s.push_str("\nUntracked skills — run `topos add <skill>` to adopt:\n");
         for u in &data.untracked {
             s.push_str(&untracked_row(u));
         }
@@ -354,9 +360,10 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
     )
 }
 
-/// One untracked-discovery row: `<name>  [<harness>]  <path>`, plus an adopt-only note for a harness topos
-/// has no full adapter for — it can still be `add`ed (the bytes track + share), but live currency for that
-/// harness lands later.
+/// One untracked-discovery row: `<name>  [<harness-name> · <slug>]  <path>`, plus an adopt-only note for a
+/// harness topos has no full adapter for — it can still be `add`ed (the bytes track + share), but live
+/// currency for that harness lands later. The **slug** is shown because it is the `<skill>@<harness>` token
+/// `add` takes to disambiguate a name found in more than one harness.
 fn untracked_row(u: &UntrackedEntry) -> String {
     let support = if u.adapter_supported {
         ""
@@ -364,8 +371,8 @@ fn untracked_row(u: &UntrackedEntry) -> String {
         "  (adopt-only — live currency lands later)"
     };
     format!(
-        "  {}  [{}]  {}{}\n",
-        u.name, u.harness_name, u.path, support
+        "  {}  [{} · {}]  {}{}\n",
+        u.name, u.harness_name, u.harness, u.path, support
     )
 }
 

@@ -33,7 +33,7 @@ mod unfollow;
 mod uninstall;
 mod upgrade;
 
-pub(crate) use add::add;
+pub(crate) use add::{add, add_with_name, resolve_add_target};
 pub(crate) use diff::diff;
 pub(crate) use follow::{FollowConnectors, FollowOpts, FollowOutcome, follow};
 pub(crate) use invite::invite;

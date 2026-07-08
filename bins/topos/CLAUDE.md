@@ -31,9 +31,13 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `HERMES_ACCEPT_HOOKS` evidence resolved at construction), though v0's composition root still selects
   Claude Code only — harness *selection* lands later (the TTY receipt copy already branches on the
   report's `currency_kind`, so no surface overstates a sibling adapter's update moment).
-- **The verbs** (`ops`) — `add` (mint id+name, scan + import, stage + publish with one rename — all-or-
-  nothing; **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
-  already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
+- **The verbs** (`ops`) — `add [<skill>[@<harness>] | --path <dir>]` (**by default a skill NAME resolved
+  against the same untracked inventory `list` discovers** — `resolve_add_target`: `<skill>@<harness>`
+  disambiguates a name found in more than one harness, a name found in one harness under several dirs is a
+  typed `AMBIGUOUS_SCOPE`, and a path-shaped positional is steered to `--path`; then the one adoption path:
+  mint id+name, scan + import, stage + publish with one rename — all-or-nothing; **recognize a Claude Code
+  skill dir, tag it + arm the currency hook**; refuse re-adopting an already-tracked dir with
+  `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
   below), `invite` (an owner mints an `/i/` link by signing + POSTing the governance Invite op — see below),
   `list [--footprint] [--tracked] [--remote]` (the tracked bucket + **untracked discovery** — skills sitting
   in any known harness's skill dir, across a baked registry ported from `vercel-labs/skills`, deduped against

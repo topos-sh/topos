@@ -28,10 +28,20 @@ pub(crate) struct Cli {
 /// The local, accountless verbs available this increment.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Adopt a local skill into topos (offline; no server, no account).
+    /// Adopt a local skill into topos (offline; no server, no account). By DEFAULT the positional is a
+    /// skill NAME, resolved against the untracked skills `topos list` discovers; `<skill>@<harness>`
+    /// disambiguates a name found in more than one harness. `--path <dir>` adopts an explicit directory
+    /// instead (the escape hatch — a skill outside a known harness dir, or bypassing name resolution).
+    /// Exactly one of the name positional or `--path` is required (enforced by clap).
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["target", "path"])))]
     Add {
-        /// The skill directory to adopt.
-        path: PathBuf,
+        /// The skill NAME to adopt, optionally `<skill>@<harness>` to disambiguate across harnesses.
+        /// Resolved against `topos list`'s untracked inventory. Mutually exclusive with `--path`.
+        target: Option<String>,
+        /// Adopt the skill directory at this explicit path instead of resolving a name. Mutually exclusive
+        /// with the name positional.
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
     },
     /// Enroll with a plane and follow its skills, or place/resume a followed skill — dispatched by the
     /// single positional. `follow <link>` (an `/i/` invite, a one-time admin CLAIM link, or a bare token
@@ -296,6 +306,24 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(approve.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn add_takes_a_name_positional_or_path_but_not_both_or_neither() {
+        // The bare name and the `<skill>@<harness>` disambiguated form both parse as the positional.
+        assert!(Cli::try_parse_from(["topos", "add", "deploy"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "add", "deploy@claude-code"]).is_ok());
+        // `--path` parses as the escape hatch.
+        assert!(Cli::try_parse_from(["topos", "add", "--path", "/tmp/skills/deploy"]).is_ok());
+        // Exactly one source is required: neither is a missing-required usage error at exit 2.
+        let neither = Cli::try_parse_from(["topos", "add"]).unwrap_err();
+        assert_eq!(neither.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(neither.exit_code(), 2);
+        // Both at once is an argument conflict at exit 2.
+        let both =
+            Cli::try_parse_from(["topos", "add", "deploy", "--path", "/tmp/deploy"]).unwrap_err();
+        assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(both.exit_code(), 2);
     }
 
     #[test]

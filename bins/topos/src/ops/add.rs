@@ -1,6 +1,9 @@
-//! `add <path>` — adopt a local skill, offline. Mint an id + name, scan + import to the embedded-git
-//! store, snapshot the genesis version, and write the sidecar docs — all staged and published with one
-//! directory rename, so adoption is all-or-nothing and the user's source bytes are never touched.
+//! `add <skill>` / `add --path <dir>` — adopt a local skill, offline. The default positional is a skill
+//! NAME resolved against the untracked inventory `list` discovers (see [`resolve_add_target`]);
+//! `--path <dir>` adopts an explicit directory. Adoption itself ([`add`]) then mints an id + name, scans +
+//! imports to the embedded-git store, snapshots the genesis version, and writes the sidecar docs — all
+//! staged and published with one directory rename, so it is all-or-nothing and the source bytes are never
+//! touched.
 
 use std::path::Path;
 
@@ -11,7 +14,7 @@ use topos_harness::DiscoveredPlacement;
 use topos_types::persisted::{
     Lock, LockedFile, PlacementMap, RecordedTuple, SwapCapability, SyncState,
 };
-use topos_types::results::AddData;
+use topos_types::results::{AddData, UntrackedEntry};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
@@ -23,13 +26,31 @@ use crate::{doc, logfile, sidecar};
 /// preimage, so it must stay constant for a deterministic id.
 const ADD_MESSAGE: &str = "topos: add";
 
-/// Adopt the skill rooted at `source`.
+/// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
+/// else frontmatter-then-basename) — the `--path` / direct entry point.
 ///
 /// # Errors
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
+    add_with_name(ctx, source, None)
+}
+
+/// Adopt the skill rooted at `source`. `name_override` (set by a name-resolved `add <skill>`) forces the
+/// tracked name to the discovered name the user typed, so it stays consistent with `list`/`publish`/`diff`
+/// even for a registry harness the active adapter does not recognize (whose bytes would otherwise be named
+/// from `SKILL.md` frontmatter). `None` keeps the source-derived name (the `--path` / direct path).
+///
+/// # Errors
+/// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
+/// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
+/// store/io failure.
+pub(crate) fn add_with_name(
+    ctx: &Ctx<'_>,
+    source: &Path,
+    name_override: Option<&str>,
+) -> Result<AddData, ClientError> {
     // Establish the home, then refuse a source that overlaps it (canonicalized — catches symlinks), so
     // uninstall can never delete user bytes and the footprint oracle never collapses.
     ctx.fs.create_dir_all(ctx.layout.home())?;
@@ -54,13 +75,22 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
     // parsed through the validated newtype like any other (the id source mints `topos_<hex>`, which
     // always fits — the parse is the type-level proof the path joins below demand).
     let skill_id = crate::id::SkillId::parse(&ctx.ids.new_skill_id())?;
-    let name = match &recognized {
-        Some(placement) => dir_basename(&placement.path).unwrap_or_else(|| skill_id.to_string()),
-        None => bundle
-            .name_hint
-            .clone()
-            .or_else(|| dir_basename(&source_abs))
-            .unwrap_or_else(|| skill_id.to_string()),
+    // A name-resolved `add <skill>` forces the discovered name (what `list` showed, what `publish`/`diff`
+    // will resolve) — so an adopt-only registry harness never tracks the bytes under a divergent
+    // frontmatter name. Absent an override: a recognized harness skill is keyed by its DIRECTORY name (the
+    // command name the harness invokes); a plain dir keeps the frontmatter-first-then-basename order.
+    let name = match name_override {
+        Some(n) => n.to_owned(),
+        None => match &recognized {
+            Some(placement) => {
+                dir_basename(&placement.path).unwrap_or_else(|| skill_id.to_string())
+            }
+            None => bundle
+                .name_hint
+                .clone()
+                .or_else(|| dir_basename(&source_abs))
+                .unwrap_or_else(|| skill_id.to_string()),
+        },
     };
 
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
@@ -215,6 +245,193 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
     })
 }
 
+/// Resolve an `add <target>` positional to the concrete skill directory to adopt.
+///
+/// `target` is a skill NAME (`deploy`) or a harness-disambiguated name (`deploy@claude-code`). It resolves
+/// against the SAME untracked inventory `topos list` discovers — the concrete, listable set of skills
+/// sitting in known harness dirs. This is name *resolution*, never a fuzzy guess: a name matching more
+/// than one placement is a hard typed error demanding `<skill>@<harness>`; a name that is already tracked
+/// or looks like a path gets its own actionable error rather than a bare not-found.
+///
+/// Returns the resolved skill directory AND its resolved NAME (the discovered basename the user typed) —
+/// the caller adopts the dir *under that name* so `list`/`add`/`publish`/`diff` all agree, even for a
+/// harness the active adapter does not recognize (whose bytes would otherwise be named from frontmatter).
+///
+/// # Errors
+/// The name-resolution family — [`ClientError::AmbiguousHarness`] / [`ClientError::AmbiguousScope`] /
+/// [`ClientError::HarnessNotFound`] / [`ClientError::NoUntrackedSkill`] / [`ClientError::AlreadyTrackedName`]
+/// / [`ClientError::PathNotName`] — or a discovery read failure.
+pub(crate) fn resolve_add_target(
+    ctx: &Ctx<'_>,
+    roots: &super::DiscoveryRoots,
+    target: &str,
+) -> Result<(std::path::PathBuf, String), ClientError> {
+    let (name, harness) = split_target(target);
+    // A path-shaped positional (a separator, or a `./` `../` `~/` prefix) can never be a discovered skill
+    // NAME — those are bare basenames. Steer it to `--path` BEFORE touching discovery, so it can never
+    // accidentally match (and adopt) a same-named discovered skill instead.
+    if is_path_shaped(name) {
+        return Err(ClientError::PathNotName {
+            arg: target.to_owned(),
+        });
+    }
+    let untracked = super::list::discover_untracked(ctx, roots)?;
+    match resolve_name(name, harness, &untracked) {
+        NameResolution::Resolved(path) => Ok((std::path::PathBuf::from(path), name.to_owned())),
+        NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
+            name: name.to_owned(),
+            harnesses,
+        }),
+        NameResolution::AmbiguousScope { harness, paths } => Err(ClientError::AmbiguousScope {
+            name: name.to_owned(),
+            harness,
+            paths,
+        }),
+        // `@harness` matched no untracked placement. If the name is nowhere untracked but IS already
+        // tracked, this is a re-add — report `ALREADY_TRACKED` the same as the bare form (so an agent
+        // branches identically whether or not it typed `@harness`). Otherwise it's a genuine miss.
+        NameResolution::HarnessNotFound { harness, available } => {
+            if available.is_empty() && tracked_by_name(ctx, name)? {
+                Err(ClientError::AlreadyTrackedName {
+                    name: name.to_owned(),
+                })
+            } else {
+                Err(ClientError::HarnessNotFound(harness_not_found_message(
+                    name, &harness, &available,
+                )))
+            }
+        }
+        // A bare name discovery does not surface: distinguish "it's already tracked", "you meant a local
+        // dir", and "it truly isn't there" so the agent knows exactly what's wrong.
+        NameResolution::NoMatch => {
+            if tracked_by_name(ctx, name)? {
+                Err(ClientError::AlreadyTrackedName {
+                    name: name.to_owned(),
+                })
+            } else if Path::new(name).exists() {
+                // A bare word that is a real cwd entry but no skill — the user likely meant `--path`.
+                Err(ClientError::PathNotName {
+                    arg: target.to_owned(),
+                })
+            } else {
+                Err(ClientError::NoUntrackedSkill {
+                    name: name.to_owned(),
+                })
+            }
+        }
+    }
+}
+
+/// The outcome of matching a name (+ optional harness slug) against the discovered untracked inventory —
+/// the PURE core of [`resolve_add_target`], so the whole dispatch is unit-tested without a filesystem.
+#[derive(Debug, PartialEq, Eq)]
+enum NameResolution {
+    /// Exactly one placement — its directory path.
+    Resolved(String),
+    /// A bare name (no `@harness`) that no placement carries.
+    NoMatch,
+    /// `@harness` was given but that harness holds no such skill; `available` are the slugs that DO (sorted).
+    HarnessNotFound {
+        harness: String,
+        available: Vec<String>,
+    },
+    /// The name sits under more than one harness — the sorted, deduped slugs the caller picks from.
+    AmbiguousHarness(Vec<String>),
+    /// The name matches more than one directory within a SINGLE harness (e.g. user + project scope) —
+    /// `@harness` cannot split them, so the caller adopts one by path.
+    AmbiguousScope { harness: String, paths: Vec<String> },
+}
+
+/// Split `<skill>[@<harness>]` on the LAST `@` (a harness slug never contains one). A degenerate token
+/// (empty name or empty harness — `foo@`, `@bar`) is treated as a bare name, so it fails as an ordinary
+/// not-found rather than a confusing empty-harness lookup.
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    match target.rsplit_once('@') {
+        Some((name, harness)) if !name.is_empty() && !harness.is_empty() => (name, Some(harness)),
+        _ => (target, None),
+    }
+}
+
+/// The pure matcher over the discovered inventory. `harness` filters by registry slug; without it, a
+/// same-name collision across harnesses is [`NameResolution::AmbiguousHarness`] and a collision within one
+/// harness is [`NameResolution::AmbiguousScope`].
+fn resolve_name(name: &str, harness: Option<&str>, untracked: &[UntrackedEntry]) -> NameResolution {
+    let by_name: Vec<&UntrackedEntry> = untracked.iter().filter(|u| u.name == name).collect();
+    match harness {
+        Some(h) => {
+            let in_h: Vec<&UntrackedEntry> =
+                by_name.iter().copied().filter(|u| u.harness == h).collect();
+            match in_h.as_slice() {
+                [] => NameResolution::HarnessNotFound {
+                    harness: h.to_owned(),
+                    available: distinct_sorted_slugs(&by_name),
+                },
+                [one] => NameResolution::Resolved(one.path.clone()),
+                many => NameResolution::AmbiguousScope {
+                    harness: h.to_owned(),
+                    paths: many.iter().map(|u| u.path.clone()).collect(),
+                },
+            }
+        }
+        None => match by_name.as_slice() {
+            [] => NameResolution::NoMatch,
+            [one] => NameResolution::Resolved(one.path.clone()),
+            many => {
+                let slugs = distinct_sorted_slugs(many);
+                if slugs.len() == 1 {
+                    NameResolution::AmbiguousScope {
+                        harness: slugs.into_iter().next().expect("len == 1"),
+                        paths: many.iter().map(|u| u.path.clone()).collect(),
+                    }
+                } else {
+                    NameResolution::AmbiguousHarness(slugs)
+                }
+            }
+        },
+    }
+}
+
+/// The distinct harness slugs across a set of entries, sorted (deterministic error copy).
+fn distinct_sorted_slugs(entries: &[&UntrackedEntry]) -> Vec<String> {
+    let mut slugs: Vec<String> = entries.iter().map(|u| u.harness.clone()).collect();
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
+/// The verbatim guidance for `add <skill>@<harness>` when that harness has no such skill — naming where it
+/// IS found, if anywhere.
+fn harness_not_found_message(name: &str, harness: &str, available: &[String]) -> String {
+    if available.is_empty() {
+        format!(
+            "no untracked skill named '{name}' in harness '{harness}' — run `topos list` to see what's adoptable"
+        )
+    } else {
+        format!(
+            "no untracked skill named '{name}' in harness '{harness}' — it is available in: {} (try `topos add {name}@<harness>`)",
+            available.join(", ")
+        )
+    }
+}
+
+/// Whether a positional is SYNTACTICALLY a path (a separator, or a `.`/`~` prefix) — so it can never be a
+/// discovered skill NAME (a bare basename) and must be steered to `--path` before resolution. The weaker
+/// "a bare word that happens to be a cwd entry" heuristic is applied only AFTER discovery finds no name
+/// match (so a skill named the same as a cwd dir still resolves).
+fn is_path_shaped(arg: &str) -> bool {
+    arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
+}
+
+/// Whether a TRACKED skill already carries this name (discovery would then exclude its dir, so a
+/// zero-match is really "already adopted"). An ambiguous tracked name still counts as tracked.
+fn tracked_by_name(ctx: &Ctx<'_>, name: &str) -> Result<bool, ClientError> {
+    match super::resolve_skill(ctx, name) {
+        Ok(_) | Err(ClientError::AmbiguousName { .. }) => Ok(true),
+        Err(ClientError::NoSuchSkill { .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 fn locked_files(bundle: &ScannedBundle) -> Vec<LockedFile> {
     bundle
         .files
@@ -300,4 +517,135 @@ fn reject_overlap(source: &Path, home: &Path) -> Result<(), ClientError> {
         return Err(ClientError::SourceOverlap);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One discovered untracked row — only the fields name resolution reads matter.
+    fn ue(name: &str, harness: &str, path: &str) -> UntrackedEntry {
+        UntrackedEntry {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            harness: harness.to_owned(),
+            harness_name: harness.to_owned(),
+            adapter_supported: false,
+            scope: "user".to_owned(),
+        }
+    }
+
+    #[test]
+    fn split_target_splits_on_the_last_at_and_ignores_degenerate_forms() {
+        assert_eq!(split_target("deploy"), ("deploy", None));
+        assert_eq!(
+            split_target("deploy@claude-code"),
+            ("deploy", Some("claude-code"))
+        );
+        // Rsplit: a name may (pathologically) contain '@' — the harness is the final segment.
+        assert_eq!(split_target("we@ird@cursor"), ("we@ird", Some("cursor")));
+        // Degenerate tokens fold back to a bare name (they fail as an ordinary not-found).
+        assert_eq!(split_target("deploy@"), ("deploy@", None));
+        assert_eq!(split_target("@cursor"), ("@cursor", None));
+    }
+
+    #[test]
+    fn a_single_discovered_placement_resolves_to_its_path() {
+        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
+        assert_eq!(
+            resolve_name("deploy", None, &inv),
+            NameResolution::Resolved("/h/.claude/skills/deploy".to_owned())
+        );
+        // The correct `@harness` resolves the same single placement.
+        assert_eq!(
+            resolve_name("deploy", Some("claude-code"), &inv),
+            NameResolution::Resolved("/h/.claude/skills/deploy".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_name_in_two_harnesses_is_ambiguous_until_disambiguated() {
+        let inv = vec![
+            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
+            ue("deploy", "cursor", "/h/.cursor/skills/deploy"),
+        ];
+        // Bare name → ambiguous across the two (sorted) slugs.
+        assert_eq!(
+            resolve_name("deploy", None, &inv),
+            NameResolution::AmbiguousHarness(vec!["claude-code".to_owned(), "cursor".to_owned()])
+        );
+        // `@harness` picks the one.
+        assert_eq!(
+            resolve_name("deploy", Some("cursor"), &inv),
+            NameResolution::Resolved("/h/.cursor/skills/deploy".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_name_twice_in_one_harness_is_a_scope_ambiguity_at_harness_not_split() {
+        // Same name, same harness slug, two directories (user + project) — `@harness` cannot split them.
+        let inv = vec![
+            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
+            ue("deploy", "claude-code", "/proj/.claude/skills/deploy"),
+        ];
+        let scope = NameResolution::AmbiguousScope {
+            harness: "claude-code".to_owned(),
+            paths: vec![
+                "/h/.claude/skills/deploy".to_owned(),
+                "/proj/.claude/skills/deploy".to_owned(),
+            ],
+        };
+        assert_eq!(resolve_name("deploy", None, &inv), scope);
+        assert_eq!(resolve_name("deploy", Some("claude-code"), &inv), scope);
+    }
+
+    #[test]
+    fn a_bare_name_with_no_placement_is_no_match() {
+        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
+        assert_eq!(resolve_name("lint", None, &inv), NameResolution::NoMatch);
+    }
+
+    #[test]
+    fn a_wrong_harness_reports_where_the_skill_actually_lives() {
+        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
+        // Named in a harness that lacks it → HarnessNotFound, listing where it IS.
+        assert_eq!(
+            resolve_name("deploy", Some("cursor"), &inv),
+            NameResolution::HarnessNotFound {
+                harness: "cursor".to_owned(),
+                available: vec!["claude-code".to_owned()],
+            }
+        );
+        // Named nowhere at all, with a harness → HarnessNotFound with no alternatives.
+        assert_eq!(
+            resolve_name("ghost", Some("cursor"), &inv),
+            NameResolution::HarnessNotFound {
+                harness: "cursor".to_owned(),
+                available: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn is_path_shaped_flags_syntactic_path_forms_only() {
+        assert!(is_path_shaped("./deploy"));
+        assert!(is_path_shaped("skills/deploy"));
+        assert!(is_path_shaped("~/x/deploy"));
+        assert!(is_path_shaped("../deploy"));
+        assert!(is_path_shaped("a\\b"));
+        // A plain skill name is NOT path-shaped — even if a cwd entry of that name exists (that weaker
+        // heuristic runs only AFTER discovery finds no match, so a skill named like a cwd dir still
+        // resolves as a name).
+        assert!(!is_path_shaped("deploy"));
+    }
+
+    #[test]
+    fn harness_not_found_message_names_alternatives_when_they_exist() {
+        let none = harness_not_found_message("deploy", "cursor", &[]);
+        assert!(none.contains("'deploy'") && none.contains("'cursor'"));
+        assert!(!none.contains("available in"));
+        let some = harness_not_found_message("deploy", "cursor", &["claude-code".to_owned()]);
+        assert!(some.contains("available in: claude-code"));
+        assert!(some.contains("topos add deploy@<harness>"));
+    }
 }
