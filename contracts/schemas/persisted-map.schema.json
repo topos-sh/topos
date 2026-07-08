@@ -27,6 +27,13 @@
         "null"
       ]
     },
+    "harness_slug": {
+      "description": "The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —\nrecorded even when topos has no full adapter for it, so a later adapter can retroactively arm\ncurrency for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits\nunder a known harness skill dir. **Additive optional.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "materialized_sha": {
       "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match.",
       "type": "string",

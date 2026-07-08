@@ -172,6 +172,8 @@ pub(crate) fn materialize(
         swap_capability: cap,
         harness: req.next_map_core.harness,
         harness_layer: req.next_map_core.harness_layer.clone(),
+        // A placed/followed skill is always adapter-backed, so its slug is the adapter's slug.
+        harness_slug: req.next_map_core.harness.map(|h| h.slug().to_owned()),
     };
     commit_docs(fs, req.sp, &next_map, req.next_lock, req.next_sync)?;
 
@@ -562,6 +564,7 @@ mod tests {
             swap_capability: cap,
             harness: None,
             harness_layer: None,
+            harness_slug: None,
         }
     }
 

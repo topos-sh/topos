@@ -67,13 +67,17 @@ pub(crate) enum Command {
         #[arg(long = "skills")]
         skills: Vec<String>,
     },
-    /// Inventory the skills on this machine.
+    /// Inventory the skills on this machine. By default also discovers **untracked** skills sitting in
+    /// any known harness's skill dir (across the baked registry) that topos could `add`.
     List {
         /// Narrow to one skill by name (errors if the name is ambiguous).
         skill: Option<String>,
         /// Also report the paths topos owns outside skill directories.
         #[arg(long)]
         footprint: bool,
+        /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.
+        #[arg(long)]
+        tracked: bool,
     },
     /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
     /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`

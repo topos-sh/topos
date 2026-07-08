@@ -8,11 +8,13 @@
 //! renders empty. `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree
 //! plus any harness config the currency hook lives in (disclosed, never deleted).
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use topos_core::digest::to_hex;
+use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
-use topos_types::results::{ListData, SkillEntry};
+use topos_types::results::{ListData, SkillEntry, UntrackedEntry};
 
 use crate::ctx::Ctx;
 use crate::enroll::{self, FollowModeDoc};
@@ -20,6 +22,15 @@ use crate::error::ClientError;
 use crate::scan;
 use crate::sidecar;
 use crate::{doc, scan::ScannedBundle};
+
+/// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's global
+/// skill dir resolves under it) and, optionally, the current project dir (for repo-scoped skills). Passing
+/// `None` to [`list`] is `--tracked` — discovery is skipped entirely.
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveryRoots {
+    pub home: PathBuf,
+    pub cwd: Option<PathBuf>,
+}
 
 /// A `list` run's typed result: the schema-pinned envelope payload plus the TTY-only enrollment
 /// disclosure. `ListData` is PINNED (its buckets carry `SkillEntry` rows only), so the enrollment header
@@ -66,6 +77,7 @@ pub(crate) fn list(
     ctx: &Ctx<'_>,
     skill: Option<&str>,
     want_footprint: bool,
+    discover: Option<DiscoveryRoots>,
 ) -> Result<ListOutcome, ClientError> {
     // The follow-state is the ONE source for the per-skill workspace provenance, the followed bucket, and
     // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
@@ -224,16 +236,94 @@ pub(crate) fn list(
         None
     };
 
+    // Discover untracked skills across the baked harness registry — only on a bare sweep (a name-narrowed
+    // `list` is about that one tracked skill) and only when not `--tracked`. Dedups against every tracked
+    // placement so an adopted/followed skill never shows up as "untracked".
+    let untracked = match (&discover, skill) {
+        (Some(roots), None) => discover_untracked(ctx, roots)?,
+        _ => Vec::new(),
+    };
+
     Ok(ListOutcome {
         data: ListData {
             followed,
             published_by_you: Vec::new(),
             tracked,
-            untracked: Vec::new(),
+            untracked,
             footprint,
         },
         enrollment,
     })
+}
+
+/// Discover skills sitting in a known harness's skill dir (across the baked registry) that no tracked skill
+/// already records — the `add`-able inventory. Dedups a physically-shared dir (e.g. `.agents/skills`) to
+/// one row by canonical path. Real-fs (like the adapters' own `discover`), so a per-dir scan failure is
+/// silently skipped, never an error.
+fn discover_untracked(
+    ctx: &Ctx<'_>,
+    roots: &DiscoveryRoots,
+) -> Result<Vec<UntrackedEntry>, ClientError> {
+    let tracked = tracked_placement_paths(ctx)?;
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut out: Vec<UntrackedEntry> = Vec::new();
+    for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
+        let canon = d.path.canonicalize().unwrap_or_else(|_| d.path.clone());
+        if tracked.contains(&canon) {
+            continue; // already adopted or followed — not "untracked"
+        }
+        if !seen.insert(canon) {
+            continue; // one physical dir once (a dir shared across harnesses, e.g. .agents/skills)
+        }
+        let name = d
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| d.path.to_string_lossy().into_owned());
+        out.push(UntrackedEntry {
+            name,
+            path: d.path.to_string_lossy().into_owned(),
+            harness: d.harness_slug,
+            harness_name: d.harness_name,
+            adapter_supported: d.adapter_supported,
+            scope: match d.scope {
+                SkillScope::User => "user",
+                SkillScope::Project => "project",
+            }
+            .to_owned(),
+        });
+    }
+    // Deterministic order: name, then path.
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    Ok(out)
+}
+
+/// Every tracked skill's placement paths, canonicalized (a placement that no longer resolves on disk is
+/// dropped — it can't shadow a real discovery). The same dedup key `add`'s `reject_already_tracked` uses.
+fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
+    let mut paths = Vec::new();
+    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if id.starts_with('.') || !entry.is_dir() {
+            continue;
+        }
+        let Ok(id) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let Some(map): Option<PlacementMap> =
+            doc::read_doc(ctx.fs, &ctx.layout.published(&id).map)?
+        else {
+            continue;
+        };
+        for p in &map.placements {
+            if let Ok(canon) = Path::new(p).canonicalize() {
+                paths.push(canon);
+            }
+        }
+    }
+    Ok(paths)
 }
 
 /// A skill carries a draft iff the live source bytes hash to a different `bundle_digest` than the lock

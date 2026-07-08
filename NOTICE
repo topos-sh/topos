@@ -2,3 +2,11 @@ Topos
 Copyright 2026 The Topos Authors
 
 This product is licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+--------------------------------------------------------------------------------
+
+This product includes data derived from the following third-party project:
+
+  vercel-labs/skills (https://github.com/vercel-labs/skills), licensed under the
+  MIT License. The agent-harness skill-directory conventions baked into
+  crates/topos-harness are ported from that project's registry.

@@ -434,6 +434,7 @@ pub(crate) fn apply_publish_ok(
             swap_capability: map.swap_capability,
             harness: map.harness,
             harness_layer: map.harness_layer.clone(),
+            harness_slug: map.harness_slug.clone(),
         };
         let next_sync = SyncState {
             schema_version: sync.schema_version,

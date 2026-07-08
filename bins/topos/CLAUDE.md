@@ -35,8 +35,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   nothing; **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
   below), `invite` (an owner mints an `/i/` link by signing + POSTing the governance Invite op — see below),
-  `list [--footprint]` (the tracked bucket; others render
-  empty; footprint = the `~/.topos/` walk plus any harness config topos holds an entry in), `diff`
+  `list [--footprint] [--tracked]` (the tracked bucket + **untracked discovery** — skills sitting in any
+  known harness's skill dir, across a baked registry ported from `vercel-labs/skills`, deduped against
+  tracked placements by canonical path; `--tracked` suppresses discovery; `followed`/`published_by_you`
+  still render empty; footprint = the `~/.topos/` walk plus any harness config topos holds an entry in), `diff`
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
   `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).

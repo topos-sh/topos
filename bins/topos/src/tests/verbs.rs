@@ -219,7 +219,7 @@ fn add_then_list_finds_tracked_and_pins_lock_shape() {
     let h = Harness::new("addlist");
     let add = ops::add(&h.ctx(), &root).unwrap();
 
-    let list = ops::list(&h.ctx(), None, false).unwrap().data;
+    let list = ops::list(&h.ctx(), None, false, None).unwrap().data;
     assert_eq!(list.tracked.len(), 1);
     let entry = &list.tracked[0];
     assert_eq!(entry.skill, "pr-describe");
@@ -261,6 +261,55 @@ fn add_then_list_finds_tracked_and_pins_lock_shape() {
 }
 
 #[test]
+fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
+    let h = Harness::new("disc");
+    // A temp user-home holding a Cursor skill. Cursor has no env home-override, so the registry resolves
+    // its dir under the passed home — hermetic even though the ambient CLAUDE_CONFIG_DIR also resolves real
+    // Claude Code skills (hence we assert CONTAINS, never an exact count).
+    let user_home = Scratch::new("disc-userhome");
+    let skill_dir = user_home.0.join(".cursor").join("skills").join("my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        b"---\nname: my-skill\ndescription: test\n---\n# My Skill\n",
+    )
+    .unwrap();
+
+    let roots = || ops::DiscoveryRoots {
+        home: user_home.0.clone(),
+        cwd: None,
+    };
+    let data = ops::list(&h.ctx(), None, false, Some(roots()))
+        .unwrap()
+        .data;
+    let found = data
+        .untracked
+        .iter()
+        .find(|u| u.harness == "cursor" && u.name == "my-skill")
+        .expect("cursor skill discovered as untracked");
+    assert!(!found.adapter_supported, "cursor is discover-and-add only");
+    assert_eq!(found.scope, "user");
+    assert!(found.path.contains("my-skill"));
+
+    // `--tracked` (None discovery) suppresses discovery entirely.
+    let tracked_only = ops::list(&h.ctx(), None, false, None).unwrap().data;
+    assert!(tracked_only.untracked.is_empty());
+
+    // Adopt it → it drops out of the untracked set (dedup by canonical placement path).
+    ops::add(&h.ctx(), &skill_dir).unwrap();
+    let after = ops::list(&h.ctx(), None, false, Some(roots()))
+        .unwrap()
+        .data;
+    assert!(
+        !after
+            .untracked
+            .iter()
+            .any(|u| u.name == "my-skill" && u.path.contains("my-skill")),
+        "an adopted skill is no longer reported as untracked"
+    );
+}
+
+#[test]
 fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -271,7 +320,7 @@ fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
 
     // Ground truth: every path under the home (topos never writes the user source dir).
     let mut ground = fs_tree(&h.home.0);
-    let mut reported = ops::list(&h.ctx(), None, true)
+    let mut reported = ops::list(&h.ctx(), None, true, None)
         .unwrap()
         .data
         .footprint
@@ -286,7 +335,7 @@ fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
     // Adversarial: a stray file under the home must appear in the footprint walk.
     let stray = layout.home().join("stray-unregistered");
     std::fs::write(&stray, b"x").unwrap();
-    let reported = ops::list(&h.ctx(), None, true)
+    let reported = ops::list(&h.ctx(), None, true, None)
         .unwrap()
         .data
         .footprint
@@ -313,7 +362,7 @@ fn add_rejects_a_symlink_and_writes_nothing() {
     );
     // Nothing tracked.
     assert!(
-        ops::list(&h.ctx(), None, false)
+        ops::list(&h.ctx(), None, false, None)
             .unwrap()
             .data
             .tracked
@@ -363,7 +412,7 @@ fn add_rejects_a_fifo_and_handles_a_casefold_collision() {
             crate::error::ClientError::Scan(_)
         ));
         assert!(
-            ops::list(&h.ctx(), None, false)
+            ops::list(&h.ctx(), None, false, None)
                 .unwrap()
                 .data
                 .tracked
@@ -433,14 +482,14 @@ fn list_by_ambiguous_name_is_typed() {
     ops::add(&h.ctx(), &src_a.0.join("pr-describe")).unwrap();
     ops::add(&h.ctx(), &src_b.0.join("pr-describe")).unwrap();
 
-    let err = ops::list(&h.ctx(), Some("pr-describe"), false).unwrap_err();
+    let err = ops::list(&h.ctx(), Some("pr-describe"), false, None).unwrap_err();
     assert!(matches!(
         err,
         crate::error::ClientError::AmbiguousName { count: 2, .. }
     ));
     // No such name -> typed.
     assert!(matches!(
-        ops::list(&h.ctx(), Some("nope"), false).unwrap_err(),
+        ops::list(&h.ctx(), Some("nope"), false, None).unwrap_err(),
         crate::error::ClientError::NoSuchSkill { .. }
     ));
 }
@@ -635,7 +684,10 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             plane_key: [0u8; 32],
             follow: &no_follow,
         };
-        let tracked = ops::list(&clean_ctx, None, false).unwrap().data.tracked;
+        let tracked = ops::list(&clean_ctx, None, false, None)
+            .unwrap()
+            .data
+            .tracked;
 
         // All-or-nothing: the staging-rename is the commit point, so the skill is either absent (fault
         // before the publish) or COMPLETE (fault at/after it) — never a half/corrupt state. A faulted
@@ -727,7 +779,7 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     assert!(settings.contains("# topos:currency"), "sentinel present");
 
     // The placement was recorded with the harness tag; a list shows it tracked.
-    let tracked = ops::list(&ctx, None, false).unwrap().data.tracked;
+    let tracked = ops::list(&ctx, None, false, None).unwrap().data.tracked;
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0].skill, "pr-describe");
 }
@@ -766,7 +818,11 @@ fn re_adding_the_same_dir_is_refused_as_already_tracked() {
         "re-adding the same dir must be refused, got {err:?}"
     );
     assert_eq!(
-        ops::list(&h.ctx(), None, false).unwrap().data.tracked.len(),
+        ops::list(&h.ctx(), None, false, None)
+            .unwrap()
+            .data
+            .tracked
+            .len(),
         1,
         "no second record was minted"
     );
@@ -1069,7 +1125,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     let a = ops::add(&ctx, &root).unwrap();
 
     // Unenrolled: no header data, empty followed bucket — the accountless view is unchanged.
-    let out = ops::list(&ctx, None, false).unwrap();
+    let out = ops::list(&ctx, None, false, None).unwrap();
     assert!(out.enrollment.is_none());
     assert!(out.data.followed.is_empty());
 
@@ -1121,7 +1177,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     )
     .unwrap();
 
-    let out = ops::list(&ctx, None, false).unwrap();
+    let out = ops::list(&ctx, None, false, None).unwrap();
     let e = out.enrollment.as_ref().expect("instance.json ⇒ enrolled");
     assert_eq!(
         e.workspace_labels,
@@ -1182,12 +1238,12 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         }
     }
     let hooked = HookedHarness;
-    let out = ops::list(&h.ctx_with(&hooked), None, false).unwrap();
+    let out = ops::list(&h.ctx_with(&hooked), None, false, None).unwrap();
     assert!(out.enrollment.expect("enrolled").hook_active);
 
     // Unfollowed: the entry leaves `followed` but stays tracked, disclosed as resumable on the TTY.
     enroll::set_following(ctx.fs, &ctx.layout, &a.skill_id, false).unwrap();
-    let out = ops::list(&ctx, None, false).unwrap();
+    let out = ops::list(&ctx, None, false, None).unwrap();
     assert!(out.data.followed.is_empty());
     let text = render::list_tty(&out);
     assert!(
@@ -1287,7 +1343,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     assert_eq!(e.read_token, "rt_secret");
 
     // `list` shows (following, mode) again…
-    let listed = ops::list(&ctx, None, false).unwrap();
+    let listed = ops::list(&ctx, None, false, None).unwrap();
     let en = listed.enrollment.as_ref();
     assert!(
         en.is_some_and(

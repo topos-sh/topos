@@ -36,7 +36,7 @@ pub(crate) use add::add;
 pub(crate) use diff::diff;
 pub(crate) use follow::{FollowConnectors, FollowOpts, FollowOutcome, follow};
 pub(crate) use invite::invite;
-pub(crate) use list::{ListOutcome, list};
+pub(crate) use list::{DiscoveryRoots, ListOutcome, list};
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
 #[cfg(test)]

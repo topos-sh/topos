@@ -167,10 +167,14 @@ pub fn run() -> ExitCode {
             render::invite_tty,
             &diag,
         ),
-        Command::List { skill, footprint } => finish_list(
+        Command::List {
+            skill,
+            footprint,
+            tracked,
+        } => finish_list(
             json,
             cmd_name,
-            ops::list(&ctx, skill.as_deref(), footprint),
+            ops::list(&ctx, skill.as_deref(), footprint, list_discovery(tracked)),
             &diag,
         ),
         Command::Diff { skill, r#ref } => finish(
@@ -696,6 +700,20 @@ fn resolve_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".topos")
+}
+
+/// The discovery roots for `list`: `None` under `--tracked` (skip discovery), else the user home (every
+/// harness's global skill dir resolves under it) + the current project dir (repo-scoped skills). A missing
+/// `$HOME` degrades to no discovery rather than an error.
+fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
+    if tracked {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(ops::DiscoveryRoots {
+        home,
+        cwd: std::env::current_dir().ok(),
+    })
 }
 
 #[cfg(test)]

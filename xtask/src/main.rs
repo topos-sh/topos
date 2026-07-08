@@ -288,8 +288,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             bundle_digest: fx_digest.to_owned(),
             tracked: true,
             // The fixture skill is adopted from a plain dir (not under ~/.claude), so it is recognized as
-            // no harness and arms no currency — both omit from the envelope.
+            // no harness and arms no currency — all three omit from the envelope.
             harness: None,
+            harness_slug: None,
             currency: None,
         })
         .expect("AddData serializes"),

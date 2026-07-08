@@ -467,6 +467,21 @@ pub enum HarnessId {
     Hermes,
 }
 
+impl HarnessId {
+    /// The stable registry slug for this harness — matches `topos-harness`'s baked registry (which mirrors
+    /// the `vercel-labs/skills` ecosystem slugs), so an adapter-backed skill's `harness_slug` agrees with a
+    /// discovered one. Note Hermes's ecosystem slug is `hermes-agent` (the [`HarnessId`] serde rename stays
+    /// the shorter `hermes` for wire back-compat — the two are deliberately distinct).
+    #[must_use]
+    pub fn slug(&self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude-code",
+            HarnessId::OpenClaw => "openclaw",
+            HarnessId::Hermes => "hermes-agent",
+        }
+    }
+}
+
 /// What fires currency for a harness — drives HONEST receipt copy ("current by next session",
 /// "next topos touch", …). `ExplicitPullOnly` is the honest-degrade floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

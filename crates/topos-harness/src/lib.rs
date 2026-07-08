@@ -18,6 +18,7 @@ use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 mod claude_code;
 mod hermes;
 mod openclaw;
+pub mod registry;
 pub use claude_code::ClaudeCode;
 pub use hermes::Hermes;
 pub use openclaw::OpenClaw;

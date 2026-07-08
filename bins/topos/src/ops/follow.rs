@@ -894,6 +894,7 @@ fn lay_first_receive_baseline(
             swap_capability: SwapCapability::Unsupported,
             harness: Some(ctx.harness.id()),
             harness_layer: None,
+            harness_slug: Some(ctx.harness.id().slug().to_owned()),
         },
     )?;
     // lock LAST — the commit marker (recovery keeps a dir only when lock.json is present).

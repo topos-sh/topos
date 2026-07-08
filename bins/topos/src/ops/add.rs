@@ -125,6 +125,15 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
             held: false,
         },
     )?;
+    // Attribute the harness. Either the adapter recognized it (adopt-in-place; currency armed below), OR
+    // the baked registry places the source under a known harness's skill dir — recorded for forward-compat
+    // even when topos has no full adapter for it (a later adapter can arm currency for this adopted skill).
+    // A plain dir under no harness stays `None` on every field.
+    let harness_slug = match &recognized {
+        Some(_) => Some(ctx.harness.id().slug().to_owned()),
+        None => registry_attribution(&source_abs).map(|a| a.slug),
+    };
+
     // Record the placement: the harness skill dir for a recognized skill (the path the harness reads),
     // else the canonical source. Topos writes NOTHING into this dir — it stays byte-identical.
     let (placement, harness, harness_layer) = match &recognized {
@@ -147,6 +156,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
             swap_capability: SwapCapability::Unsupported,
             harness,
             harness_layer,
+            harness_slug: harness_slug.clone(),
         },
     )?;
     doc::write_doc(
@@ -200,6 +210,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
         bundle_digest: digest_hex,
         tracked: true,
         harness,
+        harness_slug,
         currency,
     })
 }
@@ -266,6 +277,14 @@ fn recognize(ctx: &Ctx<'_>, canonical_source: &Path) -> Option<DiscoveredPlaceme
         .discover()
         .into_iter()
         .find(|d| d.path.canonicalize().is_ok_and(|c| c == *canonical_source))
+}
+
+/// Which known harness's skill dir `source_abs` sits under (baked registry), using the real env home + cwd.
+/// Best-effort provenance: no `$HOME` ⇒ no attribution.
+fn registry_attribution(source_abs: &Path) -> Option<topos_harness::registry::HarnessAttribution> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let cwd = std::env::current_dir().ok();
+    topos_harness::registry::attribute_path(source_abs, &home, cwd.as_deref())
 }
 
 /// Refuse a source path that is equal to, an ancestor of, or a descendant of `~/.topos/` (canonicalized,

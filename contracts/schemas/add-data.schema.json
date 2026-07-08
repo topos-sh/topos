@@ -30,6 +30,13 @@
         }
       ]
     },
+    "harness_slug": {
+      "description": "The harness's registry slug the adopted dir was attributed to (e.g. `cursor`), even for a harness\ntopos has no full adapter for (then `harness` is `None`). Provenance/disclosure only.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "name": {
       "type": "string"
     },

@@ -47,14 +47,6 @@
     "untracked"
   ],
   "$defs": {
-    "HarnessId": {
-      "type": "string",
-      "enum": [
-        "claude-code",
-        "openclaw",
-        "hermes"
-      ]
-    },
     "SkillEntry": {
       "description": "A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.",
       "type": "object",
@@ -99,11 +91,20 @@
       ]
     },
     "UntrackedEntry": {
-      "description": "A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.",
+      "description": "A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.\nDiscovery spans every harness in the baked registry, so `harness` is an open **slug** string (not the\nclosed [`crate::HarnessId`] — topos discovers far more harnesses than it has full adapters for).",
       "type": "object",
       "properties": {
+        "adapter_supported": {
+          "description": "True iff topos has a full adapter for this harness (so `add` can arm live currency). False = the\nskill is still adoptable (`topos add` tracks + shares its bytes), but auto-currency lands later.",
+          "type": "boolean"
+        },
         "harness": {
-          "$ref": "#/$defs/HarnessId"
+          "description": "The harness's registry slug (e.g. `claude-code`, `cursor`, `windsurf`).",
+          "type": "string"
+        },
+        "harness_name": {
+          "description": "The harness's human-readable name (e.g. `Claude Code`, `Cursor`).",
+          "type": "string"
         },
         "name": {
           "type": "string"
@@ -111,12 +112,19 @@
         "path": {
           "description": "The harness dir it was found in.",
           "type": "string"
+        },
+        "scope": {
+          "description": "Where the skill dir was found: `user` (a global harness home) or `project` (the current repo).",
+          "type": "string"
         }
       },
       "required": [
         "name",
         "path",
-        "harness"
+        "harness",
+        "harness_name",
+        "adapter_supported",
+        "scope"
       ]
     }
   }

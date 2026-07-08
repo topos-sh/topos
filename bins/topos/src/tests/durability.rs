@@ -74,6 +74,7 @@ fn sample_map(tag: u8) -> PlacementMap {
         swap_capability: SwapCapability::Unsupported,
         harness: None,
         harness_layer: None,
+        harness_slug: None,
     }
 }
 

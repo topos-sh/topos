@@ -571,6 +571,7 @@ fn heal_forward(
         swap_capability: map.swap_capability,
         harness: map.harness,
         harness_layer: map.harness_layer.clone(),
+        harness_slug: map.harness_slug.clone(),
     };
     materialize::commit_docs(ctx.fs, sp, &next_map, &next_lock, &next_sync)
 }

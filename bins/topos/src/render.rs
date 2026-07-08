@@ -5,7 +5,7 @@ use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
 use topos_types::results::{
     AddData, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RevertData, ReviewData, ReviewDecision, SkillEntry, UnfollowData,
+    PullSkill, RevertData, ReviewData, ReviewDecision, SkillEntry, UnfollowData, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -239,10 +239,6 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             }
         ));
     }
-    if data.tracked.is_empty() {
-        s.push_str("No tracked skills.");
-        return s;
-    }
     // The follow-state note `(mode, following)` for tracked row `i` (aligned by construction), present only
     // when enrolled+followed — extracted as plain fields so the row builder stays type-agnostic.
     let note_of = |i: usize| {
@@ -252,34 +248,47 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             .and_then(Option::as_ref)
             .map(|n| (n.mode, n.following))
     };
-    match &out.enrollment {
-        // Enrolled: group the tracked rows by workspace (named by the membership display label), with the
-        // purely-local skills under their own clearly-labelled group. `--json` stays a flat list — grouping
-        // is TTY-only.
-        Some(e) => {
-            for (ws_id, label) in ordered_workspace_groups(&data.tracked, &e.workspace_labels) {
-                s.push_str(&format!("{label}:\n"));
-                for (i, entry) in data.tracked.iter().enumerate() {
-                    if entry.workspace_id.as_deref() == Some(ws_id) {
-                        s.push_str(&list_row(entry, note_of(i)));
+    // Tracked skills. An empty inventory still falls through to the untracked discovery below — a fresh
+    // user's whole value is "here's what you could adopt", so we never early-return on no-tracked.
+    if data.tracked.is_empty() {
+        s.push_str("No tracked skills.\n");
+    } else {
+        match &out.enrollment {
+            // Enrolled: group the tracked rows by workspace (named by the membership display label), with
+            // the purely-local skills under their own clearly-labelled group. `--json` stays a flat list —
+            // grouping is TTY-only.
+            Some(e) => {
+                for (ws_id, label) in ordered_workspace_groups(&data.tracked, &e.workspace_labels) {
+                    s.push_str(&format!("{label}:\n"));
+                    for (i, entry) in data.tracked.iter().enumerate() {
+                        if entry.workspace_id.as_deref() == Some(ws_id) {
+                            s.push_str(&list_row(entry, note_of(i)));
+                        }
+                    }
+                }
+                if data.tracked.iter().any(|e| e.workspace_id.is_none()) {
+                    s.push_str("local (not shared):\n");
+                    for (i, entry) in data.tracked.iter().enumerate() {
+                        if entry.workspace_id.is_none() {
+                            s.push_str(&list_row(entry, note_of(i)));
+                        }
                     }
                 }
             }
-            if data.tracked.iter().any(|e| e.workspace_id.is_none()) {
-                s.push_str("local (not shared):\n");
+            // Unenrolled: the flat accountless list (there are no workspaces to group by).
+            None => {
+                s.push_str("Tracked skills:\n");
                 for (i, entry) in data.tracked.iter().enumerate() {
-                    if entry.workspace_id.is_none() {
-                        s.push_str(&list_row(entry, note_of(i)));
-                    }
+                    s.push_str(&list_row(entry, note_of(i)));
                 }
             }
         }
-        // Unenrolled: the flat accountless list (there are no workspaces to group by).
-        None => {
-            s.push_str("Tracked skills:\n");
-            for (i, entry) in data.tracked.iter().enumerate() {
-                s.push_str(&list_row(entry, note_of(i)));
-            }
+    }
+    // Untracked skills discovered in any known harness's skill dir — the `add`-able inventory.
+    if !data.untracked.is_empty() {
+        s.push_str("\nUntracked skills — run `topos add <path>` to adopt:\n");
+        for u in &data.untracked {
+            s.push_str(&untracked_row(u));
         }
     }
     if let Some(footprint) = &data.footprint {
@@ -289,6 +298,21 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         ));
     }
     s.trim_end().to_owned()
+}
+
+/// One untracked-discovery row: `<name>  [<harness>]  <path>`, plus an adopt-only note for a harness topos
+/// has no full adapter for — it can still be `add`ed (the bytes track + share), but live currency for that
+/// harness lands later.
+fn untracked_row(u: &UntrackedEntry) -> String {
+    let support = if u.adapter_supported {
+        ""
+    } else {
+        "  (adopt-only — live currency lands later)"
+    };
+    format!(
+        "  {}  [{}]  {}{}\n",
+        u.name, u.harness_name, u.path, support
+    )
 }
 
 /// One tracked row's text: the padded skill line (`<skill>  <skill>@<short>` + follow note + draft flag)

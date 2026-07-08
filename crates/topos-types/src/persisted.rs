@@ -117,6 +117,12 @@ pub struct PlacementMap {
     /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_layer: Option<String>,
+    /// The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —
+    /// recorded even when topos has no full adapter for it, so a later adapter can retroactively arm
+    /// currency for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits
+    /// under a known harness skill dir. **Additive optional.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_slug: Option<String>,
 }
 
 /// Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**

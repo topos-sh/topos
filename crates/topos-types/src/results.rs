@@ -157,13 +157,23 @@ pub struct ListData {
 }
 
 /// A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.
+/// Discovery spans every harness in the baked registry, so `harness` is an open **slug** string (not the
+/// closed [`crate::HarnessId`] — topos discovers far more harnesses than it has full adapters for).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct UntrackedEntry {
     pub name: String,
     /// The harness dir it was found in.
     pub path: String,
-    pub harness: crate::HarnessId,
+    /// The harness's registry slug (e.g. `claude-code`, `cursor`, `windsurf`).
+    pub harness: String,
+    /// The harness's human-readable name (e.g. `Claude Code`, `Cursor`).
+    pub harness_name: String,
+    /// True iff topos has a full adapter for this harness (so `add` can arm live currency). False = the
+    /// skill is still adoptable (`topos add` tracks + shares its bytes), but auto-currency lands later.
+    pub adapter_supported: bool,
+    /// Where the skill dir was found: `user` (a global harness home) or `project` (the current repo).
+    pub scope: String,
 }
 
 /// A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.
@@ -237,6 +247,10 @@ pub struct AddData {
     /// directory tracked in place. Disclosed so the agent can see whether currency was armed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
+    /// The harness's registry slug the adopted dir was attributed to (e.g. `cursor`), even for a harness
+    /// topos has no full adapter for (then `harness` is `None`). Provenance/disclosure only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_slug: Option<String>,
     /// The currency-trigger outcome, present when adopting into a recognized harness attempted a
     /// session-start trigger install — the honest disclosure of the (only) write `add` makes outside
     /// `~/.topos/`. `None` for a plain directory.
