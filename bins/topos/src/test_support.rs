@@ -25,7 +25,9 @@ use topos_harness::{
 };
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
-use topos_types::results::{DiffData, ProposeData, PublishData, PullData, RevertData, ReviewData};
+use topos_types::results::{
+    DiffData, ListData, ProposeData, PublishData, PullData, RevertData, ReviewData,
+};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
@@ -930,6 +932,32 @@ impl FollowHarness {
         plane_key: [u8; 32],
         approve: &str,
     ) -> Result<PublishResult, String> {
+        self.publish_impl(standup_base_url, plane_key, approve, None)
+    }
+
+    /// [`publish`](Self::publish) with an EXPLICIT `--workspace <id>` (the global flag) — disambiguates a
+    /// skill NAME shared across workspaces (the resolve filter), while a FOLLOWED skill still signs in its
+    /// OWN workspace (the pointer scope). The multi-workspace e2e's same-name disambiguation drives this.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (an ambiguous name, an unjoined `--workspace`, …).
+    pub fn publish_in_workspace(
+        &self,
+        standup_base_url: &str,
+        plane_key: [u8; 32],
+        approve: &str,
+        workspace: &str,
+    ) -> Result<PublishResult, String> {
+        self.publish_impl(standup_base_url, plane_key, approve, Some(workspace))
+    }
+
+    fn publish_impl(
+        &self,
+        standup_base_url: &str,
+        plane_key: [u8; 32],
+        approve: &str,
+        workspace: Option<&str>,
+    ) -> Result<PublishResult, String> {
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .map_err(|e| e.to_string())?;
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
@@ -945,9 +973,21 @@ impl FollowHarness {
             base_url: standup_base_url.to_owned(),
         };
         // `publish` never reads ctx.plane (the enrolled write transport is built per-base inside the op),
-        // so the read seams stay inert; the pinned `plane_key` verifies the OK receipt's signed pointer.
+        // so THAT read seam stays inert; the pinned `plane_key` verifies the OK receipt's signed pointer.
+        // The FOLLOW seam must be REAL, though: an enrolled publish infers a followed skill's OWN workspace
+        // from its follow entry (the pointer scope — never an ambient guess), which is the only correct
+        // signing scope once this install follows skills across several workspaces. Absent `follows.json`
+        // (the un-enrolled standup branch) yields an empty seam that branch never consults.
         let inert_plane = InertPlane;
-        let inert_follow = InertFollow;
+        let follows = crate::enroll::read_follows(&self.fs, &self.layout())
+            .ok()
+            .flatten();
+        let follow = FileFollow::new(
+            follows
+                .as_ref()
+                .map(crate::enroll::follow_contexts)
+                .unwrap_or_default(),
+        );
         self.with_adapter(|harness| {
             let ctx = Ctx {
                 fs: &self.fs,
@@ -958,7 +998,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 plane_key,
-                follow: &inert_follow,
+                follow: &follow,
             };
             match ops::publish(
                 &ctx,
@@ -968,7 +1008,7 @@ impl FollowHarness {
                 None,
                 false,
                 approve,
-                None,
+                workspace,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1017,6 +1057,116 @@ impl FollowHarness {
             .map(|d| d.invite_link)
             .map_err(|e| e.to_string())
         })
+    }
+
+    /// Drive the real `invite` verb with an EXPLICIT `--workspace <id>` (the global flag). Otherwise
+    /// identical to [`invite`](Self::invite): signs the governance Invite op and POSTs it, returning the
+    /// `/i/` link. This is the AMBIENT-verb selector for an install that follows skills across several
+    /// workspaces — `invite` with no `--workspace` fails locally with a `WorkspaceSelection` there.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (a non-owner is DENIED; an unjoined `--workspace` id is
+    /// a local `WorkspaceSelection` that never reaches the plane).
+    pub fn invite_in_workspace(
+        &self,
+        email: &str,
+        skills: &[&str],
+        workspace: &str,
+    ) -> Result<String, String> {
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned()))
+        };
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                plane_key: [0u8; 32],
+                follow: &inert_follow,
+            };
+            ops::invite(
+                &ctx,
+                &governance,
+                vec![email.to_owned()],
+                None,
+                skills.iter().map(|s| (*s).to_owned()).collect(),
+                Some(workspace),
+            )
+            .map(|d| d.invite_link)
+            .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Drive the real bare `list` (`list --json`, no skill filter), returning the typed [`ListData`]. A
+    /// bare list is plane-independent (only a narrowed `list <skill>` fetches proposals), so the read seams
+    /// stay inert; every per-entry `workspace_id` + the followed bucket come from the on-disk
+    /// `follows.json` / `user.json` the follows wrote — so an e2e asserts each skill's workspace provenance.
+    ///
+    /// # Panics
+    /// If the list errors (a hard wiring fault).
+    #[must_use]
+    pub fn list(&self) -> ListData {
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("load-or-create device id");
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                plane_key: [0u8; 32],
+                follow: &inert_follow,
+            };
+            ops::list(&ctx, None, false)
+                .expect("test_support: list failed")
+                .data
+        })
+    }
+
+    /// The workspace memberships `user.json` holds, as `(workspace_id, display_name)` in stored order — so
+    /// an e2e asserts a second same-plane follow ADDED a membership rather than overwriting the first.
+    #[must_use]
+    pub fn memberships(&self) -> Vec<(String, Option<String>)> {
+        enroll::read_user(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|u| {
+                u.workspaces
+                    .into_iter()
+                    .map(|m| (m.workspace_id, m.display_name))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The follow-state `follows.json` holds, as `(skill_id, workspace_id, following)` in stored order — so
+    /// an e2e asserts each followed skill is tagged with its OWN workspace and a second follow never drops
+    /// the first.
+    #[must_use]
+    pub fn follows(&self) -> Vec<(String, String, bool)> {
+        enroll::read_follows(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|f| {
+                f.follows
+                    .into_iter()
+                    .map(|e| (e.skill_id, e.workspace_id, e.following))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The device public key this rig's signer mints (load-or-generate is idempotent) — for the

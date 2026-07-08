@@ -321,10 +321,10 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
     genesis
 }
 
-/// Mint a governance-signed `/i/` invite pre-offering `skill` to `email`. The `signer` (device key id +
-/// signing seed) signs the SAME `topos-core` frame the plane re-derives + verifies (role byte 3 = Member,
-/// `expires_at = 0`, the invited-email set, the offered-skill-id set), so this in-process mint cannot
-/// drift from production.
+/// Mint a governance-signed `/i/` invite pre-offering `skill` to `email` at the `Member` role. The
+/// `signer` (device key id + signing seed) signs the SAME `topos-core` frame the plane re-derives +
+/// verifies, so this in-process mint cannot drift from production. See [`mint_invite_with_role`] for the
+/// role-selectable form (the multi-workspace e2e mints owner-role invites so the joiner can itself invite).
 pub(crate) async fn mint_invite(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -334,17 +334,40 @@ pub(crate) async fn mint_invite(
     skill: &str,
     at: &str,
 ) -> String {
+    mint_invite_with_role(authority, ws, signer, op_id, email, skill, None, Role::Member, at).await
+}
+
+/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The signing frame
+/// binds `ws.as_str()` (the ACTUAL workspace — so a plane with several workspaces mints each invite under
+/// its own scope, never a hard-coded one), the role's [`Role::signing_byte`], `expires_at = 0`, the
+/// invited-email set, and the offered-skill-**id** set — exactly what the plane's `create_invite`
+/// re-derives + verifies. The offered `name` is advisory (NOT in the preimage — the frame binds ids only),
+/// so it becomes the follower's local skill name without touching the signature; the multi-workspace e2e
+/// uses it to give a skill the SAME name in two workspaces and prove `--workspace` disambiguation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mint_invite_with_role(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    signer: (&str, &[u8; 32]),
+    op_id: &str,
+    email: &str,
+    skill: &str,
+    name: Option<&str>,
+    role: Role,
+    at: &str,
+) -> String {
     let (signer_dkid, signer_seed) = signer;
     let hyphenless: String = op_id.chars().filter(|c| *c != '-').collect();
     let mut op_id_bytes = [0u8; 16];
     hex::decode_to_slice(&hyphenless, &mut op_id_bytes).expect("op_id is 16 hex bytes");
 
+    let role_byte = role.signing_byte();
     let fields = GovernanceOpFields {
-        workspace_id: WS,
+        workspace_id: ws.as_str(),
         op_id: op_id_bytes,
         device_key_id: signer_dkid,
         op: GovernanceOpKind::Invite {
-            role: 3, // Member
+            role: role_byte,
             expires_at: 0,
             emails: &[email],
             skills: &[skill],
@@ -357,10 +380,10 @@ pub(crate) async fn mint_invite(
     let signed = GovernanceSignedOp {
         device_key_id: signer_dkid.to_owned(),
         op: GovernanceOp::Invite {
-            role: Role::Member,
+            role,
             expires_at: None,
             emails: vec![Principal::parse(email).unwrap()],
-            skills: vec![(SkillId::parse(skill).unwrap(), None)],
+            skills: vec![(SkillId::parse(skill).unwrap(), name.map(str::to_owned))],
         },
         signature,
     };
