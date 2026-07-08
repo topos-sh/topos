@@ -474,7 +474,7 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
 #[test]
 fn diff_reports_the_draft_digest_not_the_base() {
     // A bare `diff` compares draft ↔ current; its `bundle_digest` must be the DRAFT's digest — the
-    // byte-exact value `publish --approve <skill>@<digest>` consents to (the bytes being shipped),
+    // byte-exact value `publish <skill>@<digest>` consents to (the bytes being shipped),
     // NOT the base/current version's (which would yield CONSENT_MISMATCH on any real change).
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -1191,7 +1191,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     assert!(out.data.followed.is_empty());
     let text = render::list_tty(&out);
     assert!(
-        text.contains("(not following — `topos follow --approve pr-describe` resumes)"),
+        text.contains("(not following — `topos follow pr-describe` resumes)"),
         "{text}"
     );
 }
@@ -1242,13 +1242,13 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     let u = ops::unfollow(&ctx, "pr-describe").unwrap();
     assert!(!u.following);
 
-    // `follow --approve <skill>` resumes the paused entry. The skill has already been received (its
+    // `follow <skill>` resumes the paused entry. The skill has already been received (its
     // base is the adopted genesis — no pending first-receive offer), so no transport is touched: the
     // connectors panic if reached, and the inert ctx plane would error on any fetch.
     let enroll_connect =
-        |_b: &str| -> Box<dyn EnrollSource> { unreachable!("--approve never enrolls") };
+        |_b: &str| -> Box<dyn EnrollSource> { unreachable!("the skill path never enrolls") };
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
-        unreachable!("--approve builds no offer-disclosure transport")
+        unreachable!("the skill path builds no offer-disclosure transport")
     };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
@@ -1257,11 +1257,9 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     let out = ops::follow(
         &ctx,
         &connectors,
-        None,
+        Some("pr-describe".to_owned()),
         ops::FollowOpts {
             manual: false,
-            resume: false,
-            approve: vec!["pr-describe".to_owned()],
             workspace: None,
         },
     )

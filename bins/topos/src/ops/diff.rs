@@ -115,7 +115,7 @@ fn diff_draft_vs_current(
     Ok(DiffData {
         source: DiffSource::Local,
         // The DRAFT is the target endpoint (like `target.digest_hex` on the `<ref>` path): report
-        // ITS digest — the byte-exact value `publish --approve <skill>@<digest>` consents to — not
+        // ITS digest — the byte-exact value `publish <skill>@<digest>` consents to — not
         // the base's. When the draft equals current the scan reproduces the current digest, so a
         // no-change diff is unaffected.
         version_id: lock.base_commit.clone(),

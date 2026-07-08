@@ -26,19 +26,20 @@ curl -fsSL https://topos.sh/install.sh | sh
 **Share a skill with your team** — from a machine that has the skill locally:
 
 ```sh
-topos add ~/.claude/skills/pr-describe                     # adopt it (offline; no account)
-topos list --json                                          # shows each skill's digest
-topos publish pr-describe --approve pr-describe@<digest>   # sign in when prompted; prints an invite link
+topos add ~/.claude/skills/pr-describe   # adopt it (offline; no account)
+topos publish pr-describe                # sign in when prompted; prints an invite link
 ```
 
-`--approve <skill>@<digest>` pins the exact bytes being shipped. The first publish stands up your workspace
-on the hosted plane (sign in when prompted) and prints an `/i/` invite link for teammates.
+The first publish stands up your workspace on the hosted plane (sign in when prompted) and prints an `/i/`
+invite link for teammates. To pin the exact bytes being shipped, add a `@<digest>` suffix
+(`topos publish pr-describe@<digest>`, where `topos list --json` prints each digest) — the publish then
+refuses on any mismatch.
 
 **Follow your team's skills** — from a teammate's machine:
 
 ```sh
 topos follow https://topos.sh/i/<token>   # approve in the browser when it opens; it completes on its own
-topos follow --approve pr-describe        # place the disclosed first version
+topos follow pr-describe                   # place the disclosed first version
 ```
 
 Following arms a session-start hook that runs `topos pull`, so updates the team publishes land byte-exact at
@@ -47,8 +48,8 @@ the start of each session — verified against the plane's signed pointer, and n
 **Propose a change back:**
 
 ```sh
-topos publish pr-describe --propose --approve pr-describe@<digest>   # open a PR-like proposal
-topos review pr-describe@<hash> --approve                            # a reviewer lands it
+topos publish pr-describe --propose         # open a PR-like proposal
+topos review pr-describe@<hash> --approve   # a reviewer lands it
 ```
 
 ## Install
@@ -81,18 +82,18 @@ the same verbs work by hand.
 |---|---|
 | `add <dir>` | Adopt a local skill into topos (offline; no server, no account). |
 | `follow <link>` | Enroll via an `/i/` link and follow its skills. Approve in the browser; the command completes on its own. |
-| `follow --approve <skill>` | Place a disclosed first version (or resume an unfollowed skill). |
+| `follow <skill>` | Place a disclosed first version (or resume an unfollowed skill). |
 | `pull [<skill>]` | Apply updates to followed skills. The session-start hook runs this for you. |
-| `publish <skill> --approve <skill>@<digest>` | Move `current` to your draft (or genesis-create a skill). |
-| `publish --propose …` | Open a proposal (a PR) without moving `current`. |
+| `publish <skill>[@<digest>]` | Move `current` to your draft (or genesis-create a skill); the optional `@<digest>` pins the exact bytes. |
+| `publish --propose <skill>` | Open a proposal (a PR) without moving `current`. |
 | `review <skill>@<hash> --approve\|--reject` | Resolve a proposal. |
-| `revert <skill> --to <hash> --approve <skill>@<hash>` | Move the team to older bytes — a forward, invertible move. |
+| `revert <skill> --to <hash>` | Move the team to older bytes — a forward, invertible move. |
 | `invite [emails…] --skills …` | Owner mints an `/i/` invite link. |
 | `unfollow <skill>` | Stop following; keep your local copy. |
 | `list` · `diff` · `log` | Inventory skills · show a change · show a skill's history. |
 | `uninstall` | Remove the hook, the binary, and `~/.topos/`. Touches no skill bytes. |
 
-Consent is explicit end to end: `--approve <skill>@<digest>` pins the exact bytes, nothing lands that wasn't
+Consent is explicit end to end: a `<skill>@<digest>` pin binds the exact bytes, nothing lands that wasn't
 disclosed and pinned, and a diverged local draft is surfaced — never overwritten.
 
 ## Trust & security

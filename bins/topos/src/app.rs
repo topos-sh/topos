@@ -79,7 +79,7 @@ pub fn run() -> ExitCode {
     // tearing the home down.
     let device_id = match &command {
         // `follow` also loads (and on first use mints) the device identity: the device-key signer it drives
-        // requires `host.json` to exist, and `--approve` authors a draft snapshot through the pull engine.
+        // requires `host.json` to exist, and the skill path authors a draft snapshot through the pull engine.
         // `publish` authors the candidate commit and `revert` the forward-revert commit, so both load (and
         // on first use mint) the device id.
         Command::Add { .. }
@@ -112,12 +112,7 @@ pub fn run() -> ExitCode {
             render::add_tty,
             &diag,
         ),
-        Command::Follow {
-            link,
-            manual,
-            resume,
-            approve,
-        } => {
+        Command::Follow { target, manual } => {
             // The transports are built per-base-URL (known only after the op parses the link / reads the
             // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer
             // disclosure (the one connector that carries per-skill creds, so it stays a local closure).
@@ -131,15 +126,13 @@ pub fn run() -> ExitCode {
             };
             let opts = ops::FollowOpts {
                 manual,
-                resume,
-                approve,
-                // The global `--workspace` disambiguates a `--approve` skill name shared across the
-                // workspaces this install follows on one plane (begin / resume ignore it).
+                // The global `--workspace` disambiguates a positional skill name shared across the
+                // workspaces this install follows on one plane (the enrollment motions ignore it).
                 workspace: workspace.clone(),
             };
-            let first = ops::follow(&ctx, &connectors, link, opts);
+            let first = ops::follow(&ctx, &connectors, target, opts);
             // The INTERACTIVE (non-`--json`) path blocks on a pending device-authorization: poll until the
-            // human approves in the browser, so a person never has to run `follow --resume` by hand. The
+            // human approves in the browser, so a person never has to re-invoke `follow` by hand. The
             // agent (`--json`) path is UNCHANGED — it returns the pending state + the `ENROLL_RESUME`
             // next-action and never blocks (a headless agent process must not hang).
             let result = if json {
@@ -187,11 +180,7 @@ pub fn run() -> ExitCode {
             render::diff_tty,
             &diag,
         ),
-        Command::Publish {
-            skill,
-            propose,
-            approve,
-        } => {
+        Command::Publish { target, propose } => {
             // The standup branch's plane base: the env override, else the compiled-in hosted default.
             // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
             let standup = ops::StandupConnectors {
@@ -206,9 +195,8 @@ pub fn run() -> ExitCode {
                     &connect_contribute,
                     &connect_governance,
                     &standup,
-                    skill.as_deref(),
+                    &target,
                     propose,
-                    &approve,
                     workspace.as_deref(),
                 ),
                 &diag,
@@ -236,20 +224,14 @@ pub fn run() -> ExitCode {
                 &diag,
             )
         }
-        Command::Revert {
-            skill,
-            to,
-            approve,
-            confirm,
-        } => finish(
+        Command::Revert { skill, to, confirm } => finish(
             json,
             cmd_name,
             ops::revert(
                 &ctx,
                 &connect_contribute,
-                skill.as_deref(),
+                &skill,
                 &to,
-                &approve,
                 confirm,
                 workspace.as_deref(),
             ),
@@ -396,7 +378,7 @@ fn finish_list(
 }
 
 /// `follow`'s finisher — like [`finish`], but it carries the success-path `next_actions` (run
-/// `follow --resume` while pending; `pull` once offers are disclosed) on the envelope. The `--json`
+/// re-invoke `follow` while pending; `pull` once offers are disclosed) on the envelope. The `--json`
 /// payload is exactly the schema-pinned `FollowData`; the resume disclosure the outcome carries
 /// alongside is TTY-only (the pinned shape has no resume field).
 fn finish_follow(
@@ -427,9 +409,10 @@ fn finish_follow(
 const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Block the INTERACTIVE (non-`--json`) `follow` on a pending device-authorization until the browser
-/// approval settles — so a person never has to run `follow --resume` by hand. The agent path never calls
+/// approval settles — so a person never has to re-invoke `follow` by hand. The agent path never calls
 /// this (it must not hang). Re-uses the tested `ops::follow` op unchanged: it prints the waiting
-/// disclosure to STDERR (stdout stays clean for the final render), then polls `follow --resume` on a fixed
+/// disclosure to STDERR (stdout stays clean for the final render), then re-invokes `follow` (which resumes
+/// via the pending WAL) on a fixed
 /// cadence — a still-pending poll loops; an enrolled result or a typed error (the device code's expiry)
 /// ends it and is handed back for the ordinary [`finish_follow`] render. A non-pending first result (a
 /// self-host claim one-shot, an already-enrolled resume, or an error) settles immediately.
@@ -461,9 +444,8 @@ fn block_until_settled(
         std::thread::sleep(FOLLOW_POLL_INTERVAL);
         let opts = ops::FollowOpts {
             manual,
-            resume: true,
-            approve: Vec::new(),
-            // The interactive block only ever RESUMES (never approves), so the `--workspace` filter is moot.
+            // The interactive block only ever RESUMES (target = None + the pending WAL drives the resume),
+            // so the `--workspace` filter is moot.
             workspace: None,
         };
         let next = ops::follow(ctx, connectors, None, opts);

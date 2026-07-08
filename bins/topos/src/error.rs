@@ -104,10 +104,12 @@ pub(crate) enum ClientError {
     /// silently trusting a new key — the human must re-pin out of band.
     #[error("the plane's signing key differs from the pinned key; re-pin required")]
     KeyRepinRequired,
-    /// The `--approve <skill>@<digest>` consent token did not match the digest recomputed over the bytes
-    /// being shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
-    /// mode-flip). The agent re-discloses (via `diff`) and re-approves the exact digest.
-    #[error("the --approve digest does not match the bytes: disclosed {expected}, approved {got}")]
+    /// The optional `@<digest>` consent pin did not match the digest recomputed over the bytes being
+    /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
+    /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
+    #[error(
+        "the pinned @<digest> does not match the bytes: pinned {got}, bytes hash to {expected}"
+    )]
     ApprovalMismatch {
         skill: String,
         expected: String,

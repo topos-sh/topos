@@ -231,8 +231,8 @@ pub(crate) struct GrantedToken {
 /// state. `Granted` carries the opaque grant (redacted `Debug`).
 #[derive(Debug, Clone)]
 pub(crate) enum TokenPoll {
-    /// Not yet confirmed — the human hasn't approved the session yet; run `follow --resume` again later.
-    /// (The two-call resume re-polls on demand, so no in-process interval is carried.)
+    /// Not yet confirmed — the human hasn't approved the session yet; re-invoke `follow` again later.
+    /// (Re-invoking `follow` re-polls on demand, so no in-process interval is carried.)
     Pending,
     /// Polled too fast — back off (treated as still-pending by the on-demand resume).
     SlowDown,

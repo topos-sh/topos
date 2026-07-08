@@ -1,16 +1,22 @@
 //! `follow` — the device-flow enrollment + first-receive client.
 //!
-//! Three motions, one verb (the harness drives it non-interactively):
+//! One verb, dispatched by the single positional (the harness drives it non-interactively):
 //! - **`follow <link>`** (call 1) — read the `/i/` TOFU bootstrap, pin the plane key, start a device
 //!   authorization, write a `0600` WAL, and return `ENROLLMENT_PENDING` + the verification URL.
-//! - **`follow --resume`** (call 2) — poll once; on a granted poll, sign the enroll possession proof,
-//!   redeem the grant into per-skill read creds, record them in the WAL (the lockout fence), PROMOTE
-//!   (write `instance.json` / `follows.json` / `user.json` / the device key + lay the first-receive
-//!   baselines), delete the WAL, and disclose the offers.
-//! - **`follow --approve <skill>[@<digest>] …`** (post-enroll) — drive the existing pull engine to place
-//!   the named, already-disclosed first-receive bytes (the I-TOFU "one --approve"). On a retained entry
-//!   `unfollow` paused (`following == false`) it RESUMES the follow instead: the flag flips back on, a
-//!   still-pending first-receive offer is placed, and otherwise the next `pull` lands the team's current.
+//! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow` (with
+//!   any target, or none) RESUMES it — the "re-invoking IS the resume" idiom the standup publish uses:
+//!   poll once; on a granted poll, sign the enroll possession proof, redeem the grant into per-skill read
+//!   creds, record them in the WAL (the lockout fence), PROMOTE (write `instance.json` / `follows.json` /
+//!   `user.json` / the device key + lay the first-receive baselines), delete the WAL, and disclose the
+//!   offers.
+//! - **`follow <skill>[@<hash>]`** (post-enroll) — a KNOWN followed-skill name drives the existing pull
+//!   engine to place the named, already-disclosed first-receive bytes (the I-TOFU "one accept"). On a
+//!   retained entry `unfollow` paused (`following == false`) it RESUMES the follow instead: the flag flips
+//!   back on, a still-pending first-receive offer is placed, and otherwise the next `pull` lands current.
+//!
+//! The positional is dispatched by SHAPE (see [`follow`]): a pending WAL wins (re-invoke resumes); `@`
+//! forces the skill path; a known skill name is the skill path; otherwise it is an `/i/` link or a bare
+//! invite token.
 //!
 //! **I-NO-USER-TOKEN.** The agent only ever holds the opaque grant + the minted read creds — never a user
 //! token; enrollment completes by POLLING. **Secrets** (the device code, the grant, the read tokens) live
@@ -41,16 +47,12 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 /// The genesis generation sentinel — `(0,0)` means "nothing authenticated / applied yet".
 const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 
-/// `follow`'s flags, parsed from argv.
+/// `follow`'s flags, parsed from argv (the single positional rides separately).
 pub(crate) struct FollowOpts {
     /// `--manual` ⇒ confirm-each adoption (else auto).
     pub manual: bool,
-    /// `--resume` ⇒ poll + complete a pending enrollment.
-    pub resume: bool,
-    /// `--approve <skill>[@<digest>] …` ⇒ place the named, already-disclosed first-receive bytes.
-    pub approve: Vec<String>,
-    /// The global `--workspace <id>` filter — disambiguates a `--approve` skill NAME shared across the
-    /// workspaces this install follows on the same plane. Ignored by the begin / resume motions.
+    /// The global `--workspace <id>` filter — disambiguates a positional skill NAME shared across the
+    /// workspaces this install follows on the same plane. Ignored by the enrollment motions.
     pub workspace: Option<String>,
 }
 
@@ -72,34 +74,96 @@ pub(crate) struct FollowConnectors<'a> {
 /// shape has no resume field, so the resumed names ride alongside it — never on the `--json` surface).
 pub(crate) struct FollowOutcome {
     pub data: FollowData,
-    /// Display names of skills whose retained `following == false` entry this `--approve` flipped back on.
+    /// Display names of skills whose retained `following == false` entry this skill-path follow flipped on.
     pub resumed: Vec<String>,
 }
 
-/// Dispatch the `follow` verb. `--approve` and `--resume` ignore `link`; a bare `follow <link>` begins.
+/// Dispatch the `follow` verb over the single positional `target`, in this precedence order:
+///
+/// 1. a pending enrollment WAL exists → RESUME it (poll/promote/retry), regardless of `target` — the
+///    "re-invoking IS the resume" path;
+/// 2. `target` contains `@` → the skill path `<skill>@<hash>` — the name-part MUST be a known followed
+///    skill (else a typed usage error);
+/// 3. `target` is URL-shaped (`://` or `/i/`) → start enrollment (an `/i/` invite or claim link);
+/// 4. `target` is a bare word matching a KNOWN followed skill → the skill path (place offer / resume a
+///    paused entry);
+/// 5. `target` is a bare word that is NOT a known skill → treat it as a bare invite token → start
+///    enrollment (pre-enrollment its only meaning; post-enrollment it redeems a new invite on the plane);
+/// 6. no `target`, no pending WAL → a typed usage error (nothing to do).
+///
+/// Rule summary: **known-skill-name wins; `@` forces the skill path; otherwise it is a link/token.**
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] for a missing link / denied / expired session; [`ClientError::KeyRepinRequired`]
-/// / [`ClientError::PlacementUnsupported`] for a TOFU mismatch; otherwise a transport / io / store failure.
+/// [`ClientError::Enrollment`] for a missing target / denied / expired session; [`ClientError::InvalidArgument`]
+/// for an `@`-pinned unknown skill; [`ClientError::KeyRepinRequired`] / [`ClientError::PlacementUnsupported`]
+/// for a TOFU mismatch; otherwise a transport / io / store failure.
 pub(crate) fn follow(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
-    link: Option<String>,
+    target: Option<String>,
     opts: FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
-    if !opts.approve.is_empty() {
-        return approve(ctx, &opts.approve, opts.workspace.as_deref());
-    }
-    if opts.resume {
+    // 1) A pending enrollment WAL: re-invoking `follow` (with any target, or none) resumes it. `resume`
+    // routes each WAL phase (Authorizing poll / Redeemed promote / ClaimPending retry / a standup owned by
+    // `publish`) — so a second follow while one is in flight never clobbers the in-flight session's
+    // single-use secrets; it advances it.
+    if enroll::read_wal(ctx.fs, &ctx.layout)?.is_some() {
         return Ok(plain(resume(ctx, connectors)?));
     }
-    let link = link.ok_or_else(|| {
-        ClientError::Enrollment("follow needs an /i/ link (or --resume / --approve)".into())
-    })?;
-    Ok(plain(begin(ctx, connectors, &link, opts.manual)?))
+    let ws = opts.workspace.as_deref();
+    let Some(target) = target else {
+        // 6) Nothing to do: no pending enrollment and no target.
+        return Err(ClientError::Enrollment(
+            "follow needs an /i/ link or a followed-skill name (or a pending enrollment to resume)"
+                .into(),
+        ));
+    };
+    // 2) A URL-shaped target starts enrollment. Checked BEFORE `@` so an `/i/` link carrying userinfo
+    // (`https://u@host/i/tok`) or a query param (`?x=a@b`) is never misread as a `<skill>@<hash>` token.
+    if target.contains("://") || target.contains("/i/") {
+        return Ok(plain(begin(ctx, connectors, &target, opts.manual)?));
+    }
+    // 3) `@` forces the skill path; the name-part MUST be a known followed skill.
+    if target.contains('@') {
+        let name = strip_digest(&target).to_owned();
+        if !is_known_followed(ctx, &name, ws)? {
+            return Err(ClientError::InvalidArgument(format!(
+                "'{name}' is not a followed skill; pass a followed skill name, `<skill>@<hash>`, or an \
+                 /i/ link"
+            )));
+        }
+        return approve(ctx, &[target], ws);
+    }
+    // 4) A bare word matching a known followed skill is the skill path.
+    if is_known_followed(ctx, &target, ws)? {
+        return approve(ctx, &[target], ws);
+    }
+    // 5) A bare word that is not a known skill is a bare invite token → enrollment.
+    Ok(plain(begin(ctx, connectors, &target, opts.manual)?))
 }
 
-/// Wrap a non-`--approve` result (those paths never resume a paused follow).
+/// Whether `name` resolves to a tracked skill that has a follow entry (following OR `unfollow`-paused) — the
+/// "known followed skill" test the positional dispatch uses. Reads `follows.json` directly (mirroring
+/// [`approve`]), so it is correct even when the caller's `ctx.follow` seam is inert. A name that resolves to
+/// no tracked skill is not known (→ treat the positional as a link/token); an AMBIGUOUS name propagates its
+/// typed error (a genuine collision the user resolves with `--workspace`), never silently becoming a token.
+fn is_known_followed(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<bool, ClientError> {
+    let Some(follows) = enroll::read_follows(ctx.fs, &ctx.layout)? else {
+        return Ok(false);
+    };
+    let contexts = enroll::follow_contexts(&follows);
+    match super::resolve_skill_in_workspace(ctx, name, workspace) {
+        Ok((id, _)) => Ok(contexts.iter().any(|(fid, _)| fid == id.as_str())),
+        Err(ClientError::NoSuchSkill { .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Wrap a non-skill-path result (the enrollment paths never resume a paused follow).
 fn plain(data: FollowData) -> FollowOutcome {
     FollowOutcome {
         data,
@@ -119,55 +183,10 @@ fn begin(
 ) -> Result<FollowData, ClientError> {
     let (link_base, token) = parse_link(ctx, link)?;
 
-    // An in-progress enrollment WAL must not be silently clobbered by a second `follow <link>` (e.g.
-    // following workspace B while A is still mid-enrollment): `begin` writes a fresh WAL unconditionally
-    // below, so any live prior session must be settled first. The one benign clobber — an EXPIRED
-    // authorizing session — is allowed through so a fresh follow SUPERSEDES the dead WAL (the recovery
-    // path; the start-of-command sweep normally reaps it first).
-    if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
-        match &wal.state {
-            // An unsettled claim redeem for this same link retries the POST directly — NEVER refetching
-            // `/i/` (the first send may have consumed the claim, whose bootstrap then serves 404 by design;
-            // the server's same-device replay re-answers Redeemed). The match is on the TOKEN alone: it is
-            // HMAC-derived and unique per plane, and the WAL's `base_url` is the re-rooted API base while a
-            // re-pasted link may ride the team's share host — the token, not the host string, is the
-            // claim's identity. A different token is refused typed.
-            enroll::EnrollPhase::ClaimPending { claim_token, .. } => {
-                if *claim_token == token {
-                    return retry_claim(ctx, connectors, &wal);
-                }
-                return Err(ClientError::Enrollment(
-                    "a different claim enrollment is in progress; run `topos follow --resume` to \
-                     settle it first"
-                        .into(),
-                ));
-            }
-            // A still-LIVE device-authorization session for another follow: refuse rather than overwrite it
-            // (finishing it is one `follow --resume`). An EXPIRED session falls through to supersede.
-            enroll::EnrollPhase::Authorizing {
-                expires_at_millis, ..
-            } if *expires_at_millis >= now_millis(ctx) => {
-                return Err(ClientError::Enrollment(
-                    "an enrollment is already in progress; run `topos follow --resume` to finish it \
-                     (or wait for it to expire) before following another workspace"
-                        .into(),
-                ));
-            }
-            // A REDEEMED-but-unpromoted grant: the grant is single-use (spent server-side) and its minted
-            // read creds live ONLY in this WAL, so overwriting it would lose them unrecoverably. It MUST be
-            // completed with `follow --resume`, never clobbered.
-            enroll::EnrollPhase::Redeemed { .. } => {
-                return Err(ClientError::Enrollment(
-                    "an enrollment was redeemed but not finished; run `topos follow --resume` to \
-                     complete it before following another workspace"
-                        .into(),
-                ));
-            }
-            // An EXPIRED authorizing session, or a standup (owned by `publish`'s own resume): fall through
-            // so a fresh follow supersedes the dead WAL below.
-            _ => {}
-        }
-    }
+    // `begin` is only reached with NO pending enrollment WAL on disk: the [`follow`] dispatch resumes an
+    // in-flight session (rule 1) BEFORE ever dispatching a target to `begin`, and the start-of-command
+    // recovery sweep reaps an expired authorizing/standup WAL first. So a fresh follow never clobbers a
+    // live session's single-use secrets — re-invoking `follow` advances it (`resume`), it does not begin.
 
     let bootstrap = (connectors.enroll)(&link_base).fetch_bootstrap(&token)?;
     // RE-ROOT onto the plane's declared API base. The link is only where the bootstrap lives (a hosted
@@ -184,7 +203,7 @@ fn begin(
     // Branch on the enrollment method the bootstrap disclosed. A method this build does not understand
     // fails CLOSED — proceeding would enroll under a posture the human was never able to review.
     match bootstrap.plane.enrollment_method.as_str() {
-        // The one-shot admin-claim door (self-host bearer): no device-auth session, no `--resume`.
+        // The one-shot admin-claim door (self-host bearer): no device-auth session, enrolls in one call.
         "admin_claim" => {
             return claim_follow(
                 ctx,
@@ -237,7 +256,7 @@ fn begin(
         root: enroll::EnrollRoot::Invite,
     };
 
-    // The 0600 WAL — written BEFORE returning, so a `--resume` can pick up exactly this session.
+    // The 0600 WAL — written BEFORE returning, so re-invoking `follow` can pick up exactly this session.
     let expires_at_millis = now_millis(ctx).saturating_add(
         i64::try_from(auth.expires_in)
             .unwrap_or(0)
@@ -308,7 +327,7 @@ pub(super) fn tofu_decide_key(
 }
 
 // =================================================================================================
-// Call 2 — `follow --resume`: poll → (granted) redeem → Redeemed WAL → promote.
+// Call 2 — re-invoking `follow` with a pending WAL: poll → (granted) redeem → Redeemed WAL → promote.
 // =================================================================================================
 
 fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData, ClientError> {
@@ -339,11 +358,10 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
             )
         }
         // A standup session belongs to `publish` — its resume is the ORIGINAL publish command (the
-        // consent digest re-derives from that command's `--approve` each invocation, which `follow`
-        // cannot supply).
+        // optional `@<digest>` pin re-derives from that command each invocation, which `follow` cannot
+        // supply).
         enroll::EnrollPhase::AuthorizingStandup { .. } => Err(ClientError::Enrollment(
-            "a workspace standup is in progress; re-run the `topos publish … --approve …` command \
-             that started it"
+            "a workspace standup is in progress; re-run the `topos publish …` command that started it"
                 .into(),
         )),
         // An unsettled claim redeem: retry the POST directly (never refetch the possibly-consumed /i/).
@@ -454,7 +472,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
 
 // =================================================================================================
 // The admin-claim door — `follow <claim-link>` in ONE invocation (self-host bearer). The `/i/` bootstrap
-// disclosed `enrollment_method: "admin_claim"`; there is no device-auth session and no `--resume` on the
+// disclosed `enrollment_method: "admin_claim"`; there is no device-auth session and no re-invoke on the
 // happy path. A pre-send WAL makes an uncertain send safely retryable: the retry POSTs `/v1/admin-claim`
 // directly (a consumed claim's bootstrap serves 404 by design; the server's same-device replay of a
 // consumed claim deterministically re-answers Redeemed).
@@ -521,7 +539,7 @@ fn retry_claim(
             // expired / the workspace already exists). The claim is definitively dead, so the ClaimPending WAL
             // is cleared BEFORE the error surfaces (mirroring the poll Denied/Expired arms clearing the
             // Authorizing WAL) — otherwise the sweep-exempt WAL wedges every later `follow <other-link>`
-            // behind the begin-guard while `--resume` re-denies forever.
+            // behind the dispatch while a re-invoke re-denies forever.
             Err(e @ ClientError::Enrollment(_)) => {
                 enroll::delete_wal(ctx.fs, &ctx.layout)?;
                 return Err(e);
@@ -684,7 +702,7 @@ pub(super) fn promote_core(
     // atomic-per-file durable write (or an idempotent read-merge-write). The `Redeemed` enrollment WAL —
     // written BEFORE this fn and deleted only in step 6 — is the transaction log: a crash at any step
     // leaves every touched file byte-for-byte pre- or post-write (never torn), and the next
-    // `follow --resume` REPLAYS this whole sequence from the WAL until it converges. Each step is
+    // re-invoking `follow` REPLAYS this whole sequence from the WAL until it converges. Each step is
     // idempotent under that replay:
     //   1) instance.json — atomic write of identical bytes (the plane is the same on a re-promote);
     //   2) follows.json  — read-merge-write, deduped by skill_id, so this workspace's row is added-or-
@@ -979,7 +997,7 @@ fn disclose_one(
 }
 
 // =================================================================================================
-// `follow --approve` — drive the existing pull engine to place the named first-receive bytes.
+// The skill path — drive the existing pull engine to place the named first-receive bytes.
 // =================================================================================================
 
 fn approve(
@@ -988,7 +1006,7 @@ fn approve(
     workspace: Option<&str>,
 ) -> Result<FollowOutcome, ClientError> {
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
-        .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to approve".into()))?;
+        .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to accept".into()))?;
     let contexts = enroll::follow_contexts(&follows);
     // The disclosed workspace is the FIRST approved skill's OWN follow-entry workspace (per-skill) — never
     // a global first-follow, which would name the wrong workspace once the install follows skills across
@@ -1012,7 +1030,7 @@ fn approve(
                 // The explicit accept IS the I-TOFU first-receive yes (places the bytes).
                 sync_engine::sync_one(ctx, &skill_id, follow_ctx, Invocation::Accept)?;
             } else {
-                // A retained-but-paused entry (what `unfollow` keeps): `--approve` RESUMES it — the
+                // A retained-but-paused entry (what `unfollow` keeps): the skill path RESUMES it — the
                 // command every paused surface points at. Flip the durable flag first; then, if a
                 // first-receive offer is still pending, place it as a normal approve. Otherwise nothing
                 // is pulled here — the resume is disclosed and the next `pull` lands the team's current.
@@ -1151,7 +1169,7 @@ fn authority_usable(uri: &ureq::http::Uri) -> bool {
 }
 
 /// Build the pending FollowData (the agent surfaces the URL WITH the verified-domain provenance — the
-/// relay-phishing guard — then runs `follow --resume`). `verification_uri_complete` is the SERVER-built
+/// relay-phishing guard — then re-invokes `follow`). `verification_uri_complete` is the SERVER-built
 /// link when the plane provided one (used verbatim), else the caller's reconstruction.
 fn pending_followdata(
     context: &enroll::EnrollContext,
@@ -1200,7 +1218,7 @@ fn display_name(context: &enroll::EnrollContext, skill_id: &str) -> String {
         .unwrap_or_else(|| skill_id.to_owned())
 }
 
-/// Drop an `@<digest>` suffix from a `follow --approve` target when the part after the last `@` is a valid
+/// Drop an `@<hash>` suffix from a `follow <skill>[@<hash>]` target when the part after the last `@` is a valid
 /// version id, leaving the skill name (so a name containing `@` is still accepted).
 fn strip_digest(target: &str) -> &str {
     if let Some((name, suffix)) = target.rsplit_once('@')

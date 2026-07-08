@@ -510,11 +510,9 @@ fn run_follow(
     ops::follow(&ctx, &connectors, link.map(str::to_owned), opts).map(|o| o.data)
 }
 
-fn opts(manual: bool, resume: bool, approve: &[&str]) -> ops::FollowOpts {
+fn opts(manual: bool) -> ops::FollowOpts {
     ops::FollowOpts {
         manual,
-        resume,
-        approve: approve.iter().map(|s| (*s).to_owned()).collect(),
         workspace: None,
     }
 }
@@ -539,7 +537,7 @@ fn follow_link_returns_pending_writes_a_0600_wal_and_discloses_provenance() {
     let plane = FixturePlane::default();
     let link = format!("{BASE_URL}/i/tok_abc");
 
-    let data = run_follow(&rig, &fk, &plane, Some(&link), opts(false, false, &[])).unwrap();
+    let data = run_follow(&rig, &fk, &plane, Some(&link), opts(false)).unwrap();
 
     // The pending arm: not enrolled, the verification URL + provenance disclosed.
     assert!(!data.enrolled);
@@ -583,10 +581,10 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&link),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
-    let data = run_follow(&rig, &fk, &plane, None, opts(false, true, &[])).unwrap();
+    let data = run_follow(&rig, &fk, &plane, None, opts(false)).unwrap();
 
     assert!(data.enrolled);
     assert_eq!(data.workspace_id, WS);
@@ -673,7 +671,7 @@ fn a_second_follow_to_another_skill_merges_and_preserves_the_first() {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&link),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -681,7 +679,7 @@ fn a_second_follow_to_another_skill_merges_and_preserves_the_first() {
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -691,7 +689,7 @@ fn a_second_follow_to_another_skill_merges_and_preserves_the_first() {
         &fake(&[("s_review", "review")], Poll::Pending),
         &plane,
         Some("tok2"),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -699,7 +697,7 @@ fn a_second_follow_to_another_skill_merges_and_preserves_the_first() {
         &fake(&[("s_review", "review")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -773,7 +771,7 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    let data = ops::follow(&ctx, &connectors, None, opts(false, true, &[]))
+    let data = ops::follow(&ctx, &connectors, None, opts(false))
         .unwrap()
         .data;
 
@@ -841,7 +839,7 @@ fn a_denied_poll_is_a_typed_error_and_sweeps_the_wal() {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&link),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -850,7 +848,7 @@ fn a_denied_poll_is_a_typed_error_and_sweeps_the_wal() {
         &fake(&[("s_deploy", "deploy")], Poll::Denied),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
@@ -869,7 +867,7 @@ fn a_cross_base_url_follow_is_refused() {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/t")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -877,7 +875,7 @@ fn a_cross_base_url_follow_is_refused() {
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -891,7 +889,7 @@ fn a_cross_base_url_follow_is_refused() {
         &other_plane,
         &plane,
         Some("https://evil.test/i/t2"),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap_err();
     assert!(
@@ -906,7 +904,7 @@ fn a_cross_base_url_follow_is_refused() {
         &fake(&[("s_other", "other")], Poll::Pending),
         &plane,
         Some("https://links.example/i/t3"),
-        opts(false, false, &[]),
+        opts(false),
     )
     .expect("a share-host link onto the pinned plane is accepted");
     assert_eq!(same_plane.plane_base_url.as_deref(), Some(BASE_URL));
@@ -945,7 +943,7 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
         &ctx,
         &connectors,
         Some("https://links.example/i/tok_abc".to_owned()),
-        opts(false, false, &[]),
+        opts(false),
     )
     .expect("begin re-roots")
     .data;
@@ -960,7 +958,7 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
 
     // Complete the enrollment; the pinned instance records the API base — the share host is nowhere.
     let granted = fake(&[("s_deploy", "deploy")], Poll::Granted);
-    let done = run_follow(&rig, &granted, &plane, None, opts(false, true, &[])).unwrap();
+    let done = run_follow(&rig, &granted, &plane, None, opts(false)).unwrap();
     assert!(done.enrolled);
     assert_eq!(done.plane_base_url.as_deref(), Some(BASE_URL));
     let instance = enroll::read_instance(&rig.fs, &rig.layout())
@@ -979,7 +977,7 @@ fn same_url_different_key_is_key_repin_required() {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/t")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -987,7 +985,7 @@ fn same_url_different_key_is_key_repin_required() {
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -1000,7 +998,7 @@ fn same_url_different_key_is_key_repin_required() {
         &bad,
         &plane,
         Some(&format!("{BASE_URL}/i/t2")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap_err();
     assert!(matches!(err, ClientError::KeyRepinRequired), "got {err:?}");
@@ -1095,7 +1093,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/t")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -1103,7 +1101,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
@@ -1200,7 +1198,7 @@ fn approve_places_the_named_first_receive_offer() {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/t")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let _ = run_follow(
@@ -1208,11 +1206,11 @@ fn approve_places_the_named_first_receive_offer() {
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .unwrap();
 
-    // `follow --approve deploy@<digest>` drives the engine through ctx.plane (a separate, post-enroll
+    // `follow deploy` drives the engine through ctx.plane (a separate, post-enroll
     // invocation where the plane is live).
     let inert_f = InertFollow;
     let ctx = rig.ctx(&plane, &inert_f);
@@ -1224,7 +1222,7 @@ fn approve_places_the_named_first_receive_offer() {
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    let out = ops::follow(&ctx, &connectors, None, opts(false, false, &["deploy"])).unwrap();
+    let out = ops::follow(&ctx, &connectors, Some("deploy".to_owned()), opts(false)).unwrap();
 
     assert!(out.data.enrolled);
     assert_eq!(out.data.skills.len(), 1);
@@ -1241,14 +1239,14 @@ fn approve_places_the_named_first_receive_offer() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The begin-guard interleave: a second `follow <link>` must never CLOBBER an in-progress enrollment WAL
-// (following workspace B while A is still mid-enrollment). A live/redeemed session refuses; a dead
-// (expired) one is superseded. The data-loss case is a Redeemed WAL — its single-use read creds live ONLY
-// in that WAL.
+// The re-invoke-resume interleave: with a pending enrollment WAL on disk, re-invoking `follow` (with any
+// target, or none) RESUMES the in-flight session rather than clobbering it — a live Authorizing session is
+// re-polled; a Redeemed-but-unpromoted grant is completed from its single-use creds; a dead (expired)
+// session is superseded by the start-of-command recovery sweep, then a fresh follow begins.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn a_second_follow_while_the_first_is_still_pending_refuses_and_keeps_the_wal() {
+fn a_second_follow_while_the_first_is_still_pending_resumes_it_and_keeps_the_wal() {
     let rig = Rig::new("interleave-live");
     let plane = FixturePlane::default();
 
@@ -1258,7 +1256,7 @@ fn a_second_follow_while_the_first_is_still_pending_refuses_and_keeps_the_wal() 
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/tok_a")),
-        opts(false, false, &[]),
+        opts(false),
     )
     .unwrap();
     let wal_before = enroll::read_wal(&rig.fs, &rig.layout())
@@ -1269,28 +1267,34 @@ fn a_second_follow_while_the_first_is_still_pending_refuses_and_keeps_the_wal() 
         enroll::EnrollPhase::Authorizing { .. }
     ));
 
-    // Begin B (a DIFFERENT link) while A is still pending → refused, and A's WAL is byte-for-byte intact
-    // (B's fake is never even consulted — the guard fires before the bootstrap fetch).
-    let err = run_follow(
+    // A second `follow` (any target) while A is still pending RESUMES A (re-invoking IS the resume): it
+    // polls A's session — still pending — and re-emits the pending receipt. A's WAL is byte-for-byte
+    // intact; it is never clobbered.
+    let data = run_follow(
         &rig,
         &fake(&[("s_review", "review")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/tok_b")),
-        opts(false, false, &[]),
+        opts(false),
     )
-    .unwrap_err();
-    assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
+    .expect("a second follow resumes the in-flight session, it never clobbers it");
+    assert!(!data.enrolled);
+    assert!(
+        data.pending.is_some(),
+        "resuming a still-pending session re-emits the pending receipt"
+    );
     let wal_after = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
     assert_eq!(
         wal_before, wal_after,
-        "the live enrollment WAL must NOT be clobbered by a second follow"
+        "a pending poll leaves the in-flight enrollment WAL byte-for-byte intact"
     );
 }
 
 #[test]
-fn a_follow_while_a_redeemed_wal_is_unpromoted_refuses_and_keeps_the_creds() {
-    // The data-loss case: a Redeemed-but-unpromoted grant is single-use (spent server-side) and its minted
-    // read creds live ONLY in this WAL. A second `follow <link>` must REFUSE, never overwrite it.
+fn a_follow_while_a_redeemed_wal_is_unpromoted_completes_the_promotion() {
+    // A Redeemed-but-unpromoted grant is single-use (spent server-side) and its minted read creds live ONLY
+    // in this WAL. Re-invoking `follow` (with any target) COMPLETES the promotion from those persisted
+    // creds — it never loses them and never clobbers the WAL with a fresh begin.
     let rig = Rig::new("interleave-redeemed");
     let plane = FixturePlane::default();
     rig.mint_identity();
@@ -1304,33 +1308,38 @@ fn a_follow_while_a_redeemed_wal_is_unpromoted_refuses_and_keeps_the_creds() {
                 read_token: "rt_secret_s_deploy".into(),
                 expires_at: None,
             }],
-            device_key_id: "dk_abc".into(),
+            device_key_id: device_key_id_for(&device_pubkey(&rig)),
             principal: None,
             enrolled_at_millis: 1,
         },
     };
     enroll::write_wal(&rig.fs, &rig.layout(), &wal).unwrap();
 
-    let err = run_follow(
+    let data = run_follow(
         &rig,
         &fake(&[("s_review", "review")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/tok_b")),
-        opts(false, false, &[]),
+        opts(false),
     )
-    .unwrap_err();
-    assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
-    let after = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
-    assert_eq!(
-        after, wal,
-        "the redeemed WAL (the only copy of its single-use creds) must survive a second follow"
+    .expect("a re-invoked follow promotes the redeemed grant from its persisted creds");
+    assert!(data.enrolled, "the redeemed enrollment completed");
+    // The single-use creds were USED (never lost): follows.json now carries the skill, and the WAL is gone.
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert!(
+        follows.follows.iter().any(|f| f.skill_id == "s_deploy"),
+        "the redeemed read cred landed in follows.json"
     );
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
 }
 
 #[test]
-fn a_follow_supersedes_an_expired_authorizing_wal() {
-    // An EXPIRED authorizing session is dead (the human never approved in time). A fresh `follow <link>`
-    // must SUPERSEDE it (the recovery path) — begin falls through the guard and writes its own live WAL.
+fn recovery_then_a_follow_supersedes_an_expired_authorizing_wal() {
+    // An EXPIRED authorizing session is dead (the human never approved in time). Production runs the
+    // start-of-command recovery sweep first, which reaps the dead WAL; a fresh `follow <link>` then begins
+    // cleanly and writes its own live WAL. (Without the sweep, a re-invoke would re-poll the dead session.)
     let rig = Rig::new("interleave-expired");
     let plane = FixturePlane::default();
     rig.mint_identity();
@@ -1349,19 +1358,23 @@ fn a_follow_supersedes_an_expired_authorizing_wal() {
     };
     enroll::write_wal(&rig.fs, &rig.layout(), &expired).unwrap();
 
+    // The recovery sweep production runs at the start of every command reaps the expired WAL.
+    crate::sidecar::recover(&rig.fs, &rig.layout(), 1_700_000_000_000).unwrap();
+    assert!(
+        enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none(),
+        "recovery reaps the expired authorizing WAL"
+    );
+
     let data = run_follow(
         &rig,
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         &plane,
         Some(&format!("{BASE_URL}/i/tok_fresh")),
-        opts(false, false, &[]),
+        opts(false),
     )
-    .expect("a fresh follow supersedes the expired WAL");
+    .expect("a fresh follow begins after the expired WAL is reaped");
     assert!(!data.enrolled);
-    assert!(
-        data.pending.is_some(),
-        "the superseding follow is itself pending"
-    );
+    assert!(data.pending.is_some(), "the fresh follow is itself pending");
 
     // The WAL is now the FRESH session (the fake's user_code + a live expiry), not the dead one.
     let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
@@ -1406,7 +1419,7 @@ fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
         &fake(&[("s_deploy", "deploy")], Poll::Pending),
         plane,
         Some(&link),
-        opts(false, false, &[]),
+        opts(false),
     )
     .expect("A: begin");
     run_follow(
@@ -1414,14 +1427,14 @@ fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         plane,
         None,
-        opts(false, true, &[]),
+        opts(false),
     )
     .expect("A: resume promotes");
 }
 
 /// Hand-write workspace B's `Redeemed` WAL exactly as the lockout fence records it BEFORE promotion — the
 /// same install/device (so the device key id + principal match), a DIFFERENT `workspace_id` on the SAME
-/// base URL + pinned key. A re-`follow --resume` promotes from this without re-redeeming.
+/// base URL + pinned key. A re-invoked `follow` promotes from this without re-redeeming.
 fn write_workspace_b_redeemed_wal(rig: &Rig) {
     let context = enroll::EnrollContext {
         base_url: BASE_URL.into(),
@@ -1457,7 +1470,7 @@ fn write_workspace_b_redeemed_wal(rig: &Rig) {
     enroll::write_wal(&rig.fs, &rig.layout(), &wal).unwrap();
 }
 
-/// Drive `follow --resume` over an arbitrary fs (the crash gate injects a [`FaultFs`]). A Redeemed-WAL
+/// Drive a re-invoked `follow` (resume) over an arbitrary fs (the crash gate injects a [`FaultFs`]). A Redeemed-WAL
 /// resume never re-contacts the plane for enrollment (`PanicEnroll` proves it); the plane connector serves
 /// only the post-promote, best-effort offer disclosure.
 fn resume_over_fs(
@@ -1476,7 +1489,7 @@ fn resume_over_fs(
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
-    ops::follow(&ctx, &connectors, None, opts(false, true, &[])).map(|o| o.data)
+    ops::follow(&ctx, &connectors, None, opts(false)).map(|o| o.data)
 }
 
 /// Assert the fully converged state: BOTH memberships (each with the right id + display name), BOTH follows

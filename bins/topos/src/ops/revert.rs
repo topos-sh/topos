@@ -1,12 +1,11 @@
-//! `revert <skill> --to <good> --approve <skill>@<hash> [--confirm]` — undo a release for the TEAM.
+//! `revert <skill> --to <good> [--confirm]` — undo a release for the TEAM.
 //!
 //! A **forward** pointer-move: the server builds a new 1-parent commit `{tree: good.tree, parents:
 //! [current]}` that restores the GOOD version's bytes on top of `current` — nothing is deleted (the bad
-//! version stays fetchable), so it is invertible. `--to <hash>` is the GOOD version (the destination, NOT
-//! the bad one); `--approve <skill>@<hash>` binds that same good version id (the disclosed consent). The
-//! client computes the byte-identical forward `commit_id` the plane reconstructs (over the FRESH current
-//! parent — a stale parent would be a DENIED, not a clean CONFLICT). Team-only — the local go-back is
-//! `pull <skill>@<hash>`.
+//! version stays fetchable), so it is invertible. `--to <hash>` is the sole source of the GOOD version (the
+//! destination, NOT the bad one). The client computes the byte-identical forward `commit_id` the plane
+//! reconstructs (over the FRESH current parent — a stale parent would be a DENIED, not a clean CONFLICT).
+//! Team-only — the local go-back is `pull <skill>@<hash>`.
 
 use topos_core::digest::to_hex;
 use topos_core::sign::{self, Commit};
@@ -26,48 +25,28 @@ use crate::{op_wal, sidecar};
 /// Move `current` forward to the GOOD version named by `--to`.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::ApprovalMismatch`] if `--approve` does not
-/// name the same good version as `--to`; [`ClientError::ConfirmRequired`] for a no-op revert without
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::ConfirmRequired`] for a no-op revert without
 /// `--confirm`; [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's verdict; an integrity
 /// error if the good version does not reproduce its id; a transport failure otherwise.
 pub(crate) fn revert(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    skill_arg: Option<&str>,
+    skill_name: &str,
     to: &str,
-    approve: &str,
     confirm: bool,
     workspace: Option<&str>,
 ) -> Result<RevertData, ClientError> {
-    // Argv is validated FIRST (a malformed hash or token is a usage error however un-enrolled the
-    // machine is). Both `--to` and the `--approve` hash accept the full 64-hex id OR a short prefix
-    // (resolved below against the skill's recorded history, once the skill is known); they must name the
-    // SAME good version, and `--approve` the same skill as any positional.
+    // Argv is validated FIRST (a malformed hash is a usage error however un-enrolled the machine is).
+    // `--to` is the sole source of the good destination — it accepts the full 64-hex id OR a short prefix
+    // (resolved below against the skill's recorded history, once the skill is known).
     let to_ref = VersionRef::parse_arg(
         to,
         "`--to` must be a 64-char lowercase hex version id (or a unique prefix of at least 8 chars)",
-    )?;
-    let (approve_skill, approve_hash) = split_skill_at(approve)?;
-    let approve_ref = VersionRef::parse_arg(
-        &approve_hash,
-        "`--approve` must be `<skill>@<hash>` naming the good version — a 64-char lowercase hex id \
-         (or a unique prefix of at least 8 chars)",
     )?;
 
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    let skill_name = match skill_arg {
-        Some(s) if s != approve_skill => {
-            return Err(ClientError::ApprovalMismatch {
-                skill: s.to_owned(),
-                expected: format!("skill '{approve_skill}' (from --approve)"),
-                got: format!("skill '{s}' (positional)"),
-            });
-        }
-        Some(s) => s,
-        None => &approve_skill,
-    };
 
     // The `--workspace` filter disambiguates a name shared across workspaces; the SIGNED scope is the
     // skill's OWN follow-entry workspace (the forward-revert commit is built against that workspace's live
@@ -93,14 +72,6 @@ pub(crate) fn revert(
         ))
     })?;
     let good_hex = to_hex(&good_commit);
-    let approve_commit = resolve_version_ref(&recorded, &approve_ref)?;
-    if approve_commit != Some(good_commit) {
-        return Err(ClientError::ApprovalMismatch {
-            skill: approve_skill,
-            expected: format!("good version {good_hex} (from --to)"),
-            got: format!("approved version {}", approve_ref.shown()),
-        });
-    }
 
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
     let transport = connect(&instance.base_url);
@@ -200,18 +171,5 @@ fn map_outcome(
                 .unwrap_or_else(|| "DENIED".to_owned()),
         )),
         _ => Err(contribute::plane_terminal(receipt)),
-    }
-}
-
-/// Split a `<skill>@<hash>` token on its first `@`. A malformed shape is a usage error
-/// (`INVALID_ARGUMENT` — the token is the user's own argv, echoed back as clap would).
-fn split_skill_at(token: &str) -> Result<(String, String), ClientError> {
-    match token.split_once('@') {
-        Some((skill, rest)) if !skill.is_empty() && !rest.is_empty() => {
-            Ok((skill.to_owned(), rest.to_owned()))
-        }
-        _ => Err(ClientError::InvalidArgument(format!(
-            "--approve must be `<skill>@<hash>`, got `{token}`"
-        ))),
     }
 }

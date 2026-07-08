@@ -246,7 +246,7 @@ pub(crate) fn skill_creds(follows: &Follows) -> HashMap<String, SkillCred> {
 // SECRET (it holds the device code and, once redeemed, the read tokens). Hand-written `Debug` redacts.
 // =================================================================================================
 
-/// One skill an invite pre-offered (carried in the WAL so a re-`--resume` can write `follows.json` + lay
+/// One skill an invite pre-offered (carried in the WAL so a re-invoked `follow` can write `follows.json` + lay
 /// the first-receive baselines without re-reading the bootstrap).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OfferedSkill {

@@ -599,8 +599,6 @@ impl FollowHarness {
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
             manual,
-            resume: false,
-            approve: Vec::new(),
             workspace: None,
         };
         self.run_follow(
@@ -613,7 +611,7 @@ impl FollowHarness {
         .map_err(|e| e.to_string())
     }
 
-    /// Call 2: `topos follow --resume` — poll, redeem (sign the enroll possession proof over the wire), promote.
+    /// Call 2: re-invoke `topos follow` — poll, redeem (sign the enroll possession proof over the wire), promote.
     ///
     /// # Errors
     /// The follow op's typed error (pending/denied/expired/transport).
@@ -622,15 +620,13 @@ impl FollowHarness {
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
             manual: false,
-            resume: true,
-            approve: Vec::new(),
             workspace: None,
         };
         self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts)
             .map_err(|e| e.to_string())
     }
 
-    /// `topos follow --resume` where the redeem is EXPECTED to be refused — returns the denial exactly as
+    /// A re-invoked `topos follow` where the redeem is EXPECTED to be refused — returns the denial exactly as
     /// the production error envelope surfaces it (wire code + next-action codes + the redacted message),
     /// so the e2e asserts the ask-an-owner `REQUEST_ACCESS` guidance.
     ///
@@ -642,8 +638,6 @@ impl FollowHarness {
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
             manual: false,
-            resume: true,
-            approve: Vec::new(),
             workspace: None,
         };
         match self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts) {
@@ -667,8 +661,9 @@ impl FollowHarness {
         }
     }
 
-    /// `topos follow --approve <targets>` — place the first-received bytes through the REAL read transport
-    /// (wired from the minted creds the resume wrote into `follows.json`).
+    /// `topos follow <skill>[@<hash>]` — place the first-received bytes through the REAL read transport
+    /// (wired from the minted creds the resume wrote into `follows.json`). The new surface takes ONE
+    /// positional skill; the facade keeps its slice signature and drives the single target the e2e passes.
     ///
     /// # Errors
     /// The follow op's typed error.
@@ -678,7 +673,7 @@ impl FollowHarness {
         plane_key: [u8; 32],
         targets: &[String],
     ) -> Result<topos_types::results::FollowData, String> {
-        // Wire ctx.plane from the minted follow-state (the approve arm places through ctx.plane).
+        // Wire ctx.plane from the minted follow-state (the skill path places through ctx.plane).
         let follows = crate::enroll::read_follows(&self.fs, &self.layout())
             .expect("read follows.json")
             .expect("follows.json exists after resume");
@@ -688,11 +683,10 @@ impl FollowHarness {
         let follow = FileFollow::new(contexts);
         let opts = ops::FollowOpts {
             manual: false,
-            resume: false,
-            approve: targets.to_vec(),
             workspace: None,
         };
-        self.run_follow(&plane, &follow, plane_key, None, opts)
+        let target = targets.first().cloned();
+        self.run_follow(&plane, &follow, plane_key, target, opts)
             .map_err(|e| e.to_string())
     }
 
@@ -911,8 +905,8 @@ impl FollowHarness {
         });
     }
 
-    /// The adopted draft's bundle digest (lowercase hex) — the `<digest>` a publish's `--approve` must
-    /// carry. Scans the SAME work-root placement [`adopt`](Self::adopt) tracked.
+    /// The adopted draft's bundle digest (lowercase hex) — the `<digest>` a publish's `<skill>@<digest>`
+    /// pin carries. Scans the SAME work-root placement [`adopt`](Self::adopt) tracked.
     ///
     /// # Panics
     /// If the placement cannot be scanned.
@@ -922,7 +916,7 @@ impl FollowHarness {
         to_hex(&scanned.bundle_digest)
     }
 
-    /// Drive a DIRECT `publish … --approve <skill>@<digest>` over the REAL transports — including the
+    /// Drive a DIRECT `publish <skill>@<digest>` over the REAL transports — including the
     /// workspace-standup branch: on an un-enrolled rig the publish starts the standup device flow against
     /// `standup_base_url` (the explicit loopback base — the compiled-in hosted default is never consulted)
     /// and returns [`PublishResult::Pending`]; re-invoking the SAME call resumes (poll → redeem → promote →
@@ -1009,9 +1003,8 @@ impl FollowHarness {
                 &contribute,
                 &governance,
                 &standup,
-                None,
-                false,
                 approve,
+                false,
                 workspace,
             )
             .map_err(|e| e.to_string())?
@@ -1470,7 +1463,7 @@ impl ContributeHarness {
         write_tree(&self.placement(), files);
     }
 
-    /// The current placement bundle's digest (lowercase hex) — the `<digest>` an outward verb's `--approve`
+    /// The current placement bundle's digest (lowercase hex) — the `<digest>` an outward verb's `@<digest>` pin
     /// must carry.
     #[must_use]
     pub fn draft_digest(&self) -> String {
@@ -1533,7 +1526,7 @@ impl ContributeHarness {
                 base_url: "http://127.0.0.1:0".to_owned(),
             };
             match ops::publish(
-                ctx, contribute, governance, &standup, None, propose, approve, None,
+                ctx, contribute, governance, &standup, approve, propose, None,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1561,7 +1554,9 @@ impl ContributeHarness {
         })
     }
 
-    /// Drive `revert --to <good> --approve <skill>@<hash>`.
+    /// Drive `revert <skill> --to <good>`. The `approve` arg is the legacy `<skill>@<hash>` token the e2e
+    /// still passes; the new surface takes only the skill, so the facade parses the name from it (`--to` is
+    /// now the sole good-version source).
     ///
     /// # Errors
     /// The verb's typed error rendered to a string.
@@ -1572,9 +1567,9 @@ impl ContributeHarness {
         approve: &str,
         confirm: bool,
     ) -> Result<RevertData, String> {
+        let skill = approve.split_once('@').map(|(s, _)| s).unwrap_or(approve);
         self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
-            ops::revert(ctx, contribute, None, to, approve, confirm, None)
-                .map_err(|e| e.to_string())
+            ops::revert(ctx, contribute, skill, to, confirm, None).map_err(|e| e.to_string())
         })
     }
 

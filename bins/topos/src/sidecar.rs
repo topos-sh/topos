@@ -128,7 +128,7 @@ impl Layout {
 
     /// `identity/enrollment.json` — the in-flight enrollment WAL (a `0600` secret: it holds the device
     /// code and, once redeemed, the read creds). Present only between `follow <link>` and a completed
-    /// `follow --resume`; swept by recovery once expired-and-unredeemed, deleted on promotion.
+    /// a re-invoked `follow`; swept by recovery once expired-and-unredeemed, deleted on promotion.
     pub(crate) fn enrollment_path(&self) -> PathBuf {
         self.identity_dir().join("enrollment.json")
     }

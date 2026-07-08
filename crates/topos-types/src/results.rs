@@ -339,7 +339,7 @@ pub struct LogData {
 /// An UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the
 /// envelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and
 /// no version — `version_id` / `current_generation` are `None` at pending because nothing was published yet
-/// (only the consent digest, already bound by `--approve`, can be honestly filled). Re-invoking the SAME
+/// (only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME
 /// publish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command
 /// completes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]
 /// disclosure.
@@ -355,8 +355,8 @@ pub struct PublishData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: Option<String>,
-    /// The byte-exact consent digest of the shipped (or, at pending, the approved) bytes — always present:
-    /// `--approve <skill>@<digest>` bound it before any network call.
+    /// The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is
+    /// computed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
     /// The pointer's new generation after the move — `None` while the publish is PENDING a standup sign-in

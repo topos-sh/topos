@@ -2443,7 +2443,7 @@
       },
       "PublishData": {
         "type": "object",
-        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**\n\nAn UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the\nenvelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and\nno version — `version_id` / `current_generation` are `None` at pending because nothing was published yet\n(only the consent digest, already bound by `--approve`, can be honestly filled). Re-invoking the SAME\npublish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command\ncompletes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]\ndisclosure.",
+        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**\n\nAn UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the\nenvelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and\nno version — `version_id` / `current_generation` are `None` at pending because nothing was published yet\n(only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME\npublish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command\ncompletes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]\ndisclosure.",
         "required": [
           "skill_id",
           "bundle_digest"
@@ -2451,7 +2451,7 @@
         "properties": {
           "bundle_digest": {
             "type": "string",
-            "description": "The byte-exact consent digest of the shipped (or, at pending, the approved) bytes — always present:\n`--approve <skill>@<digest>` bound it before any network call."
+            "description": "The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is\ncomputed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it."
           },
           "current_generation": {
             "oneOf": [

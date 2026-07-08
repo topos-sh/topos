@@ -1,7 +1,7 @@
 //! `unfollow <skill>` — stop following `current`; KEEP the local bytes as a frozen copy.
 //!
 //! Local-only and byte-inert: it flips `following = false` in `follows.json` (retaining the workspace,
-//! mode, and read credential so a later `follow --approve <skill>` resumes) and touches NOTHING else — never the skill
+//! mode, and read credential so a later `follow <skill>` resumes) and touches NOTHING else — never the skill
 //! bytes, never the sidecar sync state or a `held` pin, never the currency hook (the hook is
 //! per-install; its sweep simply skips an unfollowed skill). "Frozen" means auto-updates stop; an
 //! explicit local `pull <skill>@<hash>` (a user-initiated go-back on their own copy) remains available.
@@ -22,7 +22,7 @@ pub(crate) fn unfollow(ctx: &Ctx<'_>, name: &str) -> Result<UnfollowData, Client
     let (skill_id, _lock) = super::resolve_skill(ctx, name)?;
 
     // Flip `following` in place, entirely under the identity lock — only that one field moves, so the
-    // entry stays a complete record (token / workspace / mode retained) a later `follow --approve`
+    // entry stays a complete record (token / workspace / mode retained) a later `follow <skill>`
     // resumes over, and
     // a concurrent enrollment writer's fresh row is never clobbered by a stale snapshot. A tracked skill
     // with no follow entry at all (e.g. adopted locally via `add`) is already not followed — the same

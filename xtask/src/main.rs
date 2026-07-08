@@ -603,8 +603,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             argv: argv(&[
                 "topos",
                 "publish",
-                "pr-describe",
-                "--approve",
                 &format!("pr-describe@{fx_digest}"),
                 "--json",
             ]),

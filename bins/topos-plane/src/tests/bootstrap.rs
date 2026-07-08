@@ -175,7 +175,8 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
     assert!(doc.contains(&format!("topos follow '{link}' --json")));
     assert!(doc.contains("releases/latest/download/install.sh"));
     assert!(doc.contains("Acme"));
-    assert!(doc.contains("follow --resume"));
+    assert!(!doc.contains("--resume"));
+    assert!(doc.contains("Re-running `topos follow` while an enrollment is pending resumes it"));
     // The human hand-off rides the same document — this IS the browser face.
     assert!(doc.contains("paste this link to your agent"));
 

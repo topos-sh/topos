@@ -422,13 +422,13 @@ impl GovernanceSource for NoInvite {
     }
 }
 
-/// Drive `ops::publish` with the standup connectors over the fakes (never the compiled-in base).
+/// Drive `ops::publish` with the standup connectors over the fakes (never the compiled-in base). `target`
+/// is the single positional — `<skill>` or `<skill>@<digest>`.
 fn run_publish(
     rig: &Rig,
     fake: &FakeStandup,
-    skill_arg: Option<&str>,
+    target: &str,
     propose: bool,
-    approve: &str,
 ) -> Result<ops::PublishOutcome, ClientError> {
     let ctx = rig.ctx();
     let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
@@ -443,9 +443,8 @@ fn run_publish(
         &contribute,
         &governance,
         &standup,
-        skill_arg,
+        target,
         propose,
-        approve,
         None,
     )
 }
@@ -461,7 +460,7 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
     let approve = format!("{name}@{digest_hex}");
     let fake = FakeStandup::new(Poll::Pending);
 
-    let outcome = run_publish(&rig, &fake, None, false, &approve).expect("call 1 is ok-pending");
+    let outcome = run_publish(&rig, &fake, &approve, false).expect("call 1 is ok-pending");
     let ops::PublishOutcome::Pending { data, resume_argv } = outcome else {
         panic!("an un-enrolled direct publish returns the PENDING standup outcome");
     };
@@ -483,14 +482,12 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
     assert!(data.version_id.is_none());
     assert!(data.current_generation.is_none());
     assert_eq!(data.bundle_digest, digest_hex);
-    // The resume argv IS this same command, canonically spelled.
+    // The resume argv IS this same command, canonically spelled — the `<skill>@<digest>` positional pin.
     assert_eq!(
         resume_argv,
         vec![
             "topos".to_owned(),
             "publish".to_owned(),
-            name.clone(),
-            "--approve".to_owned(),
             approve.clone(),
             "--json".to_owned(),
         ]
@@ -526,15 +523,43 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
 }
 
 #[test]
+fn unenrolled_bare_publish_bakes_the_disclosed_digest_into_the_resume() {
+    // A bare `publish <skill>` (no `@<digest>` pin) still BINDS across the sign-in gap: the pending
+    // receipt discloses `bundle_digest`, and the resume argv it emits carries that computed digest as the
+    // pin — so the resume's pre-flight refuses drift and nothing lands that the pending receipt did not
+    // disclose. (topos self-supplies the pin it computed; the caller never typed it.)
+    let rig = Rig::new("call1_bare");
+    let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
+    let fake = FakeStandup::new(Poll::Pending);
+
+    let outcome = run_publish(&rig, &fake, &name, false).expect("call 1 is ok-pending");
+    let ops::PublishOutcome::Pending { data, resume_argv } = outcome else {
+        panic!("an un-enrolled direct publish returns the PENDING standup outcome");
+    };
+    // The disclosed digest and the resume's pin are the SAME value — the binding is end-to-end.
+    assert_eq!(data.bundle_digest, digest_hex);
+    assert_eq!(
+        resume_argv,
+        vec![
+            "topos".to_owned(),
+            "publish".to_owned(),
+            format!("{name}@{digest_hex}"),
+            "--json".to_owned(),
+        ],
+        "a bare publish bakes the computed digest into the resume so the disclosure stays binding"
+    );
+}
+
+#[test]
 fn reinvoke_while_pending_reemits_and_keeps_the_wal() {
     let rig = Rig::new("pending2");
     let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
     let approve = format!("{name}@{digest_hex}");
 
     let fake = FakeStandup::new(Poll::Pending);
-    let _ = run_publish(&rig, &fake, None, false, &approve).unwrap();
+    let _ = run_publish(&rig, &fake, &approve, false).unwrap();
     // The SAME command re-invoked: one poll, the pending envelope re-emitted, the WAL kept.
-    let outcome = run_publish(&rig, &fake, None, false, &approve).unwrap();
+    let outcome = run_publish(&rig, &fake, &approve, false).unwrap();
     let ops::PublishOutcome::Pending { data, .. } = outcome else {
         panic!("still pending");
     };
@@ -554,23 +579,9 @@ fn reinvoke_granted_redeems_promotes_and_publishes_in_one_invocation() {
     let approve = format!("{name}@{digest_hex}");
 
     // Call 1: pending.
-    let _ = run_publish(
-        &rig,
-        &FakeStandup::new(Poll::Pending),
-        None,
-        false,
-        &approve,
-    )
-    .unwrap();
+    let _ = run_publish(&rig, &FakeStandup::new(Poll::Pending), &approve, false).unwrap();
     // Call 2 (same argv): granted → redeem → promote → the publish continues in THIS invocation.
-    let outcome = run_publish(
-        &rig,
-        &FakeStandup::new(Poll::Granted),
-        None,
-        false,
-        &approve,
-    )
-    .unwrap();
+    let outcome = run_publish(&rig, &FakeStandup::new(Poll::Granted), &approve, false).unwrap();
     let ops::PublishOutcome::Published(data) = outcome else {
         panic!("a granted standup continues into the publish");
     };
@@ -613,20 +624,13 @@ fn consent_rederives_on_resume_so_drifted_bytes_are_refused() {
     let rig = Rig::new("drift");
     let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
     let approve = format!("{name}@{digest_hex}");
-    let _ = run_publish(
-        &rig,
-        &FakeStandup::new(Poll::Pending),
-        None,
-        false,
-        &approve,
-    )
-    .unwrap();
+    let _ = run_publish(&rig, &FakeStandup::new(Poll::Pending), &approve, false).unwrap();
 
     // The bytes drift between call 1 and call 2 — the SAME approve token no longer matches the scan, so
     // the resume is refused BEFORE any poll (the existing digest-mismatch refusal), and the WAL stays.
     rig.edit("deploy", "# deploy v2 — drifted\n");
     let fake = FakeStandup::new(Poll::Granted);
-    let err = run_publish(&rig, &fake, None, false, &approve).unwrap_err();
+    let err = run_publish(&rig, &fake, &approve, false).unwrap_err();
     assert!(
         matches!(err, ClientError::ApprovalMismatch { .. }),
         "got {err:?}"
@@ -641,15 +645,8 @@ fn a_denied_or_expired_signin_clears_the_wal_typed() {
         let rig = Rig::new("deny");
         let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
         let approve = format!("{name}@{digest_hex}");
-        let _ = run_publish(
-            &rig,
-            &FakeStandup::new(Poll::Pending),
-            None,
-            false,
-            &approve,
-        )
-        .unwrap();
-        let err = run_publish(&rig, &FakeStandup::new(poll), None, false, &approve).unwrap_err();
+        let _ = run_publish(&rig, &FakeStandup::new(Poll::Pending), &approve, false).unwrap();
+        let err = run_publish(&rig, &FakeStandup::new(poll), &approve, false).unwrap_err();
         assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
         assert!(err.to_string().contains(needle), "{err}");
         assert!(
@@ -676,9 +673,8 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
         &contribute,
         &governance,
         &standup,
-        None,
-        true,
         &approve,
+        true,
         None,
     )
     .unwrap_err();
@@ -723,9 +719,8 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
         &contribute,
         &governance,
         &standup,
-        None,
-        false,
         &approve,
+        false,
         None,
     )
     .unwrap_err();
@@ -866,8 +861,7 @@ impl EnrollSource for FakeClaim {
 fn run_claim_follow(
     rig: &Rig,
     fake: &FakeClaim,
-    link: Option<&str>,
-    resume: bool,
+    target: Option<&str>,
 ) -> Result<topos_types::results::FollowData, ClientError> {
     identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
     let ctx = rig.ctx();
@@ -882,26 +876,19 @@ fn run_claim_follow(
     };
     let opts = ops::FollowOpts {
         manual: false,
-        resume,
-        approve: Vec::new(),
         workspace: None,
     };
-    ops::follow(&ctx, &connectors, link.map(str::to_owned), opts).map(|o| o.data)
+    ops::follow(&ctx, &connectors, target.map(str::to_owned), opts).map(|o| o.data)
 }
 
 #[test]
 fn a_claim_link_enrolls_in_one_invocation() {
     let rig = Rig::new("claim");
     let fake = FakeClaim::new(0);
-    let data = run_claim_follow(
-        &rig,
-        &fake,
-        Some(&format!("{CLAIM_BASE}/i/claimtok")),
-        false,
-    )
-    .expect("the one-shot claim follow succeeds");
+    let data = run_claim_follow(&rig, &fake, Some(&format!("{CLAIM_BASE}/i/claimtok")))
+        .expect("the one-shot claim follow succeeds");
 
-    assert!(data.enrolled, "ONE invocation — no --resume needed");
+    assert!(data.enrolled, "ONE invocation — no re-invoke needed");
     assert!(data.pending.is_none());
     assert_eq!(data.workspace_id, "w_acme");
     assert_eq!(data.workspace_display_name.as_deref(), Some("Acme"));
@@ -930,7 +917,7 @@ fn an_uncertain_claim_send_retries_the_post_directly_without_refetching_the_link
     let link = format!("{CLAIM_BASE}/i/claimtok");
 
     // The first send is UNCERTAIN — the error surfaces, but the pre-send WAL is on disk.
-    let err = run_claim_follow(&rig, &fake, Some(&link), false).unwrap_err();
+    let err = run_claim_follow(&rig, &fake, Some(&link)).unwrap_err();
     assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
     let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
     assert!(
@@ -942,7 +929,7 @@ fn an_uncertain_claim_send_retries_the_post_directly_without_refetching_the_link
 
     // Re-running the SAME link retries the POST directly — the (possibly consumed) /i/ link is NEVER
     // refetched; the server's same-device replay answers Redeemed.
-    let data = run_claim_follow(&rig, &fake, Some(&link), false).expect("the retry settles");
+    let data = run_claim_follow(&rig, &fake, Some(&link)).expect("the retry settles");
     assert!(data.enrolled);
     assert_eq!(
         fake.bootstrap_calls.get(),
@@ -964,7 +951,6 @@ fn a_claim_link_re_pasted_from_another_host_still_retries_without_refetch() {
         &rig,
         &fake,
         Some(&format!("https://share.example/i/{}", fake.token)),
-        false,
     )
     .unwrap_err();
     // The pre-send WAL recorded the DECLARED API base (the bootstrap's), not the share host.
@@ -975,13 +961,8 @@ fn a_claim_link_re_pasted_from_another_host_still_retries_without_refetch() {
     assert_eq!(base_url, CLAIM_BASE);
 
     // The retry rides the ORIGINAL canonical link this time — same token, different host string.
-    let data = run_claim_follow(
-        &rig,
-        &fake,
-        Some(&format!("{CLAIM_BASE}/i/{}", fake.token)),
-        false,
-    )
-    .expect("the re-pasted claim settles");
+    let data = run_claim_follow(&rig, &fake, Some(&format!("{CLAIM_BASE}/i/{}", fake.token)))
+        .expect("the re-pasted claim settles");
     assert!(data.enrolled);
     assert_eq!(fake.bootstrap_calls.get(), 1, "never refetched");
     assert_eq!(fake.claim_calls.get(), 2);
@@ -992,9 +973,9 @@ fn follow_resume_also_settles_an_unsettled_claim() {
     let rig = Rig::new("claim-resume");
     let fake = FakeClaim::new(1);
     let link = format!("{CLAIM_BASE}/i/claimtok");
-    let _ = run_claim_follow(&rig, &fake, Some(&link), false).unwrap_err();
-    // `follow --resume` (no link) retries from the WAL too.
-    let data = run_claim_follow(&rig, &fake, None, true).expect("--resume settles the claim");
+    let _ = run_claim_follow(&rig, &fake, Some(&link)).unwrap_err();
+    // Re-invoking `follow` (no link) retries from the WAL too.
+    let data = run_claim_follow(&rig, &fake, None).expect("a re-invoked follow settles the claim");
     assert!(data.enrolled);
     assert_eq!(fake.bootstrap_calls.get(), 1, "never refetched");
     assert_eq!(fake.claim_calls.get(), 2);
@@ -1004,13 +985,7 @@ fn follow_resume_also_settles_an_unsettled_claim() {
 fn a_terminal_claim_denial_clears_the_wal_and_unwedges_follow() {
     let rig = Rig::new("claim-deny");
     let fake = FakeClaim::denying();
-    let err = run_claim_follow(
-        &rig,
-        &fake,
-        Some(&format!("{CLAIM_BASE}/i/claimtok")),
-        false,
-    )
-    .unwrap_err();
+    let err = run_claim_follow(&rig, &fake, Some(&format!("{CLAIM_BASE}/i/claimtok"))).unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
     assert_eq!(fake.claim_calls.get(), 1);
     // A definitive plane rejection is not retryable — the ClaimPending WAL is GONE (contrast the
@@ -1019,16 +994,11 @@ fn a_terminal_claim_denial_clears_the_wal_and_unwedges_follow() {
         enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none(),
         "a terminal claim denial clears the ClaimPending WAL"
     );
-    // …so a follow of a DIFFERENT claim link is not wedged behind the "a different claim enrollment is
-    // in progress" begin-guard.
+    // …so a fresh follow of a DIFFERENT claim link is not wedged behind a leftover ClaimPending WAL: the
+    // terminal denial cleared it, so the re-invoke begins the new claim instead of resuming the dead one.
     let fresh = FakeClaim::build("claimtok2", 0, false);
-    let data = run_claim_follow(
-        &rig,
-        &fresh,
-        Some(&format!("{CLAIM_BASE}/i/claimtok2")),
-        false,
-    )
-    .expect("a fresh claim link enrolls after the dead one cleared");
+    let data = run_claim_follow(&rig, &fresh, Some(&format!("{CLAIM_BASE}/i/claimtok2")))
+        .expect("a fresh claim link enrolls after the dead one cleared");
     assert!(data.enrolled);
 }
 
@@ -1062,8 +1032,6 @@ fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_toke
             Some(bad.to_owned()),
             ops::FollowOpts {
                 manual: false,
-                resume: false,
-                approve: Vec::new(),
                 workspace: None,
             },
         )
@@ -1079,13 +1047,8 @@ fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_toke
     }
     // A well-formed base still parses (the validation must not over-reject the legit shapes).
     let fake = FakeClaim::new(0);
-    let data = run_claim_follow(
-        &rig,
-        &fake,
-        Some(&format!("{CLAIM_BASE}/i/claimtok")),
-        false,
-    )
-    .expect("a well-formed https base still enrolls");
+    let data = run_claim_follow(&rig, &fake, Some(&format!("{CLAIM_BASE}/i/claimtok")))
+        .expect("a well-formed https base still enrolls");
     assert!(data.enrolled);
 }
 
@@ -1156,9 +1119,8 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
         &contribute,
         &governance,
         &standup,
-        None,
-        false,
         &approve,
+        false,
         None,
     )
     .expect("the torn promotion heals and the genesis publish lands");
@@ -1195,13 +1157,7 @@ fn an_unknown_enrollment_method_fails_closed() {
     let rig = Rig::new("unknown-method");
     let mut fake = FakeClaim::new(0);
     fake.bootstrap.plane.enrollment_method = "quantum_handshake".to_owned();
-    let err = run_claim_follow(
-        &rig,
-        &fake,
-        Some(&format!("{CLAIM_BASE}/i/claimtok")),
-        false,
-    )
-    .unwrap_err();
+    let err = run_claim_follow(&rig, &fake, Some(&format!("{CLAIM_BASE}/i/claimtok"))).unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
     assert!(err.to_string().contains("quantum_handshake"), "{err}");
     // Fail-CLOSED: no WAL, no pin, no enrollment.
@@ -1255,22 +1211,8 @@ fn after_a_standup_the_pull_sweep_is_an_honest_no_op() {
     let rig = Rig::new("post-standup");
     let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
     let approve = format!("{name}@{digest_hex}");
-    let _ = run_publish(
-        &rig,
-        &FakeStandup::new(Poll::Pending),
-        None,
-        false,
-        &approve,
-    )
-    .unwrap();
-    let outcome = run_publish(
-        &rig,
-        &FakeStandup::new(Poll::Granted),
-        None,
-        false,
-        &approve,
-    )
-    .unwrap();
+    let _ = run_publish(&rig, &FakeStandup::new(Poll::Pending), &approve, false).unwrap();
+    let outcome = run_publish(&rig, &FakeStandup::new(Poll::Granted), &approve, false).unwrap();
     assert!(matches!(outcome, ops::PublishOutcome::Published(_)));
 
     // The standup enrolled with ZERO followed skills — a pull sweep finds nothing to do.

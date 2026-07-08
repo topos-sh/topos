@@ -72,15 +72,13 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
         }],
         // The plane refused a direct publish under review-required — the agent re-runs it as a proposal.
         // The CLIENT fills the executable argv (the plane sends an empty one — it doesn't know the local
-        // skill name); never an auto-flip.
+        // skill name); the `<skill>@<digest>` positional pin re-binds the same bytes; never an auto-flip.
         ClientError::ApprovalRequired { skill, digest } => vec![NextAction {
             code: ActionCode::ProposePublish,
             argv: vec![
                 "topos".into(),
                 "publish".into(),
-                skill.clone(),
                 "--propose".into(),
-                "--approve".into(),
                 format!("{skill}@{digest}"),
                 "--json".into(),
             ],
@@ -135,19 +133,15 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
     }
 }
 
-/// The success-path next actions for `follow`: a pending enrollment ⇒ run `follow --resume`; a completed
-/// enrollment that disclosed offers ⇒ `pull` to surface/place them.
+/// The success-path next actions for `follow`: a pending enrollment ⇒ re-invoke `follow` (re-invoking IS
+/// the resume — the pending WAL drives it); a completed enrollment that disclosed offers ⇒ `pull` to
+/// surface/place them.
 pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
     if data.pending.is_some() {
         return vec![NextAction {
             // An OPEN action code (carries the executable argv); no schema change to the closed set.
             code: ActionCode::from("ENROLL_RESUME".to_owned()),
-            argv: vec![
-                "topos".into(),
-                "follow".into(),
-                "--resume".into(),
-                "--json".into(),
-            ],
+            argv: vec!["topos".into(), "follow".into(), "--json".into()],
         }];
     }
     if data.enrolled && !data.skills.is_empty() {
@@ -303,10 +297,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
 fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
     let follow_note = match note {
         Some((mode, true)) => format!("  (following, {mode})"),
-        Some((_, false)) => format!(
-            "  (not following — `topos follow --approve {}` resumes)",
-            entry.skill
-        ),
+        Some((_, false)) => format!("  (not following — `topos follow {}` resumes)", entry.skill),
         None => String::new(),
     };
     let mut s = format!(
@@ -507,7 +498,7 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
             s.push_str(&format!("\nplane: {plane}"));
         }
         s.push_str(&format!(
-            "\nOpen this URL to approve, then run `topos follow --resume`:\n  {}\n  code: {}\n  \
+            "\nOpen this URL to approve, then re-run `topos follow`:\n  {}\n  code: {}\n  \
              fingerprint: {} (confirm it matches the page before approving)",
             pending.verification_uri_complete,
             pending.user_code,
@@ -536,12 +527,10 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
                 short(&sk.offer.version_id)
             ));
         }
-        s.push_str(
-            "\nApprove a skill with `topos follow --approve <skill>` (or `topos pull <skill>`).",
-        );
+        s.push_str("\nApprove a skill with `topos follow <skill>` (or `topos pull <skill>`).");
         s
     };
-    // The resume disclosure: `--approve` flipped a paused entry back on (TTY-only; the pinned
+    // The resume disclosure: a skill-path follow flipped a paused entry back on (TTY-only; the pinned
     // `FollowData` shape has no resume field).
     for name in &out.resumed {
         s.push_str(&format!(
@@ -576,7 +565,7 @@ pub(crate) fn invite_tty(data: &InviteData) -> String {
 pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
     format!(
         "Stopped following {} — auto-updates stop; your local copy is kept, nothing was deleted. \
-         `topos follow --approve {}` resumes.",
+         `topos follow {}` resumes.",
         data.skill_id, data.skill_id,
     )
 }
@@ -634,7 +623,7 @@ pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) ->
 }
 
 /// The pending publish's one next action: re-invoke THE SAME publish command (`ENROLL_RESUME` — the
-/// resume IS the original command; consent re-derives from its `--approve` on every invocation).
+/// resume IS the original command; the optional `@<digest>` pin re-derives from it on every invocation).
 pub(crate) fn publish_pending_next_actions(resume_argv: Vec<String>) -> Vec<NextAction> {
     vec![NextAction {
         code: ActionCode::from("ENROLL_RESUME".to_owned()),
@@ -1104,7 +1093,8 @@ mod tests {
         assert!(text.contains("docs@ababababab"), "{text}");
         assert!(text.contains("(following, auto)"), "{text}");
         assert!(
-            text.contains("paused@") && text.contains("(not following — `topos follow --approve"),
+            text.contains("paused@")
+                && text.contains("(not following — `topos follow paused` resumes)"),
             "{text}"
         );
         // A purely local skill sits under the local group with no follow note; its draft flag still shows.

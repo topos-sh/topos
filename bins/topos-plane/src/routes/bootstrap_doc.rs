@@ -145,8 +145,9 @@ pub(crate) fn agent_instructions(data: &BootstrapData, link: Option<&str>) -> St
              This returns `ENROLLMENT_PENDING` with a verification URL. **Show the human that URL** — \
              they open it in a browser, sign in, and approve this machine.{roster_note}\n\n\
              ## 3. Complete the enrollment once the human has approved\n\n\
-             ```sh\ntopos follow --resume --json\n```\n\n\
-             Still-pending re-surfaces the same URL; re-run after the human approves.\n\n",
+             ```sh\ntopos follow --json\n```\n\n\
+             Re-running `topos follow` while an enrollment is pending resumes it: still-pending \
+             re-surfaces the same URL; re-run after the human approves.\n\n",
             roster_note = match data.plane.deployment_mode {
                 DeploymentMode::Cloud =>
                     " (Their signed-in email must be on this workspace's roster — a leaked link is \
@@ -157,8 +158,8 @@ pub(crate) fn agent_instructions(data: &BootstrapData, link: Option<&str>) -> St
         doc.push_str(
             "## 4. Land the offered skills — with the human's yes\n\n\
              A newly received skill is an OFFER, never an auto-install:\n\n\
-             ```sh\ntopos pull --json                # discloses each offer with its content digest\n\
-             topos follow --approve <skill>    # place one offer after the human agrees\n```\n\n",
+             ```sh\ntopos pull --json          # discloses each offer with its content digest\n\
+             topos follow <skill>       # place one offer after the human agrees\n```\n\n",
         );
     }
 
@@ -239,8 +240,14 @@ mod tests {
         assert!(doc.contains("releases/latest/download/install.sh"));
         assert!(doc.contains("topos follow 'https://links.test/i/tok-abc' --json"));
         assert!(doc.contains("ENROLLMENT_PENDING"));
-        assert!(doc.contains("follow --resume"));
-        assert!(doc.contains("follow --approve"));
+        // Re-invoking `follow` resumes the pending enrollment (no `--resume` flag); a skill positional
+        // places one offer (no `--approve` flag).
+        assert!(!doc.contains("--resume"));
+        assert!(!doc.contains("--approve"));
+        assert!(
+            doc.contains("Re-running `topos follow` while an enrollment is pending resumes it")
+        );
+        assert!(doc.contains("topos follow <skill>"));
         assert!(doc.contains("never an auto-install"));
         assert!(doc.contains("deploy"));
         assert!(doc.contains("(acme.dev ✓)"));

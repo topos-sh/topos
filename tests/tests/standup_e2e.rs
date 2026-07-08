@@ -150,12 +150,10 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
         vec![
             "topos".to_owned(),
             "publish".to_owned(),
-            SKILL.to_owned(),
-            "--approve".to_owned(),
             approve.clone(),
             "--json".to_owned(),
         ],
-        "the ENROLL_RESUME argv IS this same publish command"
+        "the ENROLL_RESUME argv IS this same publish command (the `<skill>@<digest>` positional)"
     );
     assert!(
         data.version_id.is_none() && data.current_generation.is_none(),

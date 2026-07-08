@@ -16,8 +16,8 @@ pub(crate) struct Cli {
 
     /// Act in a specific workspace when this install follows skills from more than one on the same plane.
     /// Selects the workspace for the ambient write verbs (a genesis `publish`, `invite`) and disambiguates
-    /// a skill name shared across workspaces (`publish`/`review`/`revert`). Optional — with a single
-    /// workspace it is inferred.
+    /// a skill name shared across workspaces (`publish`/`review`/`revert`, and the `follow` positional
+    /// skill). Optional — with a single workspace it is inferred.
     #[arg(long, global = true, value_name = "ID")]
     pub(crate) workspace: Option<String>,
 
@@ -33,27 +33,22 @@ pub(crate) enum Command {
         /// The skill directory to adopt.
         path: PathBuf,
     },
-    /// Enroll with a plane via an `/i/` invite link, then follow its skills. Two-call resume: `follow
-    /// <link>` returns a verification URL; `follow --resume` polls + completes. A one-time admin CLAIM
-    /// link (a self-host standup) enrolls in ONE call — no resume. `follow --approve <skill>[@<hash>]`
-    /// places a disclosed first-receive offer, or resumes a skill `unfollow` paused.
+    /// Enroll with a plane and follow its skills, or place/resume a followed skill — dispatched by the
+    /// single positional. `follow <link>` (an `/i/` invite, a one-time admin CLAIM link, or a bare token
+    /// once enrolled) starts enrollment; `follow <skill>[@<hash>]` places a disclosed first-receive offer
+    /// (or resumes a skill `unfollow` paused). A device-flow enrollment returns a verification URL; while
+    /// one is pending, re-invoking `follow` (with any target, or none) RESUMES it — no separate flag.
     Follow {
-        /// The `/i/<token>` invite or claim link (the full URL, or a bare token once already enrolled).
-        /// Omitted with `--resume` / `--approve`.
-        link: Option<String>,
+        /// An `/i/<token>` invite or claim link (the full URL, or a bare token once enrolled) to enroll —
+        /// OR a followed skill name, optionally `<skill>@<hash>`, to place its offer / resume it. Omitted,
+        /// it resumes a pending enrollment.
+        target: Option<String>,
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
         #[arg(long)]
         manual: bool,
-        /// Poll a pending enrollment (started by an earlier `follow <link>`) and complete it.
-        #[arg(long)]
-        resume: bool,
-        /// Place the named, already-disclosed first-receive offer(s): `<skill>` or `<skill>@<hash>`.
-        /// On a skill `unfollow` paused, this resumes following instead.
-        #[arg(long = "approve")]
-        approve: Vec<String>,
     },
     /// Stop following a skill's `current`. Your local copy is KEPT as a frozen copy (nothing is deleted);
-    /// auto-updates stop, and `follow --approve <skill>` resumes. Local-only.
+    /// auto-updates stop, and `follow <skill>` resumes. Local-only.
     Unfollow {
         /// The skill name to stop following.
         skill: String,
@@ -91,22 +86,20 @@ pub(crate) enum Command {
         r#ref: Option<String>,
     },
     /// Ship a draft to the team. `publish` moves `current` to your draft (or genesis-creates a never-yet-
-    /// published skill); `--propose` opens a PR **without** moving `current`. Gated by `--approve
-    /// <skill>@<digest>` (the disclosed consent digest matching the bytes being shipped). Under
-    /// review-required a direct publish fails typed — re-run as `--propose` (never an auto-flip).
-    /// Un-enrolled, a direct publish STANDS UP a workspace on the hosted plane (a human signs in to
-    /// approve; re-running the same command completes it); `--propose` still requires prior enrollment
-    /// (`follow` first). Device-signed; roster-gated.
+    /// published skill); `--propose` opens a PR **without** moving `current`. Pin the bytes with an optional
+    /// `<skill>@<digest>` suffix (the disclosed consent digest — when present it must match the bytes being
+    /// shipped, refusing on mismatch; when absent the computed digest just ships). Under review-required a
+    /// direct publish fails typed — re-run as `--propose` (never an auto-flip). Un-enrolled, a direct
+    /// publish STANDS UP a workspace on the hosted plane (a human signs in to approve; re-running the same
+    /// command completes it); `--propose` still requires prior enrollment (`follow` first). Device-signed;
+    /// roster-gated.
     Publish {
-        /// The skill to publish — optional; inferred from the `--approve <skill>@<digest>` token if omitted
-        /// (they must agree when both are given).
-        skill: Option<String>,
+        /// The skill to publish, optionally pinned as `<skill>@<digest>` (the byte-exact consent digest of
+        /// the bytes being shipped).
+        target: String,
         /// Open a proposal (a PR) instead of moving `current`.
         #[arg(long)]
         propose: bool,
-        /// The consent token `<skill>@<digest>` matching the bytes being shipped (required).
-        #[arg(long = "approve")]
-        approve: String,
     },
     /// Resolve a proposal (the `gh pr review --approve` model). `--approve` moves `current` to the candidate
     /// (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer) or
@@ -124,18 +117,16 @@ pub(crate) enum Command {
         reject: bool,
     },
     /// Undo a release for the TEAM: move `current` to the older version named by `--to` — a **forward**
-    /// pointer-move (nothing deleted; invertible). `--to <hash>` is the GOOD version you go back TO (not the
-    /// bad one). `--approve <skill>@<hash>` binds that good version. `--confirm` for a no-op (already-current)
-    /// revert. Team-only — the local go-back is `pull <skill>@<hash>`. Device-signed; roster-gated.
+    /// pointer-move (nothing deleted; invertible). `--to <hash>` is the sole source of the GOOD version you
+    /// go back TO (not the bad one). `--confirm` for a no-op (already-current) revert. Team-only — the local
+    /// go-back is `pull <skill>@<hash>`. Device-signed; roster-gated.
     Revert {
-        /// The skill to revert (optional — inferred from the `--approve <skill>@<hash>` token if omitted).
-        skill: Option<String>,
-        /// The GOOD version id (64-char hex) to restore — the destination, NOT the bad version.
+        /// The skill to revert.
+        skill: String,
+        /// The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT
+        /// the bad version.
         #[arg(long = "to")]
         to: String,
-        /// The consent token `<skill>@<hash>` naming the same good version as `--to` (required).
-        #[arg(long = "approve")]
-        approve: String,
         /// Acknowledge a no-op revert (the `--to` version is already `current`).
         #[arg(long)]
         confirm: bool,
@@ -247,5 +238,63 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
         // With the target present it parses (the `@<hash>` exclusivity stays a runtime usage error).
         assert!(Cli::try_parse_from(["topos", "pull", "docs", "--onto-current"]).is_ok());
+    }
+
+    #[test]
+    fn publish_requires_a_single_positional_target_and_has_no_approve_flag() {
+        // A bare `publish` with no positional is a standard missing-required usage error at exit 2.
+        let missing = Cli::try_parse_from(["topos", "publish"]).unwrap_err();
+        assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(missing.exit_code(), 2);
+        // The bare skill and the `<skill>@<digest>` pin both parse as the single positional.
+        assert!(Cli::try_parse_from(["topos", "publish", "docs"]).is_ok());
+        let pinned = format!("docs@{}", "ab".repeat(32));
+        assert!(Cli::try_parse_from(["topos", "publish", &pinned, "--propose"]).is_ok());
+        // The removed `--approve` flag is now an unknown-argument usage error.
+        let approve =
+            Cli::try_parse_from(["topos", "publish", "docs", "--approve", &pinned]).unwrap_err();
+        assert_eq!(approve.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn revert_requires_a_skill_and_to_and_has_no_approve_flag() {
+        let hash = "ab".repeat(32);
+        assert!(Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash]).is_ok());
+        // Skill is now required.
+        let no_skill = Cli::try_parse_from(["topos", "revert", "--to", &hash]).unwrap_err();
+        assert_eq!(no_skill.kind(), ErrorKind::MissingRequiredArgument);
+        // The removed `--approve` flag is an unknown argument.
+        let approve = Cli::try_parse_from([
+            "topos",
+            "revert",
+            "docs",
+            "--to",
+            &hash,
+            "--approve",
+            &format!("docs@{hash}"),
+        ])
+        .unwrap_err();
+        assert_eq!(approve.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn follow_has_an_optional_positional_and_no_resume_or_approve_flags() {
+        // Bare, a link, and a skill positional all parse.
+        assert!(Cli::try_parse_from(["topos", "follow"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "follow", "https://topos.sh/i/tok"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "follow", "docs", "--manual"]).is_ok());
+        // The removed `--resume` / `--approve` flags are unknown arguments.
+        assert_eq!(
+            Cli::try_parse_from(["topos", "follow", "--resume"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
+        assert_eq!(
+            Cli::try_parse_from(["topos", "follow", "--approve", "docs"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
     }
 }

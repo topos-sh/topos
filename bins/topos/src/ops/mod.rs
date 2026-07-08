@@ -5,7 +5,7 @@
 //!
 //! **Shared machinery** (no verb of its own — the verbs above drive it):
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` currency machine over the kernel's
-//!   four-state transition. `pull` is its scope dispatch; `follow --approve` drives it too.
+//!   four-state transition. `pull` is its scope dispatch; the `follow <skill>` path drives it too.
 //! - [`merge_resolve`] — the author-side resolution of a diverged draft (three-way merge / conflict
 //!   materialization / the `--onto-current` escape), reachable only through the engine's witness token.
 //! - [`contribute`] — the device-signed write plumbing `publish`/`review`/`revert` share: the fresh-current
@@ -59,7 +59,7 @@ use crate::{doc, enroll};
 
 /// Resolve a skill name to its `(id, lock)` across the tracked skills, WITHOUT a workspace filter — the
 /// common case (the local verbs that do not act in a workspace: `add`, `log`, `diff`, `unfollow`, `pull`,
-/// `follow --approve`). See [`resolve_skill_in_workspace`] for the filtered form the write verbs use.
+/// the `follow <skill>` path). See [`resolve_skill_in_workspace`] for the filtered form the write verbs use.
 fn resolve_skill(ctx: &Ctx<'_>, name: &str) -> Result<(SkillId, Lock), ClientError> {
     resolve_skill_in_workspace(ctx, name, None)
 }

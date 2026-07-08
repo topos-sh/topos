@@ -52,10 +52,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   deserialize), starts a device authorization, writes a **`0600` WAL** (`identity/enrollment.json`), and
   returns `ENROLLMENT_PENDING` + the SERVER-built verification URL with the verified-domain provenance
   (the relay-phishing guard; there is no client-side URL reconstruction — a WAL without the persisted
-  URL restarts typed). `follow --resume` polls once; on a granted poll it signs the **enroll possession
+  URL restarts typed). Re-invoking `follow` while a pending WAL exists (with any target, or none) polls
+  once — the "re-invoking IS the resume" idiom; on a granted poll it signs the **enroll possession
   proof** (the device signer, binding `device_auth_id = user_code` + the offered-skill set + `grant_hash`),
   **redeems** the grant into per-skill read creds, records them in the WAL **before promotion** (the lockout
-  fence — a single-use grant can't be re-redeemed; a re-`--resume` of a `Redeemed` WAL re-promotes without
+  fence — a single-use grant can't be re-redeemed; a re-invoked `follow` over a `Redeemed` WAL re-promotes without
   re-redeeming), then PROMOTES: `instance.json` (the pinned key + the workspace disclosure), `follows.json`
   (read-merge-write under the `identity` lock, **`0600`** — a second follow never clobbers the first), and
   `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
@@ -64,10 +65,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   never reach a URL / log / error. The promote also **arms the session-start currency hook** — best-effort
   + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
   degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
-  `follow --approve <skill>[@<hash>]` drives the existing pull engine to
-  place a disclosed first-receive offer (the I-TOFU "one --approve"), and RESUMES a retained entry
+  A KNOWN followed-skill positional — `follow <skill>[@<hash>]` — drives the existing pull engine to
+  place a disclosed first-receive offer (the I-TOFU "one accept"), and RESUMES a retained entry
   `unfollow` paused (flips `following` back on; a still-pending first-receive offer is placed, else the
-  next `pull` lands current). The enrollment transports (`UreqDeviceClient`
+  next `pull` lands current). The positional is dispatched by shape (a pending WAL wins; `@` forces the
+  skill path; a known skill name is the skill path; else it is an `/i/` link or a bare invite token). The enrollment transports (`UreqDeviceClient`
   + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lives in
   `tests/tests/follow_e2e.rs`).
@@ -106,7 +108,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `follow` writes — so a bare `pull` with nothing followed stays an honest no-op. A **never-received**
   followed skill (the first-receive baseline `follow` lays: empty `recorded` at the genesis floor) is a
   state-② offer the engine OFFERS on a bare sweep (never auto-lands — I-TOFU, even for an `auto` follower)
-  and PLACES on an explicit accept / `follow --approve`; the engine change is minimal + additive (a
+  and PLACES on an explicit accept / `follow <skill>`; the engine change is minimal + additive (a
   `known_current`/`first_receive` read of the baseline + a `FirstReceiveFromLink` row in the situation map).
 - **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft (not just detects it).
   Reachable only through a `DivergedWitness` capability token minted in the sync engine's diverged arm (the
@@ -146,7 +148,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   next) — each unit-proven to round-trip through the kernel's `verify_*` (one shared preimage, so signer +
   verifier agree by construction). `host.json` now carries a secret-free **`DeviceKeyRef`** (the PUBLIC key +
   a pointer to the sibling `0600` seed, NEVER the seed) via `set_device_key`. **`sign_enroll` is now wired**
-  — `follow --resume` signs the enroll possession proof + records the device key in `host.json`.
+  — a re-invoked `follow` signs the enroll possession proof + records the device key in `host.json`.
   **`sign_governance` is now wired** too — `invite` signs the governance Invite op (see the `invite` verb
   above); `sign_device_op` is wired by the contribute verbs next.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
@@ -168,9 +170,10 @@ are asserted byte-equal in tests.
   routes; `map_write_envelope` maps the **all-outcome 200 envelope** to a typed `WriteReceipt` (every
   protocol outcome — OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`;
   only a transport/non-200/malformed body is an `Err`; the signed pointer is parsed leniently because an OK
-  `review --reject` carries `data: {}`). **`publish [--propose] --approve <skill>@<digest>`** scans the draft
-  (the same source `diff` uses), runs the **`--approve` consent gate** (recompute the digest over the scanned
-  bytes; refuse on mismatch — never a silent mode-flip), computes the byte-identical `commit_id`/`bundle_digest`
+  `review --reject` carries `data: {}`). **`publish [--propose] <skill>[@<digest>]`** scans the draft
+  (the same source `diff` uses), and when the target pins a `@<digest>` runs the **optional consent gate**
+  (recompute the digest over the scanned bytes; refuse on mismatch — never a silent mode-flip; without a pin
+  the computed digest just ships), computes the byte-identical `commit_id`/`bundle_digest`
   via the kernel (**I-COMMIT-PARITY** — author = `ctx.device_id`, message = a fixed `"topos: publish"`), pins
   the candidate in the store, persists an **op-WAL** (the extended `OpRecord`, `0600`) BEFORE the first send,
   POSTs, and maps the outcome (OK advances local state read-your-writes; APPROVAL_REQUIRED surfaces the
@@ -186,14 +189,14 @@ are asserted byte-equal in tests.
 
 - **The workspace-standup client** (`ops/publish`'s standup branch + `ops/follow`'s claim door) — the two
   self-serve doors onto the server's genesis seat. **The un-enrolled direct `publish`** stands the
-  workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the `--approve`
-  gate) runs BEFORE any network, then a standup device authorization against the hosted base
+  workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the optional
+  `@<digest>` gate) runs BEFORE any network, then a standup device authorization against the hosted base
   (`TOPOS_PLANE_URL` override, else the compiled-in `https://api.topos.sh` — consulted ONLY on this
   branch), TOFU-pin from the response's plane block, a `0600` `AuthorizingStandup` WAL, and an `ok`
   PENDING receipt (`PublishData.pending` = `signin_required` + the SERVER-built
   `verification_uri_complete` verbatim + the code + an RFC-3339 expiry) whose `ENROLL_RESUME` next-action
-  argv is THE SAME publish command. Re-invoking it polls ONCE (consent re-derives from `--approve`, so
-  drifted bytes are refused before any poll); granted ⇒ possession proof over the EMPTY offered set →
+  argv is THE SAME publish command. Re-invoking it polls ONCE (when the target pins a `@<digest>` the
+  consent re-derives from it, so drifted bytes are refused before any poll); granted ⇒ possession proof over the EMPTY offered set →
   redeem → `Redeemed` WAL BEFORE promotion (the shared crash fence) → promote → the publish CONTINUES in
   the same invocation (rebuilt around the freshly pinned key), disclosing `workspace <name> — owner
   <principal>` on both surfaces (hijack visibility). `--propose` keeps the typed not-enrolled error; an
@@ -210,7 +213,7 @@ are asserted byte-equal in tests.
 - **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
   byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
   the enrollment uses (retaining the workspace / mode / read credential so a later
-  `follow --approve <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
+  `follow <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
   pending, placing it),
   and touches nothing else — never a skill file, never the sync state or a `held` pin, never the currency
   hook (the per-install hook's sweep simply skips an unfollowed skill; `load_enrollment` keeps the pinned
