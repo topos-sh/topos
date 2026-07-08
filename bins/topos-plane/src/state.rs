@@ -13,8 +13,11 @@ use std::time::Duration;
 use anyhow::Context as _;
 use plane_store::{Authority, DeploymentMode, EnrollmentConfig, PoolConfig, WorkspaceId};
 
+use topos_types::requests::WireSkillIndex;
+
 use crate::enroll::mailer::{Mailer, NoopMailer, SmtpConfig, SmtpMailer};
 use crate::rate_limit::{Limiter, Limits};
+use crate::wire::error::PlaneHttpError;
 
 /// The composed plane's shared state: the storage authority + the in-process rate limiter + the passcode
 /// mailer + the static enrollment config. One value, cloned per request (every field is `Arc`-backed, so a
@@ -405,6 +408,28 @@ impl PlaneState {
             .map_err(|error| {
                 anyhow::anyhow!("setting review-required for `{workspace_id}`: {error}")
             })
+    }
+
+    /// The DEVICE-signed workspace CATALOG read (`GET /v1/workspaces/{ws}/skills`) — the thin wrapper the
+    /// route handler calls: parse the workspace id (a malformed id is the uniform miss), stamp the server
+    /// clock, run [`Authority::list_skills_device`](plane_store::Authority), and map each `SkillIndexRow`
+    /// into the wire [`WireSkillIndex`] (metadata only, no bytes). A [`PlaneHttpError`] carries the outcome:
+    /// [`AuthorityError::NotFound`](plane_store::AuthorityError) — unknown/revoked device, bad signature, or
+    /// non-member — becomes the indistinguishable 404; an Integrity/Internal fault becomes a 500.
+    pub(crate) async fn list_skills_device(
+        &self,
+        workspace_id: &str,
+        device_key_id: &str,
+        signature: &[u8; 64],
+    ) -> Result<WireSkillIndex, PlaneHttpError> {
+        let ws =
+            WorkspaceId::parse(workspace_id).map_err(|_| plane_store::AuthorityError::NotFound)?;
+        let now = crate::wire::now_utc().1;
+        let rows = self
+            .authority()
+            .list_skills_device(&ws, device_key_id, signature, now)
+            .await?;
+        Ok(crate::wire::map::skill_index_to_wire(rows))
     }
 
     /// The storage authority — the only trust surface; handlers call its authorized operations.

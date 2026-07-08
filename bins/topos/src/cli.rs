@@ -78,6 +78,10 @@ pub(crate) enum Command {
         /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.
         #[arg(long)]
         tracked: bool,
+        /// Also list skills available in the workspace(s) you follow (the remote catalog), annotated
+        /// with your follow-state. Requires enrollment; `--workspace <id>` narrows.
+        #[arg(long)]
+        remote: bool,
     },
     /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
     /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`

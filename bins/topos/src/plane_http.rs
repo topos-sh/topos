@@ -26,17 +26,17 @@ use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest,
     DeviceTokenResponse, DeviceTokenStatus, InviteRequest, ProposeRequest, PublishRequest,
     RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent, WireFileMode,
-    WireProposalList, WireVersionMeta,
+    WireProposalList, WireSkillIndex, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    ContributeSource, DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext,
-    FollowSource, GovernanceSource, Grant, GrantedToken, GrantedWorkspace, KnownCurrent,
-    PlaneError, PlaneSource, PointerFetch, Redeem, RedeemedCred, StandupAuthorize, TokenPoll,
-    WriteReceipt,
+    CatalogSource, ContributeSource, DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion,
+    FollowContext, FollowSource, GovernanceSource, Grant, GrantedToken, GrantedWorkspace,
+    KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem, RedeemedCred, StandupAuthorize,
+    TokenPoll, WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -795,6 +795,59 @@ impl ContributeSource for UreqDeviceClient {
         device_sig: [u8; 64],
     ) -> Result<WriteReceipt, ClientError> {
         self.post_write("/v1/reviews", &body, device_sig, "review")
+    }
+}
+
+// =================================================================================================
+// The catalog-read side of `UreqDeviceClient` — the device-signed workspace-catalog GET (`list --remote`).
+// Creds-free (the 64-byte catalog-read signature rides `Topos-Device-Signature`, the `device_key_id`
+// selector rides `Topos-Device-Key-Id`); metadata only, no bytes. A 404 (not a member / no such
+// workspace) is the indistinguishable "no catalog" ⇒ mapped to an EMPTY index, so a caller sweeping
+// several workspaces degrades cleanly rather than erroring.
+// =================================================================================================
+
+impl CatalogSource for UreqDeviceClient {
+    fn fetch_catalog(
+        &self,
+        workspace_id: &str,
+        device_key_id: &str,
+        signature: &[u8; 64],
+    ) -> Result<WireSkillIndex, PlaneError> {
+        // The workspace id is spliced into the URL path — refuse anything outside the validated charset
+        // (defense in depth; the enrollment loaders already validated what they persisted). The fixed
+        // message never echoes the hostile bytes.
+        if !crate::id::is_valid_id(workspace_id) {
+            return Err(PlaneError::Malformed(
+                "a workspace id is not a safe path segment".into(),
+            ));
+        }
+        let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
+        // The read is authorized by the device signature (over `catalog_read_preimage`), not a token, so
+        // the URL carries no secret — it is safe in an error message.
+        let sig = b64(signature);
+        let resp = self
+            .agent
+            .get(&url)
+            .header("topos-device-key-id", device_key_id)
+            .header("topos-device-signature", &sig)
+            .call()
+            // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
+            // unreachable — surfaced distinctly (the caller degrades it to a per-workspace warning).
+            .map_err(|e| PlaneError::Unreachable(format!("fetch catalog {workspace_id}: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp)?;
+                serde_json::from_slice::<WireSkillIndex>(&bytes)
+                    .map_err(|e| PlaneError::Malformed(format!("catalog for {workspace_id}: {e}")))
+            }
+            // 404 = not a member / no such workspace (the indistinguishable "no catalog") ⇒ an empty index.
+            HttpClass::NotFound => Ok(WireSkillIndex { skills: Vec::new() }),
+            // No conditional headers are sent, so 304 cannot occur; fold it in with the other statuses.
+            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(format!(
+                "fetch catalog {workspace_id}: HTTP {status}"
+            ))),
+        }
     }
 }
 

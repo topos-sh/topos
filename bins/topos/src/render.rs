@@ -5,7 +5,8 @@ use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
 use topos_types::results::{
     AddData, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RevertData, ReviewData, ReviewDecision, SkillEntry, UnfollowData, UntrackedEntry,
+    PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData, ReviewDecision,
+    SkillEntry, UnfollowData, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -291,6 +292,32 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             s.push_str(&untracked_row(u));
         }
     }
+    // The `--remote` catalog — what this install could follow next, grouped by workspace and annotated
+    // with the local follow-state. HONEST: there is no self-serve `follow <skill>` for an ungranted catalog
+    // skill yet, so an `Available` row names where it lives and does NOT promise `topos follow`.
+    if !data.remote_available.is_empty() {
+        s.push_str("\nRemote catalog:\n");
+        let label_of = |ws_id: &str| -> String {
+            out.enrollment
+                .as_ref()
+                .and_then(|e| e.workspace_labels.iter().find(|(id, _)| id == ws_id))
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| ws_id.to_owned())
+        };
+        // `remote_available` is sorted by (workspace_id, skill_id), so group by consecutive workspace.
+        let mut last_ws: Option<&str> = None;
+        for r in &data.remote_available {
+            if last_ws != Some(r.workspace_id.as_str()) {
+                s.push_str(&format!("  {}:\n", label_of(&r.workspace_id)));
+                last_ws = Some(r.workspace_id.as_str());
+            }
+            s.push_str(&remote_row(r));
+        }
+    }
+    // Isolated per-workspace catalog-read failures — the same stable lines the `--json` envelope carries.
+    for w in &out.warnings {
+        s.push_str(&format!("warning: {w}\n"));
+    }
     if let Some(footprint) = &data.footprint {
         s.push_str(&format!(
             "Footprint: {} paths under the topos home\n",
@@ -298,6 +325,33 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         ));
     }
     s.trim_end().to_owned()
+}
+
+/// One `--remote` catalog row: `<name>  <name>@<short>  <state note>` (+ any open-proposal count). The
+/// name falls back to the skill id when the plane discloses no display name. HONEST annotations — no
+/// `topos follow <skill>` promise for an `Available` skill (that grant is not self-serve yet).
+fn remote_row(r: &RemoteSkillEntry) -> String {
+    let name = r.display_name.as_deref().unwrap_or(&r.skill_id);
+    let note = match r.state {
+        RemoteFollowState::Available => "(available)".to_owned(),
+        RemoteFollowState::Following => "(following)".to_owned(),
+        RemoteFollowState::FollowingBehind => {
+            format!("(update available — run `topos pull {name}`)")
+        }
+    };
+    let proposals = if r.open_proposals > 0 {
+        format!("  {} open proposal(s)", r.open_proposals)
+    } else {
+        String::new()
+    };
+    format!(
+        "    {}  {}@{}  {}{}\n",
+        name,
+        name,
+        short(&r.version_id),
+        note,
+        proposals
+    )
 }
 
 /// One untracked-discovery row: `<name>  [<harness>]  <path>`, plus an adopt-only note for a harness topos
@@ -1079,8 +1133,10 @@ mod tests {
                     entry("local", true, None),
                 ],
                 untracked: Vec::new(),
+                remote_available: Vec::new(),
                 footprint: None,
             },
+            warnings: Vec::new(),
             enrollment: Some(ListEnrollment {
                 workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
                 base_url: "https://topos.example".to_owned(),
@@ -1137,8 +1193,62 @@ mod tests {
         let unenrolled = ListOutcome {
             data: ListData::default(),
             enrollment: None,
+            warnings: Vec::new(),
         };
         assert_eq!(list_tty(&unenrolled), "No tracked skills.");
+    }
+
+    #[test]
+    fn list_tty_renders_the_remote_catalog_grouped_and_honest() {
+        use topos_types::results::{RemoteFollowState, RemoteSkillEntry};
+
+        let remote = |skill: &str, ws: &str, state| RemoteSkillEntry {
+            skill_id: skill.to_owned(),
+            workspace_id: ws.to_owned(),
+            display_name: Some(skill.to_owned()),
+            version_id: "ab".repeat(32),
+            bundle_digest: "cd".repeat(32),
+            open_proposals: 0,
+            state,
+        };
+        let out = ListOutcome {
+            data: ListData {
+                remote_available: vec![
+                    remote("deploy", "w_acme", RemoteFollowState::Available),
+                    remote("runbook", "w_acme", RemoteFollowState::Following),
+                    remote("audit", "w_acme", RemoteFollowState::FollowingBehind),
+                ],
+                ..ListData::default()
+            },
+            enrollment: Some(ListEnrollment {
+                workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
+                base_url: "https://topos.example".to_owned(),
+                hook_active: true,
+                notes: Vec::new(),
+            }),
+            warnings: vec![
+                "could not read the catalog for workspace Beta (plane unreachable) — skipped"
+                    .to_owned(),
+            ],
+        };
+        let text = list_tty(&out);
+        assert!(text.contains("Remote catalog:"), "{text}");
+        // Grouped under the workspace's membership label.
+        assert!(text.contains("  Acme:\n"), "{text}");
+        // Available is honest — it does NOT print `topos follow`.
+        assert!(text.contains("deploy@abababababab  (available)"), "{text}");
+        assert!(!text.contains("topos follow deploy"), "{text}");
+        assert!(text.contains("runbook@abababababab  (following)"), "{text}");
+        // Behind points at `topos pull` (the real advance path).
+        assert!(
+            text.contains("audit@abababababab  (update available — run `topos pull audit`)"),
+            "{text}"
+        );
+        // The per-workspace degradation warning surfaces.
+        assert!(
+            text.contains("warning: could not read the catalog for workspace Beta"),
+            "{text}"
+        );
     }
 
     #[test]

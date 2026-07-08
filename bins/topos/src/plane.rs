@@ -12,7 +12,9 @@
 
 use topos_core::digest::FileMode;
 use topos_core::sync::Generation as KernelGen;
-use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
+use topos_types::requests::{
+    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireSkillIndex,
+};
 use topos_types::{Generation, Receipt, SignedCurrentRecord, TerminalOutcome, WireError};
 
 use crate::error::ClientError;
@@ -459,6 +461,36 @@ pub(crate) trait ContributeSource {
         body: ReviewRequest,
         device_sig: [u8; 64],
     ) -> Result<WriteReceipt, ClientError>;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The catalog-read seam — the device-signed WORKSPACE-CATALOG read side (`list --remote`), behind a
+// port so the list tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte catalog-read signature
+// is the auth, riding the `Topos-Device-Signature` header (with the `Topos-Device-Key-Id` selector), not
+// a per-skill read token — catalog visibility == workspace membership. Metadata only (no bytes). The real
+// impl is `crate::plane_http::UreqDeviceClient` (the same creds-free client that speaks enrollment /
+// governance / contribute); the fake lives in the `list` tests.
+// ---------------------------------------------------------------------------------------------
+
+/// The device-signed catalog-read transport: `GET /v1/workspaces/{ws}/skills` returns the workspace's
+/// discovery metadata (every skill holding a `current`), so a member can see what to follow next. The
+/// signature (over the kernel's `catalog_read_preimage`, binding `workspace_id` + `device_key_id`) rides
+/// the `Topos-Device-Signature` header; the `device_key_id` selects the registered key server-side.
+pub(crate) trait CatalogSource {
+    /// Read a workspace's skill catalog (metadata only). The real impl maps a **404** (not a member / no
+    /// such workspace — the indistinguishable "no catalog") to an EMPTY index rather than an error, so a
+    /// caller merging several workspaces degrades cleanly; any other non-200 is [`PlaneError::Unavailable`]
+    /// (or [`PlaneError::Unreachable`] on a connect-level fault).
+    ///
+    /// # Errors
+    /// [`PlaneError::Unreachable`] / [`PlaneError::Unavailable`] on a transport / non-200 fault;
+    /// [`PlaneError::Malformed`] on a corrupt body or an unsafe workspace-id path segment.
+    fn fetch_catalog(
+        &self,
+        workspace_id: &str,
+        device_key_id: &str,
+        signature: &[u8; 64],
+    ) -> Result<WireSkillIndex, PlaneError>;
 }
 
 /// Compare two wire generations with the kernel's epoch-dominant order (the wire type derives none).

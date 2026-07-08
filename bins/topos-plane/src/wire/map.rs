@@ -7,7 +7,7 @@ use plane_store::{
     CandidateUpload, CommitId, CreateInviteOutcome, DeploymentMode as StoreDeploymentMode,
     DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, OpenProposalSummary,
     PasscodeComplete, RedeemOutcome, SessionIntent as StoreSessionIntent, SetCurrentReceipt,
-    UploadedFile, VerificationContext, VersionMeta,
+    SkillIndexRow, UploadedFile, VerificationContext, VersionMeta,
 };
 use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
@@ -17,7 +17,7 @@ use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
     PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred,
     SessionIntent, VerificationContextResponse, WireCandidate, WireOpenProposal, WireProposalList,
-    WireVersionFile, WireVersionMeta,
+    WireSkillIndex, WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{
@@ -167,6 +167,27 @@ pub(crate) fn open_proposals_to_wire(v: Vec<OpenProposalSummary>) -> WireProposa
                 version_id: hex::encode(p.version_id),
                 base_generation: p.base,
                 created_at: p.created_at,
+            })
+            .collect(),
+    }
+}
+
+/// Map the authority's workspace skill index (`Vec<SkillIndexRow>`) to the wire [`WireSkillIndex`] — the
+/// device-signed catalog read's body. Hex-encode each 32-byte `version_id` + `bundle_digest` (the same
+/// `hex::encode` [`version_meta_to_wire`] uses), carrying the generation / display name / update time /
+/// open-proposal count through. NO bytes — the catalog is metadata only.
+pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {
+    WireSkillIndex {
+        skills: rows
+            .into_iter()
+            .map(|r| WireSkillIndexEntry {
+                skill_id: r.skill_id,
+                version_id: hex::encode(r.version_id),
+                bundle_digest: hex::encode(r.bundle_digest),
+                generation: r.generation,
+                display_name: r.display_name,
+                updated_at: r.updated_at,
+                open_proposals: r.open_proposals,
             })
             .collect(),
     }

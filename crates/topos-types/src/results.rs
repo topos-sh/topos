@@ -151,9 +151,52 @@ pub struct ListData {
     /// A real skill in a harness dir that topos doesn't manage yet (discovered, not adopted) — it has
     /// no topos `version_id`/`bundle_digest` yet, so it carries only what is knowable on disk.
     pub untracked: Vec<UntrackedEntry>,
+    /// Only present under `--remote`: skills available in the followed workspaces' catalogs, annotated with
+    /// this install's local follow-state — the "what could I follow next" surface. **INFERRED** (additive;
+    /// empty/omitted unless `--remote`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_available: Vec<RemoteSkillEntry>,
     /// Only present under `--footprint`: topos-owned paths outside skill dirs. **INFERRED shape.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<Vec<String>>,
+}
+
+/// A skill available in a followed workspace's catalog (`list --remote`), annotated with this install's
+/// follow-state so the agent can see what to `follow` (or `pull`) next. Metadata only — the catalog grants
+/// no bytes. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoteSkillEntry {
+    /// The skill id — the workspace-scoped handle a `follow` targets.
+    pub skill_id: String,
+    /// The workspace the skill lives in (its catalog scope).
+    pub workspace_id: String,
+    /// The advisory display name, when the plane discloses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The catalog `current` version id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The catalog `current` consent hash (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub bundle_digest: String,
+    /// Open, non-stale proposal count on the skill.
+    pub open_proposals: u64,
+    /// This install's follow-state for the skill.
+    pub state: RemoteFollowState,
+}
+
+/// The local follow-state annotation on a `--remote` catalog entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteFollowState {
+    /// In the workspace catalog, not followed by this install — `follow` to adopt.
+    Available,
+    /// Followed, and the local version matches the catalog `current`.
+    Following,
+    /// Followed, but the catalog `current` is newer than the local version — `pull` to advance.
+    FollowingBehind,
 }
 
 /// A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.

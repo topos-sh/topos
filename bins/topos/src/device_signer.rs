@@ -21,8 +21,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use zeroize::Zeroizing;
 
 use topos_core::sign::{
-    DeviceOpFields, EnrollFields, GovernanceOpFields, PreimageError, device_op_preimage,
-    enroll_preimage, governance_op_preimage,
+    CatalogReadFields, DeviceOpFields, EnrollFields, GovernanceOpFields, PreimageError,
+    catalog_read_preimage, device_op_preimage, enroll_preimage, governance_op_preimage,
 };
 
 use crate::atomic::atomic_write_private;
@@ -119,6 +119,20 @@ impl DeviceSigner {
         let preimage = device_op_preimage(fields).map_err(preimage_err)?;
         Ok(self.signing_key.sign(&preimage).to_bytes())
     }
+
+    /// Sign a workspace-catalog read (`list --remote`) over `topos_core::sign::catalog_read_preimage` —
+    /// the read binds only `workspace_id` + this signer's `device_key_id`. Deterministic (no RNG).
+    ///
+    /// # Errors
+    /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
+    pub(crate) fn sign_catalog_read(&self, workspace_id: &str) -> Result<[u8; 64], ClientError> {
+        let fields = CatalogReadFields {
+            workspace_id,
+            device_key_id: &self.device_key_id,
+        };
+        let preimage = catalog_read_preimage(&fields).map_err(preimage_err)?;
+        Ok(self.signing_key.sign(&preimage).to_bytes())
+    }
 }
 
 /// Redacting `Debug` — prints the public `device_key_id` + public key, never the key material (the crate
@@ -201,7 +215,8 @@ mod tests {
     use super::*;
     use crate::fs_seam::RealFs;
     use topos_core::sign::{
-        DeviceOp, GovernanceOpKind, verify_device_op, verify_enroll, verify_governance_op,
+        CatalogReadFields, DeviceOp, GovernanceOpKind, verify_catalog_read, verify_device_op,
+        verify_enroll, verify_governance_op,
     };
 
     /// The kernel's frozen device-key known-answer (seed = bytes 00..1f → this public key).
@@ -335,5 +350,32 @@ mod tests {
         };
         let sig = signer.sign_device_op(&fields).unwrap();
         assert!(verify_device_op(&fields, &sig, &signer.public_key()));
+    }
+
+    #[test]
+    fn sign_catalog_read_round_trips_through_the_kernel_verify() {
+        // The client signs the catalog-read frame; the kernel verifies the SAME bytes it framed — so
+        // the plane-store leg's `verify_catalog_read` will accept exactly what this signer produces.
+        let signer = DeviceSigner::from_seed(&[13u8; SEED_LEN]);
+        let sig = signer.sign_catalog_read("w_acme").unwrap();
+        let fields = CatalogReadFields {
+            workspace_id: "w_acme",
+            device_key_id: signer.device_key_id(),
+        };
+        assert!(verify_catalog_read(&fields, &sig, &signer.public_key()));
+        // A one-bit flip in the signature fails (the kernel is the integrity authority).
+        let mut tampered = sig;
+        tampered[0] ^= 0x01;
+        assert!(!verify_catalog_read(
+            &fields,
+            &tampered,
+            &signer.public_key()
+        ));
+        // A different workspace was not what was signed — verification fails.
+        let other_ws = CatalogReadFields {
+            workspace_id: "w_other",
+            ..fields
+        };
+        assert!(!verify_catalog_read(&other_ws, &sig, &signer.public_key()));
     }
 }

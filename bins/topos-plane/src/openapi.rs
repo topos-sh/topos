@@ -22,7 +22,8 @@ use topos_types::requests::{
     ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RedeemedSkillCred,
     RevertRequest, ReviewRequest, RosterRemoveRequest, RosterSetRequest, SessionIntent,
     VerificationContextResponse, WireCandidate, WireFile, WireFileMode, WireOpenProposal,
-    WireProposalList, WireVersionFile, WireVersionMeta, WorkspaceRole,
+    WireProposalList, WireSkillIndex, WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
+    WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
@@ -49,6 +50,8 @@ use topos_types::{
         crate::routes::bundles::get_bundle,
         crate::routes::versions::get_version,
         crate::routes::proposals::list_proposals,
+        // The device-signed workspace catalog read (catalog visibility == membership).
+        crate::routes::skills_index::list_skills,
         // The unauthenticated invite bootstrap (TOFU).
         crate::routes::bootstrap::read_invite_bootstrap,
         // Enrollment flow.
@@ -99,6 +102,9 @@ use topos_types::{
         // The proposals-listing read.
         WireProposalList,
         WireOpenProposal,
+        // The device-signed workspace catalog read.
+        WireSkillIndex,
+        WireSkillIndexEntry,
         // Per-verb `data` shapes (the agent's typed payloads).
         PublishData,
         ProposeData,

@@ -73,6 +73,32 @@ impl Db {
             })
             .collect()
     }
+
+    /// Resolve a NON-REVOKED registered device to `(public_key, principal)` on the POOL — the device-lane
+    /// catalog read's resolve (it runs no transaction). The SAME select the in-transaction
+    /// [`governance::read_active_device`](super::governance) runs, against the pool instead of a `tx`, so
+    /// both share one cached query; `None` ⇒ the device is unknown or revoked (the caller folds it to the
+    /// single uniform NotFound).
+    pub(crate) async fn read_active_device(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+    ) -> Result<Option<([u8; 32], String)>> {
+        let ws_s = ws.as_str();
+        let row = sqlx::query!(
+            r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!"
+           FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2 AND revoked = 0"#,
+            ws_s,
+            device_key_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some((blob32(&r.public_key)?, r.principal))),
+        }
+    }
 }
 
 /// A stored generation component must fit `u64` (the schema stores non-negative BIGINTs); a negative

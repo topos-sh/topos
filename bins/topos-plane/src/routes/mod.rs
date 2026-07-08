@@ -18,6 +18,7 @@ pub(crate) mod proposals;
 pub(crate) mod publish;
 pub(crate) mod reverts;
 pub(crate) mod reviews;
+pub(crate) mod skills_index;
 pub(crate) mod versions;
 
 // The OIDC routes — behind `enroll-oidc` (default-off), so a default build resolves none of the connector.

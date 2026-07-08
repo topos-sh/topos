@@ -23,6 +23,7 @@
 //! [`list_skills_session`]'s delegated index reads are principal-free, so a removal mid-call returns
 //! that one in-flight catalog whole.
 
+use topos_core::sign::{CatalogReadFields, verify_catalog_read};
 use topos_types::Generation;
 
 use crate::authority::Authority;
@@ -86,6 +87,15 @@ pub(crate) async fn list_skills_session(
     plane_mode: DeploymentMode,
 ) -> Result<Vec<SkillIndexRow>> {
     member_gate(authority, ws, acting_email, plane_mode).await?;
+    build_skill_index(authority, ws).await
+}
+
+/// The workspace catalog BODY — the SHARED index build both read lanes call AFTER their own gate, so the
+/// session lane and the device lane emit byte-identical `SkillIndexRow`s: [`Db::list_skill_index`](crate::db::Db)
+/// (the one index join) plus the per-skill OPEN non-stale proposal count delegated to the SAME
+/// `open_proposal_rows` listing statement (so `count == list.len()` by construction; a deliberate O(skills)
+/// fan-out on a cold route). Principal-free — the caller's gate has already run.
+async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Vec<SkillIndexRow>> {
     let rows = authority.db().list_skill_index(ws).await?;
     let mut out = Vec::with_capacity(rows.len());
     for SkillIndexDbRow {
@@ -112,6 +122,47 @@ pub(crate) async fn list_skills_session(
         });
     }
     Ok(out)
+}
+
+/// The DEVICE-signed catalog read (`list --remote`) — the catalog-visibility twin of
+/// [`list_skills_session`] authorized WITHOUT a web session, on BOTH cloud and self-host: device auth IS
+/// the self-host membership story, so this lane does NOT take or consult a [`DeploymentMode`]. Three gates,
+/// every failure the ONE uniform [`AuthorityError::NotFound`] (mirroring [`member_gate`]'s
+/// indistinguishability):
+/// 1. resolve the NON-REVOKED device → its registered public key + bound principal (miss ⇒ NotFound);
+/// 2. verify the catalog-read signature over `(workspace_id, device_key_id)` against that key (false ⇒
+///    NotFound) — the frame binds the workspace, so no cross-workspace replay;
+/// 3. the device's bound principal must be a CONFIRMED workspace member (catalog visibility == membership).
+///
+/// Then the SAME [`build_skill_index`] body the session lane builds. A pool read only — no transaction, no
+/// receipt, no op id. `_now` is accepted for signature parity with the token-lane reads; device
+/// registration carries no expiry, so this lane never consults a clock.
+pub(crate) async fn list_skills_device(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    device_key_id: &str,
+    signature: &[u8; 64],
+    _now: i64,
+) -> Result<Vec<SkillIndexRow>> {
+    let Some((public_key, principal_s)) =
+        authority.db().read_active_device(ws, device_key_id).await?
+    else {
+        return Err(AuthorityError::NotFound);
+    };
+    let fields = CatalogReadFields {
+        workspace_id: ws.as_str(),
+        device_key_id,
+    };
+    if !verify_catalog_read(&fields, signature, &public_key) {
+        return Err(AuthorityError::NotFound);
+    }
+    // A device_registry principal was validated at registration, so a re-parse failure is store corruption
+    // (Integrity), never a not-found — the same convention `govern_preamble` follows for a signing device.
+    let principal = Principal::parse(&principal_s).map_err(AuthorityError::integrity)?;
+    if !authority.db().confirmed_member(ws, &principal).await? {
+        return Err(AuthorityError::NotFound);
+    }
+    build_skill_index(authority, ws).await
 }
 
 /// A skill's signed `current` pointer for a confirmed member — [`crate::read::read_current`] verbatim

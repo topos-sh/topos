@@ -7,7 +7,7 @@
 //! preimage builders, the two halves of every signature agree on the bytes by construction (the
 //! classic two-halves-of-a-signature footgun is closed by one shared encoder).
 //!
-//! Five frozen, domain-separated encodings:
+//! Six frozen, domain-separated encodings:
 //!
 //! - the **commit** identity (a content hash, not a signature): `commit_id = sha256(frame)` — the
 //!   user-facing `version_id`. A length-prefixed binary frame. ([`commit_id`])
@@ -19,11 +19,15 @@
 //!   enrolling device signs to prove it controls the very key it registers. ([`verify_enroll`])
 //! - the **governance-op** signature (verify-only): a length-prefixed binary frame an owner's
 //!   registered device signs for an invite / roster mutation / device revoke. ([`verify_governance_op`])
+//! - the **catalog-read** signature (verify-only): a length-prefixed binary frame a device signs to
+//!   authorize a workspace-catalog read (`list --remote`) — it binds only the workspace + the signing
+//!   device (the catalog is the whole workspace, so no skill, no version). ([`verify_catalog_read`])
 //!
-//! Domain separation: the four binary frames carry distinct ASCII context tags (no one frame's
+//! Domain separation: the five binary frames carry distinct ASCII context tags (no one frame's
 //! signature can verify as another — a publish never as a revert, an enrollment never as a governance
-//! op, neither as a commit); the pointer is a JSON object — a different leading byte (`{`) entirely —
-//! and binds its algorithm. No signature under one preimage can verify under another.
+//! op, a catalog read never as any write, neither as a commit); the pointer is a JSON object — a
+//! different leading byte (`{`) entirely — and binds its algorithm. No signature under one preimage
+//! can verify under another.
 //!
 //! The **cross-component identity derivations these frames bind** also live here, once: the
 //! pubkey-derived [`device_key_id`], the governance [`GovernanceRole`] signing byte, and the invite
@@ -55,6 +59,8 @@ const DEVICE_OP_TAG: &[u8] = b"TOPOS_DEVICE_OP_SIG_V1\0";
 const DEVICE_ENROLL_TAG: &[u8] = b"TOPOS_DEVICE_ENROLL_V1\0";
 /// The ASCII context tag for the governance-op signature frame (26 chars + NUL = 27 bytes).
 const GOVERNANCE_OP_TAG: &[u8] = b"TOPOS_GOVERNANCE_OP_SIG_V1\0";
+/// The ASCII context tag for the workspace-catalog-read signature frame (25 chars + NUL = 26 bytes).
+const CATALOG_READ_TAG: &[u8] = b"TOPOS_CATALOG_READ_SIG_V1\0";
 
 /// Why a preimage could not be built. Every case is unreachable for well-formed inputs (a commit has
 /// ≤ 2 parents; ids/messages are far under 4 GiB; generations are small counters) — they exist so the
@@ -546,6 +552,56 @@ pub fn verify_governance_op(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Catalog-read signature — a device signs a WORKSPACE-CATALOG read (`list --remote`): list every
+// skill in a workspace it is a member of. A read of a whole workspace catalog binds only the
+// workspace + the signing device — no skill, no version (the catalog is the whole workspace). The
+// frame carries its own context tag, so a catalog-read signature can never verify as a device-op /
+// governance / enroll / pointer frame, nor any of theirs as a catalog read.
+// ---------------------------------------------------------------------------------------------
+
+/// The fields a device signs to authorize a workspace-catalog read (`list --remote`). A read binds only
+/// the workspace + the signing device — no skill, no version (the catalog is the whole workspace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogReadFields<'a> {
+    /// Scopes the read to one workspace (no cross-workspace replay).
+    pub workspace_id: &'a str,
+    /// The id of the signing device key (the verifier selects the public key by this).
+    pub device_key_id: &'a str,
+}
+
+/// Build the canonical catalog-read signing frame.
+///
+/// Layout: `TOPOS_CATALOG_READ_SIG_V1\0` ‖ `u32be`(ws len) ‖ workspace_id ‖ `u32be`(key len) ‖
+/// device_key_id. Every string length prefix is `u32be` (the one width rule across the binary frames),
+/// and the leading context tag is distinct from every other frame's, so no signature crosses frames.
+///
+/// # Errors
+/// [`PreimageError::FieldTooLong`] if a string field exceeds `u32::MAX` bytes.
+pub fn catalog_read_preimage(fields: &CatalogReadFields<'_>) -> Result<Vec<u8>, PreimageError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(CATALOG_READ_TAG);
+    put_lp_str(&mut out, fields.workspace_id)?;
+    put_lp_str(&mut out, fields.device_key_id)?;
+    Ok(out)
+}
+
+/// Verify a device's catalog-read signature with the device's registered raw 32-byte public key.
+///
+/// Returns `false` — never panics — on any malformed input or verification failure (including a field
+/// too long to frame, which therefore could never have been signed). Mirrors [`verify_device_op`].
+#[must_use]
+pub fn verify_catalog_read(
+    fields: &CatalogReadFields<'_>,
+    signature: &[u8; 64],
+    device_public_key: &[u8; 32],
+) -> bool {
+    match catalog_read_preimage(fields) {
+        Ok(message) => verify_ed25519(&message, signature, device_public_key),
+        Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Signed current pointer — RFC 8785 (JCS). The trust root every follower re-verifies on each pull.
 // ---------------------------------------------------------------------------------------------
 
@@ -735,6 +791,10 @@ mod tests {
     // unsorted emails ["bob@…","alice@…"] canonicalize to ["alice@…","bob@…"].
     const GOVERNANCE_PREIMAGE: &str = "544f504f535f474f5645524e414e43455f4f505f5349475f56310000000006775f61636d6501f47ac10b58cc4372a5670e02b2c3d4790000000f706b5f616c6963655f6c6170746f70010000000067748580000000020000000f616c6963654061636d652e746573740000000d626f624061636d652e746573740000000100000008735f6465706c6f79";
     const GOVERNANCE_SIG: &str = "577886a1b76c3673461a2af8b9f71e9dc8854e4c57e69c6a8529fa9fc94009bce0c689bfadd860a25eec57704bb05a2b58410df39b2eb5bbaea05c07c5428008";
+    // The catalog-read frame: the member's device key (DEVICE_PK) signs. Emits a 26-byte tag; the frame
+    // binds only workspace_id + device_key_id (no skill, no version — the catalog is the whole workspace).
+    const CATALOG_PREIMAGE: &str = "544f504f535f434154414c4f475f524541445f5349475f56310000000006775f61636d650000000f706b5f616c6963655f6c6170746f70";
+    const CATALOG_SIG: &str = "f78bc7e003ee8439a1384337cf0c9cf8e855d322241287872e3e7a3a3e2b5e3aa6c30fb6f17df896fa987b35f9444b5a9260a46980e6464ccc1a62b11424420d";
 
     const FIX_PARENTS: [[u8; 32]; 1] = [[0x11u8; 32]];
     const FIX_TREE: [u8; 32] = [0x22u8; 32];
@@ -810,6 +870,13 @@ mod tests {
                 emails: &["bob@acme.test", "alice@acme.test"],
                 skills: &["s_deploy"],
             },
+        }
+    }
+
+    fn fixture_catalog_read() -> CatalogReadFields<'static> {
+        CatalogReadFields {
+            workspace_id: "w_acme",
+            device_key_id: "pk_alice_laptop",
         }
     }
 
@@ -1511,6 +1578,101 @@ mod tests {
         ));
         assert!(!verify_governance_op(
             &fixture_governance(),
+            &arr64(DEVICEOP_SIG),
+            &pk
+        ));
+    }
+
+    // ---- Catalog-read signature (`list --remote`) ----
+
+    #[test]
+    fn catalog_read_known_answer_positive() {
+        let fields = fixture_catalog_read();
+        assert_eq!(
+            crate::digest::to_hex(&catalog_read_preimage(&fields).unwrap()),
+            CATALOG_PREIMAGE,
+            "catalog-read frame changed — update only if the encoding INTENTIONALLY changed",
+        );
+        assert!(
+            verify_catalog_read(&fields, &arr64(CATALOG_SIG), &arr32(DEVICE_PK)),
+            "the golden catalog-read signature must verify",
+        );
+    }
+
+    #[test]
+    fn catalog_read_negative_binds_every_field() {
+        // Both fields are part of the signed frame; tampering either — with the ORIGINAL device key, so
+        // this is distinct from the wrong-key case below — must break the golden signature.
+        let sig = arr64(CATALOG_SIG);
+        let pk = arr32(DEVICE_PK);
+        assert!(!verify_catalog_read(
+            &CatalogReadFields {
+                workspace_id: "w_other",
+                ..fixture_catalog_read()
+            },
+            &sig,
+            &pk
+        ));
+        assert!(!verify_catalog_read(
+            &CatalogReadFields {
+                device_key_id: "pk_evil",
+                ..fixture_catalog_read()
+            },
+            &sig,
+            &pk
+        ));
+    }
+
+    #[test]
+    fn catalog_read_negative_wrong_key() {
+        // Untampered fields, but verified against a different (the plane's) public key.
+        assert!(!verify_catalog_read(
+            &fixture_catalog_read(),
+            &arr64(CATALOG_SIG),
+            &arr32(PLANE_PK)
+        ));
+    }
+
+    #[test]
+    fn catalog_read_negative_wrong_tag() {
+        // Flip a byte inside the domain tag: a different context can never verify the same signature.
+        let mut bytes = unhex(CATALOG_PREIMAGE);
+        bytes[0] ^= 0xff;
+        assert!(!verify_ed25519(
+            &bytes,
+            &arr64(CATALOG_SIG),
+            &arr32(DEVICE_PK)
+        ));
+    }
+
+    #[test]
+    fn catalog_read_domain_separation() {
+        // The catalog-read frame carries its own tag, and its signature does not cross into any other
+        // frame — nor any of theirs into a catalog read. This is the critical cross-frame guard: a read
+        // signature must NEVER authorize a write, and no write/enroll/governance signature a read.
+        assert!(
+            catalog_read_preimage(&fixture_catalog_read())
+                .unwrap()
+                .starts_with(CATALOG_READ_TAG)
+        );
+        let pk = arr32(DEVICE_PK);
+        // The golden catalog-read signature must NOT verify as a governance op / device op / enrollment.
+        let catalog_sig = arr64(CATALOG_SIG);
+        assert!(!verify_governance_op(
+            &fixture_governance(),
+            &catalog_sig,
+            &pk
+        ));
+        assert!(!verify_device_op(&fixture_device_op(), &catalog_sig, &pk));
+        assert!(!verify_enroll(&fixture_enroll(), &catalog_sig, &pk));
+        // ...and neither a governance nor a device-op golden signature verifies as a catalog read.
+        assert!(!verify_catalog_read(
+            &fixture_catalog_read(),
+            &arr64(GOVERNANCE_SIG),
+            &pk
+        ));
+        assert!(!verify_catalog_read(
+            &fixture_catalog_read(),
             &arr64(DEVICEOP_SIG),
             &pk
         ));

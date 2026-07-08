@@ -1128,7 +1128,7 @@ impl FollowHarness {
                 follow: &inert_follow,
             };
             // `None` discovery roots = tracked-only: this helper must not scan the runner's real home dirs.
-            ops::list(&ctx, None, false, None)
+            ops::list(&ctx, None, false, None, None)
                 .expect("test_support: list failed")
                 .data
         })
@@ -1610,7 +1610,7 @@ impl ContributeHarness {
             plane_key,
             follow: &follow,
         };
-        let data = ops::list(&ctx, Some(&self.skill_id), false, None)
+        let data = ops::list(&ctx, Some(&self.skill_id), false, None, None)
             .expect("list")
             .data;
         data.tracked

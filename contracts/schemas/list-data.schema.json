@@ -26,6 +26,13 @@
         "$ref": "#/$defs/SkillEntry"
       }
     },
+    "remote_available": {
+      "description": "Only present under `--remote`: skills available in the followed workspaces' catalogs, annotated with\nthis install's local follow-state — the \"what could I follow next\" surface. **INFERRED** (additive;\nempty/omitted unless `--remote`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RemoteSkillEntry"
+      }
+    },
     "tracked": {
       "type": "array",
       "items": {
@@ -47,6 +54,75 @@
     "untracked"
   ],
   "$defs": {
+    "RemoteFollowState": {
+      "description": "The local follow-state annotation on a `--remote` catalog entry.",
+      "oneOf": [
+        {
+          "description": "In the workspace catalog, not followed by this install — `follow` to adopt.",
+          "type": "string",
+          "const": "available"
+        },
+        {
+          "description": "Followed, and the local version matches the catalog `current`.",
+          "type": "string",
+          "const": "following"
+        },
+        {
+          "description": "Followed, but the catalog `current` is newer than the local version — `pull` to advance.",
+          "type": "string",
+          "const": "following-behind"
+        }
+      ]
+    },
+    "RemoteSkillEntry": {
+      "description": "A skill available in a followed workspace's catalog (`list --remote`), annotated with this install's\nfollow-state so the agent can see what to `follow` (or `pull`) next. Metadata only — the catalog grants\nno bytes. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "description": "The catalog `current` consent hash (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "display_name": {
+          "description": "The advisory display name, when the plane discloses one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "open_proposals": {
+          "description": "Open, non-stale proposal count on the skill.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "skill_id": {
+          "description": "The skill id — the workspace-scoped handle a `follow` targets.",
+          "type": "string"
+        },
+        "state": {
+          "description": "This install's follow-state for the skill.",
+          "$ref": "#/$defs/RemoteFollowState"
+        },
+        "version_id": {
+          "description": "The catalog `current` version id (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "workspace_id": {
+          "description": "The workspace the skill lives in (its catalog scope).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_id",
+        "workspace_id",
+        "version_id",
+        "bundle_digest",
+        "open_proposals",
+        "state"
+      ]
+    },
     "SkillEntry": {
       "description": "A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.",
       "type": "object",

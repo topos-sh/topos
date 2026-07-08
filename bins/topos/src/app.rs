@@ -13,6 +13,7 @@ use topos_types::HarnessId;
 
 use crate::cli::{Cli, Command, RoleArg};
 use crate::ctx::Ctx;
+use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
@@ -171,12 +172,49 @@ pub fn run() -> ExitCode {
             skill,
             footprint,
             tracked,
-        } => finish_list(
-            json,
-            cmd_name,
-            ops::list(&ctx, skill.as_deref(), footprint, list_discovery(tracked)),
-            &diag,
-        ),
+            remote,
+        } => {
+            // Under `--remote`, resolve the enrolled plane + memberships (a typed "run follow first" when
+            // there is no enrollment), then build the device-signed catalog transport + signer as locals so
+            // the scope borrows them across the `list()` call.
+            let remote_inputs = if remote {
+                match list_remote_inputs(&fs, &ctx.layout) {
+                    Ok(inputs) => Some(inputs),
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                }
+            } else {
+                None
+            };
+            let catalog_client;
+            let signer;
+            let scope = if let Some((base_url, memberships)) = remote_inputs {
+                catalog_client = UreqDeviceClient::new(base_url);
+                signer = match DeviceSigner::load_or_generate(&fs, &ctx.layout) {
+                    Ok(s) => s,
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                };
+                Some(ops::RemoteScope {
+                    catalog: &catalog_client,
+                    signer: &signer,
+                    memberships,
+                    only: workspace.clone(),
+                })
+            } else {
+                None
+            };
+            finish_list(
+                json,
+                cmd_name,
+                ops::list(
+                    &ctx,
+                    skill.as_deref(),
+                    footprint,
+                    list_discovery(tracked),
+                    scope,
+                ),
+                &diag,
+            )
+        }
         Command::Diff { skill, r#ref } => finish(
             json,
             cmd_name,
@@ -358,9 +396,10 @@ fn finish_pull(
     }
 }
 
-/// `list`'s finisher — the `--json` envelope carries exactly the schema-pinned `ListData`; the TTY
-/// additionally renders the enrollment header + per-row follow annotations the outcome carries alongside
-/// (TTY-only disclosure — `ListData`'s pinned shape has no enrollment fields).
+/// `list`'s finisher — the `--json` envelope carries exactly the schema-pinned `ListData` plus any
+/// `--remote` per-workspace catalog-read warnings (mirroring `pull`); the TTY additionally renders the
+/// enrollment header + per-row follow annotations the outcome carries alongside (TTY-only disclosure —
+/// `ListData`'s pinned shape has no enrollment fields).
 fn finish_list(
     json: bool,
     command: &str,
@@ -371,7 +410,9 @@ fn finish_list(
         Ok(out) => {
             if json {
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = out.warnings.clone();
+                println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::list_tty(&out));
             }
@@ -379,6 +420,39 @@ fn finish_list(
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
+}
+
+/// Resolve the `list --remote` inputs from the on-disk enrollment: the pinned plane base URL
+/// (`instance.json`) + every joined workspace as `(workspace_id, display_label)` (`user.json`). Not
+/// enrolled (no `instance.json` / no membership) ⇒ a typed, friendly "run `topos follow` first" (the same
+/// not-enrolled shape the write verbs use), never a panic.
+///
+/// # Errors
+/// [`ClientError::Enrollment`] when there is no plane or no membership to read a catalog from.
+fn list_remote_inputs(
+    fs: &dyn FsOps,
+    layout: &Layout,
+) -> Result<(String, Vec<(String, String)>), ClientError> {
+    let instance = enroll::read_instance(fs, layout)?.ok_or_else(|| {
+        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
+    })?;
+    let memberships: Vec<(String, String)> = enroll::read_user(fs, layout)?
+        .map(|u| {
+            u.workspaces
+                .into_iter()
+                .map(|m| {
+                    let label = m.display_name.unwrap_or_else(|| m.workspace_id.clone());
+                    (m.workspace_id, label)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if memberships.is_empty() {
+        return Err(ClientError::Enrollment(
+            "not enrolled in any workspace; run `topos follow <link>` first".into(),
+        ));
+    }
+    Ok((instance.base_url, memberships))
 }
 
 /// `follow`'s finisher — like [`finish`], but it carries the success-path `next_actions` (run

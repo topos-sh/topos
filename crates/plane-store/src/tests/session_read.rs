@@ -4,6 +4,7 @@
 //! (per-skill roster vs workspace membership).
 use super::*;
 use crate::enroll::DeploymentMode;
+use topos_core::sign::{CatalogReadFields, catalog_read_preimage};
 
 const CLOUD: DeploymentMode = DeploymentMode::Cloud;
 
@@ -579,5 +580,241 @@ async fn a_null_digest_under_a_current_row_is_integrity(pool: PgPool) {
     assert!(matches!(
         a.list_skills_session(&w, "member@acme.com", CLOUD).await,
         Err(AuthorityError::Integrity(_))
+    ));
+}
+
+// ── the DEVICE-signed catalog read (`list --remote`) — the workspace-membership device lane ────────────
+//
+// Authorized by a NON-REVOKED registered device whose catalog-read signature over (ws, device_key_id)
+// verifies against its registered key AND whose bound principal is a CONFIRMED workspace member — on BOTH
+// cloud and self-host (the lane never consults a deployment mode). Every miss is the one uniform NotFound.
+
+/// Seed a NON-REVOKED reader device bound to `email`, and seat that email as a CONFIRMED member — the
+/// device catalog lane's whole entitlement (deliberately NO per-skill roster row).
+async fn seat_device_member(
+    fx: &Fixture,
+    w: &WorkspaceId,
+    dkid: &str,
+    key: &ed25519_dalek::SigningKey,
+    email: &str,
+) {
+    fx.authority
+        .db()
+        .seed_device(
+            w,
+            dkid,
+            &key.verifying_key().to_bytes(),
+            &prin(email),
+            false,
+        )
+        .await
+        .unwrap();
+    seat(fx, w, email, "member").await;
+}
+
+/// The device's catalog-read signature over `(ws, device_key_id)` — the kernel frame `list --remote` signs.
+fn sign_catalog_read(key: &ed25519_dalek::SigningKey, w: &WorkspaceId, dkid: &str) -> [u8; 64] {
+    use ed25519_dalek::Signer as _;
+    let fields = CatalogReadFields {
+        workspace_id: w.as_str(),
+        device_key_id: dkid,
+    };
+    key.sign(&catalog_read_preimage(&fields).unwrap())
+        .to_bytes()
+}
+
+#[sqlx::test]
+async fn a_member_device_reads_the_catalog(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-ok").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let pk = dev_key(70);
+    register(&fx, &w, &s, "dk", &pk, "p_author").await;
+    let body = b"# deploy\nship it\n";
+    let (g, g_digest, _o) = published_skill(
+        &fx,
+        &w,
+        &s,
+        &pk,
+        "70000000-0000-4000-8000-000000000001",
+        body,
+    )
+    .await;
+
+    // A DISTINCT reader device whose principal is a confirmed member, holding NO per-skill roster row.
+    let rk = dev_key(71);
+    seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
+    let sig = sign_catalog_read(&rk, &w, "dk_read");
+
+    let idx = a
+        .list_skills_device(&w, "dk_read", &sig, NOW)
+        .await
+        .unwrap();
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx[0].skill_id, "s_deploy");
+    assert_eq!(idx[0].version_id, g.0);
+    assert_eq!(idx[0].bundle_digest, g_digest);
+    assert_eq!(idx[0].generation, gn(1, 1));
+    assert_eq!(idx[0].open_proposals, 0);
+}
+
+/// THE key contrast: the device lane serves on self-host, where the session lane uniformly denies the
+/// SAME confirmed member — device auth is the self-host membership story.
+#[sqlx::test]
+async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-selfhost").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let pk = dev_key(72);
+    register(&fx, &w, &s, "dk", &pk, "p_author").await;
+    published_skill(
+        &fx,
+        &w,
+        &s,
+        &pk,
+        "72000000-0000-4000-8000-000000000001",
+        b"v0",
+    )
+    .await;
+
+    let rk = dev_key(73);
+    seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
+    let sig = sign_catalog_read(&rk, &w, "dk_read");
+
+    // The device lane serves the catalog — it never consults deployment mode.
+    assert_eq!(
+        a.list_skills_device(&w, "dk_read", &sig, NOW)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // The session lane, told the plane is self-host, denies the same confirmed member.
+    assert!(matches!(
+        a.list_skills_session(&w, "reader@acme.com", DeploymentMode::SelfHost)
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[sqlx::test]
+async fn a_tampered_or_cross_workspace_catalog_signature_is_notfound(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-badsig").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let pk = dev_key(74);
+    register(&fx, &w, &s, "dk", &pk, "p_author").await;
+    published_skill(
+        &fx,
+        &w,
+        &s,
+        &pk,
+        "74000000-0000-4000-8000-000000000001",
+        b"v0",
+    )
+    .await;
+    let rk = dev_key(75);
+    seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
+
+    // A one-byte-tampered signature no longer verifies → the uniform miss.
+    let mut sig = sign_catalog_read(&rk, &w, "dk_read");
+    sig[0] ^= 0xff;
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+    // A signature that binds a DIFFERENT workspace can't authorize this one (no cross-workspace replay).
+    let cross = sign_catalog_read(&rk, &ws("w_other"), "dk_read");
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_read", &cross, NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+    // An UNKNOWN device key id (never registered) is the same miss (resolve fails before any verify).
+    let ghost = sign_catalog_read(&rk, &w, "dk_ghost");
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_ghost", &ghost, NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[sqlx::test]
+async fn a_revoked_device_is_notfound_on_the_catalog_read(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-revoked").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let pk = dev_key(76);
+    register(&fx, &w, &s, "dk", &pk, "p_author").await;
+    published_skill(
+        &fx,
+        &w,
+        &s,
+        &pk,
+        "76000000-0000-4000-8000-000000000001",
+        b"v0",
+    )
+    .await;
+
+    // A REVOKED reader device whose principal is nonetheless a confirmed member, with a VALID signature.
+    let rk = dev_key(77);
+    a.db()
+        .seed_device(
+            &w,
+            "dk_read",
+            &rk.verifying_key().to_bytes(),
+            &prin("reader@acme.com"),
+            true,
+        )
+        .await
+        .unwrap();
+    seat(&fx, &w, "reader@acme.com", "member").await;
+    let sig = sign_catalog_read(&rk, &w, "dk_read");
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+}
+
+#[sqlx::test]
+async fn a_registered_device_whose_principal_is_not_a_confirmed_member_is_notfound(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-nonmember").await;
+    let a = &fx.authority;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let pk = dev_key(78);
+    register(&fx, &w, &s, "dk", &pk, "p_author").await;
+    published_skill(
+        &fx,
+        &w,
+        &s,
+        &pk,
+        "78000000-0000-4000-8000-000000000001",
+        b"v0",
+    )
+    .await;
+
+    // A registered, non-revoked device with a VALID signature, but its principal holds no confirmed seat.
+    let rk = dev_key(79);
+    a.db()
+        .seed_device(
+            &w,
+            "dk_read",
+            &rk.verifying_key().to_bytes(),
+            &prin("stranger@acme.com"),
+            false,
+        )
+        .await
+        .unwrap();
+    let sig = sign_catalog_read(&rk, &w, "dk_read");
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        Err(AuthorityError::NotFound)
+    ));
+    // Even an INVITED (unconfirmed) seat is not a confirmed member → still the uniform miss.
+    a.db()
+        .seed_workspace_member(&w, &prin("stranger@acme.com"), "member", "invited")
+        .await
+        .unwrap();
+    assert!(matches!(
+        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        Err(AuthorityError::NotFound)
     ));
 }

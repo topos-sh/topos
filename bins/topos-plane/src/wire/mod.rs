@@ -92,6 +92,43 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<String, PlaneHttpError
     Ok(token.to_owned())
 }
 
+/// Parse the reading device's key id — the `Topos-Device-Key-Id` header. A missing/blank/non-ASCII value is
+/// the single indistinguishable `MissingReadCredential` (→ 404, never 400/401/403): a device-signed READ
+/// never reveals whether a device, workspace, or membership exists (the same posture as [`bearer_token`]).
+pub(crate) fn device_key_id_header(headers: &HeaderMap) -> Result<String, PlaneHttpError> {
+    let raw = headers
+        .get("topos-device-key-id")
+        .ok_or(PlaneHttpError::MissingReadCredential)?;
+    let text = raw
+        .to_str()
+        .map_err(|_| PlaneHttpError::MissingReadCredential)?
+        .trim();
+    if text.is_empty() {
+        return Err(PlaneHttpError::MissingReadCredential);
+    }
+    Ok(text.to_owned())
+}
+
+/// Parse the catalog-READ credential — the `Topos-Device-Signature` header decoded EXACTLY as the write
+/// routes decode it ([`device_signature`]: base64url-unpadded → the raw 64-byte Ed25519 signature). Unlike
+/// the write path (a malformed signature there is an honest 400), a missing/malformed header on this READ is
+/// the single indistinguishable `MissingReadCredential` (→ 404): the read must not distinguish a missing
+/// credential from an unknown device / workspace / non-membership.
+pub(crate) fn read_signature(headers: &HeaderMap) -> Result<[u8; 64], PlaneHttpError> {
+    let raw = headers
+        .get("topos-device-signature")
+        .ok_or(PlaneHttpError::MissingReadCredential)?;
+    let text = raw
+        .to_str()
+        .map_err(|_| PlaneHttpError::MissingReadCredential)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text.as_bytes())
+        .map_err(|_| PlaneHttpError::MissingReadCredential)?;
+    bytes
+        .try_into()
+        .map_err(|_: Vec<u8>| PlaneHttpError::MissingReadCredential)
+}
+
 /// Decode a base64url-unpadded raw 32-byte key (a device public key in an enrollment body) → `[u8; 32]`.
 /// A bad alphabet or the wrong length is a 400 (`BadId`); the server then re-derives the device key id from
 /// these bytes itself (a client-asserted id is never trusted).

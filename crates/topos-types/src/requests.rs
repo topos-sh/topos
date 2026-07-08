@@ -281,6 +281,47 @@ pub struct WireProposalList {
     pub proposals: Vec<WireOpenProposal>,
 }
 
+/// One skill of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns it: the discovery
+/// metadata a member browses to decide what to follow — **NO bytes** (following still goes through the
+/// per-skill grant). Mirrors `plane-store`'s `SkillIndexRow` with every 32-byte id hex-encoded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireSkillIndexEntry {
+    /// The skill id (the `<skill>` path segment).
+    pub skill_id: String,
+    /// The `current` version's commit id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The `current` byte-exact consent hash (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub bundle_digest: String,
+    /// The `current` pointer's `(epoch, seq)`.
+    pub generation: Generation,
+    /// The unsigned, advisory folder display name (may be absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// When `current` last moved (epoch milliseconds).
+    pub updated_at: i64,
+    /// The count of OPEN, non-stale proposals on the skill.
+    pub open_proposals: u64,
+}
+
+/// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
+/// authorized by workspace membership via a device-signed read (catalog visibility == membership, on both
+/// cloud and self-host). Metadata only, no bytes; a possibly-empty list ordered by `skill_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireSkillIndex {
+    /// The workspace's skills (possibly empty).
+    pub skills: Vec<WireSkillIndexEntry>,
+}
+
 // =================================================================================================
 // Enrollment request/response DTOs — the device-flow / passcode / redeem / admin-claim wire bodies.
 //

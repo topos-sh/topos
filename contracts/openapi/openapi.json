@@ -1341,6 +1341,85 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/skills": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "list_skills",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Topos-Device-Key-Id",
+            "in": "header",
+            "description": "The reading device's key id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Topos-Device-Signature",
+            "in": "header",
+            "description": "base64url(64-byte Ed25519 catalog-read signature over (ws, device_key_id)), 86 chars.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace skill catalog (metadata only; a possibly-empty list ordered by skill id).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireSkillIndex"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/malformed header, unknown/revoked device, bad signature, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}": {
       "get": {
         "tags": [
@@ -3279,6 +3358,70 @@
               "$ref": "#/components/schemas/WireOpenProposal"
             },
             "description": "The open proposals (possibly empty)."
+          }
+        }
+      },
+      "WireSkillIndex": {
+        "type": "object",
+        "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership via a device-signed read (catalog visibility == membership, on both\ncloud and self-host). Metadata only, no bytes; a possibly-empty list ordered by `skill_id`.",
+        "required": [
+          "skills"
+        ],
+        "properties": {
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireSkillIndexEntry"
+            },
+            "description": "The workspace's skills (possibly empty)."
+          }
+        }
+      },
+      "WireSkillIndexEntry": {
+        "type": "object",
+        "description": "One skill of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns it: the discovery\nmetadata a member browses to decide what to follow — **NO bytes** (following still goes through the\nper-skill grant). Mirrors `plane-store`'s `SkillIndexRow` with every 32-byte id hex-encoded.",
+        "required": [
+          "skill_id",
+          "version_id",
+          "bundle_digest",
+          "generation",
+          "updated_at",
+          "open_proposals"
+        ],
+        "properties": {
+          "bundle_digest": {
+            "type": "string",
+            "description": "The `current` byte-exact consent hash (64-char lowercase hex)."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unsigned, advisory folder display name (may be absent)."
+          },
+          "generation": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `current` pointer's `(epoch, seq)`."
+          },
+          "open_proposals": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The count of OPEN, non-stale proposals on the skill.",
+            "minimum": 0
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The skill id (the `<skill>` path segment)."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When `current` last moved (epoch milliseconds)."
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The `current` version's commit id (64-char lowercase hex)."
           }
         }
       },

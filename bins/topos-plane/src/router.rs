@@ -38,6 +38,11 @@ pub fn router(state: PlaneState) -> Router {
             "/v1/current/{read_token}",
             get(routes::current::get_current),
         )
+        // The device-signed workspace CATALOG read (metadata only; catalog visibility == membership).
+        .route(
+            "/v1/workspaces/{ws}/skills",
+            get(routes::skills_index::list_skills),
+        )
         .route(
             "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
             get(routes::bundles::get_bundle),

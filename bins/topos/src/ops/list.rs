@@ -8,17 +8,22 @@
 //! renders empty. `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree
 //! plus any harness config the currency hook lives in (disclosed, never deleted).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use topos_core::digest::to_hex;
 use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
-use topos_types::results::{ListData, SkillEntry, UntrackedEntry};
+use topos_types::requests::WireSkillIndexEntry;
+use topos_types::results::{
+    ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry, UntrackedEntry,
+};
 
 use crate::ctx::Ctx;
-use crate::enroll::{self, FollowModeDoc};
+use crate::device_signer::DeviceSigner;
+use crate::enroll::{self, FollowEntry, FollowModeDoc};
 use crate::error::ClientError;
+use crate::plane::{CatalogSource, PlaneError};
 use crate::scan;
 use crate::sidecar;
 use crate::{doc, scan::ScannedBundle};
@@ -41,6 +46,38 @@ pub(crate) struct ListOutcome {
     pub data: ListData,
     /// `Some` iff enrolled (`instance.json` present — the same presence rule `load_enrollment` uses).
     pub enrollment: Option<ListEnrollment>,
+    /// Per-workspace `--remote` catalog-read failures (one stable-shape line each) — the SAME degradation
+    /// shape `pull` uses: a transport fault reading one workspace's catalog skips it with a warning rather
+    /// than failing the whole `list`. Empty on the local-only path. Rides the `--json` envelope's
+    /// `warnings` + the TTY, outside the pinned `ListData`.
+    pub warnings: Vec<String>,
+}
+
+/// The `--remote` scope: what `list` needs to read the followed workspaces' catalogs and annotate each
+/// entry with local follow-state. `pub(crate)` — built by the composition root (real `ureq` transport +
+/// device signer + the memberships from `user.json`) and by the test (a fake transport). Present only
+/// under `--remote`; `None` is the local-only path.
+pub(crate) struct RemoteScope<'a> {
+    /// The device-signed catalog transport (`GET /v1/workspaces/{ws}/skills`).
+    pub catalog: &'a dyn CatalogSource,
+    /// The device signer — signs each per-workspace catalog read and carries the `device_key_id` selector.
+    pub signer: &'a DeviceSigner,
+    /// Every workspace this install has joined, as `(workspace_id, display_label)` (from `user.json`) — the
+    /// catalog targets.
+    pub memberships: Vec<(String, String)>,
+    /// The global `--workspace <id>` filter (narrows to one joined workspace); `None` = every joined one.
+    pub only: Option<String>,
+}
+
+impl RemoteScope<'_> {
+    /// The workspaces to read the catalog from: the memberships, narrowed by the `--workspace` filter.
+    fn target_workspaces(&self) -> Vec<(&str, &str)> {
+        self.memberships
+            .iter()
+            .filter(|(id, _)| self.only.as_deref().is_none_or(|w| w == id))
+            .map(|(id, label)| (id.as_str(), label.as_str()))
+            .collect()
+    }
 }
 
 /// The enrolled-state disclosure for the TTY header + row annotations.
@@ -68,7 +105,9 @@ pub(crate) struct FollowNote {
     pub following: bool,
 }
 
-/// Inventory the tracked skills, optionally narrowed to one name and/or with the footprint.
+/// Inventory the tracked skills, optionally narrowed to one name and/or with the footprint, and — under
+/// `--remote` ([`RemoteScope`] present) — the followed workspaces' catalogs annotated with local
+/// follow-state (a per-workspace transport fault DEGRADES to a warning, never failing the whole `list`).
 ///
 /// # Errors
 /// [`ClientError::NoSuchSkill`] / [`ClientError::AmbiguousName`] when a name filter does not resolve to
@@ -78,6 +117,7 @@ pub(crate) fn list(
     skill: Option<&str>,
     want_footprint: bool,
     discover: Option<DiscoveryRoots>,
+    remote: Option<RemoteScope<'_>>,
 ) -> Result<ListOutcome, ClientError> {
     // The follow-state is the ONE source for the per-skill workspace provenance, the followed bucket, and
     // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
@@ -218,6 +258,13 @@ pub(crate) fn list(
             .collect(),
         None => Vec::new(),
     };
+    // The local applied version per tracked skill, keyed by id — the cheap `Following`/`FollowingBehind`
+    // discriminant for the `--remote` merge below (the sidecar `lock`'s `base_commit` is the version this
+    // install is on). Captured before `tracked` is flattened to `SkillEntry` rows (which drop the id key).
+    let local_versions: HashMap<String, String> = tracked
+        .iter()
+        .map(|(id, e)| (id.clone(), e.version_id.clone()))
+        .collect();
     let tracked: Vec<SkillEntry> = tracked.into_iter().map(|(_, e)| e).collect();
 
     let footprint = if want_footprint {
@@ -244,16 +291,120 @@ pub(crate) fn list(
         _ => Vec::new(),
     };
 
+    // The `--remote` catalog: for each followed workspace, a device-signed catalog read merged with the
+    // local follow-state. A per-workspace transport fault degrades to a warning (never fails the `list`).
+    let mut warnings: Vec<String> = Vec::new();
+    let remote_available = match remote {
+        Some(scope) => build_remote(&scope, &follows, &local_versions, &mut warnings),
+        None => Vec::new(),
+    };
+
     Ok(ListOutcome {
         data: ListData {
             followed,
             published_by_you: Vec::new(),
             tracked,
             untracked,
+            remote_available,
             footprint,
         },
         enrollment,
+        warnings,
     })
+}
+
+/// Read each target workspace's catalog (device-signed) and merge every entry with the local follow-state.
+/// A per-workspace signing or transport fault DEGRADES: the workspace is skipped with a stable-shape
+/// warning line (the same isolation `pull`'s sweep uses), and the successfully-read workspaces still land.
+/// The result is sorted deterministically by `(workspace_id, skill_id)`.
+fn build_remote(
+    scope: &RemoteScope<'_>,
+    follows: &[FollowEntry],
+    local_versions: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Vec<RemoteSkillEntry> {
+    let mut out: Vec<RemoteSkillEntry> = Vec::new();
+    for (ws_id, ws_label) in scope.target_workspaces() {
+        // Sign the catalog read for THIS workspace (the signature binds the workspace id + device key id).
+        let signature = match scope.signer.sign_catalog_read(ws_id) {
+            Ok(sig) => sig,
+            Err(_) => {
+                warnings.push(format!(
+                    "could not sign the catalog read for workspace {ws_label} — skipped"
+                ));
+                continue;
+            }
+        };
+        let index =
+            match scope
+                .catalog
+                .fetch_catalog(ws_id, scope.signer.device_key_id(), &signature)
+            {
+                Ok(index) => index,
+                Err(e) => {
+                    warnings.push(format!(
+                        "could not read the catalog for workspace {ws_label} ({}) — skipped",
+                        catalog_err_label(&e)
+                    ));
+                    continue;
+                }
+            };
+        for entry in &index.skills {
+            out.push(RemoteSkillEntry {
+                skill_id: entry.skill_id.clone(),
+                workspace_id: ws_id.to_owned(),
+                display_name: entry.display_name.clone(),
+                version_id: entry.version_id.clone(),
+                bundle_digest: entry.bundle_digest.clone(),
+                open_proposals: entry.open_proposals,
+                state: merge_follow_state(entry, ws_id, follows, local_versions),
+            });
+        }
+    }
+    // Deterministic: workspace_id, then skill_id.
+    out.sort_by(|a, b| {
+        a.workspace_id
+            .cmp(&b.workspace_id)
+            .then_with(|| a.skill_id.cmp(&b.skill_id))
+    });
+    out
+}
+
+/// The local follow-state annotation for one catalog entry:
+/// - **`Available`** — no `following == true` [`FollowEntry`] matches `(workspace_id, skill_id)`;
+/// - **`Following`** — followed, and the local applied version matches the catalog `current` (OR the local
+///   version can't be cheaply determined — we default a followed skill to `Following`, never wrongly
+///   claiming it is behind);
+/// - **`FollowingBehind`** — followed, but the local applied version differs from the catalog `current`
+///   (the catalog has moved on — `pull` to advance).
+fn merge_follow_state(
+    entry: &WireSkillIndexEntry,
+    workspace_id: &str,
+    follows: &[FollowEntry],
+    local_versions: &HashMap<String, String>,
+) -> RemoteFollowState {
+    let followed = follows
+        .iter()
+        .any(|f| f.skill_id == entry.skill_id && f.workspace_id == workspace_id && f.following);
+    if !followed {
+        return RemoteFollowState::Available;
+    }
+    match local_versions.get(&entry.skill_id) {
+        Some(local) if *local != entry.version_id => RemoteFollowState::FollowingBehind,
+        // Matches, or no cheap local version to compare — default to Following (never falsely "behind").
+        _ => RemoteFollowState::Following,
+    }
+}
+
+/// A short, leak-free label for a per-workspace catalog-read failure (rides a warning line).
+fn catalog_err_label(e: &PlaneError) -> &'static str {
+    match e {
+        // The real transport maps 404 to an empty index, so `NotFound` here is only a defensive fallback.
+        PlaneError::NotFound => "not authorized",
+        PlaneError::Unreachable(_) => "plane unreachable",
+        PlaneError::Unavailable(_) => "temporarily unavailable",
+        PlaneError::Malformed(_) => "malformed response",
+    }
 }
 
 /// Discover skills sitting in a known harness's skill dir (across the baked registry) that no tracked skill
@@ -342,5 +493,281 @@ fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientE
     match scan::scan(source) {
         Ok(ScannedBundle { bundle_digest, .. }) => Ok(to_hex(&bundle_digest) != lock.bundle_digest),
         Err(_) => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use topos_core::sign::{CatalogReadFields, verify_catalog_read};
+    use topos_harness::ClaudeCode;
+    use topos_types::persisted::Lock;
+    use topos_types::requests::{WireSkillIndex, WireSkillIndexEntry};
+    use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
+
+    use super::*;
+    use crate::ctx::Ctx;
+    use crate::fs_seam::{FsOps, RealFs};
+    use crate::ids::{RealClock, RealIds};
+    use crate::plane::{InertFollow, InertPlane};
+    use crate::sidecar::Layout;
+
+    // 64-char lowercase-hex version ids (the schema-pinned shape).
+    const VER_A: &str = "aa"; // repeated ×32 below
+    const VER_B: &str = "bb";
+    const VER_C: &str = "cc";
+    const VER_X: &str = "dd";
+    const DIGEST: &str = "ee";
+
+    fn hex(byte: &str) -> String {
+        byte.repeat(32)
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("topos-listrem-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A fake device-signed catalog transport: canned per-workspace responses (`Ok` index or a transport
+    /// fault), capturing every `(workspace_id, device_key_id, signature)` so the test can prove the caller
+    /// signed the correct per-workspace frame.
+    struct FakeCatalog {
+        ok: HashMap<String, WireSkillIndex>,
+        fail: HashSet<String>,
+        calls: RefCell<Vec<(String, String, [u8; 64])>>,
+    }
+    impl CatalogSource for FakeCatalog {
+        fn fetch_catalog(
+            &self,
+            workspace_id: &str,
+            device_key_id: &str,
+            signature: &[u8; 64],
+        ) -> Result<WireSkillIndex, PlaneError> {
+            self.calls.borrow_mut().push((
+                workspace_id.to_owned(),
+                device_key_id.to_owned(),
+                *signature,
+            ));
+            if self.fail.contains(workspace_id) {
+                return Err(PlaneError::Unavailable("boom".into()));
+            }
+            Ok(self
+                .ok
+                .get(workspace_id)
+                .cloned()
+                .unwrap_or(WireSkillIndex { skills: Vec::new() }))
+        }
+    }
+
+    fn catalog_entry(skill_id: &str, version: &str) -> WireSkillIndexEntry {
+        WireSkillIndexEntry {
+            skill_id: skill_id.to_owned(),
+            version_id: hex(version),
+            bundle_digest: hex(DIGEST),
+            generation: Generation { epoch: 1, seq: 1 },
+            display_name: Some(skill_id.to_owned()),
+            updated_at: 1,
+            open_proposals: 0,
+        }
+    }
+
+    /// Lay a tracked skill dir (`skills/<id>/lock.json` on `version`) so the tracked walk finds it and the
+    /// local-version map records it.
+    fn lay_skill(fs: &RealFs, layout: &Layout, id: &str, name: &str, version: &str) {
+        let sid = crate::id::SkillId::parse(id).unwrap();
+        fs.create_dir_all(&layout.skill_dir(&sid)).unwrap();
+        doc::write_doc(
+            fs,
+            &layout.published(&sid).lock,
+            &Lock {
+                schema_version: PERSISTED_SCHEMA_VERSION,
+                skill_id: id.to_owned(),
+                name: name.to_owned(),
+                base_commit: hex(version),
+                bundle_digest: hex(DIGEST),
+                files: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn follow_entry(skill_id: &str, workspace_id: &str, following: bool) -> FollowEntry {
+        FollowEntry {
+            skill_id: skill_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            read_token: "rt_secret".to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: false,
+            following,
+        }
+    }
+
+    #[test]
+    fn remote_merges_follow_state_and_degrades_a_failed_workspace() {
+        let home = scratch("merge");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+
+        // Local state: two followed skills in w_acme (one on VER_A, one on VER_B); s_docs not followed.
+        lay_skill(&fs, &layout, "s_deploy", "deploy", VER_A);
+        lay_skill(&fs, &layout, "s_runbook", "runbook", VER_B);
+        enroll::write_follows_merged(
+            &fs,
+            &layout,
+            &[
+                follow_entry("s_deploy", "w_acme", true),
+                follow_entry("s_runbook", "w_acme", true),
+            ],
+        )
+        .unwrap();
+
+        // The catalog for w_acme: s_deploy@A (== local → Following), s_docs@X (not followed → Available),
+        // s_runbook@C (!= local B → FollowingBehind). w_beta's read fails (degrades to a warning).
+        let mut ok = HashMap::new();
+        ok.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![
+                    catalog_entry("s_deploy", VER_A),
+                    catalog_entry("s_docs", VER_X),
+                    catalog_entry("s_runbook", VER_C),
+                ],
+            },
+        );
+        let fake = FakeCatalog {
+            ok,
+            fail: HashSet::from(["w_beta".to_owned()]),
+            calls: RefCell::new(Vec::new()),
+        };
+        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
+
+        let ids = RealIds;
+        let clock = RealClock;
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let harness = ClaudeCode::new(scratch("adapter"), &fs);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &plane,
+            plane_key: [0u8; 32],
+            follow: &follow,
+        };
+
+        let scope = RemoteScope {
+            catalog: &fake,
+            signer: &signer,
+            memberships: vec![
+                ("w_acme".to_owned(), "Acme".to_owned()),
+                ("w_beta".to_owned(), "Beta".to_owned()),
+            ],
+            only: None,
+        };
+        let out = list(&ctx, None, false, None, Some(scope)).unwrap();
+
+        // Partial results: w_acme's three skills land even though w_beta failed. Sorted by skill_id.
+        let remote = &out.data.remote_available;
+        assert_eq!(remote.len(), 3, "{remote:?}");
+        assert_eq!(remote[0].skill_id, "s_deploy");
+        assert_eq!(remote[0].state, RemoteFollowState::Following);
+        assert_eq!(remote[1].skill_id, "s_docs");
+        assert_eq!(remote[1].state, RemoteFollowState::Available);
+        assert_eq!(remote[2].skill_id, "s_runbook");
+        assert_eq!(remote[2].state, RemoteFollowState::FollowingBehind);
+        assert!(remote.iter().all(|r| r.workspace_id == "w_acme"));
+
+        // The failed workspace degraded to exactly one warning (never failing the whole list).
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("Beta"), "{:?}", out.warnings);
+
+        // Both workspaces were signed + read; each captured signature verifies over the per-workspace
+        // frame the plane rebuilds (the caller signed the correct workspace, with this device's key id).
+        let calls = fake.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        for (ws, key_id, sig) in calls.iter() {
+            assert_eq!(key_id, signer.device_key_id());
+            let fields = CatalogReadFields {
+                workspace_id: ws,
+                device_key_id: signer.device_key_id(),
+            };
+            assert!(
+                verify_catalog_read(&fields, sig, &signer.public_key()),
+                "signature must verify for workspace {ws}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_workspace_filter_narrows_to_one() {
+        let home = scratch("filter");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
+
+        let mut ok = HashMap::new();
+        ok.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![catalog_entry("s_docs", VER_X)],
+            },
+        );
+        ok.insert(
+            "w_beta".to_owned(),
+            WireSkillIndex {
+                skills: vec![catalog_entry("s_other", VER_A)],
+            },
+        );
+        let fake = FakeCatalog {
+            ok,
+            fail: HashSet::new(),
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let ids = RealIds;
+        let clock = RealClock;
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let harness = ClaudeCode::new(scratch("adapter2"), &fs);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &plane,
+            plane_key: [0u8; 32],
+            follow: &follow,
+        };
+
+        // `--workspace w_beta` → only w_beta's catalog is read.
+        let scope = RemoteScope {
+            catalog: &fake,
+            signer: &signer,
+            memberships: vec![
+                ("w_acme".to_owned(), "Acme".to_owned()),
+                ("w_beta".to_owned(), "Beta".to_owned()),
+            ],
+            only: Some("w_beta".to_owned()),
+        };
+        let out = list(&ctx, None, false, None, Some(scope)).unwrap();
+        assert_eq!(out.data.remote_available.len(), 1);
+        assert_eq!(out.data.remote_available[0].skill_id, "s_other");
+        assert_eq!(out.data.remote_available[0].workspace_id, "w_beta");
+        // Only the filtered workspace was contacted.
+        assert_eq!(fake.calls.borrow().len(), 1);
+        assert_eq!(fake.calls.borrow()[0].0, "w_beta");
     }
 }

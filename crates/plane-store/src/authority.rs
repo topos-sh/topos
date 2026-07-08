@@ -1214,6 +1214,29 @@ impl Authority {
         crate::session_read::list_skills_session(self, ws, acting_email, plane_mode).await
     }
 
+    /// The workspace catalog for a DEVICE-signed member read (`list --remote`) — the catalog-visibility
+    /// twin of [`list_skills_session`](Self::list_skills_session), authorized WITHOUT a web session and
+    /// available on BOTH cloud and self-host (device auth IS the self-host membership story, so this op
+    /// does **not** take or consult a [`DeploymentMode`]). Authorized iff the device is a NON-REVOKED
+    /// registered device, its catalog-read signature over `(workspace_id, device_key_id)` verifies against
+    /// its registered key, and its bound principal is a CONFIRMED workspace member. Every unknown/revoked
+    /// device, bad signature, or non-member is the single indistinguishable [`AuthorityError::NotFound`]. A
+    /// pool read — no transaction, no receipt, no op id. `now` is accepted for signature parity with the
+    /// token-lane reads (device registration carries no expiry to enforce).
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the uniformity rule above; [`AuthorityError::Integrity`] on a
+    /// corrupt stored row; [`AuthorityError::Internal`] on a database fault.
+    pub async fn list_skills_device(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        signature: &[u8; 64],
+        now: i64,
+    ) -> Result<Vec<SkillIndexRow>> {
+        crate::session_read::list_skills_device(self, ws, device_key_id, signature, now).await
+    }
+
     /// A skill's signed `current` pointer for a confirmed member. `Ok(None)` — no signed pointer exists
     /// for this (ws, skill): a cataloged-but-never-signed skill and an unknown skill id are deliberately
     /// indistinguishable here; the composing wrapper folds both into the uniform miss — is a
