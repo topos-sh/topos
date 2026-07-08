@@ -361,6 +361,21 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   rejected-candidate 404 through both lanes, and the NULL-digest-under-current Integrity probe). Reads
   mint nothing durable. The gate→reach two-statement window (a principal revoked between them completes
   one in-flight read) is the same accepted posture as the authorize-then-fetch TOCTOU.
+- **The DEVICE-lane catalog read (`list_skills_device`) — an OSS HTTP route, unlike the session lane.**
+  A public `Authority::list_skills_device(ws, device_key_id, signature, now)` that lets a member's
+  **device** (not a web session) read the SAME workspace catalog `list_skills_session` returns: resolve
+  the non-revoked registered device → `topos_core::sign::verify_catalog_read` over
+  `CatalogReadFields{workspace_id, device_key_id}` → `confirmed_member`, then the shared
+  `build_skill_index` (the session lane's index build, factored out and shared verbatim). Every failure
+  folds to the one uniform `NotFound` (a corrupt stored principal stays `Integrity`). It takes **no
+  `DeploymentMode`** and applies **no self-host denial** — device auth IS the self-host membership story,
+  so this lane serves the catalog on BOTH cloud and self-host (the property that unifies the OSS/cloud
+  catalog-visibility split: catalog visibility == workspace membership on every lane; the lanes differ
+  only in how the principal is authenticated — session email vs. device signature). Served by
+  `topos-plane`'s `GET /v1/workspaces/{ws}/skills` (the FIRST HTTP-routed member-scoped read; the session
+  reads stay lib-only). Driven by `src/tests/session_read.rs`'s device-lane suite (member reads the
+  catalog; tampered/cross-workspace signature, revoked device, and non-member all `NotFound`; and the key
+  contrast — the device lane SERVES a member on self-host where the session lane denies).
 - **The web-session REVIEW leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
   a hosted composition's authenticated admin routes call them; self-host uniformly denied in-op):
   **`review_approve_session`** / **`review_reject_session`** (approve / reject an OPEN proposal from a
