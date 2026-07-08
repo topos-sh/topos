@@ -25,6 +25,7 @@ use topos_harness::{
 };
 use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
+use topos_types::requests::WireSkillIndex;
 use topos_types::results::{
     DiffData, ListData, ProposeData, PublishData, PullData, RevertData, ReviewData,
 };
@@ -36,8 +37,8 @@ use crate::enroll::{self, FollowEntry, FollowModeDoc, Follows, Instance, Members
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
 use crate::plane::{
-    ContributeSource, EnrollSource, FollowContext, FollowMode, FollowSource, GovernanceSource,
-    InertFollow, InertPlane, PlaneSource,
+    CatalogSource, ContributeSource, EnrollSource, FollowContext, FollowMode, FollowSource,
+    GovernanceSource, InertFollow, InertPlane, PlaneSource,
 };
 use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
 use crate::sidecar::Layout;
@@ -1634,6 +1635,76 @@ impl ContributeHarness {
     #[must_use]
     pub fn placement_files(&self) -> Vec<(String, u32, Vec<u8>)> {
         snapshot_dir(&self.placement())
+    }
+
+    /// The RAW device-signed catalog round-trip (`list --remote`'s transport leg): build the REAL
+    /// [`UreqDeviceClient`] at `base_url` + this rig's REAL [`DeviceSigner`], sign the catalog read for
+    /// `workspace_id`, and `fetch_catalog` over loopback HTTP — proving client-sign → the
+    /// `Topos-Device-Key-Id` + base64url `Topos-Device-Signature` headers → the plane's verify → the
+    /// confirmed-member gate → the `WireSkillIndex` body (returned verbatim). A **404** — not a member /
+    /// bad signature / no such workspace — maps to an EMPTY index (the transport's degradation contract),
+    /// so the caller drives the negative case through this same method.
+    ///
+    /// # Errors
+    /// The transport's typed error rendered to a string (a connect-level / non-200 fault).
+    pub fn fetch_catalog(
+        &self,
+        base_url: &str,
+        workspace_id: &str,
+    ) -> Result<WireSkillIndex, String> {
+        let signer =
+            DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
+        let client = UreqDeviceClient::new(base_url.to_owned());
+        let signature = signer
+            .sign_catalog_read(workspace_id)
+            .map_err(|e| e.to_string())?;
+        CatalogSource::fetch_catalog(&client, workspace_id, signer.device_key_id(), &signature)
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Drive the real `list --remote` MERGE over the REAL catalog transport: build a [`ops::RemoteScope`]
+    /// over a live [`UreqDeviceClient`] + this rig's [`DeviceSigner`] and run `ops::list`, so the returned
+    /// `remote_available` is the plane's device-signed catalog annotated with THIS install's on-disk
+    /// follow-state (`follows.json` following flags + the tracked lock versions). `memberships` are the
+    /// `(workspace_id, label)` catalog targets; `only` is the `--workspace` filter. Returns
+    /// `(ListData, warnings)` — the per-workspace catalog faults ride the warnings, outside the pinned data.
+    ///
+    /// # Panics
+    /// If the list errors (a hard wiring fault).
+    #[must_use]
+    pub fn list_remote(
+        &self,
+        base_url: &str,
+        memberships: Vec<(String, String)>,
+        only: Option<String>,
+    ) -> (ListData, Vec<String>) {
+        let signer = DeviceSigner::load_or_generate(&self.fs, &self.layout())
+            .expect("load-or-generate device key");
+        let catalog = UreqDeviceClient::new(base_url.to_owned());
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("load-or-create device id");
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &inert_plane,
+            plane_key: [0u8; 32],
+            follow: &inert_follow,
+        };
+        let scope = ops::RemoteScope {
+            catalog: &catalog,
+            signer: &signer,
+            memberships,
+            only,
+        };
+        let outcome = ops::list(&ctx, None, false, None, Some(scope))
+            .expect("test_support: list --remote failed");
+        (outcome.data, outcome.warnings)
     }
 }
 

@@ -294,9 +294,19 @@ pub(crate) fn list(
     // The `--remote` catalog: for each followed workspace, a device-signed catalog read merged with the
     // local follow-state. A per-workspace transport fault degrades to a warning (never fails the `list`).
     let mut warnings: Vec<String> = Vec::new();
-    let remote_available = match remote {
-        Some(scope) => build_remote(&scope, &follows, &local_versions, &mut warnings),
-        None => Vec::new(),
+    let remote_available = match (remote, skill) {
+        // Bare-sweep only, mirroring untracked discovery above: the catalog is a browse of the WHOLE
+        // workspace, so a name-narrowed `list <skill>` skips it. This also keeps `local_versions` complete
+        // (it is captured after the no-op narrowing), so the follow-state merge can never mislabel a
+        // followed skill the narrowing dropped as `Following` when it is really `FollowingBehind`.
+        (Some(scope), None) => build_remote(&scope, &follows, &local_versions, &mut warnings),
+        (Some(_), Some(_)) => {
+            warnings.push(
+                "the remote catalog is listed only on a bare `topos list --remote`, not with a skill filter — skipped".to_owned(),
+            );
+            Vec::new()
+        }
+        (None, _) => Vec::new(),
     };
 
     Ok(ListOutcome {
@@ -769,5 +779,64 @@ mod tests {
         // Only the filtered workspace was contacted.
         assert_eq!(fake.calls.borrow().len(), 1);
         assert_eq!(fake.calls.borrow()[0].0, "w_beta");
+    }
+
+    #[test]
+    fn remote_is_skipped_and_warns_when_narrowed_to_a_skill() {
+        let home = scratch("narrowed");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
+        // A tracked skill so the name narrows cleanly (list <skill> requires exactly one match).
+        lay_skill(&fs, &layout, "s_docs", "docs", VER_X);
+
+        let mut ok = HashMap::new();
+        ok.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![catalog_entry("s_docs", VER_X)],
+            },
+        );
+        let fake = FakeCatalog {
+            ok,
+            fail: HashSet::new(),
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let ids = RealIds;
+        let clock = RealClock;
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let harness = ClaudeCode::new(scratch("adapter3"), &fs);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &plane,
+            plane_key: [0u8; 32],
+            follow: &follow,
+        };
+        let scope = RemoteScope {
+            catalog: &fake,
+            signer: &signer,
+            memberships: vec![("w_acme".to_owned(), "Acme".to_owned())],
+            only: None,
+        };
+        // `list docs --remote`: the catalog is a bare-sweep browse, so a name-narrowed list SKIPS it with a
+        // warning and attempts NO catalog read — the narrowing can never mislabel a followed skill.
+        let out = list(&ctx, Some("docs"), false, None, Some(scope)).unwrap();
+        assert!(out.data.remote_available.is_empty());
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("bare `topos list --remote`"))
+        );
+        assert!(
+            fake.calls.borrow().is_empty(),
+            "no catalog read is attempted when narrowed to a skill"
+        );
     }
 }
