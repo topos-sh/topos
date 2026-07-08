@@ -411,7 +411,7 @@ fn finish_list(
             if json {
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = out.warnings.clone();
+                envelope.warnings = out.warnings;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::list_tty(&out));
