@@ -184,6 +184,146 @@ fn assert_golden(name: &str, command: &str, value: Value) {
     assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
 }
 
+/// A fake remote source: hands back a fixed `.tar.gz` regardless of the spec (the fetch transport is
+/// proven separately over loopback; here we exercise the op's extract→place→adopt→origin flow).
+struct FakeGit(Vec<u8>);
+impl crate::git_source::GitTarballSource for FakeGit {
+    fn fetch(
+        &self,
+        _spec: &crate::source::RemoteSpec,
+    ) -> Result<Vec<u8>, crate::error::ClientError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Build a `.tar.gz` with a `TOP/` prefix over `(repo-relative path, bytes, mode)` entries.
+fn build_repo_tarball(top: &str, entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    for (name, bytes, mode) in entries {
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_size(bytes.len() as u64);
+        h.set_mode(*mode);
+        h.set_mtime(0);
+        tar.append_data(&mut h, format!("{top}/{name}"), *bytes)
+            .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+fn github_spec(owner: &str, repo: &str, git_ref: Option<&str>) -> crate::source::RemoteSpec {
+    crate::source::RemoteSpec {
+        host: crate::source::GitHost::GitHub,
+        owner: owner.into(),
+        repo: repo.into(),
+        git_ref: git_ref.map(str::to_owned),
+        subdir: None,
+    }
+}
+
+#[test]
+fn add_remote_imports_a_repo_skill_places_bytes_and_records_origin() {
+    let targz = build_repo_tarball(
+        "vercel-labs-agent-skills-3f9a2c1",
+        &[
+            (
+                "skills/web-design-guidelines/SKILL.md",
+                b"---\nname: web-design-guidelines\n---\n# guide\n",
+                0o644,
+            ),
+            (
+                "skills/web-design-guidelines/reference/tokens.md",
+                b"tokens",
+                0o644,
+            ),
+            ("LICENSE", b"MIT\n", 0o644),
+            ("README.md", b"top-level readme\n", 0o644),
+        ],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("vercel-labs", "agent-skills", Some("main"));
+
+    let h = Harness::new("remote");
+    let project = Scratch::new("remote-proj");
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    // A monorepo with several skills would need `--skill`; here it's the sole skill, so it self-selects.
+    let opts = ops::AddRemoteOpts {
+        skill: Some("web-design-guidelines".into()),
+        harness: None, // default = the active harness (claude-code) → project `.claude/skills`
+        global: false,
+    };
+
+    let data = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).expect("import succeeds");
+    assert_eq!(data.name, "web-design-guidelines");
+    let origin = data.origin.expect("a remote import records its origin");
+    assert_eq!(origin.source, "github.com/vercel-labs/agent-skills");
+    assert_eq!(origin.git_ref.as_deref(), Some("main"));
+    assert_eq!(origin.commit.as_deref(), Some("3f9a2c1"));
+    assert_eq!(
+        origin.subdir.as_deref(),
+        Some("skills/web-design-guidelines")
+    );
+    assert_eq!(origin.license.as_deref(), Some("LICENSE"));
+
+    // The bytes landed in the project's claude-code skills dir — only the skill subtree, byte-exact.
+    let dest = project.0.join(".claude/skills/web-design-guidelines");
+    assert_eq!(
+        std::fs::read(dest.join("SKILL.md")).unwrap(),
+        b"---\nname: web-design-guidelines\n---\n# guide\n"
+    );
+    assert!(dest.join("reference/tokens.md").is_file());
+    assert!(
+        !dest.join("README.md").exists(),
+        "only the skill subtree lands, not the repo root"
+    );
+
+    // origin.json is persisted in the sidecar for a later re-sync to build on.
+    let skill_id = sid(&data.skill_id);
+    let origin_doc = h
+        .home
+        .0
+        .join("skills")
+        .join(skill_id.as_str())
+        .join("origin.json");
+    assert!(origin_doc.is_file(), "origin.json written into the sidecar");
+
+    // Re-importing the same skill refuses to clobber — the tracked dir reports ALREADY_TRACKED.
+    let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+}
+
+#[test]
+fn add_remote_ambiguous_multi_skill_repo_lists_choices() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[
+            ("skills/alpha/SKILL.md", b"a", 0o644),
+            ("skills/beta/SKILL.md", b"b", 0o644),
+        ],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("remote-ambig");
+    let project = Scratch::new("remote-ambig-proj");
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: None,
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_SKILL");
+    // Nothing was written — a failed selection leaves the project tree clean.
+    assert!(!project.0.join(".claude/skills/alpha").exists());
+}
+
 #[test]
 fn add_minting_is_deterministic_and_names_from_frontmatter() {
     let src = editable_source();

@@ -106,24 +106,53 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Add { target, path } => {
-            // `--path` adopts the explicit directory (today's behavior). A `target` positional is a skill
-            // NAME resolved against the SAME untracked inventory `list` discovers, then adopted by the one
-            // unchanged `ops::add` path. clap's required `source` group guarantees exactly one is present.
-            let result = match (target, path) {
-                (_, Some(path)) => ops::add(&ctx, &path),
-                (Some(target), None) => match list_discovery(false) {
+        Command::Add {
+            source,
+            skill,
+            harness,
+            global,
+        } => {
+            // The one positional is classified by shape (crate::source): a local path adopts in place; a
+            // bare name resolves against `list`'s untracked discovery; a remote `owner/repo`/URL fetches +
+            // imports. No prompts — a remote import is fully non-interactive (the source's trust is the
+            // user/agent's to verify).
+            let result = match crate::source::classify(&source) {
+                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
+                crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
                     // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
                     // agree on the name even for a harness the active adapter does not recognize.
-                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &target)
-                        .and_then(|(p, name)| ops::add_with_name(&ctx, &p, Some(&name))),
+                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
+                        .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
                     None => Err(ClientError::InvalidArgument(
-                        "cannot resolve a skill name without $HOME set — adopt a directory with \
-                         `topos add --path <dir>`"
+                        "cannot resolve a skill name without $HOME set — adopt a directory by path \
+                         (`topos add ./<dir>`)"
                             .into(),
                     )),
                 },
-                (None, None) => unreachable!("clap requires the add `source` group"),
+                crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
+                    Some(roots) => {
+                        let git = crate::plane_http::UreqGitSource::new();
+                        ops::add_remote(
+                            &ctx,
+                            &git,
+                            &spec,
+                            &roots,
+                            &ops::AddRemoteOpts {
+                                skill,
+                                harness,
+                                global,
+                            },
+                        )
+                    }
+                    None => Err(ClientError::InvalidArgument(
+                        "cannot import a remote skill without $HOME set (needed to resolve the harness \
+                         skills dir)"
+                            .into(),
+                    )),
+                },
+                crate::source::SourceSpec::Unsupported(msg) => {
+                    Err(ClientError::InvalidArgument(msg))
+                }
             };
             finish(json, cmd_name, result, render::add_tty, &diag)
         }

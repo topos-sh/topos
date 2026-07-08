@@ -86,7 +86,7 @@ pub(crate) enum ClientError {
     /// argv token). Distinct from [`ClientError::NoSuchSkill`] (which is about *tracked* skills).
     #[error(
         "no untracked skill named '{name}' — run `topos list` to see what's adoptable, or adopt a \
-         directory with `topos add --path <dir>`"
+         directory by path (`topos add ./<dir>`)"
     )]
     NoUntrackedSkill { name: String },
     /// `add <skill>` named a skill that is already tracked (so discovery excludes it) — the right move is
@@ -94,7 +94,7 @@ pub(crate) enum ClientError {
     /// carry the `ALREADY_TRACKED` code so an agent branches the same on either.
     #[error(
         "a skill named '{name}' is already tracked — edit it in place (`topos diff {name}`), or adopt a \
-         different directory with `topos add --path <dir>`"
+         different directory by path (`topos add ./<dir>`)"
     )]
     AlreadyTrackedName { name: String },
     /// `add <skill>` resolved a name that sits under more than one harness's skill dir. The caller must
@@ -111,7 +111,7 @@ pub(crate) enum ClientError {
     /// both the user- and project-scope dir, say). `@<harness>` cannot split them, so the caller adopts one
     /// explicitly by path. The `paths` are the user's own directories, shown VERBATIM.
     #[error(
-        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one with `topos add --path <dir>`",
+        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one by path (`topos add <dir>`)",
         paths.len(), paths.join(", ")
     )]
     AmbiguousScope {
@@ -123,10 +123,10 @@ pub(crate) enum ClientError {
     /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
     #[error("{0}")]
     HarnessNotFound(String),
-    /// `add <arg>` was given a positional that looks like a path (a `/`, a leading `.`/`~`, or an existing
-    /// path on disk) rather than a skill name — the user likely meant the `--path` escape hatch. Usage
-    /// guidance shown VERBATIM (the arg is the user's own token).
-    #[error("'{arg}' looks like a path — to adopt a directory, use `topos add --path {arg}`")]
+    /// `add <arg>` was given a bare token that turned out to name an existing path on disk (a `~`-prefixed
+    /// token, or a cwd entry) rather than a discovered skill name — the user likely meant a path adopt.
+    /// Usage guidance shown VERBATIM (the arg is the user's own token).
+    #[error("'{arg}' looks like a path — to adopt a directory, prefix it (`topos add ./{arg}`)")]
     PathNotName { arg: String },
     /// The placement cannot be materialized safely (a non-directory sits where a skill dir belongs, a
     /// symlink cannot be resolved to a directory, or the filesystem supports no safe swap) — refused
@@ -225,6 +225,59 @@ pub(crate) enum ClientError {
     /// (the binary's path + how to reinstall); a path is not a secret, so it is shown VERBATIM.
     #[error("{0}")]
     UpgradeUnwritable(String),
+    /// `add <owner/repo>` (a remote import) could not fetch the source over the network (unreachable
+    /// host, an HTTP error, a not-found repo/ref). Transient by default — the agent may retry. The
+    /// message is all-public (the source + a transport reason), so it is shown VERBATIM.
+    #[error("could not fetch {0}")]
+    RemoteFetch(String),
+    /// A fetched remote source (a repo, or the `#<ref>`/`/tree/` subtree named) contained no `SKILL.md` —
+    /// there is no skill to adopt. Usage guidance shown VERBATIM (the source is the user's own token).
+    /// (`src`, not `source` — `thiserror` reserves a field named `source` for an error cause.)
+    #[error(
+        "no skill found in {src} — a skill is a directory with a SKILL.md (looked at the root and \
+         under skills/)"
+    )]
+    NoSkillInSource { src: String },
+    /// `add <owner/repo> --skill <name>` named a skill the fetched source does not contain. The message
+    /// names the skills that ARE present (VERBATIM — repo skill names are public), so the agent re-picks.
+    #[error(
+        "no skill named '{skill}' in {src} — it has: {} (pick one with `--skill <name>`)",
+        available.join(", ")
+    )]
+    SkillNotInRepo {
+        skill: String,
+        src: String,
+        available: Vec<String>,
+    },
+    /// `add <owner/repo>` fetched a source holding MORE than one skill and none was named — the agent
+    /// disambiguates with `--skill <name>`. The `skills` are the repo's skill names, shown VERBATIM.
+    #[error(
+        "{src} has {} skills ({}) — adopt one with `--skill <name>`",
+        skills.len(), skills.join(", ")
+    )]
+    AmbiguousSkillInRepo { src: String, skills: Vec<String> },
+    /// A repo holds MORE than one skill dir with the SAME basename (e.g. `skills/.curated/foo` and
+    /// `skills/.experimental/foo`) — `--skill <name>` cannot pick between them, so the import refuses to
+    /// guess. The `paths` are the colliding repo-relative dirs; the fix is a subdir-exact `/tree/<ref>/`
+    /// URL. Shares the `AMBIGUOUS_SKILL` code (an agent branches the same).
+    #[error(
+        "the name '{name}' maps to {} directories in {src} ({}) — import one by its \
+         https://github.com/…/tree/<ref>/<subdir> URL",
+        paths.len(), paths.join(", ")
+    )]
+    DuplicateSkillName {
+        src: String,
+        name: String,
+        paths: Vec<String>,
+    },
+    /// The destination skill directory a remote import would land in already exists and is NOT tracked by
+    /// topos (a foreign, non-empty dir) — refused rather than clobber it. The agent picks another
+    /// `--harness`/scope, or clears the dir. The `path` is the user's own directory, shown VERBATIM.
+    #[error(
+        "'{path}' already exists and is not tracked by topos — refusing to overwrite it; adopt it in \
+         place (`topos add {path}`), or land elsewhere with `--harness <slug>`/`--global`"
+    )]
+    PlacementOccupied { path: String },
     /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
@@ -285,6 +338,14 @@ impl ClientError {
             ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
             // A not-writable install location is a filesystem-shaped, permanent failure.
             ClientError::UpgradeUnwritable(_) => "IO_ERROR",
+            // The remote-import family (each machine-branchable; a fetch fault is retryable, the rest are
+            // permanent selection/placement errors the agent resolves by changing its argv).
+            ClientError::RemoteFetch(_) => "REMOTE_FETCH",
+            ClientError::NoSkillInSource { .. } => "NO_SKILL_IN_SOURCE",
+            ClientError::SkillNotInRepo { .. } => "SKILL_NOT_IN_REPO",
+            ClientError::AmbiguousSkillInRepo { .. } => "AMBIGUOUS_SKILL",
+            ClientError::DuplicateSkillName { .. } => "AMBIGUOUS_SKILL",
+            ClientError::PlacementOccupied { .. } => "PLACEMENT_OCCUPIED",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
         }
@@ -297,7 +358,13 @@ impl ClientError {
             // same terminal class — the agent disambiguates and retries.
             ClientError::AmbiguousName { .. }
             | ClientError::AmbiguousHarness { .. }
-            | ClientError::AmbiguousScope { .. } => TerminalOutcome::AmbiguousName,
+            | ClientError::AmbiguousScope { .. }
+            // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
+            // retry" class.
+            | ClientError::AmbiguousSkillInRepo { .. }
+            | ClientError::DuplicateSkillName { .. } => TerminalOutcome::AmbiguousName,
+            // A network fetch fault is transient — the agent may retry the same import.
+            ClientError::RemoteFetch(_) => TerminalOutcome::RetryableFailure,
             // A transient filesystem or plane-read failure is retryable — whether it surfaced
             // client-side, in the store, or reading the plane.
             ClientError::Io(_)

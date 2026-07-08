@@ -274,6 +274,30 @@ pub enum DiffSource {
 // from the documented mechanics; additive-only; will tighten as each verb is built.
 // =================================================================================================
 
+/// Where an adopted skill was imported FROM, when `add` fetched it from a remote source (a GitHub repo).
+/// All fields are public provenance — never a secret — and travel with the adopted skill so the agent (and
+/// a later re-sync) can see the upstream it came from. `None` on `AddData` for a locally-adopted skill.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct SkillOrigin {
+    /// The `<host>/<owner>/<repo>` the skill was imported from (e.g. `github.com/vercel-labs/agent-skills`).
+    pub source: String,
+    /// The branch / tag / commit requested (`#<ref>` or a `/tree/<ref>/…` URL), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// The resolved commit the bytes came from (best-effort — parsed from the fetched archive), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The skill's path within the repo (a monorepo subdir), if it was not the repo root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+    /// A LICENSE file found at the skill root or repo root, recorded as provenance (never injected into the
+    /// bundle — the adopted bytes stay byte-exact to the repo). `None` if the source carried no license.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+}
+
 /// `add` (local, offline — no plane op, `receipt: null`). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -299,6 +323,10 @@ pub struct AddData {
     /// `~/.topos/`. `None` for a plain directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
+    /// Where the skill was imported FROM, when `add` fetched it from a remote source. `None` for a
+    /// locally-adopted skill (a path or a discovered name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SkillOrigin>,
 }
 
 /// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.

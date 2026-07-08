@@ -950,6 +950,98 @@ impl crate::release::ReleaseSource for UreqReleases {
     }
 }
 
+// =================================================================================================
+// UreqGitSource — the real remote-source fetcher for `add <owner/repo>`. Downloads a repo as a `.tar.gz`
+// from GitHub's API tarball endpoint (which 302-redirects to codeload; the agent follows it) over the same
+// blocking agent as the other transports. GitHub 403s a UA-less request, so every call carries this
+// build's. Extraction + selection + the byte-exact digest stay in the op; this is a dumb byte fetcher.
+// =================================================================================================
+
+/// The blocking `ureq` remote-source: a public repo tarball over the GitHub API.
+pub(crate) struct UreqGitSource {
+    agent: ureq::Agent,
+}
+
+impl UreqGitSource {
+    pub(crate) fn new() -> Self {
+        Self {
+            agent: ureq::Agent::new_with_config(agent_config()),
+        }
+    }
+}
+
+impl crate::git_source::GitTarballSource for UreqGitSource {
+    fn fetch(&self, spec: &crate::source::RemoteSpec) -> Result<Vec<u8>, ClientError> {
+        // Only GitHub is wired today; `crate::source::classify` guarantees it, and the closed `GitHost`
+        // enum makes a non-GitHub host unrepresentable — so no host branch is needed.
+        let _ = spec.host.domain();
+        if !is_repo_seg(&spec.owner) || !is_repo_seg(&spec.repo) {
+            return Err(ClientError::RemoteFetch(format!(
+                "{}: invalid owner/repo",
+                spec.label()
+            )));
+        }
+        // GitHub's `/tarball/{ref}` (ref optional → the default branch) redirects to codeload.
+        let url = match &spec.git_ref {
+            Some(r) => {
+                let r = sanitize_ref(r).ok_or_else(|| {
+                    ClientError::RemoteFetch(format!("{}: invalid ref", spec.label()))
+                })?;
+                format!(
+                    "https://api.github.com/repos/{}/{}/tarball/{r}",
+                    spec.owner, spec.repo
+                )
+            }
+            None => format!(
+                "https://api.github.com/repos/{}/{}/tarball",
+                spec.owner, spec.repo
+            ),
+        };
+        let resp = self
+            .agent
+            .get(&url)
+            .header("User-Agent", RELEASE_USER_AGENT)
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|e| ClientError::RemoteFetch(format!("{}: {e}", spec.label())))?;
+        match resp.status().as_u16() {
+            200..=299 => read_body(resp).map_err(|_| {
+                ClientError::RemoteFetch(format!(
+                    "{}: response body could not be read",
+                    spec.label()
+                ))
+            }),
+            404 => Err(ClientError::RemoteFetch(format!(
+                "{} — repo or ref not found (only public repos are supported today)",
+                spec.label()
+            ))),
+            s => Err(ClientError::RemoteFetch(format!(
+                "{}: HTTP {s}",
+                spec.label()
+            ))),
+        }
+    }
+}
+
+/// A GitHub owner/repo path segment: ASCII alphanumerics + `.`, `_`, `-`, non-empty — the last-line guard
+/// before splicing into the request path (mirrors [`ensure_url_safe_ids`]).
+fn is_repo_seg(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Sanitize a user-supplied git ref before it rides the URL path: a branch/tag/sha may contain `/`, but
+/// never an empty/`.`/`..` segment (traversal) or a control / `%?#`/space char. `None` rejects it.
+fn sanitize_ref(r: &str) -> Option<String> {
+    if r.is_empty() || r.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        return None;
+    }
+    r.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        .then(|| r.to_owned())
+}
+
 /// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

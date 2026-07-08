@@ -30,6 +30,10 @@ pub(crate) struct SkillPaths {
     /// The durable unresolved-merge-conflict record — present only while a conflict is unresolved (the
     /// publish guard's source of truth + the pre-swap recovery journal). Absent in the common case.
     pub conflict: PathBuf,
+    /// The remote-import provenance record — present only for a skill `add` fetched from a source (a GitHub
+    /// repo): the origin repo, resolved commit, subdir, and license. A best-effort adjunct written after
+    /// adoption (never part of the atomic core), so its absence just means "no recorded upstream."
+    pub origin: PathBuf,
 }
 
 impl SkillPaths {
@@ -40,6 +44,7 @@ impl SkillPaths {
             map: base.join("map.json"),
             sync: base.join("sync.json"),
             conflict: base.join("conflict.json"),
+            origin: base.join("origin.json"),
         }
     }
 }

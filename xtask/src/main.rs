@@ -292,6 +292,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             harness: None,
             harness_slug: None,
             currency: None,
+            // Adopted from a local dir, not a remote source — no upstream origin.
+            origin: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],

@@ -1,9 +1,10 @@
-//! `add <skill>` / `add --path <dir>` — adopt a local skill, offline. The default positional is a skill
-//! NAME resolved against the untracked inventory `list` discovers (see [`resolve_add_target`]);
-//! `--path <dir>` adopts an explicit directory. Adoption itself ([`add`]) then mints an id + name, scans +
-//! imports to the embedded-git store, snapshots the genesis version, and writes the sidecar docs — all
-//! staged and published with one directory rename, so it is all-or-nothing and the source bytes are never
-//! touched.
+//! `add <source>` — adopt a skill. The positional is source-polymorphic (classified in
+//! [`crate::source`]): a local PATH (`./ ../ ~/ /…`) adopts a directory in place; a bare skill NAME
+//! resolves against the untracked inventory `list` discovers (see [`resolve_add_target`]); a remote source
+//! (`owner/repo`, a github.com URL) fetches + imports it (see [`add_remote`]). Adoption itself
+//! ([`add_with_name`]) mints an id + name, scans + imports to the embedded-git store, snapshots the genesis
+//! version, and writes the sidecar docs — all staged and published with one directory rename, so it is
+//! all-or-nothing and the source bytes are never touched.
 
 use std::path::Path;
 
@@ -11,15 +12,18 @@ use topos_core::digest::to_hex;
 use topos_core::sign::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_harness::DiscoveredPlacement;
+use topos_harness::registry::SkillScope;
 use topos_types::persisted::{
     Lock, LockedFile, PlacementMap, RecordedTuple, SwapCapability, SyncState,
 };
-use topos_types::results::{AddData, UntrackedEntry};
+use topos_types::results::{AddData, SkillOrigin, UntrackedEntry};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
+use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::scan::{self, ScannedBundle};
+use crate::source::RemoteSpec;
 use crate::{doc, logfile, sidecar};
 
 /// The fixed, controlled-ASCII commit message for a genesis adopt — folded into the `version_id`
@@ -27,7 +31,7 @@ use crate::{doc, logfile, sidecar};
 const ADD_MESSAGE: &str = "topos: add";
 
 /// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
-/// else frontmatter-then-basename) — the `--path` / direct entry point.
+/// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
 /// # Errors
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
@@ -40,7 +44,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
 /// Adopt the skill rooted at `source`. `name_override` (set by a name-resolved `add <skill>`) forces the
 /// tracked name to the discovered name the user typed, so it stays consistent with `list`/`publish`/`diff`
 /// even for a registry harness the active adapter does not recognize (whose bytes would otherwise be named
-/// from `SKILL.md` frontmatter). `None` keeps the source-derived name (the `--path` / direct path).
+/// from `SKILL.md` frontmatter). `None` keeps the source-derived name (a direct path-shaped adopt).
 ///
 /// # Errors
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
@@ -242,7 +246,208 @@ pub(crate) fn add_with_name(
         harness,
         harness_slug,
         currency,
+        // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
+        origin: None,
     })
+}
+
+/// The options a remote `add <owner/repo>` carries beyond the source spec.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AddRemoteOpts {
+    /// Pick one skill from a multi-skill repo (else: a lone skill is taken; several is a typed error).
+    pub skill: Option<String>,
+    /// Land into this harness's skills dir (a registry slug); `None` = the active harness.
+    pub harness: Option<String>,
+    /// Land in the harness's user/global skills dir instead of the project (cwd) dir.
+    pub global: bool,
+}
+
+/// The persisted remote-import provenance (`skills/<id>/origin.json`) — a best-effort adjunct written
+/// AFTER adoption, so its absence just means "no recorded upstream." Carries a `schema_version` for the
+/// fail-closed read dispatch a later re-sync will use.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OriginDoc {
+    pub schema_version: u32,
+    #[serde(flatten)]
+    pub origin: SkillOrigin,
+    /// When the import happened (epoch millis).
+    pub imported_at: u64,
+}
+
+/// Adopt a skill fetched from a REMOTE source (`owner/repo`, a github.com URL). Resolves the destination
+/// harness dir, refuses to clobber it, materializes the byte-exact skill there, then adopts it through the
+/// unchanged [`add_with_name`] core and records the provenance. Fully non-interactive — the source's
+/// trustworthiness is the caller's (user/agent) responsibility, so there is no disclosure gate.
+///
+/// # Errors
+/// The remote-import family ([`ClientError::RemoteFetch`] / [`ClientError::NoSkillInSource`] /
+/// [`ClientError::SkillNotInRepo`] / [`ClientError::AmbiguousSkillInRepo`] /
+/// [`ClientError::PlacementOccupied`] / [`ClientError::HarnessNotFound`]), plus any adoption error.
+pub(crate) fn add_remote(
+    ctx: &Ctx<'_>,
+    source: &dyn GitTarballSource,
+    spec: &RemoteSpec,
+    roots: &super::DiscoveryRoots,
+    opts: &AddRemoteOpts,
+) -> Result<AddData, ClientError> {
+    ctx.fs.create_dir_all(ctx.layout.home())?;
+
+    // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm currency
+    //    for). An explicit `--harness` must name a known registry slug.
+    let slug = opts
+        .harness
+        .clone()
+        .unwrap_or_else(|| ctx.harness.id().slug().to_owned());
+    if !topos_harness::registry::known_harnesses()
+        .iter()
+        .any(|h| h.slug == slug)
+    {
+        return Err(ClientError::HarnessNotFound(format!(
+            "unknown harness '{slug}' — omit `--harness` to use the default, or run `topos list` to see \
+             the harness slugs"
+        )));
+    }
+    let scope = if opts.global {
+        SkillScope::User
+    } else {
+        SkillScope::Project
+    };
+    let dest_root =
+        topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
+            .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?;
+
+    // 2. Fetch + extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
+    let source_label = spec.label();
+    let targz = source.fetch(spec)?;
+    let repo = extract_tree(&targz)?;
+    let selected = repo.select(
+        spec.subdir.as_deref(),
+        opts.skill.as_deref(),
+        &spec.repo,
+        &source_label,
+    )?;
+
+    // 3. Destination dir — refuse to clobber a foreign non-empty dir (no silent overwrites).
+    let dest_dir = dest_root.join(&selected.name);
+    check_destination(ctx, &dest_dir)?;
+
+    // 4. Materialize the byte-exact skill (the one place remote bytes land outside ~/.topos). Write into a
+    //    `.`-prefixed staging sibling (discovery ignores it) and rename it into place, so a crash or a
+    //    mid-write I/O error never leaves a PARTIAL skill at the real path — only a stray staging dir the
+    //    next run clears. On a failed adopt we remove the (now-complete) dest so the tree is left clean.
+    ctx.fs.create_dir_all(&dest_root)?;
+    let stage_dir = dest_root.join(format!(".topos-import-{}", selected.name));
+    if ctx.fs.exists(&stage_dir) {
+        ctx.fs.remove_dir_all(&stage_dir)?;
+    }
+    if let Err(e) = write_skill_dir(ctx, &stage_dir, &selected.files) {
+        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        return Err(e);
+    }
+    // An empty pre-existing dest is fine to fill (check_destination allowed it) but blocks the no-replace
+    // rename — clear it first. A non-empty dest was already refused above.
+    if ctx.fs.exists(&dest_dir) {
+        ctx.fs.remove_dir_all(&dest_dir)?;
+    }
+    if let Err(e) = ctx.fs.rename_dir_noreplace(&stage_dir, &dest_dir) {
+        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        return Err(ClientError::Io(format!(
+            "place import at {}: {e}",
+            dest_dir.display()
+        )));
+    }
+    let mut data = match add_with_name(ctx, &dest_dir, Some(&selected.name)) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ctx.fs.remove_dir_all(&dest_dir);
+            return Err(e);
+        }
+    };
+
+    // 5. Record provenance — a best-effort adjunct, never allowed to fail a good adoption (mirrors the
+    //    currency hook being armed after the atomic adopt).
+    let origin = SkillOrigin {
+        source: spec.origin(),
+        git_ref: spec.git_ref.clone(),
+        commit: repo.commit.clone(),
+        subdir: selected.subdir.clone(),
+        license: selected.license.clone(),
+    };
+    if let Ok(id) = crate::id::SkillId::parse(&data.skill_id) {
+        let doc = OriginDoc {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            origin: origin.clone(),
+            imported_at: ctx.clock.now_unix_millis(),
+        };
+        if let Err(e) = doc::write_doc(ctx.fs, &ctx.layout.published(&id).origin, &doc) {
+            let _ = logfile::append_event(
+                ctx.fs,
+                &ctx.layout.log_path(),
+                &serde_json::json!({
+                    "action": "add_origin_warning",
+                    "skill_id": id.as_str(),
+                    "warning": e.detail(),
+                }),
+            );
+        }
+    }
+    data.origin = Some(origin);
+    Ok(data)
+}
+
+/// Verbatim guidance when a destination harness has no dir for the chosen scope.
+fn destination_hint(slug: &str, global: bool) -> String {
+    if global {
+        format!(
+            "harness '{slug}' has no global skills directory — drop `--global` for project scope, or pick \
+             a different `--harness`"
+        )
+    } else {
+        format!(
+            "no project directory to import into — run inside a project, or use `--global` to land in \
+             '{slug}'s global skills dir"
+        )
+    }
+}
+
+/// Refuse to clobber the destination: an absent or EMPTY dir is fine to fill; a non-empty dir is either
+/// already tracked (`ALREADY_TRACKED`, edit it in place) or a foreign dir (`PLACEMENT_OCCUPIED`).
+fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
+    if !ctx.fs.exists(dest) {
+        return Ok(());
+    }
+    let empty = ctx.fs.read_dir(dest).map(|v| v.is_empty()).unwrap_or(false);
+    if empty {
+        return Ok(());
+    }
+    if let Ok(canon) = dest.canonicalize()
+        && let Some(skill_id) = tracked_skill_at(ctx, &canon)?
+    {
+        return Err(ClientError::AlreadyTracked { skill_id });
+    }
+    Err(ClientError::PlacementOccupied {
+        path: dest.display().to_string(),
+    })
+}
+
+/// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the
+/// digest). Paths are archive-relative forward-slash and already `..`/absolute-safe (extraction rejected
+/// hazards), so the component-wise join stays inside `dest`.
+fn write_skill_dir(ctx: &Ctx<'_>, dest: &Path, files: &[RepoFile]) -> Result<(), ClientError> {
+    for f in files {
+        let mut path = dest.to_path_buf();
+        for comp in f.path.split('/') {
+            path.push(comp);
+        }
+        if let Some(parent) = path.parent() {
+            ctx.fs
+                .create_dir_all(parent)
+                .map_err(|e| ClientError::Io(format!("create {}: {e}", parent.display())))?;
+        }
+        let executable = f.mode & 0o111 != 0;
+        ctx.fs.write_staged(&path, &f.bytes, executable)?;
+    }
+    Ok(())
 }
 
 /// Resolve an `add <target>` positional to the concrete skill directory to adopt.
@@ -267,9 +472,9 @@ pub(crate) fn resolve_add_target(
     target: &str,
 ) -> Result<(std::path::PathBuf, String), ClientError> {
     let (name, harness) = split_target(target);
-    // A path-shaped positional (a separator, or a `./` `../` `~/` prefix) can never be a discovered skill
-    // NAME — those are bare basenames. Steer it to `--path` BEFORE touching discovery, so it can never
-    // accidentally match (and adopt) a same-named discovered skill instead.
+    // A residual guard: `crate::source` already routes path shapes to a direct adopt, but a `~`-prefixed
+    // bare token can still arrive here — it is never a discovered skill NAME (those are bare basenames),
+    // so refuse it with actionable guidance rather than a confusing not-found.
     if is_path_shaped(name) {
         return Err(ClientError::PathNotName {
             arg: target.to_owned(),
@@ -309,7 +514,7 @@ pub(crate) fn resolve_add_target(
                     name: name.to_owned(),
                 })
             } else if Path::new(name).exists() {
-                // A bare word that is a real cwd entry but no skill — the user likely meant `--path`.
+                // A bare word that is a real cwd entry but no skill — the user likely meant a path.
                 Err(ClientError::PathNotName {
                     arg: target.to_owned(),
                 })
@@ -414,10 +619,10 @@ fn harness_not_found_message(name: &str, harness: &str, available: &[String]) ->
     }
 }
 
-/// Whether a positional is SYNTACTICALLY a path (a separator, or a `.`/`~` prefix) — so it can never be a
-/// discovered skill NAME (a bare basename) and must be steered to `--path` before resolution. The weaker
-/// "a bare word that happens to be a cwd entry" heuristic is applied only AFTER discovery finds no name
-/// match (so a skill named the same as a cwd dir still resolves).
+/// Whether a name token is SYNTACTICALLY a path (a separator, or a `.`/`~` prefix) — so it can never be a
+/// discovered skill NAME (a bare basename) and gets actionable path guidance instead. The weaker "a bare
+/// word that happens to be a cwd entry" heuristic is applied only AFTER discovery finds no name match (so
+/// a skill named the same as a cwd dir still resolves).
 fn is_path_shaped(arg: &str) -> bool {
     arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
 }
@@ -457,6 +662,17 @@ fn dir_basename(path: &Path) -> Option<String> {
 /// [`ClientError::AlreadyTracked`] if a tracked skill already records this canonical path; otherwise an
 /// [`FsOps`](crate::fs_seam::FsOps) read failure.
 fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), ClientError> {
+    match tracked_skill_at(ctx, canonical_source)? {
+        Some(skill_id) => Err(ClientError::AlreadyTracked { skill_id }),
+        None => Ok(()),
+    }
+}
+
+/// The id of the tracked skill whose placement resolves to `canonical_source` (canonical `Path` compare,
+/// resolving symlinks/firmlinks on both sides; a placement that no longer resolves on disk is stale, not a
+/// match), or `None` if that directory is not tracked. The shared predicate behind
+/// [`reject_already_tracked`] and the remote-import [`check_destination`].
+fn tracked_skill_at(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<Option<String>, ClientError> {
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -471,19 +687,15 @@ fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), 
         else {
             continue;
         };
-        // Compare canonically (resolving symlinks/firmlinks on both sides), as `Path`, never a lossy
-        // string; a placement that no longer resolves on disk is stale, not a match.
         if map.placements.iter().any(|p| {
             Path::new(p)
                 .canonicalize()
                 .is_ok_and(|c| c == *canonical_source)
         }) {
-            return Err(ClientError::AlreadyTracked {
-                skill_id: id.into_string(),
-            });
+            return Ok(Some(id.into_string()));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Match a canonical source dir against the harness's discovered placements by canonical EQUALITY (not

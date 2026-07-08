@@ -78,7 +78,7 @@ fn end_to_end_add_then_list_over_json() {
     copy_tree(&fixture(), &skill);
 
     // add — drives clap, TOPOS_HOME, the recover+identity startup, and the success envelope.
-    let (ok, v) = run(&home, &["--json", "add", "--path", skill.to_str().unwrap()]);
+    let (ok, v) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true);
@@ -128,11 +128,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let before = std::fs::read(&skill_md).unwrap();
 
     // add → recognized as Claude Code, currency armed, hook written to settings.json.
-    let (ok, v) = run_in(
-        &home,
-        &claude,
-        &["--json", "add", "--path", skill.to_str().unwrap()],
-    );
+    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
     assert_eq!(v["data"]["harness"], "claude-code");
@@ -176,11 +172,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     );
 
     // A second add of the same dir is refused (already tracked), not silently duplicated.
-    let (ok, v) = run_in(
-        &home,
-        &claude,
-        &["--json", "add", "--path", skill.to_str().unwrap()],
-    );
+    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
     assert!(!ok, "re-adding the same dir exits nonzero");
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
 
@@ -266,14 +258,15 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "NO_UNTRACKED_SKILL");
 
-    // A positional that looks like a path is steered to the `--path` escape hatch — a `./` prefix and a
-    // `/` separator are both rejected BEFORE discovery (so a path-shaped input can never adopt a
-    // same-named discovered skill).
-    for pathy in ["./deploy", "sub/deploy"] {
-        let v = run_disc(&home, &disc, &claude, &["--json", "add", pathy]);
-        assert_eq!(v["ok"], false, "{pathy}: {v}");
-        assert_eq!(v["error"]["code"], "PATH_NOT_NAME", "{pathy}");
-    }
+    // A path-shaped positional is treated as a PATH (adopt in place), NEVER resolved as the same-named
+    // discovered skill: a `./`-prefixed token pointing at nothing here fails as a path adopt (an fs
+    // error), so it can't sneak in as the discovered "deploy".
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "./deploy"]);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_ne!(
+        v["error"]["code"], "ALREADY_TRACKED",
+        "a path is adopted as a path, not resolved to the discovered skill"
+    );
 
     let _ = std::fs::remove_dir_all(&claude);
     let _ = std::fs::remove_dir_all(&disc);
@@ -350,7 +343,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     let missing = format!("/definitely-missing-topos-{}", std::process::id());
 
     // --json: the fixed message on stdout; the full context (path + cause) in the diagnostics log.
-    let out = run_raw(&home, &["add", "--path", &missing, "--json"], false);
+    let out = run_raw(&home, &["add", &missing, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "IO_ERROR");
@@ -370,7 +363,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     assert!(detail.contains(&missing), "{detail}");
 
     // TTY: redacted line + the pointer at the log; the path never reaches stderr un-asked.
-    let out = run_raw(&home, &["add", "--path", &missing], false);
+    let out = run_raw(&home, &["add", &missing], false);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("error: a filesystem operation failed"),
@@ -381,7 +374,7 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     assert!(!stderr.contains(&missing), "stays redacted: {stderr}");
 
     // TOPOS_DEBUG=1: the full chain ALSO reaches stderr, while stdout stays the clean envelope.
-    let out = run_raw(&home, &["add", "--path", &missing, "--json"], true);
+    let out = run_raw(&home, &["add", &missing, "--json"], true);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(
         v["error"]["context"]["message"],

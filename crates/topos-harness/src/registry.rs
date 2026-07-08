@@ -845,6 +845,29 @@ pub fn attribute_path(path: &Path, home: &Path, cwd: Option<&Path>) -> Option<Ha
     None
 }
 
+/// The skills directory a NEW skill for harness `slug` should land in at `scope`, resolved against
+/// `home`/`cwd` — the base onto which `add`'s remote import joins `<skill_name>/`. `None` when the slug is
+/// unknown, or the scope has no dir for that harness (a cwd-only harness at `User`, or `Project` with no
+/// `cwd`). The `User` dir is the harness's FIRST user dir — its canonical global skills location. This is
+/// the WRITE counterpart of [`discover_all`]/[`attribute_path`], so an imported skill lands exactly where
+/// discovery would later find it.
+#[must_use]
+pub fn skills_root(
+    slug: &str,
+    scope: SkillScope,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    let harness = HARNESSES.iter().find(|h| h.slug == slug)?;
+    match scope {
+        SkillScope::User => harness
+            .user_dirs
+            .first()
+            .and_then(|spec| resolve_spec(spec, home, cwd)),
+        SkillScope::Project => project_dir_of(harness, cwd),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Resolution + probe internals. No panics; a missing/unreadable dir is "nothing here", never an error.
 // ---------------------------------------------------------------------------------------------
@@ -1017,6 +1040,41 @@ mod tests {
     /// forbidden here), so it isolates its own fixtures by their temp-dir prefix instead.
     fn under<'a>(found: &'a [DiscoveredSkill], root: &Path) -> Vec<&'a DiscoveredSkill> {
         found.iter().filter(|d| d.path.starts_with(root)).collect()
+    }
+
+    #[test]
+    fn skills_root_resolves_the_write_destination_or_none() {
+        let home = TempTree::new("root-home");
+        let cwd = TempTree::new("root-cwd");
+        // Project scope joins the harness project dir onto cwd (no env override — deterministic).
+        assert_eq!(
+            skills_root(
+                "claude-code",
+                SkillScope::Project,
+                home.path(),
+                Some(cwd.path())
+            ),
+            Some(join_rel(cwd.path(), ".claude/skills"))
+        );
+        // User scope, a purely home-rooted harness (no `$…` override to perturb the test).
+        assert_eq!(
+            skills_root("cline", SkillScope::User, home.path(), None),
+            Some(join_rel(home.path(), ".agents/skills"))
+        );
+        // A cwd-only harness (`eve`) has no user dir; Project with no cwd has none either.
+        assert_eq!(
+            skills_root("eve", SkillScope::User, home.path(), Some(cwd.path())),
+            None
+        );
+        assert_eq!(
+            skills_root("claude-code", SkillScope::Project, home.path(), None),
+            None
+        );
+        // An unknown slug is never a destination.
+        assert_eq!(
+            skills_root("not-a-harness", SkillScope::User, home.path(), None),
+            None
+        );
     }
 
     #[test]

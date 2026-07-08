@@ -23,6 +23,7 @@ pub(crate) mod doc;
 pub(crate) mod enroll;
 pub(crate) mod error;
 pub(crate) mod fs_seam;
+pub(crate) mod git_source;
 pub(crate) mod id;
 pub(crate) mod identity;
 pub(crate) mod ids;
@@ -36,6 +37,7 @@ pub(crate) mod release;
 pub(crate) mod render;
 pub(crate) mod scan;
 pub(crate) mod sidecar;
+pub(crate) mod source;
 
 /// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real
 /// pull engine over the real transport without reaching the `pub(crate)` internals. Never compiled into a

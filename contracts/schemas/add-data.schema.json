@@ -40,6 +40,17 @@
     "name": {
       "type": "string"
     },
+    "origin": {
+      "description": "Where the skill was imported FROM, when `add` fetched it from a remote source. `None` for a\nlocally-adopted skill (a path or a discovered name).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SkillOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "skill_id": {
       "type": "string"
     },
@@ -76,6 +87,47 @@
         "claude-code",
         "openclaw",
         "hermes"
+      ]
+    },
+    "SkillOrigin": {
+      "description": "Where an adopted skill was imported FROM, when `add` fetched it from a remote source (a GitHub repo).\nAll fields are public provenance — never a secret — and travel with the adopted skill so the agent (and\na later re-sync) can see the upstream it came from. `None` on `AddData` for a locally-adopted skill.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "description": "The resolved commit the bytes came from (best-effort — parsed from the fetched archive), if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_ref": {
+          "description": "The branch / tag / commit requested (`#<ref>` or a `/tree/<ref>/…` URL), if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "license": {
+          "description": "A LICENSE file found at the skill root or repo root, recorded as provenance (never injected into the\nbundle — the adopted bytes stay byte-exact to the repo). `None` if the source carried no license.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "The `<host>/<owner>/<repo>` the skill was imported from (e.g. `github.com/vercel-labs/agent-skills`).",
+          "type": "string"
+        },
+        "subdir": {
+          "description": "The skill's path within the repo (a monorepo subdir), if it was not the repo root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
       ]
     },
     "TriggerReport": {

@@ -193,6 +193,27 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         data.skill_id,
         short(&data.version_id)
     );
+    // Provenance of a remote import (honest, never a trust claim) — where the bytes came from + license.
+    if let Some(o) = &data.origin {
+        out.push_str("\nImported from ");
+        out.push_str(&o.source);
+        if let Some(c) = &o.commit {
+            out.push('@');
+            out.push_str(c);
+        }
+        if let Some(sub) = &o.subdir {
+            out.push_str(" (");
+            out.push_str(sub);
+            out.push(')');
+        }
+        match o.license.as_deref() {
+            Some(lic) => {
+                out.push_str(" · ");
+                out.push_str(lic);
+            }
+            None => out.push_str(" · no license found"),
+        }
+    }
     // Disclose the one write `add` makes outside ~/.topos/ — the currency trigger — honestly (it is
     // plumbing: it runs a no-op `pull` until something is followed; never "it auto-updates"). The copy
     // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
