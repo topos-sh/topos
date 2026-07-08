@@ -167,15 +167,31 @@ pub(crate) fn read_instance(
 /// read through [`doc::read_doc_private`] — a group/other-accessible file is refused BEFORE parsing.
 /// Fail-closed on an unknown/newer `schema_version` AND on any entry whose skill/workspace id is not a
 /// safe path component (the id boundary: a traversal id must never reach a join downstream).
+///
+/// Also fail-closed on the cross-workspace invariant [`write_follows_merged`] enforces on write: a skill id
+/// is plane-minted and belongs to EXACTLY ONE workspace, and the sidecar keys skills by id alone — so the
+/// SAME `skill_id` appearing under two different `workspace_id`s (a forged/confused plane response the write
+/// guard already refuses, or a hand-edited doc) would collapse the `skill_creds` map / mis-scope the
+/// first-match lookups. The LOAD fails closed here, mirroring the write guard's message shape.
 pub(crate) fn read_follows(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<Follows>, ClientError> {
     let follows: Option<Follows> = doc::read_doc_private(fs, &layout.follows_path())?;
     if let Some(f) = &follows {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
         for entry in &f.follows {
             crate::id::SkillId::parse(&entry.skill_id)?;
             crate::id::validate_workspace_id(&entry.workspace_id)?;
+            if let Some(prev_ws) = seen.insert(entry.skill_id.as_str(), entry.workspace_id.as_str())
+                && prev_ws != entry.workspace_id.as_str()
+            {
+                return Err(ClientError::Corrupt(format!(
+                    "skill '{}' is already followed in a different workspace; a skill id belongs to \
+                     exactly one workspace",
+                    entry.skill_id
+                )));
+            }
         }
     }
     Ok(follows)
@@ -1327,5 +1343,38 @@ mod tests {
         // The SAME skill_id under the SAME workspace still updates cleanly (a token refresh).
         write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
         assert_eq!(read_follows(&fs, &layout).unwrap().unwrap().follows.len(), 1);
+    }
+
+    #[test]
+    fn read_follows_fails_closed_on_a_cross_workspace_skill_id() {
+        // The READ side of the same invariant the write guard enforces: a pre-existing / hand-edited
+        // follows.json carrying the SAME skill_id under two DIFFERENT workspaces must fail the LOAD closed
+        // (otherwise `skill_creds`'s by-id map collapses it / the first-match lookups mis-scope it).
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("xws-read"));
+        let entry = |skill: &str, ws: &str| FollowEntry {
+            skill_id: skill.to_owned(),
+            workspace_id: ws.to_owned(),
+            read_token: "rt".to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+        };
+        // The SAME skill_id under w_a AND w_b — a cross-workspace collision.
+        let hostile = Follows {
+            schema_version: 1,
+            follows: vec![entry("s_dup", "w_a"), entry("s_dup", "w_b")],
+        };
+        doc::write_doc_private(&fs, &layout.follows_path(), &hostile).unwrap();
+        let err = read_follows(&fs, &layout).unwrap_err();
+        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
+
+        // Distinct skill ids across two workspaces is the LEGITIMATE multi-workspace shape — it loads.
+        let ok = Follows {
+            schema_version: 1,
+            follows: vec![entry("s_a", "w_a"), entry("s_b", "w_b")],
+        };
+        doc::write_doc_private(&fs, &layout.follows_path(), &ok).unwrap();
+        assert_eq!(read_follows(&fs, &layout).unwrap().unwrap().follows.len(), 2);
     }
 }

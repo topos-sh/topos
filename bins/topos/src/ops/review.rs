@@ -13,7 +13,7 @@ use topos_types::results::{ReviewData, ReviewDecision};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect};
-use super::{parse_hex32_arg, resolve_skill_in_workspace, workspace_of};
+use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
@@ -54,9 +54,10 @@ pub(crate) fn review(
     // Resolve the proposal's skill (a `--workspace` filter disambiguates a name shared across
     // workspaces), then bind the SIGNED scope to that skill's OWN follow-entry workspace. You only ever
     // review a proposal for a skill you FOLLOW (the fresh-current read + candidate fetch need its read
-    // creds), so this is the STRICT resolve — a non-followed target fails with a clean local
-    // "not a followed skill" here rather than an opaque plane rejection after a wasted round-trip.
-    let (id, _lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
+    // creds), so this is the STRICT resolve — a candidate with NO follow entry (a local-only skill that
+    // merely shares the name) is dropped before the ambiguity count, and a non-followed target fails with
+    // a clean local "not a followed skill" here rather than an opaque plane rejection after a wasted trip.
+    let (id, _lock) = resolve_followed_skill_in_workspace(ctx, &skill_name, workspace)?;
     let workspace_id = workspace_of(ctx, id.as_str())?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;

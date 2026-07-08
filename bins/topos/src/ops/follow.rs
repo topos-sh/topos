@@ -49,6 +49,9 @@ pub(crate) struct FollowOpts {
     pub resume: bool,
     /// `--approve <skill>[@<digest>] …` ⇒ place the named, already-disclosed first-receive bytes.
     pub approve: Vec<String>,
+    /// The global `--workspace <id>` filter — disambiguates a `--approve` skill NAME shared across the
+    /// workspaces this install follows on the same plane. Ignored by the begin / resume motions.
+    pub workspace: Option<String>,
 }
 
 /// Builds the creds-free enrollment transport for a plane base URL.
@@ -85,7 +88,7 @@ pub(crate) fn follow(
     opts: FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
     if !opts.approve.is_empty() {
-        return approve(ctx, &opts.approve);
+        return approve(ctx, &opts.approve, opts.workspace.as_deref());
     }
     if opts.resume {
         return Ok(plain(resume(ctx, connectors)?));
@@ -116,23 +119,54 @@ fn begin(
 ) -> Result<FollowData, ClientError> {
     let (link_base, token) = parse_link(ctx, link)?;
 
-    // An unsettled claim redeem for this same link retries the POST directly — NEVER refetching `/i/`
-    // (the first send may have consumed the claim, whose bootstrap then serves 404 by design; the
-    // server's same-device replay re-answers Redeemed). The match is on the TOKEN alone: it is
-    // HMAC-derived and unique per plane, and the WAL's `base_url` is the re-rooted API base while a
-    // re-pasted link may ride the team's share host — the token, not the host string, is the claim's
-    // identity. A different token is refused typed.
-    if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)?
-        && let enroll::EnrollPhase::ClaimPending { claim_token, .. } = &wal.state
-    {
-        if *claim_token == token {
-            return retry_claim(ctx, connectors, &wal);
+    // An in-progress enrollment WAL must not be silently clobbered by a second `follow <link>` (e.g.
+    // following workspace B while A is still mid-enrollment): `begin` writes a fresh WAL unconditionally
+    // below, so any live prior session must be settled first. The one benign clobber — an EXPIRED
+    // authorizing session — is allowed through so a fresh follow SUPERSEDES the dead WAL (the recovery
+    // path; the start-of-command sweep normally reaps it first).
+    if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
+        match &wal.state {
+            // An unsettled claim redeem for this same link retries the POST directly — NEVER refetching
+            // `/i/` (the first send may have consumed the claim, whose bootstrap then serves 404 by design;
+            // the server's same-device replay re-answers Redeemed). The match is on the TOKEN alone: it is
+            // HMAC-derived and unique per plane, and the WAL's `base_url` is the re-rooted API base while a
+            // re-pasted link may ride the team's share host — the token, not the host string, is the
+            // claim's identity. A different token is refused typed.
+            enroll::EnrollPhase::ClaimPending { claim_token, .. } => {
+                if *claim_token == token {
+                    return retry_claim(ctx, connectors, &wal);
+                }
+                return Err(ClientError::Enrollment(
+                    "a different claim enrollment is in progress; run `topos follow --resume` to \
+                     settle it first"
+                        .into(),
+                ));
+            }
+            // A still-LIVE device-authorization session for another follow: refuse rather than overwrite it
+            // (finishing it is one `follow --resume`). An EXPIRED session falls through to supersede.
+            enroll::EnrollPhase::Authorizing {
+                expires_at_millis, ..
+            } if *expires_at_millis >= now_millis(ctx) => {
+                return Err(ClientError::Enrollment(
+                    "an enrollment is already in progress; run `topos follow --resume` to finish it \
+                     (or wait for it to expire) before following another workspace"
+                        .into(),
+                ));
+            }
+            // A REDEEMED-but-unpromoted grant: the grant is single-use (spent server-side) and its minted
+            // read creds live ONLY in this WAL, so overwriting it would lose them unrecoverably. It MUST be
+            // completed with `follow --resume`, never clobbered.
+            enroll::EnrollPhase::Redeemed { .. } => {
+                return Err(ClientError::Enrollment(
+                    "an enrollment was redeemed but not finished; run `topos follow --resume` to \
+                     complete it before following another workspace"
+                        .into(),
+                ));
+            }
+            // An EXPIRED authorizing session, or a standup (owned by `publish`'s own resume): fall through
+            // so a fresh follow supersedes the dead WAL below.
+            _ => {}
         }
-        return Err(ClientError::Enrollment(
-            "a different claim enrollment is in progress; run `topos follow --resume` to settle it \
-             first"
-                .into(),
-        ));
     }
 
     let bootstrap = (connectors.enroll)(&link_base).fetch_bootstrap(&token)?;
@@ -948,7 +982,11 @@ fn disclose_one(
 // `follow --approve` — drive the existing pull engine to place the named first-receive bytes.
 // =================================================================================================
 
-fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientError> {
+fn approve(
+    ctx: &Ctx<'_>,
+    targets: &[String],
+    workspace: Option<&str>,
+) -> Result<FollowOutcome, ClientError> {
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
         .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to approve".into()))?;
     let contexts = enroll::follow_contexts(&follows);
@@ -960,9 +998,11 @@ fn approve(ctx: &Ctx<'_>, targets: &[String]) -> Result<FollowOutcome, ClientErr
     let mut skills = Vec::new();
     let mut resumed = Vec::new();
     for target in targets {
-        // Strip an optional `@<digest>` (the disclosed-offer reference) and resolve by skill name.
+        // Strip an optional `@<digest>` (the disclosed-offer reference) and resolve by skill name. The
+        // `--workspace` filter disambiguates a name followed in two workspaces on the same plane (an
+        // unscoped local skill of the same name still survives the filter — the lenient resolve).
         let name = strip_digest(target);
-        let (skill_id, lock) = super::resolve_skill(ctx, name)?;
+        let (skill_id, lock) = super::resolve_skill_in_workspace(ctx, name, workspace)?;
         let mut was_resumed = false;
         if let Some((_, follow_ctx)) = contexts.iter().find(|(id, _)| id == skill_id.as_str()) {
             if workspace_id.is_empty() {

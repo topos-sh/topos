@@ -884,6 +884,7 @@ fn run_claim_follow(
         manual: false,
         resume,
         approve: Vec::new(),
+        workspace: None,
     };
     ops::follow(&ctx, &connectors, link.map(str::to_owned), opts).map(|o| o.data)
 }
@@ -1063,6 +1064,7 @@ fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_toke
                 manual: false,
                 resume: false,
                 approve: Vec::new(),
+                workspace: None,
             },
         )
         .map(|o| o.data)

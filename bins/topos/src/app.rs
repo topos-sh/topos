@@ -133,6 +133,9 @@ pub fn run() -> ExitCode {
                 manual,
                 resume,
                 approve,
+                // The global `--workspace` disambiguates a `--approve` skill name shared across the
+                // workspaces this install follows on one plane (begin / resume ignore it).
+                workspace: workspace.clone(),
             };
             let first = ops::follow(&ctx, &connectors, link, opts);
             // The INTERACTIVE (non-`--json`) path blocks on a pending device-authorization: poll until the
@@ -454,6 +457,8 @@ fn block_until_settled(
             manual,
             resume: true,
             approve: Vec::new(),
+            // The interactive block only ever RESUMES (never approves), so the `--workspace` filter is moot.
+            workspace: None,
         };
         let next = ops::follow(ctx, connectors, None, opts);
         match &next {

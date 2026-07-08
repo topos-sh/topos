@@ -81,8 +81,41 @@ fn resolve_skill_in_workspace(
     name: &str,
     workspace: Option<&str>,
 ) -> Result<(SkillId, Lock), ClientError> {
-    // The skill_id → workspace_id join comes from the follow-state; only read it when a filter is active.
-    let followed = workspace.map(|_| ctx.follow.followed()).unwrap_or_default();
+    resolve_skill_scoped(ctx, name, workspace, false)
+}
+
+/// The STRICT resolver `review` / `revert` use: like [`resolve_skill_in_workspace`], but a candidate with
+/// NO follow entry (a purely local / genesis skill that merely SHARES the name) is dropped BEFORE the
+/// ambiguity count. Those verbs only ever act on a FOLLOWED skill, so a local skill named the same as a
+/// followed one must never make the op spuriously [`ClientError::AmbiguousName`]. (Publish keeps the
+/// lenient [`resolve_skill_in_workspace`] — its genesis path deliberately resolves a brand-new local skill
+/// under a `--workspace` filter.)
+fn resolve_followed_skill_in_workspace(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<(SkillId, Lock), ClientError> {
+    resolve_skill_scoped(ctx, name, workspace, true)
+}
+
+/// The shared name-resolution core. Two filters run BEFORE the ambiguity count (so a same-name collision
+/// disambiguates deterministically):
+/// - `followed_only` drops a candidate with NO follow entry (a purely local / genesis skill);
+/// - `workspace = Some(ws)` drops a FOLLOWED candidate scoped to a different workspace (an unscoped /
+///   no-entry candidate survives the workspace filter — the lenient genesis-publish path — unless
+///   `followed_only` already dropped it).
+fn resolve_skill_scoped(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+    followed_only: bool,
+) -> Result<(SkillId, Lock), ClientError> {
+    // The skill_id → workspace_id join comes from the follow-state; only read it when a filter needs it.
+    let followed = if workspace.is_some() || followed_only {
+        ctx.follow.followed()
+    } else {
+        Vec::new()
+    };
     let mut matches: Vec<(SkillId, Lock)> = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
@@ -97,9 +130,15 @@ fn resolve_skill_in_workspace(
         if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&id).lock)?
             && lock.name == name
         {
+            let follow_entry = followed.iter().find(|(fid, _)| fid == id.as_str());
+            // The strict form drops a candidate with NO follow entry (a purely local / genesis skill that
+            // merely shares the name) — `review` / `revert` only ever act on a followed skill.
+            if followed_only && follow_entry.is_none() {
+                continue;
+            }
             // Drop a FOLLOWED candidate scoped to a different workspace; keep an unscoped (no-entry) one.
             if let Some(ws) = workspace
-                && let Some((_, fc)) = followed.iter().find(|(fid, _)| fid == id.as_str())
+                && let Some((_, fc)) = follow_entry
                 && fc.workspace_id != ws
             {
                 continue;
@@ -409,5 +448,156 @@ mod tests {
         assert_eq!(parse_hex32("abc").unwrap_err().code(), "CORRUPT_STATE");
         // A good hash parses identically through the wrapper.
         assert!(parse_hex32_arg(&"abcdef0123456789".repeat(4), "unused").is_ok());
+    }
+
+    /// The workspace-scoped + followed-only name resolvers over a real fs + a fixture follow-state.
+    mod workspace_resolution {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use topos_harness::ClaudeCode;
+        use topos_types::PERSISTED_SCHEMA_VERSION;
+        use topos_types::persisted::Lock;
+
+        use super::super::{resolve_followed_skill_in_workspace, resolve_skill_in_workspace};
+        use crate::ctx::Ctx;
+        use crate::doc;
+        use crate::error::ClientError;
+        use crate::fs_seam::{FsOps, RealFs};
+        use crate::ids::{RealClock, RealIds};
+        use crate::plane::{FollowContext, FollowMode, FollowSource, InertPlane};
+        use crate::sidecar::Layout;
+
+        const ZERO_HEX: &str =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+
+        struct FixtureFollow(Vec<(String, FollowContext)>);
+        impl FollowSource for FixtureFollow {
+            fn followed(&self) -> Vec<(String, FollowContext)> {
+                self.0.clone()
+            }
+        }
+
+        fn scratch(tag: &str) -> PathBuf {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("topos-res-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        /// Lay a tracked skill dir (`skills/<id>/lock.json` naming `name`) so the resolver's walk finds it.
+        fn lay_skill(fs: &RealFs, layout: &Layout, id: &str, name: &str) {
+            let sid = crate::id::SkillId::parse(id).unwrap();
+            fs.create_dir_all(&layout.skill_dir(&sid)).unwrap();
+            doc::write_doc(
+                fs,
+                &layout.published(&sid).lock,
+                &Lock {
+                    schema_version: PERSISTED_SCHEMA_VERSION,
+                    skill_id: id.to_owned(),
+                    name: name.to_owned(),
+                    base_commit: ZERO_HEX.to_owned(),
+                    bundle_digest: ZERO_HEX.to_owned(),
+                    files: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        fn followed(id: &str, ws: &str) -> (String, FollowContext) {
+            (
+                id.to_owned(),
+                FollowContext {
+                    workspace_id: ws.to_owned(),
+                    mode: FollowMode::Auto,
+                    review_required: false,
+                    following: true,
+                },
+            )
+        }
+
+        /// A resolver-only [`Ctx`] over a real fs + a fixture follow-state. Name resolution touches only
+        /// `fs` / `layout` / `follow`; the other seams are inert stand-ins.
+        fn with_ctx<R>(
+            home: &Layout,
+            follow: &dyn FollowSource,
+            f: impl FnOnce(&Ctx<'_>) -> R,
+        ) -> R {
+            let fs = RealFs;
+            let ids = RealIds;
+            let clock = RealClock;
+            let plane = InertPlane;
+            let harness = ClaudeCode::new(scratch("adapter"), &fs);
+            let ctx = Ctx {
+                fs: &fs,
+                ids: &ids,
+                clock: &clock,
+                device_id: String::new(),
+                layout: home.clone(),
+                harness: &harness,
+                plane: &plane,
+                plane_key: [0u8; 32],
+                follow,
+            };
+            f(&ctx)
+        }
+
+        #[test]
+        fn workspace_filter_disambiguates_a_name_followed_in_two_workspaces() {
+            // One install follows the SAME NAME "docs" in two workspaces (distinct plane-minted ids). A
+            // bare resolve is ambiguous; a `--workspace` filter picks exactly the matching one.
+            let home = Layout::new(&scratch("p2a"));
+            let fs = RealFs;
+            lay_skill(&fs, &home, "topos_a", "docs");
+            lay_skill(&fs, &home, "topos_b", "docs");
+            let follow = FixtureFollow(vec![followed("topos_a", "w_a"), followed("topos_b", "w_b")]);
+
+            with_ctx(&home, &follow, |ctx| {
+                assert!(matches!(
+                    resolve_skill_in_workspace(ctx, "docs", None),
+                    Err(ClientError::AmbiguousName { count: 2, .. })
+                ));
+                assert_eq!(
+                    resolve_skill_in_workspace(ctx, "docs", Some("w_a"))
+                        .unwrap()
+                        .0
+                        .as_str(),
+                    "topos_a"
+                );
+                assert_eq!(
+                    resolve_skill_in_workspace(ctx, "docs", Some("w_b"))
+                        .unwrap()
+                        .0
+                        .as_str(),
+                    "topos_b"
+                );
+            });
+        }
+
+        #[test]
+        fn followed_only_resolve_drops_a_local_skill_sharing_a_followed_name() {
+            // A followed skill "docs" and a purely-local skill "docs" (no follow entry) coexist. The
+            // LENIENT resolve is ambiguous (what would make `revert docs` / `review docs` spuriously
+            // fail); the STRICT followed-only resolve those verbs use drops the local one and resolves.
+            let home = Layout::new(&scratch("p2b"));
+            let fs = RealFs;
+            lay_skill(&fs, &home, "topos_followed", "docs");
+            lay_skill(&fs, &home, "topos_local", "docs");
+            let follow = FixtureFollow(vec![followed("topos_followed", "w_a")]);
+
+            with_ctx(&home, &follow, |ctx| {
+                // The lenient resolve keeps BOTH → ambiguous (the spurious failure this fix removes).
+                assert!(matches!(
+                    resolve_skill_in_workspace(ctx, "docs", None),
+                    Err(ClientError::AmbiguousName { count: 2, .. })
+                ));
+                // The followed-only resolve drops the no-follow-entry local skill → resolves to the followed.
+                let (id, _lock) = resolve_followed_skill_in_workspace(ctx, "docs", None).unwrap();
+                assert_eq!(id.as_str(), "topos_followed");
+            });
+        }
     }
 }

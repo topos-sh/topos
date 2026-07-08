@@ -601,6 +601,7 @@ impl FollowHarness {
             manual,
             resume: false,
             approve: Vec::new(),
+            workspace: None,
         };
         self.run_follow(
             &inert_plane,
@@ -623,6 +624,7 @@ impl FollowHarness {
             manual: false,
             resume: true,
             approve: Vec::new(),
+            workspace: None,
         };
         self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts)
             .map_err(|e| e.to_string())
@@ -642,6 +644,7 @@ impl FollowHarness {
             manual: false,
             resume: true,
             approve: Vec::new(),
+            workspace: None,
         };
         match self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts) {
             Ok(_) => panic!("test_support: expected the resume to be denied"),
@@ -687,6 +690,7 @@ impl FollowHarness {
             manual: false,
             resume: false,
             approve: targets.to_vec(),
+            workspace: None,
         };
         self.run_follow(&plane, &follow, plane_key, None, opts)
             .map_err(|e| e.to_string())

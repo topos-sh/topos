@@ -16,7 +16,7 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
 use super::{
-    VersionRef, resolve_skill_in_workspace, resolve_version_ref, workspace_of,
+    VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of,
 };
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
@@ -74,9 +74,10 @@ pub(crate) fn revert(
     // The `--workspace` filter disambiguates a name shared across workspaces; the SIGNED scope is the
     // skill's OWN follow-entry workspace (the forward-revert commit is built against that workspace's live
     // current). You only ever revert a skill you FOLLOW (the fresh-current read needs its read creds), so
-    // this is the STRICT resolve — a non-followed target fails locally as "not a followed skill" rather
-    // than an opaque plane rejection.
-    let (id, _lock) = resolve_skill_in_workspace(ctx, skill_name, workspace)?;
+    // this is the STRICT resolve — a candidate with NO follow entry (a local-only skill that merely shares
+    // the name) is dropped before the ambiguity count, and a non-followed target fails locally as "not a
+    // followed skill" rather than an opaque plane rejection.
+    let (id, _lock) = resolve_followed_skill_in_workspace(ctx, skill_name, workspace)?;
     let workspace_id = workspace_of(ctx, id.as_str())?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;

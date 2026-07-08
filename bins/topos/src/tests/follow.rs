@@ -515,6 +515,7 @@ fn opts(manual: bool, resume: bool, approve: &[&str]) -> ops::FollowOpts {
         manual,
         resume,
         approve: approve.iter().map(|s| (*s).to_owned()).collect(),
+        workspace: None,
     }
 }
 
@@ -1236,6 +1237,149 @@ fn approve_places_the_named_first_receive_offer() {
     assert_eq!(
         std::fs::read(placement.join("SKILL.md")).unwrap(),
         b"# deploy\n"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The begin-guard interleave: a second `follow <link>` must never CLOBBER an in-progress enrollment WAL
+// (following workspace B while A is still mid-enrollment). A live/redeemed session refuses; a dead
+// (expired) one is superseded. The data-loss case is a Redeemed WAL — its single-use read creds live ONLY
+// in that WAL.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_second_follow_while_the_first_is_still_pending_refuses_and_keeps_the_wal() {
+    let rig = Rig::new("interleave-live");
+    let plane = FixturePlane::default();
+
+    // Begin A: writes a LIVE Authorizing WAL (expires_at = now + 900s, so >= the rig's fixed clock).
+    let _ = run_follow(
+        &rig,
+        &fake(&[("s_deploy", "deploy")], Poll::Pending),
+        &plane,
+        Some(&format!("{BASE_URL}/i/tok_a")),
+        opts(false, false, &[]),
+    )
+    .unwrap();
+    let wal_before = enroll::read_wal(&rig.fs, &rig.layout())
+        .unwrap()
+        .expect("A left a live Authorizing WAL");
+    assert!(matches!(
+        &wal_before.state,
+        enroll::EnrollPhase::Authorizing { .. }
+    ));
+
+    // Begin B (a DIFFERENT link) while A is still pending → refused, and A's WAL is byte-for-byte intact
+    // (B's fake is never even consulted — the guard fires before the bootstrap fetch).
+    let err = run_follow(
+        &rig,
+        &fake(&[("s_review", "review")], Poll::Pending),
+        &plane,
+        Some(&format!("{BASE_URL}/i/tok_b")),
+        opts(false, false, &[]),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
+    let wal_after = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        wal_before, wal_after,
+        "the live enrollment WAL must NOT be clobbered by a second follow"
+    );
+}
+
+#[test]
+fn a_follow_while_a_redeemed_wal_is_unpromoted_refuses_and_keeps_the_creds() {
+    // The data-loss case: a Redeemed-but-unpromoted grant is single-use (spent server-side) and its minted
+    // read creds live ONLY in this WAL. A second `follow <link>` must REFUSE, never overwrite it.
+    let rig = Rig::new("interleave-redeemed");
+    let plane = FixturePlane::default();
+    rig.mint_identity();
+
+    let wal = enroll::PendingEnrollment {
+        schema_version: 1,
+        state: enroll::EnrollPhase::Redeemed {
+            context: tiny_context(),
+            read_creds: vec![enroll::RedeemedCredDoc {
+                skill_id: "s_deploy".into(),
+                read_token: "rt_secret_s_deploy".into(),
+                expires_at: None,
+            }],
+            device_key_id: "dk_abc".into(),
+            principal: None,
+            enrolled_at_millis: 1,
+        },
+    };
+    enroll::write_wal(&rig.fs, &rig.layout(), &wal).unwrap();
+
+    let err = run_follow(
+        &rig,
+        &fake(&[("s_review", "review")], Poll::Pending),
+        &plane,
+        Some(&format!("{BASE_URL}/i/tok_b")),
+        opts(false, false, &[]),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
+    let after = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        after, wal,
+        "the redeemed WAL (the only copy of its single-use creds) must survive a second follow"
+    );
+}
+
+#[test]
+fn a_follow_supersedes_an_expired_authorizing_wal() {
+    // An EXPIRED authorizing session is dead (the human never approved in time). A fresh `follow <link>`
+    // must SUPERSEDE it (the recovery path) — begin falls through the guard and writes its own live WAL.
+    let rig = Rig::new("interleave-expired");
+    let plane = FixturePlane::default();
+    rig.mint_identity();
+
+    let expired = enroll::PendingEnrollment {
+        schema_version: 1,
+        state: enroll::EnrollPhase::Authorizing {
+            context: tiny_context(),
+            device_code: "dc_old".into(),
+            user_code: "OLD-CODE".into(),
+            verification_uri_complete: None,
+            interval: 5,
+            // Far in the past vs the rig's FixedClock(1_700_000_000_000) → expired.
+            expires_at_millis: 1_000,
+        },
+    };
+    enroll::write_wal(&rig.fs, &rig.layout(), &expired).unwrap();
+
+    let data = run_follow(
+        &rig,
+        &fake(&[("s_deploy", "deploy")], Poll::Pending),
+        &plane,
+        Some(&format!("{BASE_URL}/i/tok_fresh")),
+        opts(false, false, &[]),
+    )
+    .expect("a fresh follow supersedes the expired WAL");
+    assert!(!data.enrolled);
+    assert!(
+        data.pending.is_some(),
+        "the superseding follow is itself pending"
+    );
+
+    // The WAL is now the FRESH session (the fake's user_code + a live expiry), not the dead one.
+    let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    let enroll::EnrollPhase::Authorizing {
+        user_code,
+        expires_at_millis,
+        ..
+    } = wal.state
+    else {
+        panic!("expected a fresh Authorizing WAL after the supersede");
+    };
+    assert_eq!(
+        user_code, "WXYZ-1234",
+        "the fresh session's user code replaced the dead one"
+    );
+    assert!(
+        expires_at_millis > 1_000,
+        "the fresh session carries a live expiry, not the dead one"
     );
 }
 

@@ -1262,6 +1262,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             manual: false,
             resume: false,
             approve: vec!["pr-describe".to_owned()],
+            workspace: None,
         },
     )
     .unwrap();
