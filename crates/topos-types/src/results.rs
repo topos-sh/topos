@@ -32,6 +32,12 @@ pub struct PullData {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullSkill {
     pub skill: String,
+    /// The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that
+    /// has no follow entry. A pulled skill is normally followed (so `Some`), but `pull <skill>@<hash>` on an
+    /// unfollowed copy has none — `Option` keeps that honest and stays symmetric with [`SkillEntry`]. Names
+    /// the workspace so a session-start sweep does not show two same-named skills indistinguishably.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     /// Highest authenticated `(epoch,seq)` seen — the anti-rollback floor.
     pub observed: Generation,
     /// Highest generation actually materialized to disk.
@@ -165,6 +171,11 @@ pub struct UntrackedEntry {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SkillEntry {
     pub skill: String,
+    /// The workspace this skill is followed in (its signed-pointer scope), or `None` for a purely local,
+    /// never-followed `add`'d skill. Provenance so two same-named skills from different workspaces are
+    /// distinguishable; `--json` carries it flat, the TTY groups by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     /// The approvable `@` token (the commit SHA-256).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
@@ -508,6 +519,7 @@ mod tests {
         let data = PullData {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
                 observed: Generation { epoch: 1, seq: 42 },
                 applied: Generation { epoch: 1, seq: 42 },
                 action: PullAction::UpToDate,
@@ -519,6 +531,7 @@ mod tests {
         };
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["skills"][0]["action"], "up_to_date");
+        assert_eq!(v["skills"][0]["workspace_id"], "w_acme");
         assert_eq!(v["proposals_awaiting"], 0);
         let back: PullData = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].action, PullAction::UpToDate);

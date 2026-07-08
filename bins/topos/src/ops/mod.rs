@@ -132,15 +132,17 @@ pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String
         .map(|(_, fc)| fc.workspace_id)
 }
 
-/// The workspace a followed skill lives in, or a typed error if it is not followed (the plane-read scope a
-/// `diff <ref>` / a proposal review needs).
+/// The workspace a followed skill lives in, or a typed error if it is not followed — the STRICT scope the
+/// plane ops on an already-existing skill need (`diff <ref>` reads it; `review` / `revert` sign in it).
+/// Unlike [`write_workspace_for_skill`], there is NO ambient fallback: those verbs always act on a skill
+/// you follow, so a non-followed target fails cleanly here instead of as an opaque plane rejection.
 ///
 /// # Errors
-/// [`ClientError::Plane`] if `skill_id` is not a followed skill (no workspace to scope the read).
+/// [`ClientError::Plane`] if `skill_id` is not a followed skill (no workspace to scope the op).
 pub(crate) fn workspace_of(ctx: &Ctx<'_>, skill_id: &str) -> Result<String, ClientError> {
     followed_workspace(ctx, skill_id).ok_or_else(|| {
         ClientError::Plane(format!(
-            "'{skill_id}' is not a followed skill; a plane read needs its workspace"
+            "'{skill_id}' is not a followed skill; a plane op needs its workspace"
         ))
     })
 }

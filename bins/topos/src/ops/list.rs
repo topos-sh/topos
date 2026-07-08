@@ -35,8 +35,9 @@ pub(crate) struct ListOutcome {
 /// The enrolled-state disclosure for the TTY header + row annotations.
 #[derive(Debug)]
 pub(crate) struct ListEnrollment {
-    /// The workspace display name (falling back to the enrolled workspace id).
-    pub workspace: String,
+    /// The joined workspaces as `(workspace_id, display_label)` in membership order — the TTY groups the
+    /// tracked rows by their `workspace_id` and names each group by its label (falling back to the raw id).
+    pub workspace_labels: Vec<(String, String)>,
     /// The pinned plane's base URL.
     pub base_url: String,
     /// Whether the harness session-start currency hook is currently installed (read from the adapter's
@@ -66,6 +67,14 @@ pub(crate) fn list(
     skill: Option<&str>,
     want_footprint: bool,
 ) -> Result<ListOutcome, ClientError> {
+    // The follow-state is the ONE source for the per-skill workspace provenance, the followed bucket, and
+    // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
+    // deliberately do NOT consult `ctx.follow`: `list` already keys its followed bucket + notes off this
+    // file read, so the per-entry `workspace_id` shares that single authority (they can only agree).
+    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
+        .map(|f| f.follows)
+        .unwrap_or_default();
+
     // Carry the stable skill id alongside each entry — the proposals read route and the follow-state
     // are keyed by id, not name.
     let mut tracked: Vec<(String, SkillEntry)> = Vec::new();
@@ -86,10 +95,18 @@ pub(crate) fn list(
             continue;
         };
         let draft = is_draft(ctx, &paths.map, &lock)?;
+        let id_str = id.into_string();
+        // The skill's workspace provenance, from its follow entry (a retained-but-paused entry still
+        // carries it); `None` for a purely local, never-followed `add`'d skill.
+        let workspace_id = follows
+            .iter()
+            .find(|f| f.skill_id == id_str)
+            .map(|f| f.workspace_id.clone());
         tracked.push((
-            id.into_string(),
+            id_str,
             SkillEntry {
                 skill: lock.name,
+                workspace_id,
                 version_id: lock.base_commit,
                 bundle_digest: lock.bundle_digest,
                 draft,
@@ -143,9 +160,6 @@ pub(crate) fn list(
     let enrollment = match enroll::read_instance(ctx.fs, &ctx.layout)? {
         None => None,
         Some(instance) => {
-            let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
-                .map(|f| f.follows)
-                .unwrap_or_default();
             let notes: Vec<Option<FollowNote>> = tracked
                 .iter()
                 .map(|(id, _)| {
@@ -161,15 +175,22 @@ pub(crate) fn list(
                         })
                 })
                 .collect();
-            // The workspace disclosure now lives per-membership in user.json (instance.json is the plane
-            // record only). For the header, name the FIRST joined workspace; a multi-workspace list view
-            // lands in a later leg.
-            let workspace = enroll::read_user(ctx.fs, &ctx.layout)?
-                .and_then(|u| u.workspaces.into_iter().next())
-                .map(|m| m.display_name.unwrap_or(m.workspace_id))
-                .unwrap_or_else(|| "workspace".to_owned());
+            // The per-workspace display names now live per-membership in user.json (instance.json is the
+            // plane record only). Carry every membership's `(id, label)` so the TTY groups the tracked rows
+            // by workspace and names each group — one install can follow skills across several workspaces.
+            let workspace_labels = enroll::read_user(ctx.fs, &ctx.layout)?
+                .map(|u| {
+                    u.workspaces
+                        .into_iter()
+                        .map(|m| {
+                            let label = m.display_name.unwrap_or_else(|| m.workspace_id.clone());
+                            (m.workspace_id, label)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(ListEnrollment {
-                workspace,
+                workspace_labels,
                 base_url: instance.base_url,
                 hook_active: !ctx.harness.uninstall_footprint().is_empty(),
                 notes,

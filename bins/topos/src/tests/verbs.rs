@@ -227,6 +227,10 @@ fn add_then_list_finds_tracked_and_pins_lock_shape() {
     assert_eq!(entry.bundle_digest, add.bundle_digest);
     assert!(!entry.draft, "freshly added skill has no draft");
     assert!(
+        entry.workspace_id.is_none(),
+        "a locally-adopted skill has no workspace"
+    );
+    assert!(
         list.followed.is_empty() && list.published_by_you.is_empty() && list.untracked.is_empty()
     );
 
@@ -1119,24 +1123,30 @@ fn list_discloses_enrollment_follow_state_and_hook() {
 
     let out = ops::list(&ctx, None, false).unwrap();
     let e = out.enrollment.as_ref().expect("instance.json ⇒ enrolled");
-    assert_eq!(e.workspace, "Acme");
+    assert_eq!(
+        e.workspace_labels,
+        vec![("w_acme".to_owned(), "Acme".to_owned())]
+    );
     assert_eq!(e.base_url, "https://topos.example");
     assert!(!e.hook_active, "NoHarness holds no managed hook entry");
-    // The followed bucket is the tracked subset follows.json selects (schema-compatible SkillEntry rows).
+    // The followed bucket is the tracked subset follows.json selects (schema-compatible SkillEntry rows),
+    // each stamped with its workspace provenance.
     assert_eq!(out.data.followed.len(), 1);
     assert_eq!(out.data.followed[0].skill, "pr-describe");
     assert_eq!(out.data.followed[0].version_id, a.version_id);
+    assert_eq!(out.data.followed[0].workspace_id.as_deref(), Some("w_acme"));
+    assert_eq!(out.data.tracked[0].workspace_id.as_deref(), Some("w_acme"));
     assert!(
         matches!(e.notes.as_slice(), [Some(n)] if n.following && n.mode == "auto"),
         "one tracked row, annotated with its follow state"
     );
     let text = render::list_tty(&out);
+    // The header names the plane + hook; the skill sits under its workspace's group header.
     assert!(
-        text.starts_with(
-            "Enrolled in Acme at https://topos.example — currency hook: not installed"
-        ),
+        text.starts_with("Enrolled at https://topos.example — currency hook: not installed"),
         "{text}"
     );
+    assert!(text.contains("\nAcme:\n"), "{text}");
     assert!(text.contains("(following, auto)"), "{text}");
 
     // A harness whose managed hook entry IS present reports the hook active.

@@ -281,6 +281,13 @@
         },
         "skill": {
           "type": "string"
+        },
+        "workspace_id": {
+          "description": "The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that\nhas no follow entry. A pulled skill is normally followed (so `Some`), but `pull <skill>@<hash>` on an\nunfollowed copy has none — `Option` keeps that honest and stays symmetric with [`SkillEntry`]. Names\nthe workspace so a session-start sweep does not show two same-named skills indistinguishably.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

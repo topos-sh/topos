@@ -28,7 +28,8 @@
           "epoch": 1,
           "seq": 7
         },
-        "skill": "pr-describe"
+        "skill": "pr-describe",
+        "workspace_id": "w_acme"
       }
     ]
   },

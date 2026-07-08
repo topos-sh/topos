@@ -324,6 +324,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(PullData {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
                 observed: Generation { epoch: 1, seq: 42 },
                 applied: Generation { epoch: 1, seq: 42 },
                 action: PullAction::UpToDate,
@@ -349,6 +350,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(PullData {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
                 observed: Generation { epoch: 1, seq: 7 },
                 applied: Generation { epoch: 1, seq: 7 },
                 action: PullAction::Merged,
@@ -381,6 +383,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(PullData {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
                 observed: Generation { epoch: 1, seq: 7 },
                 applied: Generation { epoch: 1, seq: 7 },
                 action: PullAction::Conflicted,
@@ -408,7 +411,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `list` after adopting the fixture skill — one tracked skill, no draft.
+    // `list` after adopting the fixture skill — one tracked skill, no draft. It was `add`'d locally (never
+    // followed), so it has NO workspace: `workspace_id` is `None` and omits from the envelope. The populated
+    // provenance rides the `pull` fixtures above (a followed skill) + the schema's new optional field.
     let list_ok = JsonEnvelope {
         schema_version: 1,
         command: "list".to_owned(),
@@ -416,6 +421,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(ListData {
             tracked: vec![SkillEntry {
                 skill: "pr-describe".to_owned(),
+                workspace_id: None,
                 version_id: fx_version.to_owned(),
                 bundle_digest: fx_digest.to_owned(),
                 draft: false,

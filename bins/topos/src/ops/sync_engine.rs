@@ -416,6 +416,9 @@ pub(crate) fn go_back(
     log_apply(ctx, skill_id, "pull-goback", target, &report);
     Ok(PullSkill {
         skill: name,
+        // The workspace provenance is stamped by the pull aggregator (`pull.rs`), which owns the
+        // follow-state; a go-back target may be an unfollowed local copy, so it can honestly be `None`.
+        workspace_id: None,
         observed: next_sync.observed,
         applied: next_sync.applied,
         action: PullAction::Held,
@@ -1079,8 +1082,11 @@ fn read_required<T: serde::de::DeserializeOwned>(
 // ---- PullSkill row builders ----
 
 fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
+    // `workspace_id` is stamped by the pull aggregator (`pull.rs`), which holds the follow-state; every row
+    // builder here leaves it `None`.
     PullSkill {
         skill: name.to_owned(),
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.applied,
         action,
@@ -1098,6 +1104,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
     // `applied` is now `observed` on disk; report the advanced state.
     PullSkill {
         skill: name.to_owned(),
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.observed,
         action: PullAction::FastForwarded,
@@ -1110,6 +1117,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
 fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: &str) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.applied,
         action: PullAction::Offered,
@@ -1130,6 +1138,7 @@ fn diverged_row(
 ) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.applied,
         action: PullAction::Diverged,

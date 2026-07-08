@@ -5,7 +5,7 @@ use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
 use topos_types::results::{
     AddData, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RevertData, ReviewData, ReviewDecision, UnfollowData,
+    PullSkill, RevertData, ReviewData, ReviewDecision, SkillEntry, UnfollowData,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -231,12 +231,12 @@ pub(crate) fn add_tty(data: &AddData) -> String {
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
-    // The enrollment header — the "am I enrolled, is the hook armed" disclosure. Rendered only when
-    // enrolled; the unenrolled output is byte-identical to the accountless local list.
+    // The enrollment header — the "am I enrolled, is the hook armed" disclosure. The workspace names move
+    // to the per-group headers below (one install can follow skills across several workspaces). Rendered
+    // only when enrolled; the unenrolled output is byte-identical to the accountless local list.
     if let Some(e) = &out.enrollment {
         s.push_str(&format!(
-            "Enrolled in {} at {} — currency hook: {}\n",
-            e.workspace,
+            "Enrolled at {} — currency hook: {}\n",
             e.base_url,
             if e.hook_active {
                 "active"
@@ -249,36 +249,43 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         s.push_str("No tracked skills.");
         return s;
     }
-    s.push_str("Tracked skills:\n");
-    for (i, e) in data.tracked.iter().enumerate() {
-        // The row's follow state (aligned with `tracked` by construction): following + mode, or a
-        // retained-but-paused entry that `topos follow` resumes. A purely local skill has no note.
-        let note = out
-            .enrollment
+    // The follow-state note `(mode, following)` for tracked row `i` (aligned by construction), present only
+    // when enrolled+followed — extracted as plain fields so the row builder stays type-agnostic.
+    let note_of = |i: usize| {
+        out.enrollment
             .as_ref()
             .and_then(|en| en.notes.get(i))
-            .and_then(Option::as_ref);
-        let follow_note = match note {
-            Some(n) if n.following => format!("  (following, {})", n.mode),
-            Some(_) => format!(
-                "  (not following — `topos follow --approve {}` resumes)",
-                e.skill
-            ),
-            None => String::new(),
-        };
-        s.push_str(&format!(
-            "  {}  {}@{}{}{}\n",
-            e.skill,
-            e.skill,
-            short(&e.version_id),
-            follow_note,
-            if e.draft { "  (draft)" } else { "" }
-        ));
-        // Open proposals print IN FULL — this is the surface a reviewer copies the hash from.
-        for p in &e.pending_proposals {
-            s.push_str(&format!(
-                "    open proposal {p} — run `topos review {p} --approve` (or `--reject`)\n"
-            ));
+            .and_then(Option::as_ref)
+            .map(|n| (n.mode, n.following))
+    };
+    match &out.enrollment {
+        // Enrolled: group the tracked rows by workspace (named by the membership display label), with the
+        // purely-local skills under their own clearly-labelled group. `--json` stays a flat list — grouping
+        // is TTY-only.
+        Some(e) => {
+            for (ws_id, label) in ordered_workspace_groups(&data.tracked, &e.workspace_labels) {
+                s.push_str(&format!("{label}:\n"));
+                for (i, entry) in data.tracked.iter().enumerate() {
+                    if entry.workspace_id.as_deref() == Some(ws_id) {
+                        s.push_str(&list_row(entry, note_of(i)));
+                    }
+                }
+            }
+            if data.tracked.iter().any(|e| e.workspace_id.is_none()) {
+                s.push_str("local (not shared):\n");
+                for (i, entry) in data.tracked.iter().enumerate() {
+                    if entry.workspace_id.is_none() {
+                        s.push_str(&list_row(entry, note_of(i)));
+                    }
+                }
+            }
+        }
+        // Unenrolled: the flat accountless list (there are no workspaces to group by).
+        None => {
+            s.push_str("Tracked skills:\n");
+            for (i, entry) in data.tracked.iter().enumerate() {
+                s.push_str(&list_row(entry, note_of(i)));
+            }
         }
     }
     if let Some(footprint) = &data.footprint {
@@ -288,6 +295,63 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         ));
     }
     s.trim_end().to_owned()
+}
+
+/// One tracked row's text: the padded skill line (`<skill>  <skill>@<short>` + follow note + draft flag)
+/// plus any open-proposal lines beneath it. `note` is the follow-state `(mode, following)` where the skill
+/// is enrolled+followed, else `None` (a purely local skill).
+fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
+    let follow_note = match note {
+        Some((mode, true)) => format!("  (following, {mode})"),
+        Some((_, false)) => format!(
+            "  (not following — `topos follow --approve {}` resumes)",
+            entry.skill
+        ),
+        None => String::new(),
+    };
+    let mut s = format!(
+        "  {}  {}@{}{}{}\n",
+        entry.skill,
+        entry.skill,
+        short(&entry.version_id),
+        follow_note,
+        if entry.draft { "  (draft)" } else { "" }
+    );
+    // Open proposals print IN FULL — this is the surface a reviewer copies the hash from.
+    for p in &entry.pending_proposals {
+        s.push_str(&format!(
+            "    open proposal {p} — run `topos review {p} --approve` (or `--reject`)\n"
+        ));
+    }
+    s
+}
+
+/// The workspace groups present among `tracked`, ordered `(workspace_id, display_label)`: membership order
+/// first (from `workspace_labels`), then any workspace that appears on a row but has no membership label
+/// (defensive — named by its raw id). The purely-local (no-workspace) group is rendered by the caller.
+fn ordered_workspace_groups<'a>(
+    tracked: &'a [SkillEntry],
+    workspace_labels: &'a [(String, String)],
+) -> Vec<(&'a str, &'a str)> {
+    let mut present: Vec<&str> = tracked
+        .iter()
+        .filter_map(|e| e.workspace_id.as_deref())
+        .collect();
+    present.sort_unstable();
+    present.dedup();
+
+    let mut ordered: Vec<(&'a str, &'a str)> = Vec::new();
+    for (id, label) in workspace_labels {
+        if present.contains(&id.as_str()) {
+            ordered.push((id.as_str(), label.as_str()));
+        }
+    }
+    for ws in present {
+        if !ordered.iter().any(|(id, _)| *id == ws) {
+            ordered.push((ws, ws));
+        }
+    }
+    ordered
 }
 
 pub(crate) fn diff_tty(data: &DiffData) -> String {
@@ -835,6 +899,7 @@ mod tests {
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
             skill: name.to_owned(),
+            workspace_id: None,
             observed: g(1, 2),
             applied: g(1, 2),
             action,
@@ -979,26 +1044,32 @@ mod tests {
     }
 
     #[test]
-    fn list_tty_shows_enrollment_header_and_follow_state() {
-        let entry = |name: &str, draft: bool| SkillEntry {
+    fn list_tty_groups_by_workspace_and_shows_follow_state() {
+        let entry = |name: &str, draft: bool, ws: Option<&str>| SkillEntry {
             skill: name.to_owned(),
+            workspace_id: ws.map(str::to_owned),
             version_id: "ab".repeat(32),
             bundle_digest: "cd".repeat(32),
             draft,
             pending_proposals: Vec::new(),
         };
-        let mut narrowed = entry("docs", false);
-        narrowed.pending_proposals = vec![format!("docs@{}", "ef".repeat(32))];
+        let mut docs = entry("docs", false, Some("w_acme"));
+        docs.pending_proposals = vec![format!("docs@{}", "ef".repeat(32))];
         let out = ListOutcome {
             data: ListData {
-                followed: vec![narrowed.clone()],
+                followed: vec![docs.clone()],
                 published_by_you: Vec::new(),
-                tracked: vec![narrowed, entry("paused", false), entry("local", true)],
+                // Two workspace skills (one paused) + one purely-local skill.
+                tracked: vec![
+                    docs,
+                    entry("paused", false, Some("w_acme")),
+                    entry("local", true, None),
+                ],
                 untracked: Vec::new(),
                 footprint: None,
             },
             enrollment: Some(ListEnrollment {
-                workspace: "Acme".to_owned(),
+                workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
                 base_url: "https://topos.example".to_owned(),
                 hook_active: true,
                 notes: vec![
@@ -1015,19 +1086,27 @@ mod tests {
             }),
         };
         let text = list_tty(&out);
+        // The header names the plane + hook; the workspace names move to the group headers.
         assert!(
-            text.starts_with("Enrolled in Acme at https://topos.example — currency hook: active"),
+            text.starts_with("Enrolled at https://topos.example — currency hook: active"),
             "{text}"
         );
+        // The workspace group is named by its membership display label; the local skills group separately.
+        assert!(text.contains("\nAcme:\n"), "{text}");
+        assert!(text.contains("\nlocal (not shared):\n"), "{text}");
+        // The Acme group holds the followed + the paused rows (before the local group's line).
+        let acme_at = text.find("Acme:").unwrap();
+        let local_at = text.find("local (not shared):").unwrap();
+        assert!(acme_at < local_at, "workspace group precedes local:\n{text}");
         assert!(text.contains("docs@ababababab"), "{text}");
         assert!(text.contains("(following, auto)"), "{text}");
         assert!(
             text.contains("paused@") && text.contains("(not following — `topos follow --approve"),
             "{text}"
         );
-        // A purely local skill carries no follow note; its draft flag still shows.
+        // A purely local skill sits under the local group with no follow note; its draft flag still shows.
         assert!(
-            text.contains("local@") && text.contains("(draft)"),
+            text[local_at..].contains("local@") && text.contains("(draft)"),
             "{text}"
         );
         // The open proposal prints IN FULL — the copy-paste surface for `review`.

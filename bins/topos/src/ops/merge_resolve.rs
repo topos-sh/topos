@@ -362,6 +362,7 @@ pub(crate) fn escape_recorded(
         ctx.fs.remove_file(&sp.conflict)?;
         return Ok(PullSkill {
             skill: lock.name.clone(),
+            workspace_id: None,
             observed: sync.observed,
             applied: sync.applied,
             action: PullAction::UpToDate,
@@ -878,6 +879,8 @@ fn merged_row(
 ) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
+        // Stamped by the pull aggregator (`pull.rs`), which owns the follow-state.
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.observed, // the pending update is consumed into the merged draft
         action: PullAction::Merged,
@@ -908,6 +911,7 @@ fn conflicted_row(
 ) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
+        workspace_id: None,
         observed: sync.observed,
         applied: sync.observed, // theirs is incorporated into the (blocked) conflict draft
         action: PullAction::Conflicted,

@@ -95,7 +95,13 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     &follow,
                     sync_engine::Invocation::Sweep,
                 ) {
-                    Ok(row) => skills.push(row),
+                    // Stamp the row's workspace provenance from the skill's OWN follow entry — the sweep
+                    // spans skills across every followed workspace, so two same-named skills stay
+                    // distinguishable in the `--json` rows.
+                    Ok(mut row) => {
+                        row.workspace_id = Some(follow.workspace_id.clone());
+                        skills.push(row);
+                    }
                     // A hard per-skill failure (corrupt docs, store/io) must not abort the whole sweep —
                     // disclose it (stderr + a typed warning; never stdout, which the hook injects) and
                     // leave that skill put.
@@ -122,7 +128,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
-            let row = match mode {
+            let mut row = match mode {
                 TargetMode::GoBack(vref) => sync_engine::go_back(ctx, &skill_id, &vref)?,
                 TargetMode::AcceptPending | TargetMode::OntoCurrent => {
                     let inv = match mode {
@@ -143,6 +149,9 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     }
                 }
             };
+            // Stamp the row's workspace provenance from the follow-state (a retained-but-paused entry still
+            // resolves; a purely local go-back / tracked-only skill is honestly `None`).
+            row.workspace_id = super::followed_workspace(ctx, skill_id.as_str());
             let proposals_awaiting = if plane_independent {
                 0
             } else {
