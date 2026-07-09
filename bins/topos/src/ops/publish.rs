@@ -27,7 +27,7 @@ use topos_gitstore::{ImportFile, Store};
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
 use topos_types::results::{
-    ProposeData, PublishData, PublishPending, PublishPendingStatus, StandupReceipt,
+    AddedNote, ProposeData, PublishData, PublishPending, PublishPendingStatus, StandupReceipt,
 };
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
@@ -38,12 +38,16 @@ use super::follow::{
 };
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
-use super::{parse_hex32, resolve_skill, resolve_skill_in_workspace, write_workspace_for_skill};
+use super::{
+    DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
+    resolve_skill_in_workspace, split_target, tracked_skill_at, write_workspace_for_skill,
+};
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::{TokenPoll, WriteReceipt};
+use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
 
 /// The result of `publish`: either `current` moved (a direct publish), a proposal opened (`--propose`), or
@@ -77,43 +81,87 @@ pub(crate) struct StandupConnectors<'a> {
 /// `(0,0)` (the plane's genesis branch creates `current` at `(1,1)`).
 const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 
-/// Ship `target`'s draft (or, with `propose`, open a proposal). `target` is `<skill>` or `<skill>@<digest>`
-/// — the optional pin re-verifies the scanned bytes. Un-enrolled + direct dispatches to the
-/// workspace-standup branch (see the module doc); un-enrolled + `--propose` keeps the typed error.
+/// Ship `target`'s draft (or, with `propose`, open a proposal), ADDING the skill to topos first if it is an
+/// untracked LOCAL source. `target` is `<source>[@<digest>]`: the optional `@<digest>` pin re-verifies the
+/// scanned bytes, and the SOURCE (the rest) is a tracked skill name, an untracked `<name>` / `<name>@<harness>`
+/// / `<dir>` the client adopts before publishing (the auto-add convenience — one command instead of
+/// `add` then `publish`), or a remote/unsupported form that is refused typed. Un-enrolled + direct dispatches
+/// to the workspace-standup branch (see the module doc); `--propose` keeps the typed not-enrolled error.
 ///
 /// # Errors
 /// [`ClientError::Enrollment`] if not enrolled (`--propose`) or a standup step fails typed;
-/// [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the scanned bytes;
-/// [`ClientError::PublishBlocked`] if an unresolved merge conflict is present; [`ClientError::Conflict`] /
-/// [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's typed verdict; a signing /
-/// transport / store failure otherwise.
+/// [`ClientError::InvalidArgument`] if the source is remote/unsupported (add it first);
+/// [`ClientError::HarnessMismatch`] if a `@<harness>` names a different harness than the tracked skill;
+/// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
+/// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
+/// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
+/// [`ClientError::Conflict`] / [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's
+/// typed verdict; a signing / transport / store failure otherwise.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     gov_connect: &GovernanceConnect<'_>,
     standup: &StandupConnectors<'_>,
+    roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
     workspace: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
-    let (skill_name, pin) = parse_target(target);
+    // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE. A pin only
+    // ever rides a standup RESUME, by which point the skill is already tracked, so it never collides with a
+    // `<name>@<harness>` or `<dir>` source on a first (untracked) publish.
+    let (source_str, pin) = parse_target(target);
+
+    // A `--propose` needs prior enrollment (a proposal against a workspace that does not exist yet is
+    // meaningless). Refuse BEFORE any local adoption, so an un-enrolled propose never mutates local state.
+    if propose && enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
+        return Err(ClientError::Enrollment(
+            "not enrolled; run `topos follow <link>` first".into(),
+        ));
+    }
+
+    // Auto-add: adopt an untracked LOCAL source before publishing, and learn the tracked skill name the
+    // rest of the flow resolves. `added` is `Some` iff THIS invocation performed the adoption (disclosure).
+    let (skill_name, added) = ensure_tracked(ctx, roots, &source_str)?;
+
+    let outcome = publish_tracked(
+        ctx,
+        connect,
+        gov_connect,
+        standup,
+        &skill_name,
+        pin.as_deref(),
+        propose,
+        workspace,
+    )?;
+    Ok(stamp_added(outcome, added))
+}
+
+/// Publish an ALREADY-tracked skill by name (the pre-auto-add body): dispatch enrolled vs standup, then run
+/// the ordinary publish. `skill_name` is the tracked name [`ensure_tracked`] resolved; `pin` the optional
+/// `@<digest>` consent. A `--propose` here always implies enrollment (the un-enrolled case was refused in
+/// [`publish`] before adoption).
+#[allow(clippy::too_many_arguments)]
+fn publish_tracked(
+    ctx: &Ctx<'_>,
+    connect: &ContributeConnect<'_>,
+    gov_connect: &GovernanceConnect<'_>,
+    standup: &StandupConnectors<'_>,
+    skill_name: &str,
+    pin: Option<&str>,
+    propose: bool,
+    workspace: Option<&str>,
+) -> Result<PublishOutcome, ClientError> {
     // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
-    // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup; absent + propose ⇒ the
-    // typed error (a proposal against a workspace that does not exist yet is meaningless).
+    // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup. Absent + propose was
+    // already refused in `publish` (before any adoption), so a bare un-enrolled publish here is a direct.
     if enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
-        if propose {
-            return Err(ClientError::Enrollment(
-                "not enrolled; run `topos follow <link>` first".into(),
-            ));
-        }
-        return standup_publish(
-            ctx,
-            connect,
-            gov_connect,
-            standup,
-            &skill_name,
-            pin.as_deref(),
+        debug_assert!(
+            !propose,
+            "propose + un-enrolled is refused in publish() before adoption"
         );
+        return standup_publish(ctx, connect, gov_connect, standup, skill_name, pin);
     }
     // `instance.json` PRESENT does not yet mean the promotion COMPLETED: promote_core writes it FIRST and
     // `user.json` later, so a crash inside a standup promotion leaves instance present, user absent, and
@@ -131,25 +179,154 @@ pub(crate) fn publish(
         && let enroll::EnrollPhase::Redeemed { context, .. } = &wal.state
         && matches!(context.root, enroll::EnrollRoot::Standup)
     {
-        return standup_publish(
-            ctx,
-            connect,
-            gov_connect,
-            standup,
-            &skill_name,
-            pin.as_deref(),
-        );
+        return standup_publish(ctx, connect, gov_connect, standup, skill_name, pin);
     }
     enrolled_publish(
         ctx,
         connect,
         gov_connect,
-        &skill_name,
+        skill_name,
         propose,
-        pin.as_deref(),
+        pin,
         None,
         workspace,
     )
+}
+
+/// Resolve `source_str` (the target minus any `@<digest>` pin) to a TRACKED skill NAME the rest of the
+/// publish flow resolves, ADDING it first if it is an untracked local source. Returns the name plus the
+/// per-invocation [`AddedNote`] disclosure (`Some` iff THIS call adopted the skill; `None` when already
+/// tracked).
+///
+/// An EXACT tracked-name match wins BEFORE any source-shape classification — so a tracked skill whose name
+/// happens to look like a path / remote / `<name>@<harness>` shape (`owner/repo`, `foo@bar`) still publishes
+/// by its literal name (and its standup resume argv self-heals to that exact name). Only a name tracked
+/// NOWHERE is classified by shape ([`crate::source::classify`], the same classifier `add` uses) and adopted.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] for a remote/unsupported source (add it first);
+/// [`ClientError::HarnessMismatch`] for a `@<harness>` that disagrees with an already-tracked name; the
+/// `add`-family resolution errors when adopting an untracked source; a store/io failure otherwise.
+pub(crate) fn ensure_tracked(
+    ctx: &Ctx<'_>,
+    roots: Option<&DiscoveryRoots>,
+    source_str: &str,
+) -> Result<(String, Option<AddedNote>), ClientError> {
+    // Exact literal tracked name wins first (never re-adopt / misclassify a tracked skill).
+    match resolve_skill(ctx, source_str) {
+        Ok((_, lock)) => return Ok((lock.name, None)),
+        // Tracked ambiguously (2+ under this exact name) — hand it to the ordinary `--workspace`-filtered
+        // resolve downstream; never auto-add over it.
+        Err(ClientError::AmbiguousName { .. }) => return Ok((source_str.to_owned(), None)),
+        // Not a literal tracked name — fall through to source classification + auto-add.
+        Err(ClientError::NoSuchSkill { .. }) => {}
+        Err(e) => return Err(e),
+    }
+    match source::classify(source_str) {
+        SourceSpec::LocalName(raw) => ensure_name(ctx, roots, &raw),
+        SourceSpec::LocalPath(p) => ensure_path(ctx, &p),
+        // `publish` adopts LOCAL skills only — a remote import is a deliberate, separate `add` step (it
+        // reaches the network and lands foreign bytes; the source's trust is the caller's to verify there).
+        SourceSpec::Remote(_) => Err(ClientError::InvalidArgument(format!(
+            "`topos publish` adds LOCAL skills only — '{source_str}' is a remote source; run \
+             `topos add {source_str}` to import it first, then `topos publish <skill>`"
+        ))),
+        SourceSpec::Unsupported(msg) => Err(ClientError::InvalidArgument(msg)),
+    }
+}
+
+/// The `<name>` / `<name>@<harness>` arm of [`ensure_tracked`]: publish an already-tracked name (verifying
+/// any `@<harness>` matches it), or resolve the name against discovery and adopt it.
+fn ensure_name(
+    ctx: &Ctx<'_>,
+    roots: Option<&DiscoveryRoots>,
+    raw: &str,
+) -> Result<(String, Option<AddedNote>), ClientError> {
+    let (bare, harness) = split_target(raw);
+    match resolve_skill(ctx, bare) {
+        // Uniquely tracked → publish it. A `@<harness>` that names a DIFFERENT harness than the tracked
+        // skill's likely means a different copy was intended — refuse rather than publish these bytes.
+        Ok((id, lock)) => {
+            if let Some(requested) = harness {
+                let map: PlacementMap = doc::read_doc(ctx.fs, &ctx.layout.published(&id).map)?
+                    .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+                if map.harness_slug.as_deref() != Some(requested) {
+                    return Err(ClientError::HarnessMismatch {
+                        name: lock.name,
+                        requested: requested.to_owned(),
+                        tracked: map.harness_slug.unwrap_or_else(|| "<none>".to_owned()),
+                    });
+                }
+            }
+            Ok((lock.name, None))
+        }
+        // Tracked under this name more than once (across workspaces) — NOT an auto-add case; hand the bare
+        // name to the ordinary flow, whose `--workspace`-filtered resolve disambiguates (or re-errors). A
+        // `@<harness>` is only a verification for a UNIQUELY-tracked name; across ambiguous copies `--workspace`
+        // is the deliberate selector, so the harness qualifier is advisory here (not re-checked per copy).
+        Err(ClientError::AmbiguousName { .. }) => Ok((bare.to_owned(), None)),
+        // Untracked → resolve the name against discovery + adopt it (the `add <name>` path), then publish
+        // under the resolved name.
+        Err(ClientError::NoSuchSkill { .. }) => {
+            let roots = roots.ok_or_else(|| {
+                ClientError::InvalidArgument(
+                    "cannot resolve a skill name without $HOME set — publish a directory by path \
+                     (`topos publish ./<dir>`)"
+                        .into(),
+                )
+            })?;
+            let (path, name) = resolve_add_target(ctx, roots, raw)?;
+            let data = add_with_name(ctx, &path, Some(&name))?;
+            Ok((
+                data.name.clone(),
+                Some(AddedNote {
+                    name: data.name,
+                    harness_slug: data.harness_slug,
+                }),
+            ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The `<dir>` arm of [`ensure_tracked`]: publish the tracked skill already at this directory, else adopt it
+/// in place (the `add --path`-equivalent) and publish the adopted name.
+fn ensure_path(
+    ctx: &Ctx<'_>,
+    p: &std::path::Path,
+) -> Result<(String, Option<AddedNote>), ClientError> {
+    // Already tracked at this dir → publish it (never re-adopt). Reachable only when the path canonicalizes;
+    // a bad/absent path falls through to `add`, which produces the proper scan/io error.
+    if let Ok(canonical) = p.canonicalize()
+        && let Some(id_str) = tracked_skill_at(ctx, &canonical)?
+    {
+        let id = crate::id::SkillId::parse(&id_str)?;
+        let lock: Lock = doc::read_doc(ctx.fs, &ctx.layout.published(&id).lock)?
+            .ok_or_else(|| ClientError::Corrupt("missing lock doc".to_owned()))?;
+        return Ok((lock.name, None));
+    }
+    let data = add(ctx, p)?;
+    Ok((
+        data.name.clone(),
+        Some(AddedNote {
+            name: data.name,
+            harness_slug: data.harness_slug,
+        }),
+    ))
+}
+
+/// Attach the per-invocation `added` disclosure to the outcome — Published, Pending, AND Proposed all carry
+/// it (a `--propose` of an untracked source adopts it first too), so a success path never hides the local
+/// `add` it performed. A no-op when nothing was added this invocation.
+fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> PublishOutcome {
+    if let Some(note) = added {
+        match &mut outcome {
+            PublishOutcome::Published(data) => data.added = Some(note),
+            PublishOutcome::Pending { data, .. } => data.added = Some(note),
+            PublishOutcome::Proposed(data) => data.added = Some(note),
+        }
+    }
+    outcome
 }
 
 /// The ordinary ENROLLED publish (the pre-standup body). `pin` is the optional `@<digest>` consent — when
@@ -724,6 +901,7 @@ fn pending_outcome(
                 expires_at: Some(fmt_rfc3339_millis(expires_at_millis)),
             }),
             standup: None,
+            added: None,
         },
         resume_argv: vec![
             "topos".to_owned(),
@@ -882,6 +1060,7 @@ fn map_outcome(
                 invite_link: None,
                 pending: None,
                 standup: None,
+                added: None,
             }))
         }
         TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {
@@ -889,6 +1068,7 @@ fn map_outcome(
             base_version_id: lock.base_commit.clone(),
             title: skill_name.to_owned(),
             body: None,
+            added: None,
         })),
         TerminalOutcome::ApprovalRequired => Err(ClientError::ApprovalRequired {
             skill: skill_name.to_owned(),

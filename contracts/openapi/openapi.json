@@ -1694,6 +1694,26 @@
           "CONTACT_ADMIN"
         ]
       },
+      "AddedNote": {
+        "type": "object",
+        "description": "The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add\nconvenience (`publish` accepts an untracked local source and adopts it first). Public disclosure only\n(the same facts an explicit `topos add` would return); never a secret. **INFERRED** (additive-only).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "harness_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`\nfor a plain directory adopted in place under no known harness."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by)."
+          }
+        }
+      },
       "AdminClaimRequest": {
         "type": "object",
         "description": "`POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its\nfirst owner. The server re-derives the device key id from `device_public_key`.",
@@ -2457,6 +2477,17 @@
           "title"
         ],
         "properties": {
+          "added": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AddedNote",
+                "description": "Present ONLY when THIS `publish --propose` invocation ADDED the skill to topos first (the auto-add\nconvenience — a proposal of an untracked local source adopts it before opening the PR). Discloses the\none local `add` the propose folded in; `None` when the skill was already tracked. **INFERRED.**"
+              }
+            ]
+          },
           "base_version_id": {
             "type": "string"
           },
@@ -2528,6 +2559,17 @@
           "bundle_digest"
         ],
         "properties": {
+          "added": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AddedNote",
+                "description": "Present ONLY when THIS `publish` invocation ADDED the skill to topos first (the auto-add\nconvenience: `publish <name>|<name>@<harness>|<dir>` adopts an untracked LOCAL skill, then ships it\nin one command). Discloses the one local `add` the publish folded in; `None` when the skill was\nalready tracked."
+              }
+            ]
+          },
           "bundle_digest": {
             "type": "string",
             "description": "The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is\ncomputed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it."

@@ -550,7 +550,7 @@ enum NameResolution {
 /// Split `<skill>[@<harness>]` on the LAST `@` (a harness slug never contains one). A degenerate token
 /// (empty name or empty harness — `foo@`, `@bar`) is treated as a bare name, so it fails as an ordinary
 /// not-found rather than a confusing empty-harness lookup.
-fn split_target(target: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
     match target.rsplit_once('@') {
         Some((name, harness)) if !name.is_empty() && !harness.is_empty() => (name, Some(harness)),
         _ => (target, None),
@@ -672,7 +672,10 @@ fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), 
 /// resolving symlinks/firmlinks on both sides; a placement that no longer resolves on disk is stale, not a
 /// match), or `None` if that directory is not tracked. The shared predicate behind
 /// [`reject_already_tracked`] and the remote-import [`check_destination`].
-fn tracked_skill_at(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<Option<String>, ClientError> {
+pub(crate) fn tracked_skill_at(
+    ctx: &Ctx<'_>,
+    canonical_source: &Path,
+) -> Result<Option<String>, ClientError> {
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;

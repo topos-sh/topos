@@ -269,6 +269,79 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     );
 }
 
+// ── door 1, auto-add: the first publish of an UNTRACKED directory adopts it, then stands up ─────────
+
+#[test]
+fn e2e_door1_first_publish_of_an_untracked_dir_auto_adds_and_stands_up() {
+    let plane = empty_plane("door1-autoadd", DeploymentMode::Cloud);
+    let client = FollowHarness::new("standup-autoadd");
+    // The publish target is a RAW directory the client has never adopted — the auto-add convenience.
+    let dir = client.write_skill_dir("deploy", DRAFT);
+    let dir_arg = dir.to_str().expect("a utf-8 work path");
+
+    // Call 1 — auto-adopts the dir (offline, before any network) THEN goes PENDING the human sign-in.
+    let call1 = client
+        .publish(&plane.base_url, plane.plane_key, dir_arg)
+        .expect("publish call 1");
+    let PublishResult::Pending { data, resume_argv } = call1 else {
+        panic!("an un-enrolled publish of an untracked dir must go PENDING, got {call1:?}");
+    };
+    // The folded-in add is disclosed on the pending receipt (a plain dir → no harness slug).
+    let added = data.added.expect("the auto-add is disclosed at pending");
+    assert_eq!(added.name, "deploy");
+    assert_eq!(added.harness_slug, None);
+    // The resume argv SELF-HEALS from the raw dir path to the adopted `<name>@<digest>` — so call 2
+    // tracked-resolves fast and never re-adopts.
+    let resume_target = resume_argv.get(2).cloned().expect("a resume target token");
+    assert!(
+        resume_target.starts_with("deploy@"),
+        "the resume self-heals to the adopted name, got {resume_target}"
+    );
+    assert!(client.wal_exists(), "the standup WAL is written");
+    let pending = data.pending.expect("the pending sign-in block");
+
+    // The web approve leg — the owner signs in and approves the standup.
+    let approved = plane
+        .rt
+        .block_on(plane.authority.approve_standup(
+            &pending.user_code,
+            FOUNDER,
+            None,
+            DeploymentMode::Cloud,
+            wall_ms(),
+            AT,
+        ))
+        .expect("approve the standup session");
+    assert!(
+        matches!(approved, ApproveStandupOutcome::Approved { .. }),
+        "expected Approved, got {approved:?}"
+    );
+
+    // Call 2 — the resume target (already tracked from call 1): enroll + land the genesis in one
+    // invocation, WITHOUT re-adopting.
+    let call2 = client
+        .publish(&plane.base_url, plane.plane_key, &resume_target)
+        .expect("publish call 2 (the resume)");
+    let PublishResult::Published(done) = call2 else {
+        panic!("the resumed publish must land, got {call2:?}");
+    };
+    assert!(
+        done.added.is_none(),
+        "call 2 publishes the already-tracked skill — no second add"
+    );
+    assert_eq!(
+        done.current_generation,
+        Some(Generation { epoch: 1, seq: 1 }),
+        "the auto-added skill's genesis landed over the wire"
+    );
+    assert!(
+        done.standup.is_some(),
+        "the standup disclosure rides the receipt"
+    );
+    assert!(!client.wal_exists(), "the WAL is consumed at promote");
+    assert_eq!(client.user_principal().as_deref(), Some(FOUNDER));
+}
+
 // ── door 2: the web create → owner enrollment → distribute to an invited member (cloud) ────────────
 
 #[test]

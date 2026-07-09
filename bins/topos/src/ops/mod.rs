@@ -33,7 +33,10 @@ mod unfollow;
 mod uninstall;
 mod upgrade;
 
-pub(crate) use add::{AddRemoteOpts, add, add_remote, add_with_name, resolve_add_target};
+pub(crate) use add::{
+    AddRemoteOpts, add, add_remote, add_with_name, resolve_add_target, split_target,
+    tracked_skill_at,
+};
 pub(crate) use diff::diff;
 pub(crate) use follow::{FollowConnectors, FollowOpts, FollowOutcome, follow};
 pub(crate) use invite::invite;
@@ -44,6 +47,9 @@ pub(crate) use list::{DiscoveryRoots, ListOutcome, RemoteScope, list};
 pub(crate) use list::{FollowNote, ListEnrollment};
 pub(crate) use log::log;
 pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
+// The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
+#[cfg(test)]
+pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull};
 pub(crate) use revert::revert;
 pub(crate) use review::review;

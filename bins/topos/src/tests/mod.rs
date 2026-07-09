@@ -4,6 +4,7 @@
 
 mod durability;
 mod follow;
+mod publish_autoadd;
 mod standup;
 mod sync;
 mod verbs;

@@ -598,6 +598,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
             }),
             standup: None,
+            added: None,
         })
         .expect("PublishData serializes"),
         warnings: vec![],

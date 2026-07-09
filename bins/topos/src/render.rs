@@ -4,9 +4,9 @@
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
 use topos_types::results::{
-    AddData, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData, ReviewDecision,
-    SkillEntry, UnfollowData, UntrackedEntry,
+    AddData, AddedNote, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData,
+    PullData, PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData,
+    ReviewDecision, SkillEntry, UnfollowData, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -697,8 +697,23 @@ pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
     )
 }
 
+/// The one-line disclosure that a `publish` ADDED the skill to topos first (the auto-add convenience) —
+/// honest plumbing ("it also adopted this skill"), naming the harness it was attributed to when known. It
+/// states only the adoption; the line that FOLLOWS conveys whether the publish then shipped or is pending.
+fn added_line(added: &AddedNote) -> String {
+    match &added.harness_slug {
+        Some(slug) => format!("Added '{}' from {slug} to topos.", added.name),
+        None => format!("Added '{}' to topos.", added.name),
+    }
+}
+
 pub(crate) fn publish_tty(data: &PublishData) -> String {
     let mut out = String::new();
+    // If this invocation ADDED the skill first (the auto-add convenience), say so before the publish line.
+    if let Some(added) = &data.added {
+        out.push_str(&added_line(added));
+        out.push('\n');
+    }
     // A workspace-creating publish discloses what it stood up and who owns it FIRST (hijack visibility:
     // an owner you don't recognize means someone else approved the sign-in).
     if let Some(standup) = &data.standup {
@@ -738,9 +753,15 @@ pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) ->
         // Unreachable by construction (the Pending outcome always carries the block) — stay honest anyway.
         return "Publish is pending a workspace sign-in.".to_owned();
     };
+    // If this invocation ADDED the skill first (an un-enrolled `publish <untracked>`), disclose it before
+    // the sign-in prompt — the skill is now tracked locally even while the workspace standup is pending.
+    let prefix = match &data.added {
+        Some(added) => format!("{}\n", added_line(added)),
+        None => String::new(),
+    };
     format!(
-        "No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, and \
-         approve (you become the workspace owner):\n  {}\n  code: {}\n  fingerprint: {} (confirm it \
+        "{prefix}No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, \
+         and approve (you become the workspace owner):\n  {}\n  code: {}\n  fingerprint: {} (confirm it \
          matches the page before approving)\nNothing is published yet; then re-run:\n  {}",
         pending.verification_uri_complete,
         pending.user_code,
@@ -759,9 +780,14 @@ pub(crate) fn publish_pending_next_actions(resume_argv: Vec<String>) -> Vec<Next
 }
 
 pub(crate) fn propose_tty(data: &ProposeData) -> String {
+    // If this invocation ADDED the skill first (the auto-add convenience), disclose it before the proposal.
+    let prefix = match &data.added {
+        Some(added) => format!("{}\n", added_line(added)),
+        None => String::new(),
+    };
     // Honest: this is NEEDS_REVIEW — a proposal opened, `current` did NOT move.
     format!(
-        "Opened proposal {} on base {}. Awaiting review — a reviewer runs `topos review {} --approve`.",
+        "{prefix}Opened proposal {} on base {}. Awaiting review — a reviewer runs `topos review {} --approve`.",
         data.proposal,
         short(&data.base_version_id),
         data.proposal,

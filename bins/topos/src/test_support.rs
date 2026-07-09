@@ -906,6 +906,16 @@ impl FollowHarness {
         });
     }
 
+    /// Write an UNadopted skill bundle at `<work>/<name>/` and return its path — the raw directory a
+    /// `publish <dir>` AUTO-ADOPTS before shipping. Unlike [`adopt`](Self::adopt) it does not track the
+    /// skill (that is the publish's auto-add pre-step's job).
+    #[must_use]
+    pub fn write_skill_dir(&self, name: &str, files: &[(&str, bool, &[u8])]) -> std::path::PathBuf {
+        let dir = self.work.0.join(name);
+        write_tree(&dir, files);
+        dir
+    }
+
     /// The adopted draft's bundle digest (lowercase hex) — the `<digest>` a publish's `<skill>@<digest>`
     /// pin carries. Scans the SAME work-root placement [`adopt`](Self::adopt) tracked.
     ///
@@ -1004,6 +1014,7 @@ impl FollowHarness {
                 &contribute,
                 &governance,
                 &standup,
+                None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 false,
                 workspace,
@@ -1528,7 +1539,7 @@ impl ContributeHarness {
                 base_url: "http://127.0.0.1:0".to_owned(),
             };
             match ops::publish(
-                ctx, contribute, governance, &standup, approve, propose, None,
+                ctx, contribute, governance, &standup, None, approve, propose, None,
             )
             .map_err(|e| e.to_string())?
             {

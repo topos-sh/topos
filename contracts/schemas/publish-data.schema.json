@@ -4,6 +4,17 @@
   "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**\n\nAn UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the\nenvelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and\nno version — `version_id` / `current_generation` are `None` at pending because nothing was published yet\n(only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME\npublish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command\ncompletes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]\ndisclosure.",
   "type": "object",
   "properties": {
+    "added": {
+      "description": "Present ONLY when THIS `publish` invocation ADDED the skill to topos first (the auto-add\nconvenience: `publish <name>|<name>@<harness>|<dir>` adopts an untracked LOCAL skill, then ships it\nin one command). Discloses the one local `add` the publish folded in; `None` when the skill was\nalready tracked.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AddedNote"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "bundle_digest": {
       "description": "The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is\ncomputed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it.",
       "type": "string",
@@ -66,6 +77,26 @@
     "bundle_digest"
   ],
   "$defs": {
+    "AddedNote": {
+      "description": "The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add\nconvenience (`publish` accepts an untracked local source and adopts it first). Public disclosure only\n(the same facts an explicit `topos add` would return); never a secret. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "harness_slug": {
+          "description": "The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`\nfor a plain directory adopted in place under no known harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
     "Generation": {
       "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
       "type": "object",

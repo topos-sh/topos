@@ -189,7 +189,14 @@ are asserted byte-equal in tests.
   routes; `map_write_envelope` maps the **all-outcome 200 envelope** to a typed `WriteReceipt` (every
   protocol outcome — OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`;
   only a transport/non-200/malformed body is an `Err`; the signed pointer is parsed leniently because an OK
-  `review --reject` carries `data: {}`). **`publish [--propose] <skill>[@<digest>]`** scans the draft
+  `review --reject` carries `data: {}`). **`publish [--propose] <target>[@<digest>]`** first runs the
+  **auto-add pre-step** (`ensure_tracked`): an EXACT tracked name wins straight through, else the target is
+  an untracked LOCAL source it adopts before publishing — a discovered `<name>` / `<name>@<harness>`
+  (reusing `add`'s `resolve_add_target`) or a `<dir>` (adopted in place via `ops::add`); a remote
+  `owner/repo`/URL is refused (add it first), a `@<harness>` disagreeing with an already-tracked skill is
+  `HARNESS_MISMATCH`, and `--propose` while un-enrolled is refused BEFORE any adoption. A folded-in add is
+  disclosed on the receipt (`PublishData`/`ProposeData` `added`), and the standup resume argv self-heals to
+  the adopted `<name>@<digest>`. Then it scans the draft
   (the same source `diff` uses), and when the target pins a `@<digest>` runs the **optional consent gate**
   (recompute the digest over the scanned bytes; refuse on mismatch — never a silent mode-flip; without a pin
   the computed digest just ships), computes the byte-identical `commit_id`/`bundle_digest`

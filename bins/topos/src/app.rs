@@ -272,6 +272,9 @@ pub fn run() -> ExitCode {
                 enroll: &connect_enroll,
                 base_url: resolve_standup_base(std::env::var("TOPOS_PLANE_URL").ok()),
             };
+            // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
+            // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
+            let roots = list_discovery(false);
             finish_publish(
                 json,
                 cmd_name,
@@ -280,6 +283,7 @@ pub fn run() -> ExitCode {
                     &connect_contribute,
                     &connect_governance,
                     &standup,
+                    roots.as_ref(),
                     &target,
                     propose,
                     workspace.as_deref(),

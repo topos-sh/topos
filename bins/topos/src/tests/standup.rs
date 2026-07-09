@@ -443,6 +443,7 @@ fn run_publish(
         &contribute,
         &governance,
         &standup,
+        None, // roots — the standup tests act on an already-tracked skill (no auto-add)
         target,
         propose,
         None,
@@ -520,6 +521,49 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
     // NOT enrolled yet — nothing promoted, nothing published.
     assert!(enroll::read_instance(&rig.fs, &layout).unwrap().is_none());
     assert_eq!(fake.authorize_calls.get(), 1);
+}
+
+#[test]
+fn unenrolled_publish_of_an_untracked_dir_auto_adds_then_stands_up() {
+    // The auto-add composition: an un-enrolled `publish <dir>` of a skill topos has never seen adopts it in
+    // place FIRST (offline, before any network), then stands the workspace up — one command, disclosed.
+    let rig = Rig::new("autoadd");
+    let src = rig.work.0.join("newskill");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), "# newskill v1\n").unwrap();
+    let fake = FakeStandup::new(Poll::Pending);
+
+    let outcome =
+        run_publish(&rig, &fake, src.to_str().unwrap(), false).expect("call 1 is ok-pending");
+    let ops::PublishOutcome::Pending { data, resume_argv } = outcome else {
+        panic!(
+            "an un-enrolled direct publish of an untracked dir returns the PENDING standup outcome"
+        );
+    };
+
+    // The add was folded in and DISCLOSED (a plain dir under no harness → no slug).
+    let added = data
+        .added
+        .expect("the auto-add is disclosed on the pending receipt");
+    assert_eq!(added.name, "newskill");
+    assert_eq!(added.harness_slug, None);
+    // The standup actually started (the network was reached only AFTER the local adopt).
+    assert!(data.pending.is_some());
+    assert_eq!(fake.authorize_calls.get(), 1);
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_some());
+
+    // The skill is now tracked under its adopted NAME — the resume argv carries `<name>@<digest>` (never the
+    // original dir path), so call 2 tracked-resolves fast and never re-adopts.
+    assert_eq!(resume_argv.first().map(String::as_str), Some("topos"));
+    assert!(
+        resume_argv.iter().any(|a| a.starts_with("newskill@")),
+        "the resume argv self-heals to the adopted name: {resume_argv:?}"
+    );
+    // A second adopt of the same dir is now refused — proof it is genuinely tracked.
+    assert!(matches!(
+        ops::add(&rig.ctx(), &src).unwrap_err(),
+        ClientError::AlreadyTracked { .. }
+    ));
 }
 
 #[test]
@@ -673,6 +717,7 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
         &contribute,
         &governance,
         &standup,
+        None, // roots — already-tracked skill, no auto-add
         &approve,
         true,
         None,
@@ -719,6 +764,7 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
         &contribute,
         &governance,
         &standup,
+        None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
         None,
@@ -1119,6 +1165,7 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
         &contribute,
         &governance,
         &standup,
+        None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
         None,

@@ -110,17 +110,22 @@ pub(crate) enum Command {
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
     },
-    /// Ship a draft to the team. `publish` moves `current` to your draft (or genesis-creates a never-yet-
+    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. The target is a
+    /// tracked skill NAME, or an untracked LOCAL source topos adopts before publishing — a discovered
+    /// `<skill>` / `<skill>@<harness>` (disambiguates across harnesses) or a `<dir>` path (adopted in
+    /// place) — so one command does `add` + `publish`. (A remote `owner/repo`/URL is NOT adopted here — run
+    /// `topos add <source>` first.) `publish` moves `current` to your draft (or genesis-creates a never-yet-
     /// published skill); `--propose` opens a PR **without** moving `current`. Pin the bytes with an optional
-    /// `<skill>@<digest>` suffix (the disclosed consent digest — when present it must match the bytes being
+    /// `@<digest>` suffix (the disclosed consent digest — when present it must match the bytes being
     /// shipped, refusing on mismatch; when absent the computed digest just ships). Under review-required a
     /// direct publish fails typed — re-run as `--propose` (never an auto-flip). Un-enrolled, a direct
     /// publish STANDS UP a workspace on the hosted plane (a human signs in to approve; re-running the same
     /// command completes it); `--propose` still requires prior enrollment (`follow` first). Device-signed;
     /// roster-gated.
     Publish {
-        /// The skill to publish, optionally pinned as `<skill>@<digest>` (the byte-exact consent digest of
-        /// the bytes being shipped).
+        /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
+        /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>` (the
+        /// byte-exact consent digest of the bytes being shipped).
         target: String,
         /// Open a proposal (a PR) instead of moving `current`.
         #[arg(long)]

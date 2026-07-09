@@ -463,6 +463,29 @@ pub struct PublishData {
     /// is the seated owner, so a name you don't recognize means someone else owns your workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standup: Option<StandupReceipt>,
+    /// Present ONLY when THIS `publish` invocation ADDED the skill to topos first (the auto-add
+    /// convenience: `publish <name>|<name>@<harness>|<dir>` adopts an untracked LOCAL skill, then ships it
+    /// in one command). Discloses the one local `add` the publish folded in; `None` when the skill was
+    /// already tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<AddedNote>,
+}
+
+/// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
+/// convenience (`publish` accepts an untracked local source and adopts it first). Public disclosure only
+/// (the same facts an explicit `topos add` would return); never a secret. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct AddedNote {
+    /// The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by).
+    pub name: String,
+    /// The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`
+    /// for a plain directory adopted in place under no known harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_slug: Option<String>,
 }
 
 /// The workspace-standup sign-in a pending `publish` waits on. **INFERRED.**
@@ -529,6 +552,11 @@ pub struct ProposeData {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Present ONLY when THIS `publish --propose` invocation ADDED the skill to topos first (the auto-add
+    /// convenience — a proposal of an untracked local source adopts it before opening the PR). Discloses the
+    /// one local `add` the propose folded in; `None` when the skill was already tracked. **INFERRED.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<AddedNote>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a
@@ -640,6 +668,7 @@ mod tests {
                 expires_at: Some("2026-07-03T00:15:00Z".to_owned()),
             }),
             standup: None,
+            added: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert!(v.get("version_id").is_none(), "no version at pending");
@@ -659,6 +688,7 @@ mod tests {
                 workspace_display_name: "robert's workspace".to_owned(),
                 owner_principal: Some("robert@example.com".to_owned()),
             }),
+            added: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["standup"]["workspace_display_name"], "robert's workspace");

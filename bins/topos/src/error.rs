@@ -97,6 +97,19 @@ pub(crate) enum ClientError {
          different directory by path (`topos add ./<dir>`)"
     )]
     AlreadyTrackedName { name: String },
+    /// `publish <skill>@<harness>` named a harness that differs from the one the ALREADY-TRACKED skill of
+    /// that name was adopted from. The auto-add convenience cannot re-adopt a tracked name, and a mismatched
+    /// `@<harness>` suffix likely means a DIFFERENT copy was intended — refused so a stray suffix never
+    /// silently publishes the tracked bytes. Slugs shown VERBATIM (the tracked one, and the user's token).
+    #[error(
+        "skill '{name}' is already tracked from harness '{tracked}', not '{requested}' — publish it as \
+         `topos publish {name}`, or adopt the '{requested}' copy under a different name first"
+    )]
+    HarnessMismatch {
+        name: String,
+        requested: String,
+        tracked: String,
+    },
     /// `add <skill>` resolved a name that sits under more than one harness's skill dir. The caller must
     /// disambiguate with `<skill>@<harness>`. The `harnesses` are the registry slugs, shown VERBATIM.
     #[error(
@@ -314,6 +327,7 @@ impl ClientError {
             ClientError::NoUntrackedSkill { .. } => "NO_UNTRACKED_SKILL",
             // The name-oriented twin of AlreadyTracked shares its code (agents branch the same on either).
             ClientError::AlreadyTrackedName { .. } => "ALREADY_TRACKED",
+            ClientError::HarnessMismatch { .. } => "HARNESS_MISMATCH",
             ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
             ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
