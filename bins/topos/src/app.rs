@@ -156,7 +156,11 @@ pub fn run() -> ExitCode {
             };
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
-        Command::Follow { target, manual } => {
+        Command::Follow {
+            target,
+            manual,
+            wait,
+        } => {
             // The transports are built per-base-URL (known only after the op parses the link / reads the
             // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer
             // disclosure (the one connector that carries per-skill creds, so it stays a local closure).
@@ -175,15 +179,22 @@ pub fn run() -> ExitCode {
                 workspace: workspace.clone(),
             };
             let first = ops::follow(&ctx, &connectors, target, opts);
-            // The INTERACTIVE (non-`--json`) path blocks on a pending device-authorization: poll until the
-            // human approves in the browser, so a person never has to re-invoke `follow` by hand. The
-            // agent (`--json`) path is UNCHANGED — it returns the pending state + the `ENROLL_RESUME`
-            // next-action and never blocks (a headless agent process must not hang).
-            let result = if json {
-                first
-            } else {
-                block_until_settled(&ctx, &connectors, manual, first)
-            };
+            // Block on a pending device-authorization until the human approves (so a person never re-invokes
+            // `follow` by hand), unless this is a headless `--json` run without `--wait` (which must not
+            // hang). The interactive block only ever RESUMES (target = None + the pending WAL drives it).
+            let policy = WaitPolicy::resolve(json, wait, &clock);
+            let result =
+                block_on_pending(&clock, &policy, first, follow_pending_disclosure, || {
+                    ops::follow(
+                        &ctx,
+                        &connectors,
+                        None,
+                        ops::FollowOpts {
+                            manual,
+                            workspace: None,
+                        },
+                    )
+                });
             finish_follow(json, cmd_name, result, &diag)
         }
         Command::Unfollow { skill } => finish(
@@ -265,7 +276,11 @@ pub fn run() -> ExitCode {
             render::diff_tty,
             &diag,
         ),
-        Command::Publish { target, propose } => {
+        Command::Publish {
+            target,
+            propose,
+            wait,
+        } => {
             // The standup branch's plane base: the env override, else the compiled-in hosted default.
             // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
             let standup = ops::StandupConnectors {
@@ -275,21 +290,31 @@ pub fn run() -> ExitCode {
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
             let roots = list_discovery(false);
-            finish_publish(
-                json,
-                cmd_name,
+            let publish_once = |t: &str| {
                 ops::publish(
                     &ctx,
                     &connect_contribute,
                     &connect_governance,
                     &standup,
                     roots.as_ref(),
-                    &target,
+                    t,
                     propose,
                     workspace.as_deref(),
-                ),
-                &diag,
-            )
+                )
+            };
+            let first = publish_once(&target);
+            // If the standup went PENDING, re-bind the disclosed digest so drift during the sign-in wait is
+            // refused by the re-poll's consent gate (see `standup_repoll_target`).
+            let repoll_target = standup_repoll_target(&target, &first);
+            // Block on a pending standup sign-in until it settles (auto-creating the workspace + publishing
+            // in the same command), unless this is a headless `--json` run without `--wait` (which must not
+            // hang — it returns the pending state + the `ENROLL_RESUME` next-action, as before).
+            let policy = WaitPolicy::resolve(json, wait, &clock);
+            let result =
+                block_on_pending(&clock, &policy, first, publish_pending_disclosure, || {
+                    publish_once(&repoll_target)
+                });
+            finish_publish(json, cmd_name, result, &diag)
         }
         Command::Review {
             target,
@@ -555,57 +580,152 @@ fn finish_follow(
     }
 }
 
-/// The interactive `follow`'s poll cadence: while a human opens the browser and approves, poll the
-/// device-authorization grant this often. There is no separate client timeout — the device code's own
-/// expiry makes the plane return a terminal Expired/Denied that surfaces as `Err`, ending the loop.
-const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// The poll cadence while a human opens the browser and approves: re-poll the device-authorization grant
+/// this often. There is no separate client timeout by default — the device code's own expiry makes the
+/// plane return a terminal Expired/Denied that surfaces as `Err`, ending the loop (a numeric `--wait`
+/// deadline can end it sooner, still pending).
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Block the INTERACTIVE (non-`--json`) `follow` on a pending device-authorization until the browser
-/// approval settles — so a person never has to re-invoke `follow` by hand. The agent path never calls
-/// this (it must not hang). Re-uses the tested `ops::follow` op unchanged: it prints the waiting
-/// disclosure to STDERR (stdout stays clean for the final render), then re-invokes `follow` (which resumes
-/// via the pending WAL) on a fixed
-/// cadence — a still-pending poll loops; an enrolled result or a typed error (the device code's expiry)
-/// ends it and is handed back for the ordinary [`finish_follow`] render. A non-pending first result (a
-/// self-host claim one-shot, an already-enrolled resume, or an error) settles immediately.
-fn block_until_settled(
-    ctx: &Ctx<'_>,
-    connectors: &ops::FollowConnectors<'_>,
-    manual: bool,
-    first: Result<ops::FollowOutcome, ClientError>,
-) -> Result<ops::FollowOutcome, ClientError> {
-    // Only a device-auth pending blocks; everything else (claim one-shot, already-enrolled, error) is
-    // returned as-is. A self-host admin-claim enrolls in one call and is never pending — excluded here.
-    let Ok(out) = &first else {
+/// A pending device-authorization's human-facing disclosure — the clickable URL (the RFC-8628
+/// `verification_uri_complete`, which embeds the code) plus the anti-phishing fingerprint. Extracted from
+/// either verb's pending outcome so [`block_on_pending`] can print it once, generically. No bare code line:
+/// the code rides inside the URL (clicked, never typed).
+struct PendingDisclosure {
+    verification_uri_complete: String,
+    device_fingerprint: String,
+}
+
+/// The pending disclosure for a `follow` outcome (None ⇒ not a pending device-auth).
+fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosure> {
+    out.data.pending.as_ref().map(|p| PendingDisclosure {
+        verification_uri_complete: p.verification_uri_complete.clone(),
+        device_fingerprint: p.device_fingerprint.clone(),
+    })
+}
+
+/// The pending disclosure for a `publish` outcome (only the un-enrolled standup branch is ever pending).
+fn publish_pending_disclosure(out: &ops::PublishOutcome) -> Option<PendingDisclosure> {
+    match out {
+        ops::PublishOutcome::Pending { data, .. } => {
+            data.pending.as_ref().map(|p| PendingDisclosure {
+                verification_uri_complete: p.verification_uri_complete.clone(),
+                device_fingerprint: p.device_fingerprint.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The target a standup re-poll must use. If the first outcome went PENDING, reuse the canonical pinned
+/// target the ops layer already built into `resume_argv` (`<skill>@<digest>` with the SAME `<skill>` parse
+/// `publish` uses and the disclosed digest baked in), so the re-poll's consent gate refuses bytes that
+/// drift during the sign-in wait — never silently shipped, and never mis-parsing a skill name that itself
+/// contains `@`. `resume_argv` is `[topos, publish, <target>, --json]`; take the element after `publish`.
+/// A non-pending first result (already published, or an error), or an unexpected argv shape, keeps the
+/// original target (the block returns a non-pending first result untouched anyway).
+fn standup_repoll_target(
+    original: &str,
+    first: &Result<ops::PublishOutcome, ClientError>,
+) -> String {
+    match first {
+        Ok(ops::PublishOutcome::Pending { resume_argv, .. }) => resume_argv
+            .iter()
+            .skip_while(|a| a.as_str() != "publish")
+            .nth(1)
+            .cloned()
+            .unwrap_or_else(|| original.to_owned()),
+        _ => original.to_owned(),
+    }
+}
+
+/// Whether this invocation blocks on a pending device-authorization, and until when.
+/// - `block == false` — never block (a headless `--json` run without `--wait`): return the first result.
+/// - `deadline_millis == None` — block until the device code's own TTL ends it (interactive default, or a
+///   bare `--wait`).
+/// - `deadline_millis == Some(t)` — block until settled or the wall clock passes `t` (`--wait <seconds>`),
+///   whichever comes first.
+struct WaitPolicy {
+    block: bool,
+    deadline_millis: Option<u64>,
+}
+
+impl WaitPolicy {
+    /// Derive the policy from `--json` and the `--wait [<seconds>]` flag: block when interactive (`!json`)
+    /// OR when `--wait` was given in any form; a numeric `--wait <seconds>` sets a wall-clock deadline.
+    fn resolve(json: bool, wait: Option<Option<u64>>, clock: &dyn Clock) -> Self {
+        Self {
+            block: !json || wait.is_some(),
+            deadline_millis: match wait {
+                Some(Some(secs)) => Some(
+                    clock
+                        .now_unix_millis()
+                        .saturating_add(secs.saturating_mul(1000)),
+                ),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Block on a pending device-authorization until it settles, an optional deadline passes, or the device
+/// code's own expiry ends it with a terminal error — so a person never re-invokes the command by hand. The
+/// disclosure prints to STDERR once (stdout stays the clean final render). `pending_of` extracts the
+/// disclosure (None ⇒ not pending ⇒ return as-is); `repoll` re-invokes the op, which RESUMES via its
+/// on-disk WAL. A `policy.block == false` (headless `--json` without `--wait`) returns the first result
+/// untouched — a headless agent must not hang.
+fn block_on_pending<T>(
+    clock: &dyn Clock,
+    policy: &WaitPolicy,
+    first: Result<T, ClientError>,
+    pending_of: impl Fn(&T) -> Option<PendingDisclosure>,
+    mut repoll: impl FnMut() -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    if !policy.block {
+        return first;
+    }
+    let disc = match &first {
+        Ok(out) => pending_of(out),
+        Err(_) => None,
+    };
+    let Some(disc) = disc else {
         return first;
     };
-    let Some(pending) = &out.data.pending else {
-        return first;
-    };
 
-    // The human-facing waiting disclosure on STDERR (stdout stays the clean final envelope/TTY).
+    // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY). No bare code line —
+    // the code rides inside the URL; the fingerprint is the one thing to eyeball against the page.
     eprintln!(
-        "Open this URL to approve:\n  {}\n  code: {}\n  fingerprint: {} (confirm it matches the page)",
-        pending.verification_uri_complete,
-        pending.user_code,
-        render::group_fingerprint(&pending.device_fingerprint),
+        "Open this URL to approve:\n  {}\n  fingerprint: {} (confirm it matches the page)",
+        disc.verification_uri_complete,
+        render::group_fingerprint(&disc.device_fingerprint),
     );
     eprintln!("Waiting for approval…");
 
+    // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
+    // (starts as `first`, so `--wait 0` returns immediately without polling again).
+    let mut last = first;
     loop {
-        std::thread::sleep(FOLLOW_POLL_INTERVAL);
-        let opts = ops::FollowOpts {
-            manual,
-            // The interactive block only ever RESUMES (target = None + the pending WAL drives the resume),
-            // so the `--workspace` filter is moot.
-            workspace: None,
+        // Honor a numeric deadline precisely: stop the instant it passes (checked BEFORE sleeping, so a
+        // short `--wait <n>` is not overshot by a whole poll interval).
+        if policy
+            .deadline_millis
+            .is_some_and(|d| clock.now_unix_millis() >= d)
+        {
+            return last;
+        }
+        // Sleep the poll interval, but never past the deadline.
+        let nap = match policy.deadline_millis {
+            Some(d) => Duration::from_millis(d.saturating_sub(clock.now_unix_millis()))
+                .min(DEVICE_POLL_INTERVAL),
+            None => DEVICE_POLL_INTERVAL,
         };
-        let next = ops::follow(ctx, connectors, None, opts);
-        match &next {
-            // Still waiting on the human — keep polling.
-            Ok(o) if o.data.pending.is_some() => continue,
-            // Enrolled (Ok, non-pending) or a terminal error — settled; render it.
-            _ => return next,
+        std::thread::sleep(nap);
+        let next = repoll();
+        if matches!(&next, Ok(o) if pending_of(o).is_some()) {
+            // Still waiting on the human — keep polling (the deadline is re-checked at the loop top).
+            last = next;
+        } else {
+            // Settled (enrolled / published) or a terminal error (incl. the device code's expiry) — done.
+            return next;
         }
     }
 }
@@ -866,8 +986,67 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HOSTED_BASE_URL, build_pull_scope, resolve_standup_base};
-    use crate::ops::{PullScope, TargetMode, VersionRef};
+    use super::{
+        DEFAULT_HOSTED_BASE_URL, build_pull_scope, resolve_standup_base, standup_repoll_target,
+    };
+    use crate::ops::{PublishOutcome, PullScope, TargetMode, VersionRef};
+
+    /// A standup PENDING outcome whose ops-built `resume_argv` pins `resume_target`, as
+    /// `standup_repoll_target` sees it.
+    fn pending_publish(resume_target: &str) -> Result<PublishOutcome, crate::error::ClientError> {
+        use topos_types::results::{PublishData, PublishPending, PublishPendingStatus};
+        Ok(PublishOutcome::Pending {
+            data: PublishData {
+                skill_id: "sk_x".to_owned(),
+                version_id: None,
+                bundle_digest: "d1".to_owned(),
+                current_generation: None,
+                invite_link: None,
+                pending: Some(PublishPending {
+                    status: PublishPendingStatus::SigninRequired,
+                    verification_uri_complete: "https://topos.sh/verify/tok".to_owned(),
+                    user_code: "tok".to_owned(),
+                    device_fingerprint: "abcd".to_owned(),
+                    expires_at: None,
+                }),
+                standup: None,
+                added: None,
+            },
+            resume_argv: vec![
+                "topos".to_owned(),
+                "publish".to_owned(),
+                resume_target.to_owned(),
+                "--json".to_owned(),
+            ],
+        })
+    }
+
+    #[test]
+    fn standup_repoll_reuses_the_canonical_pinned_resume_target() {
+        // The re-poll target is the ops-built pinned target from `resume_argv` verbatim — its `<digest>`
+        // pin makes the consent gate refuse byte-drift during the sign-in wait, never silently shipping it.
+        assert_eq!(
+            standup_repoll_target("docs", &pending_publish("docs@d1")),
+            "docs@d1"
+        );
+        // A skill NAME that itself contains `@` (a harness-qualified name) is preserved verbatim — not
+        // truncated at the first `@` (the ops layer parsed the digest off the tail, so `resume_argv` already
+        // holds the right target).
+        assert_eq!(
+            standup_repoll_target("docs@claude-code", &pending_publish("docs@claude-code@d1")),
+            "docs@claude-code@d1"
+        );
+        // A non-pending first result has nothing to re-bind (the block returns it as-is).
+        let published = pending_publish("docs@d1").map(|o| match o {
+            PublishOutcome::Pending { mut data, .. } => {
+                data.pending = None;
+                data.version_id = Some("v".repeat(64));
+                PublishOutcome::Published(data)
+            }
+            other => other,
+        });
+        assert_eq!(standup_repoll_target("docs", &published), "docs");
+    }
 
     #[test]
     fn standup_base_env_override_beats_the_compiled_default() {

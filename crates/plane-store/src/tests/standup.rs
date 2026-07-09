@@ -604,16 +604,20 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
     let device_seed = [40u8; 32];
     let dpub = device_pub(&device_seed);
 
-    // START: no invite, no workspace; the HIGH-ENTROPY code (16 chars + 3 dashes vs enroll's 8 + 1) and
-    // the verify-base URIs.
+    // START: no invite, no workspace; the HIGH-ENTROPY opaque code (a 32-byte base64url token — it rides
+    // only inside `verification_uri_complete`, clicked never typed) and the verify-base URIs.
     let start = a
         .start_standup_device_auth(&dpub, "founder-laptop", NOW, T0)
         .await
         .unwrap();
-    assert_eq!(
-        start.user_code.len(),
-        19,
-        "standup code is 16 chars + 3 dashes"
+    assert!(
+        start.user_code.len() >= 40
+            && start
+                .user_code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "standup code is a long opaque URL-safe token, got {:?}",
+        start.user_code
     );
     assert_eq!(start.verification_uri, "https://plane.test/verify");
     assert_eq!(
@@ -796,10 +800,14 @@ async fn approve_standup_refuses_an_enroll_session(pool: PgPool) {
         .start_device_auth(&invite, &device_pub(&[43u8; 32]), "laptop", NOW, T0)
         .await
         .unwrap();
-    assert_eq!(
-        start.user_code.len(),
-        9,
-        "enroll codes keep the short 8+1 shape"
+    assert!(
+        start.user_code.len() >= 40
+            && start
+                .user_code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "enroll codes share the opaque URL-safe token shape, got {:?}",
+        start.user_code
     );
     // Approving an ENROLL session through the standup door is the uniform miss — it must never CREATE a
     // workspace for a session that already has one.

@@ -380,7 +380,8 @@ pub struct DeviceAuthorizeRequest {
 pub struct DeviceAuthorizeResponse {
     /// The SECRET device code the client polls `device/token` with.
     pub device_code: String,
-    /// The short code a human types on the verification page.
+    /// The opaque code identifying this device-auth session; it rides inside `verification_uri_complete`
+    /// (the human clicks the URL — it is not typed).
     pub user_code: String,
     /// The verification URL a human visits to approve the session.
     pub verification_uri: String,

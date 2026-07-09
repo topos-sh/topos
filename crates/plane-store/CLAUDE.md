@@ -280,8 +280,10 @@ Each write domain X splits into `src/X.rs` (orchestration, outside the transacti
   can seat an owner into a live workspace; the deployment mode is a PARAMETER threaded from the plane's
   config, never a request). (1) **The standup device flow** — `start_standup_device_auth` (CLOUD planes
   only; self-host ⇒ the uniform `NotFound`) opens a session with `intent = 'standup'` and NO workspace,
-  minting a HIGH-entropy 16-char user code (19 with the group dashes; approval CREATES ownership, so
-  the code must be unguessable; enroll codes keep the short 8-char shape); `approve_standup` (lib-only,
+  minting the same HIGH-entropy OPAQUE `user_code` enroll uses (a 32-byte base64url token, ~256 bits — it
+  rides only inside `verification_uri_complete` and is clicked, never typed, so entropy is the only dial;
+  approval CREATES ownership with no roster gate behind it, so a live code must be unguessable within its
+  TTL); `approve_standup` (lib-only,
   for a composing web leg with an already-verified email) runs cap → fresh-`w_<hex32>`-id seat → the
   session's pending→confirmed CAS in ONE txn — the CAS is the idempotency (same-email re-click ⇒
   `AlreadyApproved`; different email / unknown / expired / enroll-intent ⇒ the single indistinguishable

@@ -624,11 +624,12 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
         if let Some(plane) = &data.plane_base_url {
             s.push_str(&format!("\nplane: {plane}"));
         }
+        // The code rides inside the URL (RFC-8628 `verification_uri_complete`) — the human clicks it, never
+        // types it — so only the URL + the anti-phishing fingerprint are surfaced (no separate code line).
         s.push_str(&format!(
-            "\nOpen this URL to approve, then re-run `topos follow`:\n  {}\n  code: {}\n  \
+            "\nOpen this URL to approve, then re-run `topos follow`:\n  {}\n  \
              fingerprint: {} (confirm it matches the page before approving)",
             pending.verification_uri_complete,
-            pending.user_code,
             group_fingerprint(&pending.device_fingerprint),
         ));
         return s;
@@ -759,12 +760,13 @@ pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) ->
         Some(added) => format!("{}\n", added_line(added)),
         None => String::new(),
     };
+    // The code rides inside the URL (RFC-8628 `verification_uri_complete`) — clicked, never typed — so only
+    // the URL + the anti-phishing fingerprint are surfaced (no separate code line).
     format!(
-        "{prefix}No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, \
-         and approve (you become the workspace owner):\n  {}\n  code: {}\n  fingerprint: {} (confirm it \
+        "{prefix}No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, and \
+         approve (you become the workspace owner):\n  {}\n  fingerprint: {} (confirm it \
          matches the page before approving)\nNothing is published yet; then re-run:\n  {}",
         pending.verification_uri_complete,
-        pending.user_code,
         group_fingerprint(&pending.device_fingerprint),
         resume_argv.join(" "),
     )
@@ -1415,5 +1417,12 @@ mod tests {
         // The fingerprint prints GROUPED in fours for eyeball comparison against the verification page.
         assert!(text.contains("e4aa f52f 5c39 1ce9"), "{text}");
         assert!(text.contains("confirm it matches the page"), "{text}");
+        // The clickable URL is surfaced; the bare user_code is NOT shown on its own line (it rides inside
+        // the URL — clicked, never typed).
+        assert!(text.contains("https://topos.sh/verify/WXYZ-1234"), "{text}");
+        assert!(
+            !text.contains("\n  code:"),
+            "code line should be gone: {text}"
+        );
     }
 }

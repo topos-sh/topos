@@ -129,7 +129,7 @@
           ]
         },
         "user_code": {
-          "description": "The short code shown for cross-checking on the verification page.",
+          "description": "The opaque session code embedded in `verification_uri_complete` (the human clicks the URL — it is\nnot typed).",
           "type": "string"
         },
         "verification_uri_complete": {

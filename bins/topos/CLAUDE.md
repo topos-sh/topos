@@ -72,7 +72,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
   returns `ENROLLMENT_PENDING` + the SERVER-built verification URL with the verified-domain provenance
   (the relay-phishing guard; there is no client-side URL reconstruction — a WAL without the persisted
   URL restarts typed). Re-invoking `follow` while a pending WAL exists (with any target, or none) polls
-  once — the "re-invoking IS the resume" idiom; on a granted poll it signs the **enroll possession
+  once — the "re-invoking IS the resume" idiom (the BIN re-invokes it automatically on a cadence for an
+  interactive run or a `--wait [<seconds>]` run, so a person never re-runs by hand; a headless `--json` run
+  without `--wait` returns the pending state and never hangs); on a granted poll it signs the **enroll possession
   proof** (the device signer, binding `device_auth_id = user_code` + the offered-skill set + `grant_hash`),
   **redeems** the grant into per-skill read creds, records them in the WAL **before promotion** (the lockout
   fence — a single-use grant can't be re-redeemed; a re-invoked `follow` over a `Redeemed` WAL re-promotes without
@@ -225,8 +227,12 @@ are asserted byte-equal in tests.
   consent re-derives from it, so drifted bytes are refused before any poll); granted ⇒ possession proof over the EMPTY offered set →
   redeem → `Redeemed` WAL BEFORE promotion (the shared crash fence) → promote → the publish CONTINUES in
   the same invocation (rebuilt around the freshly pinned key), disclosing `workspace <name> — owner
-  <principal>` on both surfaces (hijack visibility). `--propose` keeps the typed not-enrolled error; an
-  enrolled device never reaches the branch. **`follow <claim-link>`** enrolls in ONE invocation: the
+  <principal>` on both surfaces (hijack visibility). The op is unchanged either way — it polls once and
+  returns; the BIN (`app.rs`) is what turns that into ONE command: it re-invokes on a fixed cadence until
+  the sign-in settles for an INTERACTIVE run (or a `--wait [<seconds>]` `--json` run), and a headless
+  `--json` run without `--wait` still returns the PENDING receipt immediately (never hangs). `--propose`
+  keeps the typed not-enrolled error; an enrolled device never reaches the branch. **`follow <claim-link>`**
+  enrolls in ONE invocation: the
   bootstrap's `enrollment_method` branches (`admin_claim` ⇒ pin → pre-send `ClaimPending` WAL (`0600`,
   token redacted) → POST `/v1/admin-claim` → promote; an unknown method fails CLOSED typed); an uncertain
   send retries the POST directly from the WAL on the next invocation — never refetching the

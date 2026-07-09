@@ -86,7 +86,7 @@ pub struct EnrollmentDisclosure {
 pub struct DeviceAuthStart {
     /// The SECRET device code the client polls with (the plaintext appears ONLY here; only its sha256 is stored).
     pub device_code: String,
-    /// The short code a human types on the verification page.
+    /// The opaque code identifying the session, embedded in the verification URL (clicked, not typed).
     pub user_code: String,
     /// The verification URL (built from the plane's verification base — `verify_base_url` when configured,
     /// else `base_url`).
@@ -479,38 +479,16 @@ pub(crate) fn random_claim_token() -> Result<String> {
     random_device_code()
 }
 
-/// The unambiguous user-code alphabet (no vowels — no accidental words — and no `0/O/1/I`).
-const USER_CODE_ALPHABET: &[u8; 28] = b"BCDFGHJKLMNPQRSTVWXZ23456789";
-
-/// `n` fresh chars from the user-code alphabet, grouped 4-at-a-time with `-`.
-fn random_code_chars(n: usize) -> Result<String> {
-    let mut raw = vec![0u8; n];
-    getrandom::getrandom(&mut raw).map_err(|_| AuthorityError::internal(EnrollEntropy))?;
-    let mut out = String::with_capacity(n + n / 4);
-    for (i, b) in raw.iter().enumerate() {
-        if i > 0 && i % 4 == 0 {
-            out.push('-');
-        }
-        out.push(USER_CODE_ALPHABET[usize::from(*b) % USER_CODE_ALPHABET.len()] as char);
-    }
-    Ok(out)
-}
-
-/// A fresh ENROLL user code: 8 chars grouped `XXXX-XXXX`. Short and low-value — the invite-anchored flow's
-/// approval only confirms an identity onto a session the roster gate still guards at redeem, so the code
-/// needs to be typed by a human, not to be unguessable.
+/// A fresh `user_code` — the correlation handle a browser approval is matched against. It is **not** a
+/// secret (that is the `device_code`); it exists only to identify *which* pending device-authorization
+/// session an approval belongs to. Because it rides exclusively inside `verification_uri_complete` (the
+/// human clicks the URL — no plane surface accepts a typed code), it is a high-entropy OPAQUE URL token,
+/// not a short human-typeable code: 32 random bytes, base64url-unpadded (~256 bits, URL-path-safe). The
+/// entropy makes a live code unguessable within its TTL — the property that matters for standup, where an
+/// approval mints ownership with no roster gate behind it. ENROLL and STANDUP share this one shape: the
+/// old short, human-typeable enroll code existed only to be typed, which never happens.
 pub(crate) fn random_user_code() -> Result<String> {
-    random_code_chars(8)
-}
-
-/// A fresh STANDUP user code: 16 chars grouped `XXXX-XXXX-XXXX-XXXX` (~76 bits over the 28-char alphabet).
-/// HIGH-ENTROPY on purpose: approving a standup session CREATES a workspace and seats the approver as its
-/// owner — there is no roster gate behind it — so a signed-in stranger must not be able to find or guess a
-/// live code within its TTL. Entropy is the dial RFC 8628 (section 6.1) offers for exactly this; the
-/// semantics are unchanged (the code still
-/// rides inside `verification_uri_complete`, so no human ever types it).
-pub(crate) fn random_standup_user_code() -> Result<String> {
-    random_code_chars(16)
+    random_device_code()
 }
 
 /// A fresh 6-digit numeric passcode.
@@ -714,8 +692,9 @@ pub(crate) async fn start_standup_device_auth(
     let device_key_id = device_key_id_for(device_public_key);
     let device_code = random_device_code()?;
     let device_code_sha256 = sha256_token(&device_code);
-    // The HIGH-ENTROPY standup code (see `random_standup_user_code` for why the length differs).
-    let user_code = unique_user_code(authority, random_standup_user_code).await?;
+    // The same opaque high-entropy `user_code` shape enroll uses (see `random_user_code`): it rides only
+    // inside `verification_uri_complete`, and its entropy is what keeps a live standup code unguessable.
+    let user_code = unique_user_code(authority, random_user_code).await?;
     let expires_at = now.saturating_add(DEVICE_AUTH_TTL_MS);
 
     authority

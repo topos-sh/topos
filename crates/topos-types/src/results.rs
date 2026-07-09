@@ -375,7 +375,8 @@ pub struct FollowData {
 pub struct EnrollmentPending {
     /// The verification URL with the `user_code` embedded — the human opens it to approve the session.
     pub verification_uri_complete: String,
-    /// The short code shown for cross-checking on the verification page.
+    /// The opaque session code embedded in `verification_uri_complete` (the human clicks the URL — it is
+    /// not typed).
     pub user_code: String,
     /// 16-hex fingerprint of this device's public key; a human cross-checks it against the verification page.
     pub device_fingerprint: String,

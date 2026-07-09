@@ -134,10 +134,14 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     };
     let pending = data.pending.expect("the pending sign-in block");
     assert_eq!(pending.status, PublishPendingStatus::SigninRequired);
-    assert_eq!(
-        pending.user_code.len(),
-        19,
-        "standup codes are high-entropy (16 chars + 3 dashes)"
+    assert!(
+        pending.user_code.len() >= 40
+            && pending
+                .user_code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "standup codes are high-entropy opaque URL-safe tokens, got {:?}",
+        pending.user_code
     );
     assert_eq!(
         pending.verification_uri_complete,

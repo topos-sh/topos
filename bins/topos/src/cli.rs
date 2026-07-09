@@ -63,6 +63,12 @@ pub(crate) enum Command {
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
         #[arg(long)]
         manual: bool,
+        /// Block until the browser approval settles, finishing enrollment in ONE command (no manual
+        /// re-run). Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Without
+        /// `--wait`, an agent (`--json`) run returns the pending state immediately; an interactive run
+        /// always waits. Put `--wait` AFTER any positional (its value binds greedily).
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
+        wait: Option<Option<u64>>,
     },
     /// Stop following a skill's `current`. Your local copy is KEPT as a frozen copy (nothing is deleted);
     /// auto-updates stop, and `follow <skill>` resumes. Local-only.
@@ -119,8 +125,9 @@ pub(crate) enum Command {
     /// `@<digest>` suffix (the disclosed consent digest — when present it must match the bytes being
     /// shipped, refusing on mismatch; when absent the computed digest just ships). Under review-required a
     /// direct publish fails typed — re-run as `--propose` (never an auto-flip). Un-enrolled, a direct
-    /// publish STANDS UP a workspace on the hosted plane (a human signs in to approve; re-running the same
-    /// command completes it); `--propose` still requires prior enrollment (`follow` first). Device-signed;
+    /// publish STANDS UP a workspace on the hosted plane (a human signs in to approve; an interactive run
+    /// then auto-creates the workspace and publishes in the same command, and `--wait` makes an agent run
+    /// block until it does); `--propose` still requires prior enrollment (`follow` first). Device-signed;
     /// roster-gated.
     Publish {
         /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
@@ -130,6 +137,12 @@ pub(crate) enum Command {
         /// Open a proposal (a PR) instead of moving `current`.
         #[arg(long)]
         propose: bool,
+        /// Block until the browser sign-in settles, then auto-create the workspace and publish in ONE
+        /// command (the un-enrolled standup path). Bare `--wait` waits until the code expires; `--wait
+        /// <seconds>` caps the wait. Without `--wait`, an agent (`--json`) run returns the pending state
+        /// immediately; an interactive run always waits. Put `--wait` AFTER the positional target.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
+        wait: Option<Option<u64>>,
     },
     /// Resolve a proposal (the `gh pr review --approve` model). `--approve` moves `current` to the candidate
     /// (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer) or
@@ -254,7 +267,7 @@ mod tests {
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, Command};
 
     #[test]
     fn cli_is_internally_consistent() {
@@ -369,5 +382,43 @@ mod tests {
                 .kind(),
             ErrorKind::UnknownArgument
         );
+    }
+
+    #[test]
+    fn wait_flag_is_an_optional_valued_flag_on_publish_and_follow() {
+        // Absent ⇒ None; bare `--wait` ⇒ Some(None) (wait until the code expires); `--wait <n>` ⇒
+        // Some(Some(n)) (cap the wait). The value binds greedily, so `--wait` goes AFTER the positional.
+        let absent = Cli::try_parse_from(["topos", "publish", "docs"]).unwrap();
+        let bare = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap();
+        let valued = Cli::try_parse_from(["topos", "publish", "docs", "--wait", "300"]).unwrap();
+        assert!(matches!(
+            absent.command,
+            Command::Publish { wait: None, .. }
+        ));
+        assert!(matches!(
+            bare.command,
+            Command::Publish {
+                wait: Some(None),
+                ..
+            }
+        ));
+        assert!(matches!(
+            valued.command,
+            Command::Publish {
+                wait: Some(Some(300)),
+                ..
+            }
+        ));
+        // Same shape on `follow` (bare here — no positional to compete for the value).
+        let follow_bare = Cli::try_parse_from(["topos", "follow", "--wait"]).unwrap();
+        assert!(matches!(
+            follow_bare.command,
+            Command::Follow {
+                wait: Some(None),
+                ..
+            }
+        ));
+        // A non-numeric value is a parse error (not silently swallowed).
+        assert!(Cli::try_parse_from(["topos", "publish", "docs", "--wait", "soon"]).is_err());
     }
 }

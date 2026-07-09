@@ -859,8 +859,8 @@ impl Authority {
     /// `pending` with `intent = 'standup'`, and a signed-in human's [`approve_standup`](Self::approve_standup)
     /// later creates the workspace it confirms into. CLOUD planes only: on a self-host plane this is the
     /// single indistinguishable [`AuthorityError::NotFound`] (self-host stands up via the operator's
-    /// one-time claim link). The standup `user_code` is HIGH-ENTROPY (16 chars vs enroll's 8) because the
-    /// approval CREATES ownership — see the generator's rationale.
+    /// one-time claim link). The standup `user_code` is a HIGH-ENTROPY opaque URL token (the same shape
+    /// enroll uses) because the approval CREATES ownership with no roster gate — see the generator's rationale.
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on a self-host plane; [`AuthorityError::Internal`] on a fault.

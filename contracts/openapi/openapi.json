@@ -2043,7 +2043,7 @@
           },
           "user_code": {
             "type": "string",
-            "description": "The short code a human types on the verification page."
+            "description": "The opaque code identifying this device-auth session; it rides inside `verification_uri_complete`\n(the human clicks the URL — it is not typed)."
           },
           "verification_uri": {
             "type": "string",

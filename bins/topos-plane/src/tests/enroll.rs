@@ -177,10 +177,14 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
     .await;
     assert_eq!(s, StatusCode::OK);
     let auth: DeviceAuthorizeResponse = serde_json::from_slice(&b).unwrap();
-    assert_eq!(
-        auth.user_code.len(),
-        19,
-        "standup code = 16 chars + 3 dashes"
+    assert!(
+        auth.user_code.len() >= 40
+            && auth
+                .user_code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "standup code is a high-entropy opaque URL-safe token, got {:?}",
+        auth.user_code
     );
     assert_eq!(auth.verification_uri, format!("{ENROLL_BASE_URL}/verify"));
     assert_eq!(
