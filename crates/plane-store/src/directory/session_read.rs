@@ -27,7 +27,7 @@ use topos_core::sign::{CatalogReadFields, verify_catalog_read};
 use topos_types::Generation;
 
 use crate::authority::Authority;
-use crate::db::session_read::SkillIndexDbRow;
+use crate::db::directory::session_read::SkillIndexDbRow;
 use crate::enroll::DeploymentMode;
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};

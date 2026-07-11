@@ -1,6 +1,6 @@
 //! The enrollment issuance SQL — the raw-`sqlx` half (every `query!` for the issuance core).
 //!
-//! Mirrors [`super::set_current`]: the `SERIALIZABLE` (`run_serializable!`) poll/confirm/redeem transactions live here, the
+//! Mirrors [`crate::db::custody::set_current`]: the `SERIALIZABLE` (`run_serializable!`) poll/confirm/redeem transactions live here, the
 //! orchestration ([`crate::enroll`]) hands in server-trusted values (the rehashed grant, the re-derived
 //! device key id) plus the enrollment secret and gets back domain outcomes. No `sqlx` type crosses the
 //! module boundary. Every row is `workspace_id`-scoped; every opaque credential is matched only by its
@@ -12,7 +12,7 @@ use sqlx::{Postgres, Transaction};
 use topos_core::digest;
 use topos_core::sign::{EnrollFields, verify_enroll};
 
-use super::{Db, blob32};
+use crate::db::{Db, blob32};
 use crate::enroll::{
     self, ConfirmOutcome, DeploymentMode, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued,
     MintedReadToken, PasscodeComplete, RedeemInput, RedeemOutcome,

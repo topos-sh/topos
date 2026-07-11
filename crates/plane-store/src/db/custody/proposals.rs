@@ -4,14 +4,14 @@
 //!
 //! A proposal roots its candidate's bytes through [`proposal_object`](super) — NOT `commit_object`, which
 //! means "accepted trunk" — gated for BOTH retention and read on the derived `open AND base == current`
-//! predicate (see [`super::Db::authorize_object_read`] / [`super::Db::claim_for_delete`]). `review --approve`
+//! predicate (see [`crate::db::Db::authorize_object_read`] / [`crate::db::Db::claim_for_delete`]). `review --approve`
 //! performs the handoff to `commit_object` inside the one promotion transaction; `review --reject` only flips
 //! the stored status, after which the gate stops matching and ordinary GC reclaims the unique objects.
 
 use sqlx::{Postgres, Transaction};
 use topos_types::Generation;
 
-use super::{Db, ReadLane, blob32};
+use crate::db::{Db, ReadLane, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -159,7 +159,7 @@ impl Db {
 
     /// List the OPEN, non-stale proposals on `(ws, skill)` for a gate-admitted `principal` — the
     /// proposals-listing read, split gate/reach like the object/version authorizations: the lane's
-    /// principal gate ([`super::Db::read_gate`]), then the principal-free [`Self::open_proposal_rows`].
+    /// principal gate ([`crate::db::Db::read_gate`]), then the principal-free [`Self::open_proposal_rows`].
     /// The gate **is** the authorization, and a denial folds to an EMPTY list, never a not-found — a
     /// valid token whose principal is not on this skill's roster sees `[]`, exactly as before the split
     /// (the route's scope/path assert is the cross-skill guard; membership is silent).
@@ -178,9 +178,9 @@ impl Db {
 
     /// The principal-free proposals listing — the reach half (the lane gate has already admitted the
     /// caller). ONE join over `proposals ⋈ current`, gated on the SAME `open ∧ base == current` staleness
-    /// predicate the read-reachability statements ([`super::Db::object_witness`] /
-    /// [`super::Db::version_readable`]) and both GC keep-checks
-    /// ([`super::Db::claim_for_delete`] / [`super::Db::claim_stale_for_recovery`]) use — this is the 5th
+    /// predicate the read-reachability statements ([`crate::db::Db::object_witness`] /
+    /// [`crate::db::Db::version_readable`]) and both GC keep-checks
+    /// ([`crate::db::Db::claim_for_delete`] / [`crate::db::Db::claim_stale_for_recovery`]) use — this is the 5th
     /// verbatim copy of that literal — so a staled proposal vanishes from the list exactly as it drops out
     /// of read + retention (**keep == read == list**). Every table is bound on `workspace_id`, so no fact
     /// crosses a tenant. Ordered by `(created_at, commit_id)` for a stable enumeration.

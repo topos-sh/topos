@@ -55,42 +55,31 @@
 //! HTTP surface (these writes are exercised in-process only), real identity/roster/device issuance (the
 //! registry is fixture-seeded), at-rest key encryption, and the `purge` verb are later work.
 
-// Layout — the orchestration/db twin convention. Each write domain X splits into two halves:
-//   src/X.rs    — the orchestration OUTSIDE the transaction (filesystem work, credential derivation,
-//                 candidate assembly; no SQL);
-//   src/db/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write transaction plus its
-//                 pool reads (no `sqlx` type ever crosses out of `mod db`).
+// Layout — the vault/directory grouping over the orchestration/db twin convention. The domains split into
+// two groups: `custody/` (byte custody — bytes/versions/pointers/GC) and `directory/`
+// (access/identity/policy), each mirrored under `db/` for its raw-SQL half. Each write domain X splits into
+// two halves:
+//   src/{custody,directory}/X.rs    — the orchestration OUTSIDE the transaction (filesystem work, credential
+//                 derivation, candidate assembly; no SQL);
+//   src/db/{custody,directory}/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write
+//                 transaction plus its pool reads (no `sqlx` type ever crosses out of `mod db`).
 // The twins today: `enroll` (enrollment issuance), `governance` (the owner-signed governance ops + the
 // admin claim), and `set_current` (the pointer-move). `session_read` is the first READ twin — pool reads
 // only, no `run_serializable!`, no op_id/`workspace_events`/receipts, mirroring `read_roster`'s posture
-// (its `db/session_read.rs` holds the one index query; everything else re-uses `read.rs`'s machinery). Exceptions: `gc`'s SQL lives in `db/lifecycle` (one
+// (its `db/directory/session_read.rs` holds the one index query; everything else re-uses `custody/read.rs`'s
+// machinery). Exceptions: `gc`'s SQL lives in `db/custody/lifecycle` (one
 // fence, one file); the proposals' orchestration lives in `set_current` (propose/approve are arms of the
-// one pointer-move write; `db/proposals` holds their SQL); and `db/receipts` is SQL-half-only (the receipt
-// read/insert/replay machinery + terminal-outcome writers both `db/set_current` paths call — no
-// orchestration twin).
+// one pointer-move write; `db/custody/proposals` holds their SQL); and `db/custody/receipts` is SQL-half-only
+// (the receipt read/insert/replay machinery + terminal-outcome writers both `db/custody/set_current` paths
+// call — no orchestration twin).
 mod actor;
 mod authority;
+mod custody;
 mod db;
-mod enroll;
+mod directory;
 mod error;
-mod governance;
 mod id;
-mod lineage;
-mod read;
-mod restore;
-mod session_read;
-mod session_review;
-mod session_roster;
-mod set_current;
 mod signer;
-mod upload;
-
-// The object-lifecycle fence: `ingest`/`migrate` drive the publish/propose writes, and the GC pass,
-// recovery sweep, and quarantine janitor are exposed as the public `Authority::run_gc`/`run_recovery`/
-// `run_janitor` (the composing server owns scheduling — this library holds none, but it now hands the
-// composer the handles to schedule).
-mod gc;
-mod lifecycle;
 
 // The feature-gated `impl Authority` test-fixtures shims (seed roster/device/workspace, drive a real genesis
 // publish, tamper a signature) — split out of `authority.rs` so the facade reads as exactly the production
@@ -100,6 +89,14 @@ mod fixtures;
 
 #[cfg(test)]
 mod tests;
+
+// Internal path forwarding — the rest of the crate (and the in-crate tests) still name these modules at the
+// crate root; `custody/` groups byte custody (bytes/versions/pointers/GC) and `directory/` groups
+// access/identity/policy. The object-lifecycle fence's GC pass / recovery sweep / quarantine janitor stay
+// exposed as the public `Authority::run_gc`/`run_recovery`/`run_janitor` (the composing server owns
+// scheduling — this library holds none, but it hands the composer the handles to schedule).
+pub(crate) use custody::{gc, lifecycle, lineage, read, restore, set_current, upload};
+pub(crate) use directory::{enroll, governance, session_read, session_review, session_roster};
 
 pub use authority::{Authority, PoolConfig};
 pub use enroll::{

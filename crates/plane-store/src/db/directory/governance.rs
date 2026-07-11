@@ -15,9 +15,8 @@ use topos_core::sign::{
     GovernanceOpFields, GovernanceOpKind, governance_op_preimage, verify_governance_op,
 };
 
-use super::Db;
-use super::blob32;
 use super::enroll::{EnrollCorrupt, read_device};
+use crate::db::{Db, blob32};
 use crate::enroll::{self, DeploymentMode, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
@@ -1193,7 +1192,9 @@ async fn read_active_device(
     }
 }
 
-pub(super) async fn read_member_role(
+// `pub(in crate::db)`: shared across the seam — the custody pointer-move transaction
+// (`db::custody::set_current`) reads the acting principal's workspace role from it.
+pub(in crate::db) async fn read_member_role(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     principal: &Principal,

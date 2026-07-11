@@ -24,11 +24,11 @@
 
 use sqlx::{Postgres, Transaction};
 
-use super::Db;
 use super::governance::{
     EventRecord, mint_invite_row, read_event, read_member_role, record_event_raw,
     self_invite_token, would_orphan_owner,
 };
+use crate::db::Db;
 use crate::enroll::{self};
 use crate::error::{AuthorityError, Result};
 use crate::governance::{GovernanceOutcome, Role};
@@ -126,7 +126,7 @@ async fn read_genesis_request(
     .map_err(AuthorityError::internal)?;
     match row {
         None => Ok(None),
-        Some(r) => Ok(Some(super::blob32(&r.request_sha256)?)),
+        Some(r) => Ok(Some(crate::db::blob32(&r.request_sha256)?)),
     }
 }
 

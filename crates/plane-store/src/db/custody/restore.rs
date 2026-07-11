@@ -20,7 +20,7 @@ use topos_types::{
     CurrentRecord, Generation, PointerScope, Signature, SignatureAlg, SignedCurrentRecord,
 };
 
-use super::Db;
+use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{SkillId, WorkspaceId};
 use crate::restore::EpochBumpReport;
@@ -65,7 +65,7 @@ async fn run(
     let rows = lock_current_rows(tx, filter).await?;
     let mut reports = Vec::with_capacity(rows.len());
     for row in rows {
-        let commit = super::commit_id_from_row(&row.commit_id)?;
+        let commit = crate::db::commit_id_from_row(&row.commit_id)?;
         let old = Generation {
             epoch: i64_to_u64(row.epoch)?,
             seq: i64_to_u64(row.seq)?,

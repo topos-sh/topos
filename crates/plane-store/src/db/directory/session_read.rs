@@ -1,12 +1,12 @@
 //! The session-read lane's one new query — the per-workspace skill index. A child of `mod db`; no
 //! `sqlx` type crosses the boundary. Everything else the session lane reads goes through the existing
 //! reachability statements (`object_witness` / `version_readable` / `open_proposal_rows`), re-gated by
-//! [`super::ReadLane::WorkspaceMember`] — this file exists only for the index join no token-scoped read
+//! [`crate::db::ReadLane::WorkspaceMember`] — this file exists only for the index join no token-scoped read
 //! ever needed.
 
 use topos_types::Generation;
 
-use super::{Db, blob32};
+use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::WorkspaceId;
 

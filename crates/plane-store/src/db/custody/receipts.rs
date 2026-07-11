@@ -13,9 +13,8 @@ use sqlx::{Postgres, Transaction};
 use topos_core::sign::DeviceOp;
 use topos_types::{Generation, TerminalOutcome};
 
-use super::Db;
-use super::blob32;
-use super::set_current::{CurrentRow, delete_lease, i64_to_u64, u64_to_i64};
+use crate::db::custody::set_current::{CurrentRow, delete_lease, i64_to_u64, u64_to_i64};
+use crate::db::{Db, blob32};
 use crate::actor::{ReceiptActor, ReceiptMethod};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, SkillId, WorkspaceId};

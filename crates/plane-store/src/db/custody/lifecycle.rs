@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use sqlx::{Postgres, Transaction};
 
-use super::Db;
+use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, WorkspaceId};
 
@@ -197,7 +197,7 @@ impl Db {
     /// - **no live `promotion_lease`** (an in-flight migrate's pre-rooted set), and
     /// - **no OPEN, NON-STALE proposal** rooting it via `proposal_object` (the pending-review surface). This
     ///   last `NOT EXISTS` shares its `open ∧ base == current` predicate **verbatim** with the read arm
-    ///   ([`super::Db::authorize_object_read`]) and the recovery claim
+    ///   ([`crate::db::Db::authorize_object_read`]) and the recovery claim
     ///   ([`Self::claim_stale_for_recovery`]), so the instant a publish advances `current` (staling the
     ///   proposal) the object drops out of retention AND read in the same step — no reaper, no edge deletion,
     ///   no window (the equivalence test pins the copies together).

@@ -13,7 +13,7 @@ use sqlx::{Postgres, Transaction};
 use topos_core::digest;
 
 use super::Db;
-use super::lifecycle::GIT_OID_LEN;
+use crate::db::custody::lifecycle::GIT_OID_LEN;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 

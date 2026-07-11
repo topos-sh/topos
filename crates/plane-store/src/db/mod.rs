@@ -728,38 +728,15 @@ fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
 #[error("stored content id is not 32 bytes")]
 struct BadBlobWidth;
 
-// The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). Driven
-// by the ingest/migrate orchestration and the GC/recovery/janitor entry points; a few helpers (e.g.
-// `release_lease`) are exercised only by tests, so the dead-code waiver stays on the module.
-#[cfg_attr(not(test), allow(dead_code))]
-mod lifecycle;
+// The custody raw-SQL twins (the pointer-move transaction, the object-lifecycle fence, the contribute-table
+// SQL, the receipt machinery, and the restore epoch bump) — grouped under `db/custody/`.
+pub(crate) mod custody;
 
-pub(crate) use lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
+// The directory raw-SQL twins (enrollment issuance, governance + admin-claim, and the two web-session
+// directory legs' SQL) — grouped under `db/directory/`.
+pub(crate) mod directory;
 
-// The operator backup/restore epoch bump (re-sign `current` one epoch forward; touches ONLY `current`).
-mod restore;
-
-// The pointer-move transaction (the `set-current` write) + its policy/device-registry helpers.
-mod set_current;
-
-// The durable all-outcome receipt machinery (read/insert/replay, the terminal-outcome writers, the outcome
-// codecs) — shared by `set_current`'s promote and reject paths.
-mod receipts;
-
-// The contribute authority's proposal + approval SQL (publish --propose / review --approve|--reject).
-mod proposals;
-
-// The enrollment issuance SQL (invites / device-auth / passcodes / grants / redeem).
-mod enroll;
-
-// The web-session read lane's SQL (the one skill-index query).
-pub(crate) mod session_read;
-
-// The web-session roster SQL (invite / remove / rotate / the roster read).
-mod session_roster;
-
-// The governance + admin-claim SQL (owner-signed create-invite + roster/revoke mutations; the first-boot claim).
-mod governance;
+pub(crate) use custody::lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 
 // Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
 // `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them

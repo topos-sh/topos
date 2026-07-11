@@ -15,17 +15,17 @@ use topos_types::{
     TerminalOutcome, WIRE_SCHEMA_VERSION,
 };
 
-use super::governance::read_member_role;
-use super::proposals::{
+use crate::db::directory::governance::read_member_role;
+use crate::db::custody::proposals::{
     ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
     read_open_proposal, resolve_proposal, set_proposal_status,
 };
-use super::receipts::{
+use crate::db::custody::receipts::{
     BoundIdentity, Replay, StoredReceipt, approval_required, conflict, denied, denied_code,
     denied_preauth, first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse,
     reject_denied, reject_denied_code, reject_denied_preauth, reject_terminal, replay, retryable,
 };
-use super::{Db, blob32};
+use crate::db::{Db, blob32};
 use crate::actor::WriteActor;
 use crate::error::{AuthorityError, Result};
 use crate::governance::Role;
@@ -340,7 +340,8 @@ async fn run(
             // availability/lineage DENIED.
             let current = read_current(tx, input.ws, input.skill).await?;
             let genesis_standup =
-                if super::roster_exists(&mut **tx, input.ws, input.skill, &device.principal).await?
+                if crate::db::roster_exists(&mut **tx, input.ws, input.skill, &device.principal)
+                    .await?
                 {
                     false
                 } else {
@@ -351,7 +352,7 @@ async fn run(
                         return denied(tx, input, &bound, "principal not rostered for the skill")
                             .await;
                     }
-                    if !super::workspace_member_confirmed(&mut **tx, input.ws, &device.principal)
+                    if !crate::db::workspace_member_confirmed(&mut **tx, input.ws, &device.principal)
                         .await?
                     {
                         return denied(
@@ -536,7 +537,7 @@ async fn run(
     // stay the LAST statement before the op tail — a future receipted-terminal between here and the promote
     // would re-open the orphan-row window.
     if genesis_standup {
-        super::insert_roster(&mut **tx, input.ws, input.skill, &acting).await?;
+        crate::db::insert_roster(&mut **tx, input.ws, input.skill, &acting).await?;
     }
 
     // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,
@@ -825,7 +826,7 @@ async fn reject_run(
             if !verify_device_op(&fields, signature, &device.public_key) {
                 return Ok(reject_denied_preauth(r, "device signature invalid"));
             }
-            if !super::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
+            if !crate::db::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
                 return reject_denied(tx, r, "principal not rostered for the skill").await;
             }
             device.principal
