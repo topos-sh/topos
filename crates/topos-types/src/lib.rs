@@ -2,8 +2,8 @@
 //!
 //! These are *deserialization shapes* for the boundary: the `--json` envelope, every per-verb
 //! result shape ([`results`]), the frozen [`TerminalOutcome`] enum, the [`Receipt`] + [`WireError`],
-//! the signed-`current` envelope, the [`ActionCode`] vocabulary, the harness [`TriggerReport`], and
-//! the on-disk client documents ([`persisted`]). **No logic.** The app libs parse these into
+//! the unsigned [`WireCurrentRecord`] pointer body, the [`ActionCode`] vocabulary, the harness
+//! [`TriggerReport`], and the on-disk client documents ([`persisted`]). **No logic.** The app libs parse these into
 //! `topos-core`'s validated domain newtypes at the HTTP/CLI edge (parse-don't-validate), so
 //! `topos-core` never imports this crate.
 //!
@@ -27,11 +27,11 @@ pub mod bootstrap;
 
 #[doc(inline)]
 pub use bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
-    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
+    ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 
-/// Bumped on any breaking change to a WIRE shape (the `--json` envelope, the signed-`current`
+/// Bumped on any breaking change to a WIRE shape (the `--json` envelope, the `current`
 /// pointer, the HTTP request/response bodies); every wire document carries it.
 pub const WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -84,7 +84,7 @@ pub struct JsonEnvelope {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The frozen terminal-outcome set (all 11; APPROVAL_REQUIRED included).
+// The frozen terminal-outcome set (all 10; APPROVAL_REQUIRED included).
 // ---------------------------------------------------------------------------------------------
 
 /// The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
@@ -106,7 +106,6 @@ pub enum TerminalOutcome {
     Denied,
     Unavailable,
     AmbiguousName,
-    KeyRepinRequired,
     RetryableFailure,
     PermanentFailure,
 }
@@ -132,13 +131,12 @@ pub struct NextAction {
 /// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
 /// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
 /// reading Rust; additive-only — new codes append here.
-pub const KNOWN_ACTION_CODES: [&str; 9] = [
+pub const KNOWN_ACTION_CODES: [&str; 8] = [
     "PROPOSE_PUBLISH",
     "REBASE_AND_RETRY",
     "RESOLVE_DIVERGED_DRAFT",
     "APPLY_WAITING_UPDATE",
     "DISAMBIGUATE_NAME",
-    "REPIN_PLANE_KEY",
     "REQUEST_ACCESS",
     "RETRY",
     "CONTACT_ADMIN",
@@ -153,7 +151,6 @@ pub enum ActionCode {
     ResolveDivergedDraft, // DIVERGED
     ApplyWaitingUpdate,   // `pull <skill>` — a previously observed-but-unapplied version
     DisambiguateName,     // AMBIGUOUS_NAME
-    RepinPlaneKey,        // KEY_REPIN_REQUIRED
     RequestAccess,        // DENIED → invite/enroll
     Retry,                // RETRYABLE_FAILURE / UNAVAILABLE
     ContactAdmin,         // non-self-service denials
@@ -184,7 +181,6 @@ impl ActionCode {
             ActionCode::ResolveDivergedDraft => "RESOLVE_DIVERGED_DRAFT",
             ActionCode::ApplyWaitingUpdate => "APPLY_WAITING_UPDATE",
             ActionCode::DisambiguateName => "DISAMBIGUATE_NAME",
-            ActionCode::RepinPlaneKey => "REPIN_PLANE_KEY",
             ActionCode::RequestAccess => "REQUEST_ACCESS",
             ActionCode::Retry => "RETRY",
             ActionCode::ContactAdmin => "CONTACT_ADMIN",
@@ -201,7 +197,6 @@ impl From<String> for ActionCode {
             "RESOLVE_DIVERGED_DRAFT" => ActionCode::ResolveDivergedDraft,
             "APPLY_WAITING_UPDATE" => ActionCode::ApplyWaitingUpdate,
             "DISAMBIGUATE_NAME" => ActionCode::DisambiguateName,
-            "REPIN_PLANE_KEY" => ActionCode::RepinPlaneKey,
             "REQUEST_ACCESS" => ActionCode::RequestAccess,
             "RETRY" => ActionCode::Retry,
             "CONTACT_ADMIN" => ActionCode::ContactAdmin,
@@ -239,7 +234,7 @@ impl schemars::JsonSchema for ActionCode {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // An OPEN string set: the known vocabulary is advertised (so a cross-language consumer can
         // branch without reading Rust), but any string validates — an old build must pass an unknown
-        // future code through, not reject it. Contrast the CLOSED `TerminalOutcome` / `SignatureAlg`.
+        // future code through, not reject it. Contrast the CLOSED `TerminalOutcome`.
         schemars::json_schema!({
             "type": "string",
             "title": "ActionCode",
@@ -313,7 +308,7 @@ pub struct Affected {
     pub proposal: Option<String>,
 }
 
-/// The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even
+/// The ONE canonical receipt across all outcomes — the durable idempotency record (present even
 /// on failures): one stable receipt per op, identical on retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
@@ -347,9 +342,6 @@ pub struct Receipt {
     /// RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "date-time")))]
     pub created_at: String,
-    /// The signing key id that covered this op.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_id: Option<String>,
     /// Outcome-specific extra detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
@@ -383,8 +375,9 @@ pub struct WireError {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The signed `current` pointer envelope — public semantics {version_id, generation},
-// the signed preimage also binds workspace_id + skill_id (no cross-scope replay).
+// The `current` pointer wire body — public semantics {version_id, generation}; the scope binds
+// workspace_id + skill_id. UNSIGNED: authority is the database row behind the pointer, integrity is
+// the content-addressed version id re-verified byte-for-byte on apply.
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,45 +403,21 @@ pub struct CurrentRecord {
     pub generation: Generation,
 }
 
-/// The signature algorithm — a CLOSED set. v0 is Ed25519 only; an unknown or `none` algorithm must
-/// fail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root
-/// pointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the
-/// exact opposite of a next-action code and must never silently pass through.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub enum SignatureAlg {
-    Ed25519,
-}
-
+/// The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,
+/// embeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,
+/// and integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned
+/// envelope; `ETag = "<epoch>.<seq>"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct Signature {
-    pub alg: SignatureAlg,
-    pub key_id: String,
-    /// base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[A-Za-z0-9_-]{86}$")))]
-    pub value: String,
-}
-
-/// The signed `current` pointer — a versioned envelope; `ETag = "<epoch>.<seq>"`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct SignedCurrentRecord {
+pub struct WireCurrentRecord {
     /// Always `1` for this contract version (the schema pins it `const`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
     pub scope: PointerScope,
     pub record: CurrentRecord,
-    pub signature: Signature,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -547,8 +516,8 @@ mod tests {
             ActionCode::Retry
         );
         assert_eq!(
-            ActionCode::from("REPIN_PLANE_KEY".to_owned()),
-            ActionCode::RepinPlaneKey
+            ActionCode::from("REQUEST_ACCESS".to_owned()),
+            ActionCode::RequestAccess
         );
         // Every advertised known code parses to a known (non-`Unknown`) variant.
         for code in KNOWN_ACTION_CODES {
@@ -560,29 +529,14 @@ mod tests {
     }
 
     #[test]
-    fn signature_alg_is_closed_and_fails_closed() {
-        assert_eq!(
-            serde_json::to_string(&SignatureAlg::Ed25519).unwrap(),
-            "\"Ed25519\""
-        );
-        assert_eq!(
-            serde_json::from_str::<SignatureAlg>("\"Ed25519\"").unwrap(),
-            SignatureAlg::Ed25519
-        );
-        // An unknown / "none" algorithm must REFUSE to deserialize (fail closed) — no downgrade.
-        assert!(serde_json::from_str::<SignatureAlg>("\"none\"").is_err());
-        assert!(serde_json::from_str::<SignatureAlg>("\"RSA\"").is_err());
-    }
-
-    #[test]
     fn terminal_outcome_is_screaming_snake() {
         assert_eq!(
             serde_json::to_string(&TerminalOutcome::ApprovalRequired).unwrap(),
             "\"APPROVAL_REQUIRED\""
         );
         assert_eq!(
-            serde_json::to_string(&TerminalOutcome::KeyRepinRequired).unwrap(),
-            "\"KEY_REPIN_REQUIRED\""
+            serde_json::to_string(&TerminalOutcome::AmbiguousName).unwrap(),
+            "\"AMBIGUOUS_NAME\""
         );
     }
 

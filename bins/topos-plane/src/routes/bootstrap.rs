@@ -1,6 +1,6 @@
-//! `GET /i/{token}` — the UNAUTHENTICATED bootstrap read (TOFU). An `/i/` link resolves to EITHER an invite
-//! (the workspace identity + offered skills + the plane signing root to pin, **no bytes, no role**) OR a
-//! one-time admin CLAIM (the workspace-to-be's name, no skills, `enrollment_method = "admin_claim"`). The
+//! `GET /i/{token}` — the UNAUTHENTICATED bootstrap read. An `/i/` link resolves to EITHER an invite
+//! (the workspace identity + offered skills + the plane API base to dial, **no bytes, no role, no trust root**)
+//! OR a one-time admin CLAIM (the workspace-to-be's name, no skills, `enrollment_method = "admin_claim"`). The
 //! two live in disjoint tables and are probed in sequence — a claim token can never resolve as an invite
 //! nor vice versa — and every dead/unknown token of either kind is the single indistinguishable 404.
 //!
@@ -35,7 +35,7 @@ use crate::wire::{self, error::PlaneHttpError, map};
     tag = "enrollment",
     params(("token" = String, Path, description = "The opaque `/i/<token>` invite or admin-claim token.")),
     responses(
-        (status = 200, description = "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.", body = topos_types::bootstrap::BootstrapData),
+        (status = 200, description = "The bootstrap (workspace + plane API base; no bytes, no role, no trust root). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.", body = topos_types::bootstrap::BootstrapData),
         (status = 404, description = "No such invite or claim, or it is revoked/consumed/expired (always the JSON envelope, any Accept).", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
         (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),

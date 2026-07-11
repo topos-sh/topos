@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use topos_core::sign::{self, Commit};
+use topos_core::identity::{self, Commit};
 use topos_gitstore::{GitstoreError, ImportFile, LargeObjectStore, StagedEntry, Store};
 
 use crate::authority::Authority;
@@ -136,7 +136,7 @@ pub(crate) async fn ingest(
     .await?;
 
     let parent_ids: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
-    let version_id = sign::commit_id(&Commit {
+    let version_id = identity::commit_id(&Commit {
         parents: &parent_ids,
         tree: staged.bundle_digest,
         author: &author,

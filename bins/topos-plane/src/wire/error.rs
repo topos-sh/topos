@@ -3,7 +3,7 @@
 //!
 //! Design rule: a returned protocol outcome (OK / CONFLICT / DENIED / …) is ALWAYS a 200 carrying a receipt
 //! (see [`crate::wire::map::write_envelope`]); a non-2xx is ONLY a transport/auth/integrity fault:
-//! - `400` — a malformed body / id / device-signature header;
+//! - `400` — a malformed body / id;
 //! - `404` — a missing/blank read credential OR `AuthorityError::NotFound` (indistinguishable — for READ
 //!   credentials the plane never answers 401/403, so it reveals nothing about whether a token, workspace,
 //!   skill, object, or version exists);
@@ -27,8 +27,6 @@ use topos_types::{
 pub(crate) enum PlaneHttpError {
     /// A malformed request body / DTO / candidate field → 400.
     BadBody(String),
-    /// A missing or malformed `Topos-Device-Signature` header → 400.
-    BadDeviceSignature,
     /// A malformed identifier (workspace / skill / op id, or a hex commit/object id in a body) → 400.
     BadId(String),
     /// A missing/blank read credential → 404 (indistinguishable; never 401/403).
@@ -54,13 +52,6 @@ impl IntoResponse for PlaneHttpError {
             PlaneHttpError::BadBody(m) => {
                 (StatusCode::BAD_REQUEST, "BAD_REQUEST", false, vec![], m)
             }
-            PlaneHttpError::BadDeviceSignature => (
-                StatusCode::BAD_REQUEST,
-                "BAD_DEVICE_SIGNATURE",
-                false,
-                vec![],
-                "missing or malformed Topos-Device-Signature header".to_owned(),
-            ),
             PlaneHttpError::BadId(m) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", false, vec![], m),
             PlaneHttpError::MissingReadCredential => (
                 StatusCode::NOT_FOUND,

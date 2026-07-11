@@ -1,20 +1,19 @@
 //! The unauthenticated invite-bootstrap payload — what `GET /i/{token}` returns BEFORE enrollment.
 //!
-//! A device reads this (TOFU) the instant it opens an `/i/<token>` link, *before* it has any credential: it
-//! carries the workspace identity, the offered skills, the enrollment posture, and — load-bearing — the
-//! plane's **signing root** to pin (the trust anchor every later signed `current` pointer verifies against).
-//! It carries **no bytes and no role** (the role lives server-side on the pre-seeded member rows), and
-//! `first_receive_auto_land` is **always false** — a received skill is offered, never silently landed.
+//! A device reads this the instant it opens an `/i/<token>` link, *before* it has any credential: it
+//! carries the workspace identity, the offered skills, the enrollment posture, and the plane's API base
+//! URL to dial. It carries **no trust root to pin** — a `current` pointer is unsigned, its authority the
+//! database row and its integrity the content-addressed version id. It carries **no bytes and no role**
+//! (the role lives server-side on the pre-seeded member rows), and `first_receive_auto_land` is
+//! **always false** — a received skill is offered, never silently landed.
 //!
 //! Field names are snake_case as written. These are **deserialization shapes** only (no logic); the route
 //! maps the authority's `InviteBootstrap` domain struct into this at the edge.
 
 use serde::{Deserialize, Serialize};
 
-use crate::SignatureAlg;
-
 /// The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the
-/// workspace + the plane signing root to pin. No bytes, no role.
+/// workspace + the plane API base to dial. No bytes, no role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -26,7 +25,7 @@ pub struct BootstrapData {
     pub schema_version: u32,
     /// The invite's non-secret descriptor (consent posture, expiry).
     pub invite: BootstrapInvite,
-    /// The plane the workspace lives on, including the signing key to TOFU-pin.
+    /// The plane the workspace lives on — its API base and enrollment method.
     pub plane: BootstrapPlane,
     /// The workspace the invite is for.
     pub workspace: BootstrapWorkspace,
@@ -70,8 +69,7 @@ pub enum ConsentMode {
     DirectHumanFirstReceive,
 }
 
-/// The plane a workspace lives on — its public base URL, deployment posture, offered enrollment method, and
-/// the signing key a device pins as its trust root.
+/// The plane a workspace lives on — its public base URL, deployment posture, and offered enrollment method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -86,9 +84,6 @@ pub struct BootstrapPlane {
     pub deployment_mode: DeploymentMode,
     /// The enrollment method advertised to a bootstrapping device (e.g. `"device_code"` / `"passcode"`).
     pub enrollment_method: String,
-    /// The plane's Ed25519 signing key — the trust root a device pins (TOFU) and every later signed
-    /// `current` pointer verifies against.
-    pub signing_key: BootstrapSigningKey,
 }
 
 /// A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;
@@ -104,21 +99,6 @@ pub enum DeploymentMode {
     Cloud,
     /// A self-hosted plane: enrollment grants membership from a valid grant (no human identity step).
     SelfHost,
-}
-
-/// The plane's signing key as a device pins it — the algorithm, the key id, and the raw public key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct BootstrapSigningKey {
-    /// The signature algorithm — Ed25519 only (the CLOSED kernel enum; an unknown alg fails to deserialize).
-    pub alg: SignatureAlg,
-    /// The plane signing key id (the `key_id` carried in every signed `current` pointer).
-    pub key_id: String,
-    /// The raw 32-byte Ed25519 public key, base64url-unpadded — the trust root the device pins.
-    pub value: String,
 }
 
 /// The workspace an invite is for — its id, display name, and domain-verification state. No role (the role
@@ -225,11 +205,6 @@ mod tests {
                 base_url: "https://plane.test".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "passcode".to_owned(),
-                signing_key: BootstrapSigningKey {
-                    alg: SignatureAlg::Ed25519,
-                    key_id: "pk_demo".to_owned(),
-                    value: "AAAA".to_owned(),
-                },
             },
             workspace: BootstrapWorkspace {
                 workspace_id: "w_acme".to_owned(),
@@ -245,6 +220,8 @@ mod tests {
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["workspace"]["workspace_id"], "w_acme");
         assert_eq!(v["plane"]["deployment_mode"], "cloud");
+        // No trust root to pin — the plane block carries only base_url + posture + enrollment method.
+        assert!(v["plane"].get("enrollment_method").is_some());
         assert_eq!(v["invite"]["consent"], "direct_human_first_receive");
         assert_eq!(v["invite"]["first_receive_auto_land"], false);
         // No role anywhere in the bootstrap — the role lives server-side.

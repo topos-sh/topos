@@ -2,23 +2,37 @@
 //! receipts layer records it.
 //!
 //! One module so the three types stay together: [`WriteActor`] is what the orchestration hands the
-//! transaction (the device lane's key + signature, or the session lane's verified principal + its
+//! transaction (the device lane's presented credential, or the session lane's verified principal + its
 //! domain-tagged request identity), and [`WriteActor::receipt_actor`] is the ONE projection into the
 //! receipts layer ([`ReceiptActor`]) — every terminal writer derives its `(actor, method,
-//! request_sha256)` triple here, so the lane vocabulary cannot drift per writer. The kernel's frozen
-//! device-op frame is untouched: none of these types crosses the wire or enters a signing preimage.
+//! request_sha256)` triple here, so the lane vocabulary cannot drift per writer. A crate-root shared
+//! leaf: custody consumes it, the directory's session legs construct it, and neither imports the other
+//! to do so.
 
 use crate::id::Principal;
+
+/// The ONE uniform acting-gate denial for the session lane: a non-member, a merely-invited seat, an
+/// absent workspace, and a self-host caller past the posture belt all read the same (the static reason
+/// is for the composing wrapper's classification, never an oracle — and it is never persisted). Lane
+/// vocabulary, so it lives with the actor types both sides of the seam share.
+pub const SESSION_REVIEW_ACTING_DENIED: &str =
+    "session review ops require a confirmed workspace member";
+
+/// The machine-branchable code on the DURABLE role denial (a confirmed plain member).
+pub const REVIEWER_ROLE_REQUIRED_CODE: &str = "REVIEWER_ROLE_REQUIRED";
+
+/// The role denial's message — a plane→web byte contract (the cloud pins it verbatim).
+pub(crate) const REVIEWER_ROLE_REQUIRED_MSG: &str =
+    "approving or rejecting needs an owner or reviewer seat";
 
 /// The lane a contribute write arrived on. The transaction bodies branch on this ONLY at their
 /// authorization step; every other step is actor-blind.
 #[derive(Debug, Clone)]
 pub(crate) enum WriteActor<'a> {
-    /// The device-signed lane (the CLI): byte-identical to the pre-lane behavior.
-    Device {
-        device_key_id: &'a str,
-        signature: &'a [u8; 64],
-    },
+    /// The device lane (the CLI): the presented device credential. The transaction authenticates it by
+    /// LOOKUP — the non-revoked registry row for this id, read inside the same transaction — never by a
+    /// possession proof.
+    Device { device_key_id: &'a str },
     /// The web-session lane (hosted compositions only; self-host is denied upstream). `acting` is
     /// the composing caller's session-verified, canonical principal; `request_sha256` is the
     /// domain-tagged full-request identity (reason included on a reject) the replay probe compares.
@@ -32,9 +46,9 @@ impl WriteActor<'_> {
     /// The ONE projection into the receipts layer.
     pub(crate) fn receipt_actor(&self) -> ReceiptActor<'_> {
         match self {
-            WriteActor::Device { device_key_id, .. } => ReceiptActor {
+            WriteActor::Device { device_key_id } => ReceiptActor {
                 actor: device_key_id,
-                method: ReceiptMethod::DeviceSigned,
+                method: ReceiptMethod::Device,
                 request_sha256: None,
             },
             WriteActor::Session {
@@ -52,8 +66,8 @@ impl WriteActor<'_> {
 /// The stored `op_receipts.method` discriminant — which leg wrote the receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiptMethod {
-    /// A device-signed op; the receipt's `actor` is the signing device key id.
-    DeviceSigned,
+    /// A device-credential op; the receipt's `actor` is the acting device key id.
+    Device,
     /// A web-session op; the receipt's `actor` is the acting principal's verified email.
     WebSession,
 }
@@ -62,7 +76,7 @@ impl ReceiptMethod {
     /// The stored string form (matches the `op_receipts.method` CHECK constraint).
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            ReceiptMethod::DeviceSigned => "device_signed",
+            ReceiptMethod::Device => "device",
             ReceiptMethod::WebSession => "web_session",
         }
     }

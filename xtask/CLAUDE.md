@@ -39,7 +39,12 @@ cargo xtask conformance            # the store matrices (not yet implemented —
     nor `reqwest` (the OIDC connector is feature-gated default-off) — a production-tree check;
   - every workspace member opts into the shared `[workspace.lints]` (incl. `unsafe_code = forbid`);
   - the Dockerfile's builder image tag AND ci.yml's cargo-deny `rust-version` both match
-    `rust-toolchain.toml`'s pinned channel (one toolchain, three pin sites, bumped together).
+    `rust-toolchain.toml`'s pinned channel (one toolchain, three pin sites, bumped together);
+  - **the vault/directory seam** (a source scan, not `cargo tree`): `plane-store`'s custody modules
+    (`src/custody/` + `src/db/custody/`) reference NO directory module path (group paths and the
+    crate-root aliases both banned) and name NO directory table after FROM/JOIN/INTO/UPDATE in SQL —
+    the access-witness trait is the only seam; the reverse direction (directory → custody) is
+    deliberately allowed (the row/byte rule: a review approve terminates in the shared pointer-move).
 - **`ci`** — the contributor's pre-push loop: runs the full NON-DB gate sequence in the same order as the
   CI `gate` job, failing fast with a per-gate banner — `cargo fmt --all --check`, `cargo clippy --workspace
   --all-targets --locked -- -D warnings`, `cargo doc --workspace --no-deps --locked` (with

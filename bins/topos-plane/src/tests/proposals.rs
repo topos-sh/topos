@@ -11,21 +11,12 @@ async fn propose_opens_a_proposal_needs_review_without_moving_current(pool: PgPo
 
     let op = "30000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"a proposed change\n")];
-    let (vid, digest) = compute_ids(&[g_vid], &files);
-    let sig = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishPropose,
-        op,
-        gn(1, 1),
-        vid,
-        digest,
-    );
+    let (vid, _digest) = compute_ids(&[g_vid], &files);
 
     let (status, _, bytes) = run(
         &ctx,
         post(
             "/v1/proposals",
-            &sig,
             candidate_body(op, gn(1, 1), &[g_vid], &files),
         ),
     )
@@ -57,20 +48,11 @@ async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token(pool: 
     // Open a proposal (a child of genesis) via `POST /v1/proposals`.
     let op = "70000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"a proposed change\n")];
-    let (vid, digest) = compute_ids(&[g_vid], &files);
-    let sig = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishPropose,
-        op,
-        gn(1, 1),
-        vid,
-        digest,
-    );
+    let (vid, _digest) = compute_ids(&[g_vid], &files);
     let (status, _, _) = run(
         &ctx,
         post(
             "/v1/proposals",
-            &sig,
             candidate_body(op, gn(1, 1), &[g_vid], &files),
         ),
     )

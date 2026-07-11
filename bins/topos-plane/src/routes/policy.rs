@@ -1,8 +1,8 @@
 //! `PUT /v1/workspaces/{ws}/policy/review-required` — the SELF-HOST operator's `review-required` toggle.
 //!
 //! Authenticated by the plane's admin bearer token (`--admin-token` / `TOPOS_PLANE_ADMIN_TOKEN`), not a
-//! device-op signature — the operator owns the plane; a device-signed governance variant needs a new
-//! kernel frame and lands later. With NO admin token configured the route answers **404** (invisible), so
+//! device credential — the operator owns the plane; a device-credential-authenticated governance variant over
+//! this policy lands later. With NO admin token configured the route answers **404** (invisible), so
 //! a downstream composition that merges `router(state)` without setting a token can never expose an
 //! unauthenticated policy write on its open `/v1/` lane; a configured route answers an honest **401** on a
 //! missing/wrong token (the operator's own secret — see the `wire::error` scoping note). Enforcement of

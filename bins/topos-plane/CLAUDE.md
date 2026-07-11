@@ -13,8 +13,8 @@
 - `pub async fn PlaneState::set_review_required(&self, workspace_id: &str, review_required: bool) ->
   anyhow::Result<()>` — the `review_required` workspace-policy toggle, **set via the public API** (a leak-free
   wrapper over `Authority::set_review_required`: the id is parsed + both errors stringified internally). A
-  composing admin route calls it; it is **not** itself device-op-signed (the device-signed `PUT /policy`
-  governance route is later work).
+  composing admin route calls it; it is **not** itself device-credential authenticated (a
+  device-credential-authenticated `PUT /policy` governance route is later work).
 - `pub fn router(state: PlaneState) -> axum::Router` — the **single** composed surface a downstream plane
   imports verbatim (the limiter lives inside `PlaneState`). There is **no** `PlaneExtension`/callback/fork
   hook (a check-arch guard also proves the production build never enables the test-only seeding feature).
@@ -26,17 +26,17 @@
   `GET /v1/workspaces/{ws}/skills/{skill}/proposals` (the OPEN proposals' `{version_id, base, created_at}` —
   count + handles only, no bytes/roles; same Bearer-read scope + 404-not-403 + the shared `open ∧ base==current`
   staleness clause, so a staled proposal vanishes; a mutable list, so `must-revalidate`, no ETag), the
-  **device-signed workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog —
-  authenticated by a `Topos-Device-Key-Id` selector + a base64url `Topos-Device-Signature` over the
-  catalog-read frame, both folding a missing/malformed value to the uniform 404; calls
-  `Authority::list_skills_device` → `WireSkillIndex`; the FIRST HTTP-routed member-scoped read, serving
-  cloud AND self-host), and the device-signed writes
-  `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews`. Each handler is parse → call
+  **device-credential workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog
+  — authenticated by a `Topos-Device-Key-Id` selector, a missing/malformed value folding to the uniform 404;
+  calls `Authority::list_skills_device` → `WireSkillIndex`; the FIRST HTTP-routed member-scoped read, serving
+  cloud AND self-host), and the device-credential writes
+  `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (the presented `device_key_id` rides the body,
+  authenticated in-transaction by registry-row lookup — no signature header). Each handler is parse → call
   the authority → serialize: **no trust decision, no raw object read, no client-asserted principal** in a
   handler.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
-  unauthenticated TOFU bootstrap `GET /i/{token}` (the workspace + the plane signing root to pin; **no bytes,
-  no role**; a dead invite ⇒ 404 — and the route now ALSO serves one-time admin-CLAIM links, probed after
+  unauthenticated bootstrap `GET /i/{token}` (the workspace + the plane API base to dial; **no bytes,
+  no role, no trust root**; a dead invite ⇒ 404 — and the route now ALSO serves one-time admin-CLAIM links, probed after
   the invite table: `enrollment_method: "admin_claim"`, no skills, the same uniform 404 for
   consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors). The route
   **content-negotiates**: an Accept asking for JSON (or no Accept) gets the versioned `BootstrapData`
@@ -52,18 +52,19 @@
   enrollment flow `POST /v1/device/authorize` (now intent-dispatching: an `enroll` start needs its
   `invite_token`; a `standup` start — explicit intent, or no invite at all — opens a workspace-less session
   on a hosted plane [self-host ⇒ 404], answers with the high-entropy code + `verification_uri_complete` +
-  the plane block to TOFU-pin, and a contradictory intent/invite body is a 400), `POST /v1/device/token`
+  the plane block [API base + posture + method, no trust root], and a contradictory intent/invite body is a 400), `POST /v1/device/token`
   (a granted poll now carries the `{workspace_id, display_name}` context a standup client lacks),
   `GET /v1/enroll/verify/{user_code}` (now disclosing the session's `intent`, so a web page renders
   join-copy vs create-copy; a standup session's workspace name is `""` until approval),
   `POST /v1/enroll/passcode` (the returned code is sent fire-and-forget on
   `spawn_blocking`, so the constant-shaped ack never leaks whether an address was rostered),
-  `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the enroll
-  possession sig rides the `Topos-Device-Signature` header; mints per-skill read creds, **never a user
-  token**), and `POST /v1/admin-claim`; and the governance mutations `POST /v1/invites`,
-  `PUT|DELETE /v1/workspaces/{ws}/roster/{email}`, `DELETE /v1/workspaces/{ws}/devices` (each a governance-frame
-  signature → ONE authority op). A confirmed identity is **never `Principal::parse`d in a handler** (it comes
-  from a server-trusted row in the authority); a target email is op data, bound into the signed frame. The
+  `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the grant is
+  the bearer credential in the body, checked against the device public key it is bound to — no signature;
+  mints per-skill read creds, **never a user token**), and `POST /v1/admin-claim`; and the governance
+  mutations `POST /v1/invites`, `PUT|DELETE /v1/workspaces/{ws}/roster/{email}`,
+  `DELETE /v1/workspaces/{ws}/devices` (each the acting `device_key_id` + op → ONE authority op). A confirmed
+  identity is **never `Principal::parse`d in a handler** (it comes from a server-trusted row in the
+  authority); a target email is op data. The
   OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off `enroll-oidc` feature (so
   the committed OpenAPI contract excludes them).
 - The wire mapping (`wire/map.rs`): a *read* enrollment step (bootstrap / device-auth / verification /
@@ -104,14 +105,16 @@
   `router(state)` without setting a token can never expose an unauthenticated toggle on its open `/v1/`
   lane); configured-but-wrong is an honest **401** (the one scoped exception to the 404-not-403 read
   posture — an operator's own secret, not an object-existence oracle); success is **204**, an idempotent
-  set. NOT device-op-signed (the device-signed governance variant needs a new kernel frame — later work).
+  set. NOT device-credential authenticated (a device-credential-authenticated governance variant over this
+  policy is later work).
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 - **The backup/restore epoch bump** (`restore_cmd.rs`): `PlaneState::restore_bump_epochs(workspaces,
   epoch_at_least)` — the leak-free wrapper (plain `String`/`u64` in, a plain `EpochBumpSummary` out, ids
-  parsed at this edge) over `Authority::restore_bump_epochs`, which re-signs every selected `current`
-  pointer one epoch forward (same commit, same seq) so followers roll forward after a database restore
-  instead of alarming on a reused generation.
+  parsed at this edge) over `Authority::restore_bump_epochs`, which rewrites every selected `current`
+  pointer one epoch forward (same commit, same seq) so a reused `(epoch, seq)` tuple after a database restore
+  can't confuse the proposal-staleness predicate or an in-flight CAS / conditional GET (concurrency
+  correctness, not follower-alarm avoidance).
 - **The workspace-standup wrappers** (`standup_cmd.rs`) — the leak-free, deliberately LIB-ONLY surface for
   the PRIVILEGED genesis ops (there is NO OSS HTTP route for any of them; the bin's `mint-claim`
   subcommand and a downstream composition's authenticated admin routes are the callers):
@@ -137,7 +140,7 @@
   same leak-free, LIB-ONLY surface for the web-session MEMBER-SCOPED reads (no OSS HTTP route):
   `PlaneState::list_skills_session` (the workspace catalog — per skill: the `current` version id,
   generation, epoch-ms update time, consent digest, open-proposal count), `read_current_session` (the
-  stored `SignedCurrentRecord` bytes VERBATIM — a never-signed pointer is deliberately FOLDED into the
+  stored `WireCurrentRecord` bytes VERBATIM — a pointer with no record row is deliberately FOLDED into the
   uniform `NotFound`, since the catalog only lists current-rowed skills), `read_version_session` +
   `list_proposals_session` (PRE-SERIALIZED wire JSON via the SAME mappers the token-scoped `/v1`
   routes use — parity by construction, a composing route relays the bytes verbatim), and
@@ -196,9 +199,9 @@ issuance decision (every credential/identity decision is `plane-store::Authority
   `with_mailer` shim injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in
   production).
 
-**Planned (lands later):** the **device-signed `PUT /policy` variant** (the
-admin-token operator route is built — see above; a device-op-signed governance route over the same policy
-needs a new kernel frame, still later work); the **audit outbox** read via durable cursors. NOT planned
+**Planned (lands later):** a **device-credential-authenticated `PUT /policy` variant** (the
+admin-token operator route is built — see above; a governance route over the same policy authenticated by
+the acting device credential is still later work); the **audit outbox** read via durable cursors. NOT planned
 here: **verification/create page HTML** — the routes above are the JSON surface, and a composing web layer
 serves its own pages over them (hosted compositions already do); this lib deliberately ships none. **TLS
 termination**: terminate at a reverse proxy (the recommended, documented path); the BIN also carries an
@@ -210,11 +213,11 @@ a real box (public DNS, Let's Encrypt staging→prod, rate limits, renewal timin
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / database URL / git-root /
-large-root / plane-key / enrollment secret / base URL / mode / SMTP relay / the optional operator
+large-root / enrollment secret / base URL / mode / SMTP relay / the optional operator
 admin token, which enables the policy route / the maintenance interval), resolves its two bin-local
 marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
 **single leak-free constructor** `PlaneState::open(PlaneConfig { .. })` — which opens the `Authority`,
-loads the plane key + enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
+loads the enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
 `plane-store` type, dogfooding the same path a downstream plane uses) — spawns the maintenance scheduler
 (`--gc-interval-secs` / **`TOPOS_PLANE_GC_INTERVAL_SECS`**, default **300**; `0` disables it for an operator
 running the passes out-of-band), and serves `router(state)`. Under
@@ -223,9 +226,8 @@ the `/v1/enroll/oidc/*` routes can drive it.
 
 Two operator subcommands: **`topos-plane restore-bump-epoch --workspace <id> … | --all-workspaces
 [--epoch-at-least <n>]`** — opens the same state serve does (never binding the listen socket), runs the
-epoch bump, prints one line per re-signed pointer plus a `re-signed <N> pointer(s) with key <key_id>`
-summary (the key id is the operator's tripwire that the restored data dir still holds the pre-incident
-signing seed), and refuses to run without an explicit selection. And **`topos-plane mint-claim
+epoch bump, prints one line per bumped pointer plus a `bumped <N> pointer(s)` summary, and refuses to run
+without an explicit selection. And **`topos-plane mint-claim
 --workspace <id> [--display-name <name>] [--owner-email <email>] [--ttl 72h]`** — mints the one-time
 workspace-standup claim and prints the `/i/` link as the ONLY stdout line (a shown-once warning goes to
 stderr; the token never enters tracing). The **bare invocation still serves**, byte-identically — the

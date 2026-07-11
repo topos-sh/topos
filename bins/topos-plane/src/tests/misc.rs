@@ -44,7 +44,6 @@ async fn open_builds_a_serving_state() {
         database_url: unique_database_url("open").await,
         git_root: dir.join("git"),
         large_root: dir.join("large"),
-        plane_key_path: dir.join("plane.key"),
         enroll_secret_path: dir.join("enroll.key"),
         base_url: "https://plane.test".to_owned(),
         verify_base_url: None,
@@ -82,7 +81,6 @@ async fn open_refuses_the_reserved_admin_claim_enrollment_method() {
         database_url: unique_database_url("open_reserved").await,
         git_root: dir.join("git"),
         large_root: dir.join("large"),
-        plane_key_path: dir.join("plane.key"),
         enroll_secret_path: dir.join("enroll.key"),
         base_url: "https://plane.test".to_owned(),
         verify_base_url: None,
@@ -110,20 +108,11 @@ async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgP
 
     let op_p = "90000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"a change nobody wanted\n")];
-    let (prop_vid, prop_digest) = compute_ids(&[g_vid], &files);
-    let sig_p = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishPropose,
-        op_p,
-        gn(1, 1),
-        prop_vid,
-        prop_digest,
-    );
+    let (prop_vid, _prop_digest) = compute_ids(&[g_vid], &files);
     let (sp, _, _) = run(
         &ctx,
         post(
             "/v1/proposals",
-            &sig_p,
             candidate_body(op_p, gn(1, 1), &[g_vid], &files),
         ),
     )
@@ -131,21 +120,13 @@ async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgP
     assert_eq!(sp, StatusCode::OK);
 
     let op_r = "90000000-0000-4000-8000-000000000002";
-    let sig_r = sign_sig(
-        &ctx.key,
-        DeviceOp::ReviewReject,
-        op_r,
-        gn(1, 1),
-        prop_vid,
-        prop_digest,
-    );
     let body = serde_json::to_vec(&serde_json::json!({
         "workspace_id": WS, "skill_id": SKILL, "op_id": op_r, "device_key_id": DKID,
         "expected": { "epoch": 1, "seq": 1 },
         "proposal": hex::encode(prop_vid), "decision": "reject",
     }))
     .unwrap();
-    let (sr, _, _) = run(&ctx, post("/v1/reviews", &sig_r, body)).await;
+    let (sr, _, _) = run(&ctx, post("/v1/reviews", body)).await;
     assert_eq!(sr, StatusCode::OK);
 
     // One pass — the same body the spawned scheduler runs each tick (and once at startup).
@@ -271,9 +252,8 @@ async fn an_unconfigured_new_state_refuses_the_genesis_wrappers(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text(pool: PgPool) {
     let ctx = setup(pool, "bad-body").await;
-    // A valid signature header but a non-JSON body.
-    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
-    let (status, _, bytes) = run(&ctx, post("/v1/publish", &sig, b"not json".to_vec())).await;
+    // A non-JSON body — no signature header exists anymore; the credential rides the (here malformed) body.
+    let (status, _, bytes) = run(&ctx, post("/v1/publish", b"not json".to_vec())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let env = envelope(&bytes);
     assert!(!env.ok);
@@ -284,18 +264,30 @@ async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn a_missing_device_signature_header_is_a_400(pool: PgPool) {
-    let ctx = setup(pool, "no-sig").await;
+async fn a_publish_from_an_unknown_device_is_a_200_denied(pool: PgPool) {
+    // The write credential is the body's `device_key_id`, authenticated in-transaction by registry-row
+    // lookup. A publish naming a device that was never registered is a SYNTHESIZED pre-auth DENIED — a
+    // 200 carrying the DENIED receipt/error (never persisted, never a 401/403).
+    let ctx = setup(pool, "unknown-device").await;
     let (g_vid, _) = seed_genesis(&ctx, "70000000-0000-4000-8000-000000000000").await;
     let op = "70000000-0000-4000-8000-000000000001";
-    let files = vec![file("SKILL.md", b"unsigned\n")];
-    // POST with NO Topos-Device-Signature header.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/publish")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(candidate_body(op, gn(1, 1), &[g_vid], &files)))
-        .unwrap();
-    let (status, _, _) = run(&ctx, req).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let files = vec![file("SKILL.md", b"from a stranger\n")];
+    // Build the shared candidate body, then repoint its `device_key_id` at a device that was never
+    // registered (the shared builder hard-codes the seeded DKID).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&candidate_body(op, gn(1, 1), &[g_vid], &files)).unwrap();
+    body["device_key_id"] = serde_json::json!("dk_unregistered");
+    let (status, _, bytes) = run(
+        &ctx,
+        post("/v1/publish", serde_json::to_vec(&body).unwrap()),
+    )
+    .await;
+    // A protocol outcome is always a 200; an unknown device is DENIED.
+    assert_eq!(status, StatusCode::OK);
+    let env = envelope(&bytes);
+    assert!(!env.ok, "an unknown device must be denied: {env:?}");
+    assert_eq!(
+        env.error.expect("DENIED carries a WireError").outcome,
+        TerminalOutcome::Denied
+    );
 }

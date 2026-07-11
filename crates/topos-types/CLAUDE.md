@@ -1,8 +1,8 @@
 # `topos-types` — the boundary DTOs (wire + persisted)
 
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
-([`results`]), the frozen terminal-outcome enum, the closed `SignatureAlg`, the signed-`current`-record
-envelope, the error taxonomy, the HTTP wire request/response DTOs ([`requests`]: the write bodies + the
+([`results`]), the frozen terminal-outcome enum, the unsigned `WireCurrentRecord` pointer body,
+the error taxonomy, the HTTP wire request/response DTOs ([`requests`]: the write bodies + the
 version metadata + the **enrollment** device-flow/passcode/redeem/admin-claim DTOs — now intent-aware for
 the workspace-standup flow, all additive: `DeviceAuthorizeRequest` made `invite_token` optional and gained
 the closed `SessionIntent` (`enroll`/`standup`); `DeviceAuthorizeResponse` gained the optional
@@ -10,7 +10,7 @@ the closed `SessionIntent` (`enroll`/`standup`); `DeviceAuthorizeResponse` gaine
 `workspace {workspace_id, display_name}`; `RedeemResponse` the optional seated `principal`;
 `VerificationContextResponse` the optional `intent` — + the **governance**
 invite/roster/revoke bodies), the unauthenticated invite-**bootstrap** payload ([`bootstrap`]: the
-pre-enrollment TOFU read — workspace + the plane signing root to pin; no bytes, no role), and the on-disk
+pre-enrollment read — workspace + the plane API base to dial; no trust root, no bytes, no role), and the on-disk
 client documents ([`persisted`]: sync / lock / map / op / conflict — the last records an unresolved author
 merge: the publish-block fact + the recovery journal). These are **deserialization shapes** — the app libs
 parse them into `topos-core`'s validated domain types at the HTTP/CLI boundary (parse-don't-validate, so the
@@ -33,7 +33,7 @@ disclosure) blocks.
 
 - `version_id` — the commit SHA-256; the user-facing `<skill>@<version_id>`.
 - `bundle_digest` — the byte-exact consent hash over the bundle's files.
-- The signing/approval preimage binds `skill_id` + `version_id` + `bundle_digest`. These are **distinct
+- The op/receipt identity carries `skill_id` + `version_id` + `bundle_digest`. These are **distinct
   values** — never call both "digest."
 
 ## No logic here

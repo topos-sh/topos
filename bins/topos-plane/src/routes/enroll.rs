@@ -1,8 +1,8 @@
 //! The enrollment routes — the device-authorization flow, the passcode second factor, the central grant
-//! redeem, and the self-host admin-claim. None of these is device-op-signed EXCEPT redeem, which carries the
-//! enrollment **possession** signature in the `Topos-Device-Signature` header. Every handler is THIN: parse
-//! the wire DTO/headers → call ONE authority op → serialize. A confirmed identity is NEVER `Principal::parse`d
-//! here — it is resolved from a server-trusted row inside the authority.
+//! redeem, and the self-host admin-claim. The GRANT is the bearer credential; the redeem presents it in the
+//! body (with the device public key it must match) — no signature. Every handler is THIN: parse the wire DTO
+//! → call ONE authority op → serialize. A confirmed identity is NEVER `Principal::parse`d here — it is
+//! resolved from a server-trusted row inside the authority.
 //!
 //! Read-shaped steps (authorize / token / verify / passcode / confirm) return a plain typed DTO and reserve
 //! 404 for the single indistinguishable not-found (a dead invite, an unknown code, a non-live session). The
@@ -11,7 +11,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceTokenRequest, PasscodeAck, PasscodeAckStatus,
@@ -29,7 +29,7 @@ use crate::wire::{self, ApiJson, map};
     tag = "enrollment",
     request_body = DeviceAuthorizeRequest,
     responses(
-        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block to TOFU-pin).", body = topos_types::requests::DeviceAuthorizeResponse),
+        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block: API base + posture + method, no trust root).", body = topos_types::requests::DeviceAuthorizeResponse),
         (status = 400, description = "Malformed body, device public key, or intent/invite combination.", body = topos_types::JsonEnvelope),
         (status = 404, description = "No such invite (or it is revoked/expired), or a standup start on a plane that does not offer it.", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited.", body = topos_types::JsonEnvelope),
@@ -61,7 +61,7 @@ pub(crate) async fn start_device_auth(
             Ok(Json(map::device_auth_to_wire(start, now, None)).into_response())
         }
         // STANDUP: no invite — the session is born workspace-less; the response carries the plane block
-        // (base URL + posture + the signing key to TOFU-pin), which an enroll start leaves to `/i/`.
+        // (base URL + posture + enrollment method), which an enroll start leaves to `/i/`.
         (Some(SessionIntent::Standup) | None, None) => {
             let start = state
                 .authority()
@@ -211,11 +211,10 @@ pub(crate) async fn complete_passcode(
     request_body = RedeemRequest,
     params(
         ("ws" = String, Path, description = "Workspace id (the grant is authoritative for the workspace)."),
-        ("Topos-Device-Signature" = String, Header, description = "base64url(64-byte Ed25519 enrollment-possession signature), 86 chars"),
     ),
     responses(
         (status = 200, description = "The redeem receipt — OK carries the registered device + minted read creds; DENIED the flat error.", body = topos_types::JsonEnvelope),
-        (status = 400, description = "Malformed body, key, or signature header.", body = topos_types::JsonEnvelope),
+        (status = 400, description = "Malformed body or key.", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited.", body = topos_types::JsonEnvelope),
         (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),
     ),
@@ -224,16 +223,15 @@ pub(crate) async fn redeem(
     State(state): State<PlaneState>,
     // The path `{ws}` is REST sugar; the grant is the authoritative source of the workspace.
     Path(_ws): Path<String>,
-    headers: HeaderMap,
     ApiJson(req): ApiJson<RedeemRequest>,
 ) -> Result<Response, PlaneHttpError> {
-    // The enrollment possession proof rides the header (NOT the body), reusing the device-signature parser.
-    let enroll_sig = wire::device_signature(&headers)?;
+    // The grant is the bearer credential; the server checks the body's device public key matches the key the
+    // grant is bound to (binding consistency, not a possession proof).
     let device_public_key = wire::base64url_key(&req.device_public_key)?;
     let (created_at, now) = wire::now_utc();
     let outcome = state
         .authority()
-        .redeem_enrollment(&req.grant, &enroll_sig, device_public_key, now, &created_at)
+        .redeem_enrollment(&req.grant, device_public_key, now, &created_at)
         .await?;
     Ok((
         StatusCode::OK,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use gix::objs::tree::EntryKind;
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
-use topos_core::sign::{self, Commit};
+use topos_core::identity::{self, Commit};
 
 use crate::error::GitstoreError;
 use crate::{VERSION_REF_PREFIX, error::VerifyError};
@@ -176,7 +176,7 @@ impl Store {
             author,
             message,
         };
-        let recomputed = sign::commit_id(&frame).map_err(|_| GitstoreError::VersionMismatch)?;
+        let recomputed = identity::commit_id(&frame).map_err(|_| GitstoreError::VersionMismatch)?;
         if recomputed != version_id {
             return Err(GitstoreError::VersionMismatch);
         }

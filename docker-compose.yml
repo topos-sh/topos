@@ -63,7 +63,7 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      # The git-object + large-object stores and the 0600 signing key / enrollment secret (generated on
+      # The git-object + large-object stores and the 0600 enrollment secret (generated on
       # first boot). Snapshot these BEFORE the database (see the README's backup order).
       - plane-data:/data
 

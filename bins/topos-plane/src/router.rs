@@ -1,5 +1,5 @@
 //! [`router`] — the ONE composed surface. `router(state)` is the entire HTTP plane a downstream cloud mounts
-//! verbatim (its own middleware sits in front; there is no extension hook here). The device-signed writes,
+//! verbatim (its own middleware sits in front; there is no extension hook here). The device-credential writes,
 //! the token-scoped reads, the unauthenticated invite bootstrap, the enrollment flow, and the governance
 //! mutations (axum 0.8 `{param}` syntax), all under the rate-limit middleware, with the body-size belts.
 
@@ -25,7 +25,7 @@ const ENROLL_BODY_LIMIT: usize = 64 * 1024;
 
 /// Build the composed plane router. ONE argument — the limiter lives inside [`PlaneState`].
 pub fn router(state: PlaneState) -> Router {
-    // The device-signed write routes carry a (large) JSON candidate body; the read routes carry none.
+    // The device-credential write routes carry a (large) JSON candidate body; the read routes carry none.
     let writes = Router::new()
         .route("/v1/publish", post(routes::publish::publish))
         .route("/v1/proposals", post(routes::proposals::propose))
@@ -38,7 +38,7 @@ pub fn router(state: PlaneState) -> Router {
             "/v1/current/{read_token}",
             get(routes::current::get_current),
         )
-        // The device-signed workspace CATALOG read (metadata only; catalog visibility == membership).
+        // The device-credential workspace CATALOG read (metadata only; catalog visibility == membership).
         .route(
             "/v1/workspaces/{ws}/skills",
             get(routes::skills_index::list_skills),
@@ -56,7 +56,7 @@ pub fn router(state: PlaneState) -> Router {
             get(routes::proposals::list_proposals),
         );
 
-    // The unauthenticated invite bootstrap (TOFU) — a GET, no body, no body-size belt.
+    // The unauthenticated invite bootstrap — a GET, no body, no body-size belt.
     let public = Router::new().route("/i/{token}", get(routes::bootstrap::read_invite_bootstrap));
 
     // Enrollment + governance: small JSON bodies behind the 64 KiB belt. The `/v1/workspaces/{ws}/devices`
@@ -108,7 +108,7 @@ async fn trace_requests(req: Request, next: Next) -> Response {
 /// routes fold in cleanly under `#[cfg(feature = "enroll-oidc")]`.
 fn enroll_and_governance_routes() -> Router<PlaneState> {
     let router = Router::new()
-        // Enrollment (grant/passcode-auth; NOT device-op-signed except redeem's possession header).
+        // Enrollment (grant/passcode-auth; the redeem presents the grant + device key, no signature).
         .route(
             "/v1/device/authorize",
             post(routes::enroll::start_device_auth),
@@ -129,7 +129,7 @@ fn enroll_and_governance_routes() -> Router<PlaneState> {
             "/v1/workspaces/{ws}/devices",
             post(routes::enroll::redeem).delete(routes::governance::revoke_device),
         )
-        // Governance (device-op-signed via the governance frame; owner/admin).
+        // Governance (device-credential authenticated; owner/admin).
         .route("/v1/invites", post(routes::governance::create_invite))
         // `/v1/workspaces/{ws}/roster/{email}`: PUT sets a role, DELETE removes the principal.
         .route(

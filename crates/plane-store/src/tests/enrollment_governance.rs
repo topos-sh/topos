@@ -1,15 +1,10 @@
 //! Split from the former monolithic `tests.rs` (behavior-preserving).
 use super::*;
 
-use ed25519_dalek::SigningKey;
-use topos_core::sign::{
-    EnrollFields, GovernanceOpFields, GovernanceOpKind, enroll_preimage, governance_op_preimage,
-};
-
 use crate::enroll::device_key_id_for;
 use crate::{
     ConfirmOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, DeviceAuthPoll, GovernanceOp,
-    GovernanceOutcome, GovernanceSignedOp, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
+    GovernanceOutcome, GovernanceRequest, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
 };
 
 const NOW: i64 = 1_000;
@@ -19,9 +14,10 @@ pub(super) fn op_id(n: u64) -> String {
     format!("00000000-0000-4000-8000-{n:012x}")
 }
 
-/// The raw Ed25519 public key for a seed.
+/// A device public key from a seed. Nothing verifies it — the credential presented at enroll/redeem and
+/// governance is the `device_key_id` derived from this public key — so the seed IS the key.
 pub(super) fn device_pub(seed: &[u8; 32]) -> [u8; 32] {
-    SigningKey::from_bytes(seed).verifying_key().to_bytes()
+    *seed
 }
 
 /// Pull the opaque token out of a `/i/<token>` link.
@@ -29,89 +25,21 @@ fn token_of(link: &str) -> String {
     link.rsplit('/').next().expect("a link tail").to_owned()
 }
 
-/// Sign a governance op the way an owner's device would (rebuild the kernel frame, sign the preimage).
+/// Build a governance request as an owner's device presents it — the acting `device_key_id` + the typed
+/// op. The transaction authenticates the credential by registry-row lookup; nothing signs. (`_owner_seed`,
+/// `_ws`, `_op_id` are vestigial now that nothing signs — kept so the call sites stay stable; `op_id`
+/// rides the outer `create_invite`/`roster_*`/`revoke_device` call, never the request body.)
 pub(super) fn sign_governance(
-    owner_seed: &[u8; 32],
-    ws: &str,
-    op_id: &str,
+    _owner_seed: &[u8; 32],
+    _ws: &str,
+    _op_id: &str,
     device_key_id: &str,
     op: GovernanceOp,
-) -> GovernanceSignedOp {
-    let op_id_bytes = uuid::Uuid::parse_str(op_id)
-        .expect("canonical uuid")
-        .into_bytes();
-    let signature = {
-        let emails: Vec<&str>;
-        let skills: Vec<&str>;
-        let kind = match &op {
-            GovernanceOp::Invite {
-                role,
-                expires_at,
-                emails: e,
-                skills: s,
-            } => {
-                emails = e.iter().map(Principal::as_str).collect();
-                skills = s.iter().map(|(id, _)| id.as_str()).collect();
-                GovernanceOpKind::Invite {
-                    role: role.signing_byte(),
-                    expires_at: u64::try_from(expires_at.unwrap_or(0)).unwrap_or(0),
-                    emails: &emails,
-                    skills: &skills,
-                }
-            }
-            GovernanceOp::RosterSet { role, target } => GovernanceOpKind::RosterSet {
-                role: role.signing_byte(),
-                target: target.as_str(),
-            },
-            GovernanceOp::RosterRemove { target } => GovernanceOpKind::RosterRemove {
-                target: target.as_str(),
-            },
-            GovernanceOp::DeviceRevoke {
-                target_device_key_id,
-            } => GovernanceOpKind::DeviceRevoke {
-                target_device_key_id: target_device_key_id.as_str(),
-            },
-        };
-        let fields = GovernanceOpFields {
-            workspace_id: ws,
-            op_id: op_id_bytes,
-            device_key_id,
-            op: kind,
-        };
-        let preimage = governance_op_preimage(&fields).expect("preimage");
-        SigningKey::from_bytes(owner_seed)
-            .sign(&preimage)
-            .to_bytes()
-    };
-    GovernanceSignedOp {
+) -> GovernanceRequest {
+    GovernanceRequest {
         device_key_id: device_key_id.to_owned(),
         op,
-        signature,
     }
-}
-
-/// Sign an enrollment possession proof the way the enrolling device would.
-pub(super) fn sign_enroll(
-    device_seed: &[u8; 32],
-    ws: &str,
-    grant_hash: [u8; 32],
-    device_auth_id: &str,
-    device_key_id: &str,
-    device_public_key: [u8; 32],
-    offered: &[&str],
-) -> [u8; 64] {
-    let fields = EnrollFields {
-        workspace_id: ws,
-        grant_hash,
-        device_auth_id,
-        device_key_id,
-        device_public_key,
-        offered_skill_ids: offered,
-    };
-    let preimage = enroll_preimage(&fields).expect("preimage");
-    SigningKey::from_bytes(device_seed)
-        .sign(&preimage)
-        .to_bytes()
 }
 
 /// Seat an owner: a workspace row, an `owner`/`confirmed` member, and the owner's registered device.
@@ -207,25 +135,16 @@ async fn cloud_flow_to_grant(
     }
 }
 
-/// Redeem a grant with the (honest) enrolling device.
+/// Redeem a grant with the (honest) enrolling device. The grant IS the bearer credential; the server
+/// checks the redeem body's `device_public_key` matches the grant's bound key (a binding check, not a
+/// possession proof). `_device_seed` is vestigial now that nothing signs — kept so call sites stay stable.
 pub(super) async fn redeem(
     a: &Authority,
     grant: &GrantIssued,
-    device_seed: &[u8; 32],
+    _device_seed: &[u8; 32],
     dpub: [u8; 32],
 ) -> RedeemOutcome {
-    let grant_hash = digest::sha256(grant.grant_token.as_bytes());
-    let offered: Vec<&str> = grant.offered_skills.iter().map(SkillId::as_str).collect();
-    let sig = sign_enroll(
-        device_seed,
-        grant.workspace_id.as_str(),
-        grant_hash,
-        &grant.device_auth_id,
-        &grant.device_key_id,
-        dpub,
-        &offered,
-    );
-    a.redeem_enrollment(&grant.grant_token, &sig, dpub, NOW, "t0")
+    a.redeem_enrollment(&grant.grant_token, dpub, NOW, "t0")
         .await
         .unwrap()
 }
@@ -395,23 +314,13 @@ async fn a_leaked_grant_redeemed_by_a_different_device_is_denied(pool: PgPool) {
     let device_seed = [11u8; 32];
     let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
 
-    // An attacker who stole the grant token but holds a DIFFERENT key cannot redeem it.
+    // An attacker who stole the grant token but presents a DIFFERENT device key cannot redeem it: the
+    // server checks the redeem body's device_public_key against the grant's bound key (the binding check
+    // that replaced the possession proof).
     let attacker_seed = [99u8; 32];
     let attacker_pub = device_pub(&attacker_seed);
-    let attacker_dk = device_key_id_for(&attacker_pub);
-    let grant_hash = digest::sha256(grant.grant_token.as_bytes());
-    let offered: Vec<&str> = grant.offered_skills.iter().map(SkillId::as_str).collect();
-    let sig = sign_enroll(
-        &attacker_seed,
-        grant.workspace_id.as_str(),
-        grant_hash,
-        &grant.device_auth_id,
-        &attacker_dk,
-        attacker_pub,
-        &offered,
-    );
     let out = a
-        .redeem_enrollment(&grant.grant_token, &sig, attacker_pub, NOW, "t0")
+        .redeem_enrollment(&grant.grant_token, attacker_pub, NOW, "t0")
         .await
         .unwrap();
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
@@ -491,19 +400,8 @@ async fn redeem_fails_closed_on_a_corrupt_stored_deployment_mode(pool: PgPool) {
         .await
         .unwrap();
 
-    let grant_hash = digest::sha256(grant.grant_token.as_bytes());
-    let offered: Vec<&str> = grant.offered_skills.iter().map(SkillId::as_str).collect();
-    let sig = sign_enroll(
-        &device_seed,
-        grant.workspace_id.as_str(),
-        grant_hash,
-        &grant.device_auth_id,
-        &grant.device_key_id,
-        dpub,
-        &offered,
-    );
     let err = a
-        .redeem_enrollment(&grant.grant_token, &sig, dpub, NOW, "t0")
+        .redeem_enrollment(&grant.grant_token, dpub, NOW, "t0")
         .await
         .expect_err("a garbage stored mode must fail the redeem closed");
     assert!(
@@ -595,8 +493,8 @@ async fn a_mixed_case_invite_seats_the_canonical_row_and_a_lowercase_confirm_red
     pool: PgPool,
 ) {
     // The reverse direction: the OWNER types the mixed case. `make_invite` parses the email at the
-    // op edge (`prin` folds) and signs over the FOLDED set — exactly what the fixed CLI does — so
-    // the signature verifies, the seat is born canonical, and a lowercase-proven identity lands in it.
+    // op edge (`prin` folds) so the request carries the FOLDED set — exactly what the fixed CLI sends —
+    // the seat is born canonical, and a lowercase-proven identity lands in it.
     let fx = Fixture::new(pool.clone(), "enr-fold-invite").await;
     let a = &fx.authority;
     let w = ws("w_acme");
@@ -743,7 +641,7 @@ async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPoo
         "the read token stays 404 — the denied re-redeem re-minted nothing"
     );
 
-    // The owner self-revokes its OWN device → a subsequent device-signed governance op is refused.
+    // The owner self-revokes its OWN device → a subsequent governance op from that device is refused.
     let self_revoke = sign_governance(
         &owner_seed,
         w.as_str(),
@@ -858,7 +756,7 @@ async fn concurrent_last_two_owner_removals_keep_one_owner(pool: PgPool) {
         .await
         .unwrap();
 
-    // Each owner signs a removal of the OTHER — the write-skew.
+    // Each owner requests a removal of the OTHER — the write-skew.
     let remove_owner2 = sign_governance(
         &owner1_seed,
         w.as_str(),
@@ -947,7 +845,7 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
 
-    // An attacker with NO registered device signs a governance op with a well-formed op_id.
+    // An attacker with NO registered device presents a governance op with a well-formed op_id.
     let attacker_seed = [99u8; 32];
     let forged = sign_governance(
         &attacker_seed,
@@ -966,7 +864,7 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
             a.create_invite(&w, &op_id(7), forged, "t0").await.unwrap(),
             CreateInviteOutcome::Denied(_)
         ),
-        "an unknown signing device is denied (pre-authentication)"
+        "an unknown device is denied (pre-authentication)"
     );
 
     // The SAME op_id, now from the LEGIT owner, SUCCEEDS — the pre-authentication failure wrote no durable
@@ -1027,91 +925,66 @@ async fn create_invite_is_op_id_idempotent_with_an_identical_link(pool: PgPool) 
     );
 }
 
+/// Governance op-id key-reuse: the audit/idempotency slot belongs to the FIRST request under an op id.
+/// A same-op_id retry whose request payload DIVERGES (a different invitee) is a denied key-reuse, never a
+/// second apply. The request identity is now a server-side canonical encoding of the request fields (the
+/// signed frame is gone) — so this is behaviorally identical to the pre-de-crypto identity from the
+/// test's view. (A same-op_id retry with the IDENTICAL request replays; that is pinned by
+/// `create_invite_is_op_id_idempotent_with_an_identical_link`.)
 #[sqlx::test]
-async fn an_invite_signed_over_raw_mixed_case_emails_verifies_and_seats_canonical_rows(
-    pool: PgPool,
-) {
-    // The kernel folds email-valued inputs IN-FRAME: `governance_op_preimage` passes every Invite
-    // email through `canonical_principal` BEFORE the set-build, so the preimage below — built over
-    // the RAW `Alice@Acme.COM` bytes, with no explicit fold anywhere in this test — is
-    // byte-identical to the one the plane rebuilds from its parsed (folded) wire form. The
-    // signature verifies, the op is Created, and the seat is born canonical: the structural
-    // in-frame fold, proven end-to-end.
-    //
-    // (Version-skew residual, as prose only: a binary built from an OLD kernel — one WITHOUT the
-    // in-frame fold — that signed mixed-case input bound genuinely different bytes, and a new
-    // plane still denies that signature at verification. No such kernel exists in this tree, so
-    // it is compatibility narrative here, not a testable property.)
-    let fx = Fixture::new(pool.clone(), "enr-fold-raw").await;
+async fn create_invite_op_id_reuse_with_a_divergent_request_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "enr-opid-reuse").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    let op = op_id(6);
 
-    let op = op_id(2);
-    let op_id_bytes = uuid::Uuid::parse_str(&op)
-        .expect("canonical uuid")
-        .into_bytes();
-    let raw_emails = ["Alice@Acme.COM"]; // the raw argv casing, bound into the frame verbatim
-    let raw_skills = ["s_deploy"];
-    let preimage = governance_op_preimage(&GovernanceOpFields {
-        workspace_id: w.as_str(),
-        op_id: op_id_bytes,
-        device_key_id: &owner_dk,
-        op: GovernanceOpKind::Invite {
-            role: Role::Member.signing_byte(),
-            expires_at: 0,
-            emails: &raw_emails,
-            skills: &raw_skills,
+    // First: op id X invites alice → Created.
+    let first = sign_governance(
+        &owner_seed,
+        w.as_str(),
+        &op,
+        &owner_dk,
+        GovernanceOp::Invite {
+            role: Role::Member,
+            expires_at: None,
+            emails: vec![prin("alice@acme.com")],
+            skills: vec![(skill("s_deploy"), None)],
         },
-    })
-    .expect("preimage");
-    let signature = SigningKey::from_bytes(&owner_seed)
-        .sign(&preimage)
-        .to_bytes();
-    let mk_op = || GovernanceOp::Invite {
-        role: Role::Member,
-        expires_at: None,
-        // The wire edge parses (= folds) the email; the SIGNATURE above bound the raw casing.
-        emails: vec![prin("Alice@Acme.COM")],
-        skills: vec![(skill("s_deploy"), None)],
-    };
-    let raw_signed = GovernanceSignedOp {
-        device_key_id: owner_dk.clone(),
-        op: mk_op(),
-        signature,
-    };
-    let out = a.create_invite(&w, &op, raw_signed, "t0").await.unwrap();
-    let CreateInviteOutcome::Created(created) = out else {
-        panic!("a raw-mixed-case-signed invite must verify against the in-frame fold: {out:?}");
-    };
+    );
+    assert!(matches!(
+        a.create_invite(&w, &op, first, "t0").await.unwrap(),
+        CreateInviteOutcome::Created(_)
+    ));
 
-    // The seated member row is the FOLDED principal — one canonical identity, born `invited`.
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT principal, status FROM workspace_member WHERE workspace_id = $1 AND role = 'member'",
+    // The SAME op id X with a DIVERGENT request (a different invitee) is a denied key-reuse — the slot
+    // belongs to the first request, and nothing is re-applied.
+    let divergent = sign_governance(
+        &owner_seed,
+        w.as_str(),
+        &op,
+        &owner_dk,
+        GovernanceOp::Invite {
+            role: Role::Member,
+            expires_at: None,
+            emails: vec![prin("carol@acme.com")],
+            skills: vec![(skill("s_deploy"), None)],
+        },
+    );
+    assert!(matches!(
+        a.create_invite(&w, &op, divergent, "t0").await.unwrap(),
+        CreateInviteOutcome::Denied(_)
+    ));
+
+    // carol was never seated — the denied key-reuse applied nothing.
+    let carol = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workspace_member WHERE workspace_id = $1 AND principal = 'carol@acme.com'",
     )
     .bind(w.as_str())
-    .fetch_all(&pool)
+    .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        rows,
-        vec![("alice@acme.com".to_owned(), "invited".to_owned())]
-    );
-
-    // Raw-cased and folded signing are now the SAME bytes end-to-end: `sign_governance` (which
-    // signs over the parsed, folded Principals) emits the IDENTICAL deterministic signature, and
-    // a same-op_id retry with it replays the identical link — never a divergent-payload denial.
-    let folded_signed = sign_governance(&owner_seed, w.as_str(), &op, &owner_dk, mk_op());
-    assert_eq!(
-        folded_signed.signature, signature,
-        "preimage(raw) == preimage(folded) ⇒ the deterministic Ed25519 signatures are identical"
-    );
-    let CreateInviteOutcome::Created(replayed) =
-        a.create_invite(&w, &op, folded_signed, "t0").await.unwrap()
-    else {
-        panic!("the folded-signing retry must replay");
-    };
-    assert_eq!(created.link, replayed.link);
+    assert_eq!(carol, 0, "the denied key-reuse seated nobody");
 }
 
 #[sqlx::test]
@@ -1258,19 +1131,8 @@ async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
     // Presenting a DIFFERENT key (whose server-derived id ≠ the grant's binding) is denied.
     let other_seed = [55u8; 32];
     let other_pub = device_pub(&other_seed);
-    let grant_hash = digest::sha256(grant.grant_token.as_bytes());
-    let offered: Vec<&str> = grant.offered_skills.iter().map(SkillId::as_str).collect();
-    let sig = sign_enroll(
-        &other_seed,
-        grant.workspace_id.as_str(),
-        grant_hash,
-        &grant.device_auth_id,
-        &device_key_id_for(&other_pub),
-        other_pub,
-        &offered,
-    );
     let out = a
-        .redeem_enrollment(&grant.grant_token, &sig, other_pub, NOW, "t0")
+        .redeem_enrollment(&grant.grant_token, other_pub, NOW, "t0")
         .await
         .unwrap();
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");

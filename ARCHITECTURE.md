@@ -16,27 +16,26 @@ The repository is two programs in one Apache-2.0 Cargo workspace:
 - **`topos-plane`** — the self-hostable sharing server (a library plus a thin binary).
 
 They share one trust kernel, `topos-core`: the single, auditable implementation of the byte-exact digest,
-consent, signing, and sync algorithm. Nothing proprietary lives here.
+the consent rule, and the sync algorithm. Nothing proprietary lives here.
 
 ## The two motions
 
-1. **Distribute.** An author `publish`es a bundle; a teammate `follow`s it and every subsequent `pull`
-   lands the team's `current` version byte-exact, signature-verified. A session-start hook runs the pull, so
-   updates arrive at the start of each agent session — never over the user's local edits.
-2. **Contribute.** Anyone can `publish --propose` a candidate version; a reviewer `review --approve`s it to
-   make it `current` (a PR-like flow). `revert --to` rolls the whole team forward to older bytes without
-   deleting anything.
+**Distribute** — an author `publish`es a bundle, a teammate `follow`s it, and every `pull` lands the team's
+`current` byte-exact (digest re-verified in), driven by a session-start hook so updates arrive per session,
+never over local edits. **Contribute** — anyone `publish --propose`s a candidate, a reviewer
+`review --approve`s it to `current` (PR-like), and `revert --to` rolls the team forward to older bytes.
 
 ## The crate graph (acyclic)
 
-Every split is paid for by a real boundary — a testable-authority boundary, a platform-dependency boundary,
-or the storage-privacy boundary — never a crate-per-noun.
+Every split is paid for by a real boundary — a testable-authority, platform-dependency, or storage-privacy
+boundary — never a crate-per-noun.
 
 ```
-topos-types   the shared wire DTOs (the --json envelope, receipts, the signed-pointer envelope). No logic.
-topos-core    the PURE trust kernel — no I/O, no traits, no clock/RNG. Owns the byte-exact digest, the
-   ▲   ▲      consent truth-table, the sync-state transition, the diff3 policy, and the Ed25519
-   │   │      sign-preimage + verify. Every trust invariant is a unit/property test here.
+topos-types   the shared wire DTOs (the --json envelope, receipts, the current-record). No logic.
+topos-core    the PURE trust kernel — no I/O, no traits, no clock/RNG, no crypto. Owns the byte-exact
+   ▲   ▲      digest, the consent truth-table, the sync-state transition, the diff3 merge policy, and the
+   │   │      content-addressed identity derivations (commit id, device key id, canonical principal).
+   │   │      Every trust invariant is a unit/property test here.
    │   ├── topos-gitstore ──► topos-core     (git object mechanics; diff/diff3 execution; large objects)
    │   └── topos-harness  ──► topos-core, topos-types   (the client-side harness port + its impls)
    │
@@ -46,94 +45,123 @@ topos         ──► topos-core, topos-types, topos-gitstore, topos-harness  
               └── NO edge to plane-store / sqlx   ◄── enforced architectural layering
 ```
 
-Heavy dependencies are placed deliberately and the placement is enforced by `cargo xtask check-arch`:
-`sqlx` is referenced by `plane-store` only (and kept out of the client build); `axum` powers the plane's
-HTTP server, `ureq` the client's blocking transport. The optional OIDC enrollment connector is feature-
-gated **default-off** — a production-tree check asserts a default build resolves none of it.
+Heavy dependencies are placed deliberately and enforced by `cargo xtask check-arch`: `sqlx` lives in
+`plane-store` only (kept out of the client build), `axum` powers the plane's HTTP server, `ureq` the client's
+transport. The optional OIDC enrollment connector is feature-gated **default-off** — a production-tree check
+asserts a default build resolves none of it.
 
 ## Trust boundaries — the load-bearing invariants
 
-- **One trust implementation.** Every trust decision — digest, consent, the sync transition, diff3, the
-  signing preimage — is written once, in `topos-core`, the only crate with no I/O. The plane, the CLI, the
-  fixtures, and the tests all link it, so no second implementation can drift.
+- **One trust implementation.** Every content and consent decision is written once, in `topos-core`, the only
+  crate with no I/O and no crypto; the plane, the CLI, the fixtures, and the tests all link it, so no second
+  implementation can drift.
 - **The client is never an authority.** `topos` takes no dependency on `plane-store`, `sqlx`, or a SQL
   driver. It is a thin sync tool; the dependency graph enforces this at build time.
 - **The plane is a library, composed — not a framework with holes.** `topos-plane`'s lib exposes clean
-  authority operations plus a `router(state)` builder, and has no extension or callback hook. A separate
-  product can import and compose this library around the authority, but the authority is never reimplemented
-  and never bypassed.
-- **`plane-store` keeps raw SQL and raw git reads private (`pub(crate)`).** Only authorized authority
-  operations are public — that privacy boundary is what forces every object read through the access check.
-- **Disclosure and integrity, not a second permission system.** The tool guarantees that nothing lands that
-  was not disclosed and pinned. How much a human sits in the loop is the harness's job; a followed behavior
-  still runs with your harness's permissions, so Topos proves provenance and consent, not that the contents
-  are safe to run.
+  authority operations plus a `router(state)` builder, with no extension or callback hook. A separate product
+  can compose this library around the authority, but the authority is never reimplemented and never bypassed.
+- **Disclosure and integrity, not a second permission system.** Nothing lands that was not disclosed and
+  pinned; how much a human sits in the loop is the harness's job. A followed behavior runs with your harness's
+  permissions, so Topos proves provenance and consent, not that the contents are safe to run.
 
 ## The consent + sync model
 
-- **Bundle digest.** A version's identity is a plain sha256 over the raw bytes of every file in the bundle —
-  no normalization. `<skill>@<hash>` pins the exact bytes. A *version* is an immutable, content-addressed
-  snapshot of the whole bundle.
-- **`current`.** The one movable pointer a team follows. `publish` moves it forward, `review --approve`
-  moves it sideways to a proposal, `revert --to` moves it forward while restoring older bytes.
-- **Signed pointers, monotonic generations.** The plane signs each `current` move with its Ed25519 key.
-  A follower pins the plane key on first follow and verifies every pointer; a pointer's generation only
-  increases, and a follower refuses any pointer at or below the highest it has seen (anti-rollback).
-- **Four-state client transition.** On pull, the client computes where it is (current, behind, diverged,
-  or conflicted) and applies the result with an **atomic directory swap** — a materialization is all-or-
-  nothing, never a half-written bundle. A diverged local draft is resolved with a three-way (diff3) merge
-  and surfaced, never silently overwritten.
-- **Concurrency at the plane.** A pointer move is a serializable `(epoch, seq)` compare-and-set: two authors
-  racing the same skill produce one winner and one honest `CONFLICT`, never a lost write.
+- **Content-addressed versions.** A version's identity is a plain sha256 over the raw bytes of every file —
+  no normalization; `<skill>@<hash>` pins the exact bytes, which the client re-hashes and matches on every
+  apply, so tampering or corruption in transit or storage is a loud integrity error. `current`, the one
+  movable pointer a team follows, is a plain record whose authority is the database row behind it.
+- **Four-state client transition.** On pull, the client computes where it is (current, behind, diverged, or
+  conflicted) and applies with an **atomic directory swap** — all-or-nothing, never a half-written bundle. A
+  diverged local draft is resolved with a three-way (diff3) merge and surfaced, never silently overwritten.
+
+## Trust, deliberately boring
+
+Topos extends the same trust a team already gives its git host and CI, and nothing more. There is **no
+signing** in the system: no signed pointers, no key pinning, no client-side signature verification, no
+anti-rollback cryptography — a follower trusts the plane it enrolled with as it trusts the git remote it
+clones from. The accepted consequence is plain: a compromised server can distribute bad content, the risk
+every team already lives with on its source host. Assurance is **visibility** — inspectable history, durable
+receipts, a one-command revert — and content addressing keeps optional signing open as a later layer.
+
+## The server authority: custody and directory
+
+`plane-store` is the only crate that touches the database or reads a raw object, and it is split into two
+halves along the row/byte line:
+
+- **Custody** owns the bytes: versions, the object store, and the one movable `current` pointer per skill. It
+  ingests candidate bundles, holds them through an upload/quarantine/GC lifecycle, and moves `current` under
+  a compare-and-set. It knows nothing about who a principal is.
+- **Directory** owns identity and policy: workspaces, the roster, enrolled devices, invitations and
+  enrollment, governance roles, and the review-required policy. It is the source of every authorization
+  decision.
+
+Custody never reads a directory table and never names the directory module — a build-time `check-arch` rule
+enforces that one-way boundary. Instead, custody declares an **access-witness** interface that the directory
+implements, and calls it *inside its own transaction*, so every authorization reflects the committed roster
+at commit time. This is what makes **revocation immediate**: a `revoke` committed before a promotion is seen
+by that promotion's in-transaction check and blocks it, in the same serializable window.
+
+**The pointer move.** A `current` move — `publish`, genesis create, `revert`, or an approved proposal — runs
+as one `SERIALIZABLE` transaction with bounded retry and no filesystem work inside it: an operation-id replay
+probe (a retried write replays its receipt byte-for-byte, never double-applying), the witness access check, a
+compare-and-set on the whole `(epoch, seq)` generation (one winner, one honest `CONFLICT`, never a lost
+write), an availability and first-parent lineage check, then a commit that writes provenance before the
+pointer advances and records a durable, attributed receipt for **every** outcome. Postgres does not serialize
+writers on its own, so each read-then-write invariant — the CAS, the last-owner guard, the object-presence
+fence — is re-proven by serializable isolation plus retry, not by a lock the caller must remember to take.
+
+**The read model.** Every read is **skill-scoped and capability-gated**. A per-skill read token (or, for a
+member browsing the catalog, a session or device identity) is mapped to a `(workspace, skill, principal)`
+built from the trusted row — never a caller-asserted id — and authorized on *rostered ∧ reachable*. **No
+object is served by bare hash**, and every not-entitled or not-found case returns the same indistinguishable
+**404, not a 403**, so the read surface is no oracle for which skills exist. A store failure on an
+already-authorized object is a separate integrity fault, never a 404.
+
+**The object lifecycle fence.** Bytes move through a database-authoritative lifecycle: ingest into a
+quarantine, lease-then-install on the way to a version, and a mark-then-claim garbage collector whose keep-set
+is *exactly* the read-authorization surface — a readable object is never reclaimed, and a reclaimed object
+reads 404, never a false integrity fault. The pointer move, the lease, and GC coordinate through guarded
+compare-and-swaps, so a crash leaves recoverable state, not a half-written bundle.
 
 ## Storage
 
-The plane keeps three kinds of state:
+The plane keeps three kinds of state.
 
-- **A Postgres metadata database** — the authority: rosters, pointers, proposals, receipts, enrollment. All
-  access goes through `plane-store`; raw SQL is private to that crate.
-- **A git object store** — content-addressed bundle bytes, with a verify-on-read check (bytes are
-  re-hashed to their id on every read) and a quarantine/lease/GC lifecycle fence.
-- **A size-routed large-object store** — larger blobs offloaded to the local filesystem beside the git
-  store. (An S3-compatible remote backend is planned and additive.)
-
-Compilation is offline: the compile-time-checked SQL queries read committed `.sqlx` metadata, so
-`cargo build`, `clippy`, and `doc` need no database — only running the test suite does.
+- **A Postgres metadata database** — the directory plus the pointer/lifecycle bookkeeping: workspaces,
+  rosters, devices, enrollment, pointers, proposals, receipts. Access goes through `plane-store`; raw SQL and
+  raw git reads are private to that crate, so no code outside it can run an unbound query or read a bare
+  object.
+- **A git object store** — content-addressed bundle bytes, verified on read (re-hashed to their id) and
+  managed by the lifecycle fence above.
+- **A size-routed large-object store** — larger blobs offloaded to the local filesystem beside the git store.
+  (An S3-compatible remote backend is planned and additive.)
 
 ## Contracts (generated, never hand-written)
 
 The cross-language contract lives in `contracts/`: a JSON-Schema per wire type, per verb payload, and per
 persisted document; golden `--json` fixtures validated both positively and negatively; and the plane's
-OpenAPI. All of it is **generated** from the Rust types by `xtask` and **drift-gated** in CI — change the
-types, regenerate, review the diff. This is what lets other languages depend on the wire without depending
-on the Rust.
+OpenAPI. All of it is **generated** from the Rust types by `xtask` and **drift-gated** in CI — so other
+languages can depend on the wire without depending on the Rust.
 
 ## Harness adapters
 
 A harness is *which directories to read and write* plus *when a currency check fires* — no dialect
 translation in the OSS core (bytes sync exactly within a harness family). The `HarnessAdapter` port in
 `topos-harness` is the one client-side seam; the **Claude Code** adapter is the reference implementation
-(discovery, adopt-in-place, an idempotent session-start currency hook, clean uninstall). Adding a harness
-is a directory map plus a currency trigger, not a refactor.
+(discovery, adopt-in-place, an idempotent session-start currency hook, clean uninstall). Adding a harness is
+a directory map plus a currency trigger, not a refactor.
 
 ## The gates
 
-`cargo xtask ci` runs the full non-database gate sequence in CI's order: `fmt --check`, `clippy -D
-warnings`, `doc -D warnings`, the schema / fixture / OpenAPI drift gates, and `check-arch` (which enforces
-the layering, the leaf-crate leanness, the OIDC-default-off claim, and the toolchain/Docker pin pair). The
-Postgres-backed test suite, `cargo-deny`, and a compose smoke run round out CI. A tagged release reuses the
-exact same gate before it builds anything.
+`cargo xtask ci` runs the full non-database gate in CI's order: `fmt --check`, `clippy -D warnings`, `doc -D
+warnings`, the schema / fixture / OpenAPI drift gates, and `check-arch` (which enforces the layering, the
+leaf-crate leanness, the custody↛directory seam, the OIDC-default-off claim, and the toolchain/Docker pin
+pair). The Postgres-backed test suite, `cargo-deny`, and a compose smoke round out CI; a tagged release
+reuses the exact same gate first.
 
 ## Directory map
 
-| Path | What |
-|---|---|
-| `crates/` | the five library crates — the trust kernel, storage, and the ports |
-| `bins/` | the two programs — the CLI (`topos`) and the plane (`topos-plane`) |
-| `contracts/` | the generated, committed cross-language contract |
-| `xtask/` | codegen plus the invariant gates (`ci`, `check-arch`, the drift gates) |
-| `tests/` | the workspace-level loopback-HTTP end-to-end suites |
-| `scripts/` | the installer, the compose smoke, the ACME rehearsal |
-
-Each folder carries a `CLAUDE.md` (symlinked as `AGENTS.md`) with that unit's contract; the root
-`CLAUDE.md` is the map.
+The workspace is `crates/` (the five libraries), `bins/` (the two programs), `contracts/` (the generated
+cross-language contract), `xtask/` (codegen + the invariant gates), `tests/` (the loopback-HTTP e2e suites),
+and `scripts/` (the installer, the compose smoke, the ACME rehearsal). Each folder carries a `CLAUDE.md`
+(symlinked as `AGENTS.md`) with that unit's contract; the root `CLAUDE.md` is the map.

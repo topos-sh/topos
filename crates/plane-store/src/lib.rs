@@ -25,7 +25,7 @@
 //!   reference-by-id — the canonical rules, a GC-excluded quarantine, lease-before-migrate, server-side
 //!   dedup, durable install), then one serializable pure-DB transaction advances `current` under a
 //!   whole-`(epoch, seq)` compare-and-set (publish/revert/approve) or opens a gated proposal (propose),
-//!   signs the new pointer, and writes a durable all-outcome receipt. `commit_object` is written ONLY by the
+//!   and writes a durable all-outcome receipt. `commit_object` is written ONLY by the
 //!   accepted-trunk path (publish/revert/approve); a proposal roots its bytes through `proposal_object`,
 //!   gated for both retention and read on `open ∧ non-stale`.
 //! - **The cross-skill lineage predicate** ([`Authority::check_lineage`]) — a read-only gather + the pure
@@ -63,7 +63,7 @@
 //                 derivation, candidate assembly; no SQL);
 //   src/db/{custody,directory}/X.rs — the raw-SQL half: the one SERIALIZABLE (`run_serializable!`) write
 //                 transaction plus its pool reads (no `sqlx` type ever crosses out of `mod db`).
-// The twins today: `enroll` (enrollment issuance), `governance` (the owner-signed governance ops + the
+// The twins today: `enroll` (enrollment issuance), `governance` (the owner-driven governance ops + the
 // admin claim), and `set_current` (the pointer-move). `session_read` is the first READ twin — pool reads
 // only, no `run_serializable!`, no op_id/`workspace_events`/receipts, mirroring `read_roster`'s posture
 // (its `db/directory/session_read.rs` holds the one index query; everything else re-uses `custody/read.rs`'s
@@ -79,10 +79,10 @@ mod db;
 mod directory;
 mod error;
 mod id;
-mod signer;
+mod secret;
 
 // The feature-gated `impl Authority` test-fixtures shims (seed roster/device/workspace, drive a real genesis
-// publish, tamper a signature) — split out of `authority.rs` so the facade reads as exactly the production
+// publish, corrupt a stored record) — split out of `authority.rs` so the facade reads as exactly the production
 // API. Same gate as the shims always had: the production build never compiles it.
 #[cfg(feature = "test-fixtures")]
 mod fixtures;
@@ -107,7 +107,7 @@ pub use enroll::{
 pub use error::{AuthorityError, Result};
 pub use governance::{
     ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
-    GovernanceOutcome, GovernanceSignedOp, InviteCreated, MintClaimOutcome, MintedClaim, Role,
+    GovernanceOutcome, GovernanceRequest, InviteCreated, MintClaimOutcome, MintedClaim, Role,
     WorkspaceCreated,
 };
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
@@ -121,7 +121,7 @@ pub use session_review::{
 pub use session_roster::{
     RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
-pub use set_current::{DeviceSignedOp, SetCurrentReceipt};
+pub use set_current::{DeviceOp, DeviceOpRequest, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 
 /// The embedded Postgres migration set, exposed for out-of-crate test harnesses (the loopback e2e crates)

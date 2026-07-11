@@ -17,7 +17,10 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
+use topos_core::digest;
+
 use crate::authority::Authority;
+use crate::custody::read::ReadScope;
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
 
@@ -37,7 +40,7 @@ pub(crate) const PASSCODE_MAX_ATTEMPTS: i64 = 5;
 // ── return types (domain values; B4 maps these to wire DTOs) ───────────────────────────────────────────
 
 /// The bootstrap payload an invite link resolves to (everything a device needs to begin enrolling). Carries
-/// the plane's signing root to TOFU-pin, the workspace identity, the offered skills, and the verification
+/// the workspace identity, the offered skills, and the verification
 /// base — but **no bytes and no role** (the role lives server-side on the pre-seeded member rows).
 #[derive(Debug, Clone)]
 pub struct InviteBootstrap {
@@ -53,10 +56,6 @@ pub struct InviteBootstrap {
     pub verified_domain_status: String,
     /// The skills the invite pre-offers, each with an optional display name.
     pub skills: Vec<(SkillId, Option<String>)>,
-    /// The plane's raw 32-byte Ed25519 public key (the trust root the device pins).
-    pub plane_public_key: [u8; 32],
-    /// The plane signing key id.
-    pub plane_key_id: String,
     /// The plane's public API base URL (what the bootstrap payload declares; the client re-roots onto it).
     pub base_url: String,
     /// The base the minted `/i/` share links ride (`link_base_url` else `base_url`) — for a serving layer
@@ -295,7 +294,7 @@ impl SessionIntent {
 }
 
 /// The enrollment subsystem's static configuration — held on the [`Authority`](crate::Authority) so
-/// `read_invite_bootstrap` / `start_device_auth` can return the plane's signing root, the verification base
+/// `read_invite_bootstrap` / `start_device_auth` can return the verification base
 /// URL, and the offered enrollment method without re-plumbing them per call. The `secret_path` is consumed
 /// once at [`Authority::with_enrollment_config`](crate::Authority::with_enrollment_config) load time.
 #[derive(Debug, Clone)]
@@ -367,7 +366,7 @@ impl EnrollmentState {
     /// # Errors
     /// [`AuthorityError::Internal`] if the secret file cannot be read/created/validated.
     pub(crate) fn load(config: EnrollmentConfig) -> Result<Self> {
-        let seed = crate::signer::load_or_generate_seed(&config.secret_path)?;
+        let seed = crate::secret::load_or_generate_seed(&config.secret_path)?;
         Ok(Self {
             secret: EnrollmentSecret(seed),
             config,
@@ -405,13 +404,13 @@ pub(crate) fn derive_token(secret: &[u8; 32], domain: &[u8], parts: &[&[u8]]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tag)
 }
 
-/// The server-derived device key id from a raw Ed25519 public key: `dk_<first 32 hex of sha256(pubkey)>`,
-/// via the ONE kernel derivation (`topos_core::sign::device_key_id` — the same fn the client signer
+/// The server-derived device key id from a raw device public key: `dk_<first 32 hex of sha256(pubkey)>`,
+/// via the ONE kernel derivation (`topos_core::identity::device_key_id` — the same fn the client
 /// calls). The plane derives this ITSELF on enroll and re-derives it on redeem — a client-asserted id is
 /// never trusted, so a mismatch between a grant's bound key and the presented key is caught structurally.
 #[must_use]
 pub(crate) fn device_key_id_for(device_public_key: &[u8; 32]) -> String {
-    topos_core::sign::device_key_id(device_public_key)
+    topos_core::identity::device_key_id(device_public_key)
 }
 
 /// Map a sha256 over a credential's UTF-8 bytes (the one stored form of every opaque credential).
@@ -436,10 +435,8 @@ pub(crate) fn device_fingerprint(device_public_key: &[u8; 32]) -> String {
 /// [`crate::db`]). Every identity field is the SERVER's value — the rehashed grant, the re-derived device
 /// key id — never a client claim.
 pub(crate) struct RedeemInput<'a> {
-    /// `sha256(grant_token)` — the grant row's PK and the enroll frame's `grant_hash`.
+    /// `sha256(grant_token)` — the grant row's PK (the bearer credential's stored form).
     pub grant_sha256: [u8; 32],
-    /// The device's enrollment possession-proof signature.
-    pub enroll_sig: &'a [u8; 64],
     /// The raw device public key presented (must equal the grant's bound key).
     pub device_public_key: [u8; 32],
     /// The SERVER-derived device key id from `device_public_key` (a client-asserted id is never trusted).
@@ -539,8 +536,6 @@ pub(crate) async fn read_invite_bootstrap(
     let deployment_mode = DeploymentMode::parse(&workspace.deployment_mode)
         .ok_or_else(|| AuthorityError::integrity(BadStoredDeploymentMode))?;
     let skills = authority.db().read_invite_skills(&token_sha256).await?;
-    let plane_public_key = authority.plane_public_key()?;
-    let plane_key_id = authority.plane_key_id()?;
     let config = &authority.enrollment()?.config;
     Ok(InviteBootstrap {
         workspace_id: invite.workspace_id,
@@ -549,8 +544,6 @@ pub(crate) async fn read_invite_bootstrap(
         verified_domain: workspace.verified_domain,
         verified_domain_status: workspace.verified_domain_status,
         skills,
-        plane_public_key,
-        plane_key_id,
         base_url: config.base_url.clone(),
         link_base: config.link_base().to_owned(),
         enrollment_method: config.enrollment_method.clone(),
@@ -837,13 +830,14 @@ pub(crate) async fn confirm_external_identity(
         .await
 }
 
-/// Redeem an enrollment grant (the orchestration half of [`Authority::redeem_enrollment`]). SERVER-derives
-/// the device key id from the presented key, then runs the one possession-proof + gate + register + mint
-/// transaction. Returns minted per-skill read tokens — NEVER a user token.
+/// Redeem an enrollment grant (the orchestration half of [`Authority::redeem_enrollment`]). The GRANT is
+/// the bearer credential (a deterministic HMAC secret, stored only as its sha256); the presented device
+/// key must equal the grant's bound key (the binding consistency check runs in-transaction). SERVER-derives
+/// the device key id from the presented key, then runs the one gate + register + mint transaction. Returns
+/// minted per-skill read tokens — NEVER a user token.
 pub(crate) async fn redeem_enrollment(
     authority: &Authority,
     grant_token: &str,
-    enroll_sig: &[u8; 64],
     device_public_key: [u8; 32],
     now: i64,
     created_at: &str,
@@ -853,11 +847,36 @@ pub(crate) async fn redeem_enrollment(
     let secret = authority.enrollment()?.secret.as_bytes();
     let input = RedeemInput {
         grant_sha256,
-        enroll_sig,
         device_public_key,
         server_device_key_id: &server_device_key_id,
         now,
         created_at,
     };
     authority.db().redeem_txn(&input, secret).await
+}
+
+/// Resolve a presented read token to its opaque [`ReadScope`] — the read-credential resolver.
+///
+/// Hashes the token (the table stores ONLY the sha256 — the plaintext is a `0600` secret at rest on the
+/// follower, never recoverable from a database read) and does one indexed lookup on the hash. A miss is the
+/// single indistinguishable [`AuthorityError::NotFound`], so a caller can never probe which tokens,
+/// workspaces, or skills exist; a stored row that fails to re-parse is store corruption (handled in
+/// [`crate::db`], not surfaced as not-found).
+///
+/// # Errors
+/// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
+/// [`AuthorityError::Integrity`] if a stored row is corrupt.
+pub(crate) async fn resolve_read_token(
+    authority: &Authority,
+    token: &str,
+    now: i64,
+) -> Result<ReadScope> {
+    let token_sha256 = digest::sha256(token.as_bytes());
+    // `now` enforces the token's `expires_at` (a NULL expiry never expires — legacy + non-expiring rows): an
+    // expired token resolves to the same indistinguishable `NotFound` as an unknown one, so a per-device
+    // revoke (which also drops the row) and an expiry are both an instant 404, never an enumeration oracle.
+    match authority.db().lookup_read_token(&token_sha256, now).await? {
+        Some((ws, skill, principal)) => Ok(ReadScope::for_skill_roster(ws, skill, principal)),
+        None => Err(AuthorityError::NotFound),
+    }
 }

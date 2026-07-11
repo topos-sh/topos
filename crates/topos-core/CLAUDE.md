@@ -10,18 +10,15 @@ wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `top
 Implemented (each behind a known-answer / truth-table test):
 - ✅ the byte-exact sha256 **bundle digest** + the canonical-manifest **reject rules** (`digest`);
 - ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`);
-- ✅ the frozen **signing/commit byte-encodings** (`sign`) — the canonical `commit_id` construction, the
-  **Ed25519** device-op signature frame + verify, the JCS `current`-pointer preimage + verify, and the
-  verify-only **device-enrollment possession proof** + **governance-op** signature frames (the concrete
-  `sign` lives in the caller, over the same dalek crate) — plus the **cross-component identity
-  derivations** those frames bind (`device_key_id`, the `GovernanceRole` signing byte, the
-  `INVITE_NO_EXPIRY` sentinel, and `canonical_principal` — the ASCII-lowercase principal fold every
-  email-valued preimage input passes before signing, the same fold the plane applies at its parse
-  boundary), written once here and called by both the client signer and the plane's verify side.
+- ✅ the frozen **content-addressed identity derivations** (`identity`) — the canonical `commit_id`
+  construction (the user-facing `version_id`, a length-prefixed binary frame), the pubkey-derived
+  `device_key_id`, and `canonical_principal` (the ASCII-lowercase principal fold every email-valued
+  identifier passes, the same fold the plane applies at its parse boundary). No keys, no signatures —
+  written once here so every component that re-derives an id agrees on the bytes by construction.
 - ✅ the **client sync transition** (`sync`) — the four currency states from `work==base?`×`applied==observed?`,
-  the anti-rollback floor + reused-tuple-ALARM evaluation (epoch-dominant generation order), and the
-  post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind a
-  truth-table/matrix test.
+  and the post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind
+  a truth-table test. No floor, no alarm: the served pointer is the sync target, its integrity the
+  content-addressed version id re-verified by digest on apply.
 - ✅ the **author-merge policy** (`merge`) — the three-way file-set **reconciliation** over
   `(path, mode, content_sha256)` metadata → a per-path `MergePlan`; the `MergeOutcome` **decision** over
   the plan + the byte-merge verdicts; and the **publish guard** (`publish_blocked`, presence-based over a
@@ -39,6 +36,8 @@ Planned (land behind a golden vector as their wire encoding / mechanics freeze):
 - **No ambient clock or RNG** — time is a `now` parameter; keys/signatures are byte parameters.
 - **Every core invariant is a unit or seeded generative test in this crate** (the generative tests use
   a deterministic in-repo xorshift generator — no proptest/RNG dependency).
-- Depends on nothing in the workspace, and only on crypto primitives (`cargo xtask check-arch` enforces it).
+- Depends on nothing in the workspace, and only on hashing + canonical-form primitives (`cargo xtask
+  check-arch` enforces it).
 
-Dependencies: `sha2` + `ed25519-dalek` (verify-only, `default-features = false`). Nothing else.
+Dependencies: `sha2` + `unicode-normalization` (the NFC path-collision fold in `digest`). Nothing else —
+no crypto, no keys.

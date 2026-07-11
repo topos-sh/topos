@@ -12,7 +12,7 @@ const CLOUD: DeploymentMode = DeploymentMode::Cloud;
 /// returns the OK receipt.
 async fn publish_named(
     fx: &Fixture,
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
     w: &WorkspaceId,
     s: &SkillId,
     op_id_str: &str,

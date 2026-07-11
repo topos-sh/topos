@@ -1,21 +1,28 @@
 //! The one pointer-move transaction — the raw-SQL half of `set-current`.
 //!
 //! One `SERIALIZABLE` (`run_serializable!`) write transaction advances a skill's `current` pointer by exactly one step, under
-//! a compare-and-set on the whole `(epoch, seq)` pair, signs the new pointer, re-roots the migrated bytes,
-//! and writes a durable all-outcome receipt — **with no filesystem op inside the transaction**. The
-//! ordered sub-steps (and why each ordering is load-bearing) are in [`run`]. All `sqlx` stays here; the
-//! caller ([`crate::set_current`]) hands in server-trusted values and a signer and gets back a domain
-//! [`SetCurrentReceipt`]. The receipt persistence/replay machinery + the terminal-outcome writers `run` and
-//! `reject_run` call live in [`super::receipts`]; this file keeps the ordered state machine itself.
+//! a compare-and-set on the whole `(epoch, seq)` pair, re-roots the migrated bytes, and writes a durable
+//! all-outcome receipt — **with no filesystem op inside the transaction**. The ordered sub-steps (and why
+//! each ordering is load-bearing) are in [`run`]. All `sqlx` stays here; the caller
+//! ([`crate::custody::set_current`]) hands in server-trusted values and gets back a domain
+//! [`SetCurrentReceipt`]. Every access fact (device resolution, roster/role gates, the review policy)
+//! enters through the [`AccessWitness`] seam — read INSIDE this transaction, so a directory row committed
+//! before it (a revoke, a roster removal) is serialized ahead and decides the outcome. The receipt
+//! persistence/replay machinery + the terminal-outcome writers `run` and `reject_run` call live in
+//! [`super::receipts`]; this file keeps the ordered state machine itself.
 
 use sqlx::{Postgres, Transaction};
-use topos_core::sign::{CurrentPointer, DeviceOp, DeviceOpFields, verify_device_op};
 use topos_types::{
-    CurrentRecord, Generation, PointerScope, Signature, SignatureAlg, SignedCurrentRecord,
-    TerminalOutcome, WIRE_SCHEMA_VERSION,
+    CurrentRecord, Generation, PointerScope, TerminalOutcome, WIRE_SCHEMA_VERSION,
+    WireCurrentRecord,
 };
 
-use crate::db::directory::governance::read_member_role;
+use super::witness::{AccessWitness, SessionWriteGate};
+use crate::actor::{
+    REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG, SESSION_REVIEW_ACTING_DENIED,
+    WriteActor,
+};
+use crate::custody::set_current::{DeviceOp, PromoteInput, RejectInput, SetCurrentReceipt};
 use crate::db::custody::proposals::{
     ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
     read_open_proposal, resolve_proposal, set_proposal_status,
@@ -26,18 +33,11 @@ use crate::db::custody::receipts::{
     reject_denied, reject_denied_code, reject_denied_preauth, reject_terminal, replay, retryable,
 };
 use crate::db::{Db, blob32};
-use crate::actor::WriteActor;
 use crate::error::{AuthorityError, Result};
-use crate::governance::Role;
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
-use crate::session_review::{
-    REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG, SESSION_REVIEW_ACTING_DENIED,
-};
-use crate::set_current::{PromoteInput, RejectInput, SetCurrentReceipt};
-use crate::signer::PlaneSigner;
 
-/// The JCS / I-JSON safe-integer bound (2^53 − 1) the pointer preimage enforces — a generation a follower
-/// could never verify is never stored or signed.
+/// The I-JSON safe-integer bound (2^53 − 1) the wire record enforces — a generation a JSON consumer
+/// (the web app, an agent) could not represent exactly is never stored or served.
 const MAX_SAFE_INT: u64 = (1u64 << 53) - 1;
 
 impl Db {
@@ -46,20 +46,19 @@ impl Db {
     pub(crate) async fn set_current_txn(
         &self,
         input: PromoteInput<'_>,
-        signer: &PlaneSigner,
     ) -> Result<SetCurrentReceipt> {
-        run_serializable!(self, tx, run(&mut tx, &input, signer).await)
+        run_serializable!(self, tx, run(&mut tx, &input, self).await)
     }
 
     /// The standalone `review --reject` / proposer-withdraw transaction. NOT a pointer move — it never enters
-    /// [`run`]: `current` is untouched, nothing is signed, there is no lease. One `SERIALIZABLE` transaction mirrors the
-    /// promotion's discipline where it overlaps — receipt-replay first, then in-transaction authorization (the
-    /// SAME device-op frame, `op = ReviewReject`) — then resolves the proposal and classifies it: `open` ⇒
+    /// [`run`]: `current` is untouched, there is no lease. One `SERIALIZABLE` transaction mirrors the
+    /// promotion's discipline where it overlaps — receipt-replay first, then in-transaction authorization
+    /// (the SAME witness lookups, `op = ReviewReject`) — then resolves the proposal and classifies it: `open` ⇒
     /// flip to `rejected`; already `rejected` ⇒ idempotent OK (a lost-ack retry under a different op_id); and
     /// `accepted` or absent ⇒ a typed DENIED. One path serves both reviewer-reject and proposer-withdraw;
     /// `resolved_by` records who.
     pub(crate) async fn review_reject_txn(&self, r: RejectInput<'_>) -> Result<SetCurrentReceipt> {
-        run_serializable!(self, tx, reject_run(&mut tx, &r).await)
+        run_serializable!(self, tx, reject_run(&mut tx, &r, self).await)
     }
 
     /// The recorded bundle digest of a commit's provenance row **scoped to the requesting skill** (revert
@@ -165,9 +164,9 @@ impl Db {
             .collect()
     }
 
-    /// Read back the signed `current` record (the serialized `SignedCurrentRecord` envelope) for a skill —
-    /// what a follower's pointer fetch returns. `None` until the pointer has been moved (signed).
-    pub(crate) async fn read_signed_record(
+    /// Read back the stored `current` record (the serialized [`WireCurrentRecord`] document) for a skill —
+    /// what a follower's pointer fetch returns. `None` until the pointer has first been moved.
+    pub(crate) async fn read_current_record(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
@@ -175,7 +174,7 @@ impl Db {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
         let row = sqlx::query!(
-            r#"SELECT signed_record AS "signed_record?: Vec<u8>" FROM current
+            r#"SELECT record AS "record?: Vec<u8>" FROM current
                WHERE workspace_id = $1 AND skill_id = $2"#,
             ws_s,
             skill_s,
@@ -183,44 +182,7 @@ impl Db {
         .fetch_optional(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
-        Ok(row.and_then(|r| r.signed_record))
-    }
-
-    /// Whether the workspace's review-required policy is on (the cheap preflight read; the in-txn read is
-    /// authoritative). Absent row ⇒ off (the default).
-    pub(crate) async fn workspace_review_required(&self, ws: &WorkspaceId) -> Result<bool> {
-        let ws_s = ws.as_str();
-        let row = sqlx::query!(
-            r#"SELECT review_required AS "review_required!: i64" FROM workspace_policy WHERE workspace_id = $1"#,
-            ws_s,
-        )
-        .fetch_optional(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(row.is_some_and(|r| r.review_required != 0))
-    }
-
-    /// Upsert the workspace's `review_required` policy (the write the read above consults). The single home
-    /// for the policy row; `Authority::set_review_required` is the public op, and the test-fixtures
-    /// `seed_review_required` shim delegates to it. The upsert has no foreign key onto the standalone
-    /// `workspace` row (so the publish/read tests that seed no workspace stay green).
-    pub(crate) async fn set_review_required(
-        &self,
-        ws: &WorkspaceId,
-        review_required: bool,
-    ) -> Result<()> {
-        let ws_s = ws.as_str();
-        let rr = i64::from(review_required);
-        sqlx::query!(
-            "INSERT INTO workspace_policy (workspace_id, review_required) VALUES ($1, $2) \
-             ON CONFLICT (workspace_id) DO UPDATE SET review_required = excluded.review_required",
-            ws_s,
-            rr,
-        )
-        .execute(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(())
+        Ok(row.and_then(|r| r.record))
     }
 }
 
@@ -234,7 +196,7 @@ impl Db {
 async fn run(
     tx: &mut Transaction<'_, Postgres>,
     input: &PromoteInput<'_>,
-    signer: &PlaneSigner,
+    witness: &impl AccessWitness,
 ) -> Result<SetCurrentReceipt> {
     let bound = BoundIdentity {
         command: crate::set_current::device_op_command(input.op),
@@ -288,8 +250,9 @@ async fn run(
         Replay::Fresh => {}
     }
 
-    // (2) Policy — read inside the txn (the source of truth; a preflight may have read a now-stale value).
-    let review_required = read_review_required(tx, input.ws).await?;
+    // (2) Policy — read inside the txn via the witness (the source of truth; a preflight may have read a
+    // now-stale value).
+    let review_required = witness.review_required(tx, input.ws).await?;
 
     // (3 + 3b) Authorization — authoritative + in-txn, and the ONE place the transaction branches on the
     // lane. Both arms read `current` only after their authentication step, so an unauthorized caller never
@@ -301,35 +264,17 @@ async fn run(
     // per-skill roster row (the session read lane's catalog-visibility-is-membership decision, carried to
     // the review write).
     let (acting, genesis_standup, current) = match &input.actor {
-        WriteActor::Device {
-            device_key_id,
-            signature,
-        } => {
-            // Resolve the device to a NON-REVOKED public key bound to a principal, verify the device-op
-            // signature over SERVER-trusted fields, and require the principal is rostered. A revoke
-            // committed before this txn is serialized ahead of it and blocks the move. A
-            // PRE-AUTHENTICATION failure (unknown/revoked device, invalid signature) is DENIED **without a
-            // durable receipt** — see `denied_preauth`; the authenticated-but-unauthorized denials below
-            // stay receipted.
-            let Some(device) = resolve_device(tx, input.ws, device_key_id).await? else {
+        WriteActor::Device { device_key_id } => {
+            // Resolve the PRESENTED device credential against the live registry row — the witness read,
+            // inside THIS transaction, so a revoke committed before it is serialized ahead and blocks the
+            // move — and require the bound principal is rostered. Authentication IS the credential
+            // lookup: an unknown or revoked device is DENIED **without a durable receipt** — see
+            // `denied_preauth`; the authenticated-but-unauthorized denials below stay receipted.
+            let Some(device) = witness.device(tx, input.ws, device_key_id).await? else {
                 return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
             };
             if device.revoked {
                 return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
-            }
-            let fields = DeviceOpFields {
-                workspace_id: input.ws.as_str(),
-                skill_id: input.skill.as_str(),
-                op: input.op,
-                op_id: input.op_id_bytes,
-                device_key_id,
-                expected_epoch: input.expected.epoch,
-                expected_seq: input.expected.seq,
-                commit_id: input.candidate_commit.0,
-                bundle_digest: input.candidate_bundle_digest,
-            };
-            if !verify_device_op(&fields, signature, &device.public_key) {
-                return denied_preauth(tx, input, &bound, "device signature invalid").await;
             }
             // The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
             // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish)
@@ -339,32 +284,32 @@ async fn run(
             // receipt, so an inline insert here would commit an orphan roster row alongside a later
             // availability/lineage DENIED.
             let current = read_current(tx, input.ws, input.skill).await?;
-            let genesis_standup =
-                if crate::db::roster_exists(&mut **tx, input.ws, input.skill, &device.principal)
+            let genesis_standup = if witness
+                .rostered(tx, input.ws, input.skill, &device.principal)
+                .await?
+            {
+                false
+            } else {
+                let genesis_shaped = current.is_none()
+                    && matches!(input.op, DeviceOp::PublishDirect)
+                    && input.parents.is_empty();
+                if !genesis_shaped {
+                    return denied(tx, input, &bound, "principal not rostered for the skill").await;
+                }
+                if !witness
+                    .confirmed_member(tx, input.ws, &device.principal)
                     .await?
                 {
-                    false
-                } else {
-                    let genesis_shaped = current.is_none()
-                        && matches!(input.op, DeviceOp::PublishDirect)
-                        && input.parents.is_empty();
-                    if !genesis_shaped {
-                        return denied(tx, input, &bound, "principal not rostered for the skill")
-                            .await;
-                    }
-                    if !crate::db::workspace_member_confirmed(&mut **tx, input.ws, &device.principal)
-                        .await?
-                    {
-                        return denied(
-                            tx,
-                            input,
-                            &bound,
-                            "principal is not a confirmed workspace member",
-                        )
-                        .await;
-                    }
-                    true
-                };
+                    return denied(
+                        tx,
+                        input,
+                        &bound,
+                        "principal is not a confirmed workspace member",
+                    )
+                    .await;
+                }
+                true
+            };
             (device.principal, genesis_standup, current)
         }
         WriteActor::Session { acting, .. } => {
@@ -377,25 +322,24 @@ async fn run(
                 return Err(AuthorityError::internal(SessionOpNotReviewable));
             }
             // The in-txn role gate (authoritative; the orchestration's pool-level pre-gate is the cheap
-            // fence). A non-member / merely-invited / unknown-workspace caller gets the ONE uniform
-            // denial, synthesized — never persisted (the session recording rule: a web-verified email
-            // proves nothing about THIS workspace, and a durable row would let any account grow the
-            // ledger). A CONFIRMED plain member is entitled to a recorded, replayable answer: the durable
-            // typed role denial.
-            match read_member_role(tx, input.ws, acting).await? {
-                Some((role, status)) if status == "confirmed" => {
-                    if role != Role::Owner.as_str() && role != Role::Reviewer.as_str() {
-                        return denied_code(
-                            tx,
-                            input,
-                            &bound,
-                            REVIEWER_ROLE_REQUIRED_CODE,
-                            REVIEWER_ROLE_REQUIRED_MSG,
-                        )
-                        .await;
-                    }
+            // fence). The witness answers the whole role matrix: a non-member / merely-invited /
+            // unknown-workspace caller gets the ONE uniform denial, synthesized — never persisted (the
+            // session recording rule: a web-verified email proves nothing about THIS workspace, and a
+            // durable row would let any account grow the ledger). A CONFIRMED plain member is entitled
+            // to a recorded, replayable answer: the durable typed role denial.
+            match witness.session_write_gate(tx, input.ws, acting).await? {
+                SessionWriteGate::Authorized => {}
+                SessionWriteGate::RoleDenied => {
+                    return denied_code(
+                        tx,
+                        input,
+                        &bound,
+                        REVIEWER_ROLE_REQUIRED_CODE,
+                        REVIEWER_ROLE_REQUIRED_MSG,
+                    )
+                    .await;
                 }
-                _ => {
+                SessionWriteGate::Unproven => {
                     return denied_preauth(tx, input, &bound, SESSION_REVIEW_ACTING_DENIED).await;
                 }
             }
@@ -537,7 +481,9 @@ async fn run(
     // stay the LAST statement before the op tail — a future receipted-terminal between here and the promote
     // would re-open the orphan-row window.
     if genesis_standup {
-        crate::db::insert_roster(&mut **tx, input.ws, input.skill, &acting).await?;
+        witness
+            .seat_roster(tx, input.ws, input.skill, &acting)
+            .await?;
     }
 
     // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,
@@ -546,18 +492,16 @@ async fn run(
     // --approve` promotes the locked proposal sideways through the SAME promote plus the status handoff.
     // (`review --reject` never reaches `run` — it is a standalone status-flip transaction.)
     match input.op {
-        DeviceOp::PublishDirect | DeviceOp::Revert => {
-            promote(tx, input, signer, new_gen, &bound).await
-        }
+        DeviceOp::PublishDirect | DeviceOp::Revert => promote(tx, input, new_gen, &bound).await,
         DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &acting).await,
         DeviceOp::ReviewApprove => {
-            approve_arm(tx, input, signer, new_gen, &bound, review_required, &acting).await
+            approve_arm(tx, input, new_gen, &bound, review_required, &acting).await
         }
         DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
     }
 }
 
-/// Record provenance + reachability, sign the advanced pointer, and persist it with the durable OK receipt —
+/// Record provenance + reachability, advance the pointer, and persist it with the durable OK receipt —
 /// the shared pointer-advance for a direct publish, a revert, AND the accepted half of a proposal. The
 /// `commit_object` edges it writes PERMANENTLY root the candidate's objects (the accepted-trunk root), so for
 /// an approve this write IS the handoff from the proposal's gated `proposal_object` root to the trunk. Does
@@ -565,7 +509,6 @@ async fn run(
 async fn advance_current(
     tx: &mut Transaction<'_, Postgres>,
     input: &PromoteInput<'_>,
-    signer: &PlaneSigner,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
 ) -> Result<SetCurrentReceipt> {
@@ -580,22 +523,14 @@ async fn advance_current(
     for obj in input.object_ids {
         insert_commit_object(tx, input.ws, input.candidate_commit, *obj).await?;
     }
-    let pointer = CurrentPointer {
-        workspace_id: input.ws.as_str(),
-        skill_id: input.skill.as_str(),
-        version_id: input.candidate_commit.0,
-        epoch: new_gen.epoch,
-        seq: new_gen.seq,
-    };
-    let signature = signer.sign_pointer(&pointer)?;
-    let signed_record = serialize_signed_record(&pointer, signer.key_id(), &signature)?;
+    let record = serialize_record(input.ws, input.skill, input.candidate_commit, new_gen)?;
     upsert_current(
         tx,
         input.ws,
         input.skill,
         input.candidate_commit,
         new_gen,
-        &signed_record,
+        &record,
         input.display_name,
         input.now,
     )
@@ -609,8 +544,7 @@ async fn advance_current(
         expected: input.expected,
         outcome: TerminalOutcome::Ok,
         current: Some(new_gen),
-        signed_record: Some(signed_record),
-        key_id: Some(signer.key_id().to_owned()),
+        record: Some(record),
         created_at: input.created_at.to_owned(),
         details: None,
     };
@@ -623,11 +557,10 @@ async fn advance_current(
 async fn promote(
     tx: &mut Transaction<'_, Postgres>,
     input: &PromoteInput<'_>,
-    signer: &PlaneSigner,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
 ) -> Result<SetCurrentReceipt> {
-    let receipt = advance_current(tx, input, signer, new_gen, bound).await?;
+    let receipt = advance_current(tx, input, new_gen, bound).await?;
     delete_lease(tx, input.ws, input.op_id).await?;
     Ok(receipt)
 }
@@ -697,8 +630,7 @@ async fn propose_arm(
         expected: input.expected,
         outcome: TerminalOutcome::NeedsReview,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: input.created_at.to_owned(),
         details: None,
     };
@@ -716,7 +648,6 @@ async fn propose_arm(
 async fn approve_arm(
     tx: &mut Transaction<'_, Postgres>,
     input: &PromoteInput<'_>,
-    signer: &PlaneSigner,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
     review_required: bool,
@@ -756,7 +687,7 @@ async fn approve_arm(
         input.created_at,
     )
     .await?;
-    let receipt = advance_current(tx, input, signer, new_gen, bound).await?;
+    let receipt = advance_current(tx, input, new_gen, bound).await?;
     set_proposal_status(
         tx,
         input.ws,
@@ -775,6 +706,7 @@ async fn approve_arm(
 async fn reject_run(
     tx: &mut Transaction<'_, Postgres>,
     r: &RejectInput<'_>,
+    witness: &impl AccessWitness,
 ) -> Result<SetCurrentReceipt> {
     let bound = BoundIdentity {
         command: crate::set_current::device_op_command(r.op),
@@ -797,36 +729,22 @@ async fn reject_run(
     // (2) Authorization — the reject twin of `run`'s one lane fork (the same deliberate lane asymmetry:
     // device = per-skill roster; session = confirmed owner|reviewer workspace seat).
     let acting: Principal = match &r.actor {
-        WriteActor::Device {
-            device_key_id,
-            signature,
-        } => {
-            // The SAME in-transaction device-op verification the promotion runs (a non-revoked registered
-            // key bound to a rostered principal), over the `ReviewReject`-typed frame. A revoke serialized
-            // ahead of this blocks the reject. A pre-authentication failure is DENIED without a durable
-            // receipt (mirroring `run`'s `denied_preauth`; a reject has no lease, so nothing is even
-            // released) — the roster denial below names a verified device and stays receipted.
-            let Some(device) = resolve_device(tx, r.ws, device_key_id).await? else {
+        WriteActor::Device { device_key_id } => {
+            // The SAME in-transaction witness lookups the promotion runs (a non-revoked registry row
+            // bound to a rostered principal). A revoke serialized ahead of this blocks the reject. A
+            // pre-authentication failure is DENIED without a durable receipt (mirroring `run`'s
+            // `denied_preauth`; a reject has no lease, so nothing is even released) — the roster denial
+            // below names an authenticated device and stays receipted.
+            let Some(device) = witness.device(tx, r.ws, device_key_id).await? else {
                 return Ok(reject_denied_preauth(r, "device unknown or revoked"));
             };
             if device.revoked {
                 return Ok(reject_denied_preauth(r, "device unknown or revoked"));
             }
-            let fields = DeviceOpFields {
-                workspace_id: r.ws.as_str(),
-                skill_id: r.skill.as_str(),
-                op: r.op,
-                op_id: r.op_id_bytes,
-                device_key_id,
-                expected_epoch: r.expected.epoch,
-                expected_seq: r.expected.seq,
-                commit_id: r.commit.0,
-                bundle_digest: r.bundle_digest,
-            };
-            if !verify_device_op(&fields, signature, &device.public_key) {
-                return Ok(reject_denied_preauth(r, "device signature invalid"));
-            }
-            if !crate::db::roster_exists(&mut **tx, r.ws, r.skill, &device.principal).await? {
+            if !witness
+                .rostered(tx, r.ws, r.skill, &device.principal)
+                .await?
+            {
                 return reject_denied(tx, r, "principal not rostered for the skill").await;
             }
             device.principal
@@ -838,19 +756,20 @@ async fn reject_run(
             }
             // The same session role gate as `run`: uniform synthesized denial for anyone unproven in THIS
             // workspace; a durable typed role denial for a confirmed plain member.
-            match read_member_role(tx, r.ws, acting).await? {
-                Some((role, status)) if status == "confirmed" => {
-                    if role != Role::Owner.as_str() && role != Role::Reviewer.as_str() {
-                        return reject_denied_code(
-                            tx,
-                            r,
-                            REVIEWER_ROLE_REQUIRED_CODE,
-                            REVIEWER_ROLE_REQUIRED_MSG,
-                        )
-                        .await;
-                    }
+            match witness.session_write_gate(tx, r.ws, acting).await? {
+                SessionWriteGate::Authorized => {}
+                SessionWriteGate::RoleDenied => {
+                    return reject_denied_code(
+                        tx,
+                        r,
+                        REVIEWER_ROLE_REQUIRED_CODE,
+                        REVIEWER_ROLE_REQUIRED_MSG,
+                    )
+                    .await;
                 }
-                _ => return Ok(reject_denied_preauth(r, SESSION_REVIEW_ACTING_DENIED)),
+                SessionWriteGate::Unproven => {
+                    return Ok(reject_denied_preauth(r, SESSION_REVIEW_ACTING_DENIED));
+                }
             }
             (*acting).clone()
         }
@@ -885,57 +804,6 @@ async fn reject_run(
 }
 
 // --- tx-bound + pool SQL helpers (every one workspace-scoped) ---
-
-struct DeviceRecord {
-    public_key: [u8; 32],
-    principal: Principal,
-    revoked: bool,
-}
-
-async fn resolve_device(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-    device_key_id: &str,
-) -> Result<Option<DeviceRecord>> {
-    let ws_s = ws.as_str();
-    let row = sqlx::query!(
-        r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!", revoked AS "revoked!: i64"
-           FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2"#,
-        ws_s,
-        device_key_id,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    match row {
-        None => Ok(None),
-        Some(r) => {
-            // Stored values are validated on the way in, so a re-parse failure is store corruption.
-            let public_key = blob32(&r.public_key)?;
-            let principal = Principal::parse(&r.principal).map_err(AuthorityError::integrity)?;
-            Ok(Some(DeviceRecord {
-                public_key,
-                principal,
-                revoked: r.revoked != 0,
-            }))
-        }
-    }
-}
-
-async fn read_review_required(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-) -> Result<bool> {
-    let ws_s = ws.as_str();
-    let row = sqlx::query!(
-        r#"SELECT review_required AS "review_required!: i64" FROM workspace_policy WHERE workspace_id = $1"#,
-        ws_s,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(row.is_some_and(|r| r.review_required != 0))
-}
 
 pub(super) struct CurrentRow {
     pub(super) commit: CommitId,
@@ -1095,7 +963,7 @@ async fn upsert_current(
     skill: &SkillId,
     commit: CommitId,
     generation: Generation,
-    signed_record: &[u8],
+    record: &[u8],
     display_name: Option<&str>,
     updated_at: i64,
 ) -> Result<()> {
@@ -1109,18 +977,18 @@ async fn upsert_current(
     // keeps the current name when this move carries none (a revert / approve / a name-less publish), so a
     // pointer move never blanks a name it didn't mean to touch.
     sqlx::query!(
-        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at, display_name) \
+        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at, display_name) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          ON CONFLICT (workspace_id, skill_id) DO UPDATE SET \
            commit_id = excluded.commit_id, epoch = excluded.epoch, seq = excluded.seq, \
-           signed_record = excluded.signed_record, updated_at = excluded.updated_at, \
+           record = excluded.record, updated_at = excluded.updated_at, \
            display_name = COALESCE(excluded.display_name, current.display_name)",
         ws_s,
         skill_s,
         cid,
         epoch,
         seq,
-        signed_record,
+        record,
         updated_at,
         display_name,
     )
@@ -1147,42 +1015,28 @@ pub(super) async fn delete_lease(
     Ok(())
 }
 
-/// Serialize the `SignedCurrentRecord` envelope stored in `current.signed_record` + `op_receipts`. The
-/// signature is over `pointer_preimage` (the JCS string), NOT this envelope — a verifier reconstructs the
-/// `CurrentPointer` strictly from {scope, record} and re-derives the preimage; `key_id`/`schema_version`
-/// are NOT part of the signed bytes.
-fn serialize_signed_record(
-    pointer: &CurrentPointer<'_>,
-    key_id: &str,
-    signature: &[u8; 64],
+/// Serialize the [`WireCurrentRecord`] document stored in `current.record` + the OK receipt — the
+/// pointer read's wire body. Its authority is the database row it mirrors; its integrity story is the
+/// content-addressed `version_id` a follower re-verifies by digest on every apply.
+fn serialize_record(
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    commit: CommitId,
+    generation: Generation,
 ) -> Result<Vec<u8>> {
-    let record = SignedCurrentRecord {
-        // The signed-`current` record is a WIRE shape (it rides the read route + the OK receipt).
+    let record = WireCurrentRecord {
+        // The `current` record is a WIRE shape (it rides the read route + the OK receipt).
         schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
-            workspace_id: pointer.workspace_id.to_owned(),
-            skill_id: pointer.skill_id.to_owned(),
+            workspace_id: ws.as_str().to_owned(),
+            skill_id: skill.as_str().to_owned(),
         },
         record: CurrentRecord {
-            version_id: topos_core::digest::to_hex(&pointer.version_id),
-            generation: Generation {
-                epoch: pointer.epoch,
-                seq: pointer.seq,
-            },
-        },
-        signature: Signature {
-            alg: SignatureAlg::Ed25519,
-            key_id: key_id.to_owned(),
-            value: base64_url(signature),
+            version_id: topos_core::digest::to_hex(&commit.0),
+            generation,
         },
     };
     serde_json::to_vec(&record).map_err(AuthorityError::internal)
-}
-
-/// base64url, unpadded — the frozen wire form of a 64-byte signature (86 chars).
-fn base64_url(signature: &[u8; 64]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
 }
 
 // --- small conversions (a stored value that violates a width/range CHECK is store corruption) ---

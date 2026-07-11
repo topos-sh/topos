@@ -4,6 +4,9 @@
 pub(crate) mod enroll;
 pub(crate) mod governance;
 
+// The directory's implementation of custody's access-witness seam + the pool-level principal probes.
+pub(crate) mod witness;
+
 // The web-session read lane's SQL (the one skill-index query).
 pub(crate) mod session_read;
 

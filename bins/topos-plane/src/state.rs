@@ -95,8 +95,6 @@ pub struct PlaneConfig {
     pub git_root: PathBuf,
     /// The per-workspace large-object store root (created if absent).
     pub large_root: PathBuf,
-    /// The plane signing key (a `0600` seed; generated on first run if absent).
-    pub plane_key_path: PathBuf,
     /// The enrollment HMAC secret (a `0600` seed; generated on first run if absent) — the root every opaque
     /// credential is derived from.
     pub enroll_secret_path: PathBuf,
@@ -205,8 +203,8 @@ impl PlaneState {
 
     /// Open a serving [`PlaneState`] over Postgres from a leak-free [`PlaneConfig`] — the **single** construction
     /// path a downstream plane (and the OSS bin) use. Builds the storage [`Authority`] (the db + git + large
-    /// stores, the plane signing key, the enrollment secret) and the internal enrollment config from the
-    /// config's plain/owned fields, so the caller never names a `plane_store` type. Rate limits default to
+    /// stores, the enrollment secret) and the internal enrollment config from the config's plain/owned fields,
+    /// so the caller never names a `plane_store` type. Rate limits default to
     /// [`Limits::from_env`] (chain [`with_rate_limit`](Self::with_rate_limit) to override); the OIDC connector
     /// stays a post-construction, feature-gated step.
     ///
@@ -224,7 +222,6 @@ impl PlaneState {
     ///     database_url: "postgres://plane:secret@db:5432/plane".to_owned(),
     ///     git_root: "git".into(),
     ///     large_root: "large".into(),
-    ///     plane_key_path: "plane.key".into(),
     ///     enroll_secret_path: "enroll.key".into(),
     ///     base_url: "https://plane.example".to_owned(),
     ///     verify_base_url: None,
@@ -249,7 +246,7 @@ impl PlaneState {
     ///
     /// # Errors
     /// Returns an [`anyhow::Error`] if a store root cannot be created, the database cannot be opened or
-    /// migrated, or the plane signing key / enrollment secret cannot be loaded or generated.
+    /// migrated, or the enrollment secret cannot be loaded or generated.
     pub async fn open(cfg: PlaneConfig) -> anyhow::Result<PlaneState> {
         // The deployment posture crosses the boundary as a String; parse it here (an unknown value warns +
         // falls back to self_host, exactly as the bin did), so no `plane_store::DeploymentMode` is named by a
@@ -281,8 +278,6 @@ impl PlaneState {
         )
         .await
         .context("opening the storage authority")?
-        .with_plane_key(&cfg.plane_key_path)
-        .context("loading the plane signing key")?
         .with_enrollment_config(EnrollmentConfig {
             secret_path: cfg.enroll_secret_path,
             base_url: cfg.base_url.clone(),
@@ -410,24 +405,23 @@ impl PlaneState {
             })
     }
 
-    /// The DEVICE-signed workspace CATALOG read (`GET /v1/workspaces/{ws}/skills`) — the thin wrapper the
+    /// The DEVICE-credential workspace CATALOG read (`GET /v1/workspaces/{ws}/skills`) — the thin wrapper the
     /// route handler calls: parse the workspace id (a malformed id is the uniform miss), stamp the server
     /// clock, run [`Authority::list_skills_device`](plane_store::Authority), and map each `SkillIndexRow`
     /// into the wire [`WireSkillIndex`] (metadata only, no bytes). A [`PlaneHttpError`] carries the outcome:
-    /// [`AuthorityError::NotFound`](plane_store::AuthorityError) — unknown/revoked device, bad signature, or
-    /// non-member — becomes the indistinguishable 404; an Integrity/Internal fault becomes a 500.
+    /// [`AuthorityError::NotFound`](plane_store::AuthorityError) — unknown/revoked device or non-member —
+    /// becomes the indistinguishable 404; an Integrity/Internal fault becomes a 500.
     pub(crate) async fn list_skills_device(
         &self,
         workspace_id: &str,
         device_key_id: &str,
-        signature: &[u8; 64],
     ) -> Result<WireSkillIndex, PlaneHttpError> {
         let ws =
             WorkspaceId::parse(workspace_id).map_err(|_| plane_store::AuthorityError::NotFound)?;
         let now = crate::wire::now_utc().1;
         let rows = self
             .authority()
-            .list_skills_device(&ws, device_key_id, signature, now)
+            .list_skills_device(&ws, device_key_id, now)
             .await?;
         Ok(crate::wire::map::skill_index_to_wire(rows))
     }

@@ -63,11 +63,7 @@ impl Fixture {
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let mut authority = Authority::from_pool(pool, &dir.join("stores"), &dir.join("large"))
             .expect("open authority")
-            // Every fixture gets a plane signing key (load-or-generate, 0600) — the pointer-move tests need it;
-            // it is simply unused by the read/upload/lifecycle tests.
-            .with_plane_key(&dir.join("plane.key"))
-            .expect("load plane key")
-            // ...and an enrollment config (load-or-generate the 0600 HMAC secret) — the enrollment/governance
+            // An enrollment config (load-or-generate the 0600 HMAC secret) — the enrollment/governance
             // tests need it; every other test simply never touches it.
             .with_enrollment_config(EnrollmentConfig {
                 secret_path: dir.join("enroll.key"),
@@ -212,7 +208,7 @@ fn blob(n: usize, seed: u8) -> Vec<u8> {
 // `publish --propose` roots a candidate's bytes through `proposal_object`, gated — for BOTH retention and
 // read — on ONE derived predicate `open ∧ base == current`. These tests pin that the read arm and the two
 // GC-claim arms evaluate it IDENTICALLY (the anti-drift guard), and that keep-set == read-authorization holds
-// across the eventless stale transition: a reclaimed object reads 404, never an Integrity alarm. The
+// across the eventless stale transition: a reclaimed object reads 404, never an Integrity fault. The
 // propose/approve/reject write paths that PRODUCE these rows are exercised end-to-end further below; here the
 // rows are seeded, so the gate itself is tested in isolation.
 
@@ -239,18 +235,13 @@ const PROP_OP_1: &str = "a1111111-1111-4111-8111-111111111111";
 // ── the pointer-move write (`set-current`): genesis · publish · revert · the gate · interleavings ──────
 //
 // These drive the WHOLE backbone in-process against a real Postgres + git store: ingest → migrate → the one
-// serializable pointer-move transaction. A test acts as the client device — it signs the device-op over the
-// SERVER-rehashed candidate values (exactly what the txn reconstructs), so a valid signature is the binding.
+// serializable pointer-move transaction. The device request presents only its `device_key_id`; the txn
+// authenticates it by registry-row lookup (the non-revoked row bound to a rostered principal) — no signed
+// frame, no possession proof.
 
-use ed25519_dalek::Signer as _;
+use topos_types::{Generation, TerminalOutcome, WireCurrentRecord};
 
-use topos_core::sign::{
-    CurrentPointer, DeviceOp, DeviceOpFields, device_op_preimage, verify_pointer,
-};
-
-use topos_types::{Generation, SignedCurrentRecord, TerminalOutcome};
-
-use crate::DeviceSignedOp;
+use crate::{DeviceOp, DeviceOpRequest};
 
 const NOW: i64 = 1_000_000;
 
@@ -260,10 +251,11 @@ fn gn(epoch: u64, seq: u64) -> Generation {
     Generation { epoch, seq }
 }
 
-/// A deterministic device signing key (the test's "client device"); its public key is seeded into the
-/// device registry, so the in-transaction authorization verifies the device-op against it.
-fn dev_key(seed: u8) -> ed25519_dalek::SigningKey {
-    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+/// A deterministic device PUBLIC key (the test's "client device") seeded into the registry. Nothing
+/// verifies it — the credential a write presents is the `device_key_id` string, authenticated by a
+/// registry-row lookup — so any fixed 32 bytes stand in for a real key.
+fn dev_key(seed: u8) -> [u8; 32] {
+    [seed; 32]
 }
 
 /// Register a device + roster its principal so the pointer-move's in-transaction authorization passes.
@@ -276,69 +268,34 @@ async fn register(
 
     dkid: &str,
 
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
 
     principal: &str,
 ) {
     let p = prin(principal);
     fx.authority
         .db()
-        .seed_device(ws, dkid, &key.verifying_key().to_bytes(), &p, false)
+        .seed_device(ws, dkid, key, &p, false)
         .await
         .unwrap();
     fx.authority.db().seed_roster(ws, skill, &p).await.unwrap();
 }
 
-/// Sign a device-op over the SERVER-trusted candidate identity (commit id + bundle digest + scope) — the
-/// same fields the transaction rebuilds, so an honest device's signature verifies there.
-#[allow(clippy::too_many_arguments)]
-fn sign_op(
-    key: &ed25519_dalek::SigningKey,
-
-    dkid: &str,
-
-    ws: &WorkspaceId,
-
-    skill: &SkillId,
-
-    op_kind: DeviceOp,
-
-    op_id: &OpId,
-
-    expected: Generation,
-
-    commit: [u8; 32],
-
-    digest: [u8; 32],
-) -> [u8; 64] {
-    let op_id_bytes = uuid::Uuid::parse_str(op_id.as_str()).unwrap().into_bytes();
-    let fields = DeviceOpFields {
-        workspace_id: ws.as_str(),
-        skill_id: skill.as_str(),
-        op: op_kind,
-        op_id: op_id_bytes,
-        device_key_id: dkid,
-        expected_epoch: expected.epoch,
-        expected_seq: expected.seq,
-        commit_id: commit,
-        bundle_digest: digest,
-    };
-    key.sign(&device_op_preimage(&fields).unwrap()).to_bytes()
-}
-
-/// Ingest + sign-over-the-staged-values + migrate, returning the staged candidate + the signed device op —
-/// so a test can drive the pointer-move itself (and inject a revoke/GC between migrate and the txn).
+/// Ingest + migrate, returning the staged candidate + the device request — so a test can drive the
+/// pointer-move itself (and inject a revoke/GC between migrate and the txn). The request carries only the
+/// presented `device_key_id`; the txn authenticates it by registry lookup (`_key`/`_skill` are unused now
+/// that nothing signs, kept so call sites stay stable).
 #[allow(clippy::too_many_arguments)]
 async fn prepare(
     fx: &Fixture,
 
-    key: &ed25519_dalek::SigningKey,
+    _key: &[u8; 32],
 
     dkid: &str,
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    _skill: &SkillId,
 
     op_kind: DeviceOp,
 
@@ -347,31 +304,19 @@ async fn prepare(
     candidate: CandidateUpload,
 
     expected: Generation,
-) -> (lifecycle::StagedCandidate, DeviceSignedOp) {
+) -> (lifecycle::StagedCandidate, DeviceOpRequest) {
     let op_id = op(op_id_str);
     let staged = lifecycle::ingest(&fx.authority, ws, &op_id, candidate, NOW)
         .await
         .unwrap();
-    let signature = sign_op(
-        key,
-        dkid,
-        ws,
-        skill,
-        op_kind,
-        &op_id,
-        expected,
-        staged.version_id.0,
-        staged.bundle_digest,
-    );
     lifecycle::migrate(&fx.authority, ws, &staged, NOW)
         .await
         .unwrap();
     (
         staged,
-        DeviceSignedOp {
+        DeviceOpRequest {
             device_key_id: dkid.to_owned(),
             op: op_kind,
-            signature,
             expected,
         },
     )
@@ -382,7 +327,7 @@ async fn prepare(
 async fn publish(
     fx: &Fixture,
 
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
 
     dkid: &str,
 
@@ -432,98 +377,29 @@ fn child(parent: CommitId, files: Vec<UploadedFile>) -> CandidateUpload {
     }
 }
 
-fn hex32(s: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
-    }
-    out
+/// Parse a stored `current.record` — the UNSIGNED [`WireCurrentRecord`] document `read_current_record`
+/// returns and a follower's pointer fetch serves (unsigned now; authority is the row behind the pointer,
+/// integrity is the content-addressed `version_id` re-verified byte-for-byte on apply).
+fn wire_record(bytes: &[u8]) -> WireCurrentRecord {
+    serde_json::from_slice(bytes).expect("a stored current record parses as WireCurrentRecord")
 }
 
-fn b64_sig(s: &str) -> [u8; 64] {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(s)
-        .unwrap()
-        .try_into()
-        .unwrap()
-}
-
-/// Reconstruct the `CurrentPointer` STRICTLY from {scope, record} of a stored signed record and verify it
-/// (key_id / schema_version are NOT part of the signed bytes). `scope` lets a test force a wrong scope.
-fn verify_record(bytes: &[u8], ws: &str, skill: &str, pubkey: &[u8; 32]) -> bool {
-    let rec: SignedCurrentRecord = serde_json::from_slice(bytes).unwrap();
-    let ptr = CurrentPointer {
-        workspace_id: ws,
-        skill_id: skill,
-        version_id: hex32(&rec.record.version_id),
-        epoch: rec.record.generation.epoch,
-        seq: rec.record.generation.seq,
-    };
-    verify_pointer(&ptr, &b64_sig(&rec.signature.value), pubkey)
-}
-
-/// Sign a revert device-op: the server constructs the forward commit, so the test signs over the SAME values
-/// the txn will (good's digest determines the forward version_id).
-#[allow(clippy::too_many_arguments)]
-async fn sign_revert(
-    fx: &Fixture,
-
-    key: &ed25519_dalek::SigningKey,
-
-    dkid: &str,
-
-    ws: &WorkspaceId,
-
-    skill: &SkillId,
-
-    good: CommitId,
-
-    op_id: &OpId,
-
-    expected: Generation,
-) -> [u8; 64] {
-    use topos_core::sign::{self, Commit};
-    let good_digest = fx
-        .authority
-        .db()
-        .skill_commit_bundle_digest(ws, skill, good)
-        .await
-        .unwrap()
-        .unwrap();
-    let current = fx
-        .authority
-        .db()
-        .read_current_commit(ws, skill)
-        .await
-        .unwrap()
-        .unwrap();
-    let version_id = sign::commit_id(&Commit {
-        parents: &[current.0],
-        tree: good_digest,
-        author: "d_test",
-        message: "topos revert",
-    })
-    .unwrap();
-    sign_op(
-        key,
-        dkid,
-        ws,
-        skill,
-        DeviceOp::Revert,
-        op_id,
+/// A revert device request — the server constructs the forward commit; the request presents only the
+/// device credential + the CAS target generation (nothing signs the forward version id any more).
+fn revert_request(dkid: &str, expected: Generation) -> DeviceOpRequest {
+    DeviceOpRequest {
+        device_key_id: dkid.to_owned(),
+        op: DeviceOp::Revert,
         expected,
-        version_id,
-        good_digest,
-    )
+    }
 }
 
 // ── the contribute authority end-to-end: publish --propose · review --approve|--reject (the write paths) ──
 //
 // These drive the REAL propose/approve/reject through `Authority` (and the shared `set_current::propose`)
 // against a live Postgres + git store — the write paths that PRODUCE the proposal/approval rows the gated GC +
-// read arms above consume. A test acts as the client device, signing each device-op over the SERVER-rehashed
-// candidate values exactly as the transaction reconstructs them.
+// read arms above consume. A test acts as the client device, presenting its `device_key_id`; the transaction
+// authenticates it by registry-row lookup exactly as production does.
 
 /// The commit `current` points at for a skill (the parent for the next candidate).
 async fn current_commit(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> CommitId {
@@ -535,12 +411,12 @@ async fn current_commit(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> CommitId 
         .expect("a current pointer")
 }
 
-/// Ingest + migrate + sign(PublishPropose) + open the proposal; returns (receipt, candidate commit, digest).
+/// Ingest + migrate + open the proposal (`PublishPropose`); returns (receipt, candidate commit, digest).
 #[allow(clippy::too_many_arguments)]
 async fn do_propose(
     fx: &Fixture,
 
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
 
     dkid: &str,
 
@@ -581,12 +457,13 @@ async fn do_propose(
     (r, staged.version_id, staged.bundle_digest)
 }
 
-/// Sign a `review --approve` over the proposal's (commit, digest, base) and run it through the public API.
+/// Run a `review --approve` on the proposal's (commit, base) through the public API. `_key`/`digest` are
+/// vestigial now that nothing signs — kept so the call sites stay stable.
 #[allow(clippy::too_many_arguments)]
 async fn do_approve(
     fx: &Fixture,
 
-    key: &ed25519_dalek::SigningKey,
+    _key: &[u8; 32],
 
     dkid: &str,
 
@@ -598,26 +475,14 @@ async fn do_approve(
 
     commit: CommitId,
 
-    digest: [u8; 32],
+    _digest: [u8; 32],
 
     base: Generation,
 ) -> crate::SetCurrentReceipt {
     let op_id = op(op_id_str);
-    let sig = sign_op(
-        key,
-        dkid,
-        ws,
-        skill,
-        DeviceOp::ReviewApprove,
-        &op_id,
-        base,
-        commit.0,
-        digest,
-    );
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: dkid.to_owned(),
         op: DeviceOp::ReviewApprove,
-        signature: sig,
         expected: base,
     };
     fx.authority
@@ -626,12 +491,13 @@ async fn do_approve(
         .unwrap()
 }
 
-/// Sign a `review --reject` over the proposal's (commit, digest, base) and run it through the public API.
+/// Run a `review --reject` on the proposal's (commit, base) through the public API. `_key`/`digest` are
+/// vestigial now that nothing signs — kept so the call sites stay stable.
 #[allow(clippy::too_many_arguments)]
 async fn do_reject(
     fx: &Fixture,
 
-    key: &ed25519_dalek::SigningKey,
+    _key: &[u8; 32],
 
     dkid: &str,
 
@@ -643,26 +509,14 @@ async fn do_reject(
 
     commit: CommitId,
 
-    digest: [u8; 32],
+    _digest: [u8; 32],
 
     base: Generation,
 ) -> crate::SetCurrentReceipt {
     let op_id = op(op_id_str);
-    let sig = sign_op(
-        key,
-        dkid,
-        ws,
-        skill,
-        DeviceOp::ReviewReject,
-        &op_id,
-        base,
-        commit.0,
-        digest,
-    );
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: dkid.to_owned(),
         op: DeviceOp::ReviewReject,
-        signature: sig,
         expected: base,
     };
     fx.authority

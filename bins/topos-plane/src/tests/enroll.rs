@@ -1,5 +1,5 @@
 //! The enrollment surface: the state wiring (`with_enroll_config` / `with_mailer`) and the full
-//! device flow to a redeem (happy path + the wrong-device-key denial).
+//! device flow to a redeem (happy path + the wrong-device-key binding denial).
 
 use topos_types::requests::RedeemResponse;
 
@@ -58,7 +58,7 @@ async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-redeem").await;
-    let (grant, user_code, device_pk, device_key) = enroll_to_grant(
+    let (grant, _user_code, device_pk) = enroll_to_grant(
         &ctx,
         "bbbbbbbb-0000-4000-8000-000000000001",
         ALICE_SEED,
@@ -68,15 +68,7 @@ async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
     .await;
 
     let device_key_id = device_key_id_for(&device_pk);
-    let grant_hash = digest::sha256(grant.as_bytes());
-    let sig = sign_enroll(
-        &device_key,
-        grant_hash,
-        &user_code,
-        &device_key_id,
-        device_pk,
-        &[SKILL],
-    );
+    // The grant is the bearer credential; the body presents the matching device public key. No signature.
     let body = serde_json::json!({
         "workspace_id": WS,
         "grant": grant,
@@ -85,7 +77,7 @@ async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
 
     let (status, _, bytes) = send(
         ctx.app(),
-        signed_req("POST", &format!("/v1/workspaces/{WS}/devices"), &sig, body),
+        post_nosig(&format!("/v1/workspaces/{WS}/devices"), body),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -105,7 +97,7 @@ async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn a_redeem_with_a_wrong_device_key_is_denied(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-wrongkey").await;
-    let (grant, user_code, _device_pk, _device_key) = enroll_to_grant(
+    let (grant, _user_code, _device_pk) = enroll_to_grant(
         &ctx,
         "cccccccc-0000-4000-8000-000000000001",
         ALICE_SEED,
@@ -114,19 +106,9 @@ async fn a_redeem_with_a_wrong_device_key_is_denied(pool: PgPool) {
     )
     .await;
 
-    // Present a DIFFERENT device key than the grant binds → the grant's device-key match fails.
-    let wrong = dev_key(99);
-    let wrong_pk = wrong.verifying_key().to_bytes();
-    let wrong_dk = device_key_id_for(&wrong_pk);
-    let grant_hash = digest::sha256(grant.as_bytes());
-    let sig = sign_enroll(
-        &wrong,
-        grant_hash,
-        &user_code,
-        &wrong_dk,
-        wrong_pk,
-        &[SKILL],
-    );
+    // Present a DIFFERENT device public key than the grant is bound to → the redeem's binding check fails
+    // (the leaked-grant-on-another-device case).
+    let wrong_pk = dev_pubkey(99);
     let body = serde_json::json!({
         "workspace_id": WS,
         "grant": grant,
@@ -135,7 +117,7 @@ async fn a_redeem_with_a_wrong_device_key_is_denied(pool: PgPool) {
 
     let (status, _, bytes) = send(
         ctx.app(),
-        signed_req("POST", &format!("/v1/workspaces/{WS}/devices"), &sig, body),
+        post_nosig(&format!("/v1/workspaces/{WS}/devices"), body),
     )
     .await;
     // A device-key mismatch is a 200 + DENIED envelope, never a 403.
@@ -158,11 +140,10 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
     };
 
     let ctx = enroll_setup(pool, "standup-wire").await;
-    let device = dev_key(21);
-    let device_pk = device.verifying_key().to_bytes();
+    let device_pk = dev_pubkey(21);
 
     // AUTHORIZE with intent=standup and NO invite: the response carries the high-entropy code, the
-    // complete verification URI on the verify base, and the plane block to TOFU-pin.
+    // complete verification URI on the verify base, and the plane block.
     let (s, _, b) = send(
         ctx.app(),
         post_nosig(
@@ -196,11 +177,9 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
         plane.deployment_mode,
         topos_types::bootstrap::DeploymentMode::Cloud
     );
-    let expected_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(ctx.authority().plane_public_key().unwrap());
     assert_eq!(
-        plane.signing_key.value, expected_key,
-        "the TOFU root is the plane key"
+        plane.base_url, ENROLL_BASE_URL,
+        "the plane block declares the API base"
     );
 
     // The verification disclosure: intent standup, no workspace yet ("" — the page renders standup copy).
@@ -249,19 +228,7 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
     assert_eq!(ws_block.workspace_id, workspace_id);
     assert_eq!(ws_block.display_name, "Newco");
 
-    // REDEEM over the wire — the possession frame binds the FRESH workspace + the empty offered set.
-    let device_key_id = device_key_id_for(&device_pk);
-    let grant_hash = digest::sha256(grant.as_bytes());
-    let fields = sign::EnrollFields {
-        workspace_id: &ws_block.workspace_id,
-        grant_hash,
-        device_auth_id: &auth.user_code,
-        device_key_id: &device_key_id,
-        device_public_key: device_pk,
-        offered_skill_ids: &[],
-    };
-    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(device.sign(&enroll_preimage(&fields).unwrap()).to_bytes());
+    // REDEEM over the wire — the grant bears the FRESH workspace; the body presents the matching device key.
     let body = serde_json::json!({
         "workspace_id": ws_block.workspace_id,
         "grant": grant,
@@ -269,10 +236,8 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
     });
     let (s, _, b) = send(
         ctx.app(),
-        signed_req(
-            "POST",
+        post_nosig(
             &format!("/v1/workspaces/{}/devices", ws_block.workspace_id),
-            &sig,
             body,
         ),
     )
@@ -292,7 +257,7 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn standup_authorize_contradictory_bodies_are_400(pool: PgPool) {
     let ctx = enroll_setup(pool, "standup-400").await;
-    let device_pk = dev_key(22).verifying_key().to_bytes();
+    let device_pk = dev_pubkey(22);
     // intent=enroll with NO invite token.
     let (s, _, _) = send(
         ctx.app(),
@@ -327,7 +292,7 @@ async fn standup_authorize_contradictory_bodies_are_400(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn standup_authorize_on_a_self_host_plane_is_the_uniform_404(pool: PgPool) {
     let ctx = enroll_setup_mode(pool, "standup-selfhost", DeploymentMode::SelfHost).await;
-    let device_pk = dev_key(23).verifying_key().to_bytes();
+    let device_pk = dev_pubkey(23);
     let (s, _, _) = send(
         ctx.app(),
         post_nosig(

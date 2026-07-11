@@ -19,7 +19,7 @@ async fn propose_opens_a_proposal_without_moving_current(pool: PgPool) {
     )
     .await;
     let g = current_commit(&fx, &w, &s).await;
-    let before = fx.authority.read_signed_record(&w, &s).await.unwrap();
+    let before = fx.authority.db().read_current_record(&w, &s).await.unwrap();
 
     let unique = b"a brand new reference doc";
     let (r, _cp, _d) = do_propose(
@@ -34,13 +34,13 @@ async fn propose_opens_a_proposal_without_moving_current(pool: PgPool) {
     )
     .await;
 
-    // NEEDS_REVIEW, nothing signed, `current` byte-for-byte unchanged (same commit + same signed record).
+    // NEEDS_REVIEW, no pointer written, `current` byte-for-byte unchanged (same commit + same stored record).
     assert_eq!(r.outcome, TerminalOutcome::NeedsReview);
-    assert!(r.signed_record.is_none());
+    assert!(r.record.is_none());
     assert!(r.current.is_none());
     assert_eq!(current_commit(&fx, &w, &s).await, g);
     assert_eq!(
-        fx.authority.read_signed_record(&w, &s).await.unwrap(),
+        fx.authority.db().read_current_record(&w, &s).await.unwrap(),
         before
     );
 
@@ -64,10 +64,9 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool:
     register(&fx, &w, &s, "dk", &key, "p_author").await;
     // No genesis publish: `current` is absent. A `--propose` must fail typed (a proposal needs a base) and
     // upload nothing — the first version is a direct genesis publish.
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: "dk".to_owned(),
         op: DeviceOp::PublishPropose,
-        signature: [0u8; 64],
         expected: gn(0, 0),
     };
     let r = fx
@@ -87,7 +86,8 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool:
     assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
     assert!(
         fx.authority
-            .read_signed_record(&w, &s)
+            .db()
+            .read_current_record(&w, &s)
             .await
             .unwrap()
             .is_none()
@@ -197,7 +197,7 @@ async fn propose_then_approve_promotes_sideways_and_replays_idempotently(pool: P
     )
     .await;
 
-    // Approve promotes sideways: current advances (1,1)->(1,2), signed; the candidate becomes `current`.
+    // Approve promotes sideways: current advances (1,1)->(1,2), pointer written; the candidate becomes `current`.
     let r = do_approve(
         &fx,
         &key,
@@ -212,7 +212,7 @@ async fn propose_then_approve_promotes_sideways_and_replays_idempotently(pool: P
     .await;
     assert!(r.is_ok());
     assert_eq!(r.current, Some(gn(1, 2)));
-    assert!(r.signed_record.is_some());
+    assert!(r.record.is_some());
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 
     // The handoff: the once-proposal-only object is now TRUNK-rooted (commit_object) — survives GC, stays read.
@@ -381,13 +381,7 @@ async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_ma
     .await;
     // Revert --to X -> R(tree=beta, parents=[Y]) -> (1,3). Now current.tree == beta == Q's base tree.
     let rop = op("24000000-0000-4000-8000-000000000004");
-    let rsig = sign_revert(&fx, &key, "dk", &w, &s, x, &rop, gn(1, 2)).await;
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk".to_owned(),
-        op: DeviceOp::Revert,
-        signature: rsig,
-        expected: gn(1, 2),
-    };
+    let rdev = revert_request("dk", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -601,7 +595,7 @@ async fn a_solo_author_may_self_approve_when_review_required_is_off(pool: PgPool
 #[sqlx::test]
 async fn a_staled_then_gc_reclaimed_proposal_approve_conflicts_not_integrity(pool: PgPool) {
     // After a proposal stales AND GC reclaims its unique bytes, a late approve must be a clean CONFLICT — the
-    // pre-transaction render fault is classified as stale (current moved), never surfaced as a corruption alarm.
+    // pre-transaction render fault is classified as stale (current moved), never surfaced as an Integrity fault.
     let fx = Fixture::new(pool, "pr-stale-approve").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(29);
@@ -699,7 +693,7 @@ async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims(pool: PgPo
             .is_ok()
     );
 
-    // Reject ⇒ OK (a reject success carries no pointer data); `current` untouched, nothing signed.
+    // Reject ⇒ OK (a reject success carries no pointer data); `current` untouched, no pointer written.
     let r = do_reject(
         &fx,
         &key,
@@ -713,7 +707,7 @@ async fn reject_flips_open_to_rejected_and_the_unique_object_reclaims(pool: PgPo
     )
     .await;
     assert_eq!(r.outcome, TerminalOutcome::Ok);
-    assert!(r.signed_record.is_none());
+    assert!(r.record.is_none());
     assert_eq!(current_commit(&fx, &w, &s).await, g);
 
     // The rejected proposal's unique object is no longer readable and GC reclaims it.
@@ -812,13 +806,7 @@ async fn an_unrostered_principal_cannot_reject(pool: PgPool) {
     // The stranger's device is registered but NOT rostered for the skill.
     fx.authority
         .db()
-        .seed_device(
-            &w,
-            "dk_stranger",
-            &stranger.verifying_key().to_bytes(),
-            &prin("p_stranger"),
-            false,
-        )
+        .seed_device(&w, "dk_stranger", &stranger, &prin("p_stranger"), false)
         .await
         .unwrap();
     publish(
@@ -997,13 +985,7 @@ async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_read
     let key = dev_key(50);
     fx.authority
         .db()
-        .seed_device(
-            &w,
-            "dk",
-            &key.verifying_key().to_bytes(),
-            &prin("p_stranger"),
-            false,
-        )
+        .seed_device(&w, "dk", &key, &prin("p_stranger"), false)
         .await
         .unwrap();
     let body = b"injected";
@@ -1201,13 +1183,7 @@ async fn revert_to_a_proposal_commit_is_refused_so_it_cannot_bypass_review(pool:
     .await;
     // revert --to <the proposal commit> ⇒ PERMANENT_FAILURE; `current` must NOT advance to the proposal's tree.
     let rop = op("52000000-0000-4000-8000-000000000003");
-    let rsig = sign_revert(&fx, &key, "dk", &w, &s, cp, &rop, gn(1, 1)).await;
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk".to_owned(),
-        op: DeviceOp::Revert,
-        signature: rsig,
-        expected: gn(1, 1),
-    };
+    let rdev = revert_request("dk", gn(1, 1));
     let r = fx
         .authority
         .revert(

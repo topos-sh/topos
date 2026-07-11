@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE current SET epoch = $1, signed_record = $2, updated_at = $3 WHERE workspace_id = $4 AND skill_id = $5 AND epoch = $6 AND seq = $7",
+  "query": "UPDATE current SET epoch = $1, record = $2, updated_at = $3 WHERE workspace_id = $4 AND skill_id = $5 AND epoch = $6 AND seq = $7",
   "describe": {
     "columns": [],
     "parameters": {
@@ -16,5 +16,5 @@
     },
     "nullable": []
   },
-  "hash": "c5949435959831514b8a6286395478fc5024c07d05239e39d7a0eee5044200d0"
+  "hash": "6e581895833e11b4ddae665050a7bab60e845a01bfda6c669e31a67ce1a7c1b7"
 }

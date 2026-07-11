@@ -13,7 +13,7 @@
 //!
 //! sha256 names three DISTINCT id spaces in this system: a file's **content id** (`sha256(raw
 //! bytes)`), the **bundle digest** (`sha256(canonical manifest)`), and the **commit id**
-//! (`sha256(canonical commit frame)` — [`crate::sign`]). All are 32 bytes, and a value can equal a
+//! (`sha256(canonical commit frame)` — [`crate::identity`]). All are 32 bytes, and a value can equal a
 //! value of another space by construction — a file whose bytes ARE a rendered manifest has a content
 //! id equal to that manifest's bundle digest — so the three spaces must never share a column, a
 //! lookup, or a dedup key. A cross-kind by-hash lookup (or a combined cache) would let one space
@@ -81,7 +81,7 @@ pub enum RejectReason {
     ///
     /// NOTE: this catches NFC + ASCII-case collisions. **Full Unicode case-fold** (e.g. Kelvin `K`
     /// U+212A folding to `k`) is genuinely version-sensitive — it needs a *pinned Unicode version*, a
-    /// freeze decision the spec leaves open (tracked alongside the deferred signing encodings). The
+    /// freeze decision the spec leaves open (tracked alongside the other deferred encoding freezes). The
     /// common collisions are caught now; the Unicode-case-fold tail is the documented residual.
     CaseFoldCollision,
 }

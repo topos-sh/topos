@@ -31,7 +31,7 @@ async fn open_proposal(
     fx: &Fixture,
     w: &WorkspaceId,
     s: &SkillId,
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
     op_publish: &str,
     op_propose: &str,
 ) -> (CommitId, CommitId, [u8; 32]) {
@@ -179,12 +179,12 @@ async fn session_approve_promotes_stamps_the_resolution_and_replays_byte_identic
     )
     .await;
 
-    // Approve promotes sideways: current advances (1,1)->(1,2), signed; the candidate becomes `current`.
+    // Approve promotes sideways: current advances (1,1)->(1,2); the candidate becomes `current`.
     let rid = "60000000-0000-4000-8000-000000000003";
     let r = approve_session(&fx, &w, &s, cp, gn(1, 1), rid, "reviewer@acme.com").await;
     assert!(r.is_ok());
     assert_eq!(r.current, Some(gn(1, 2)));
-    assert!(r.signed_record.is_some());
+    assert!(r.record.is_some());
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 
     // The proposal row is accepted with the full resolution stamp: WHO (the reviewer's canonical
@@ -220,7 +220,7 @@ async fn session_approve_promotes_stamps_the_resolution_and_replays_byte_identic
     assert_eq!(sha.as_ref().map(Vec::len), Some(32));
     assert_eq!(outcome, "OK");
 
-    // A same-request_id re-run returns the byte-identical receipt (signed_record included) and the
+    // A same-request_id re-run returns the byte-identical receipt (record included) and the
     // pointer does NOT move twice: seq advanced exactly once, one durable row.
     let replayed = approve_session(&fx, &w, &s, cp, gn(1, 1), rid, "reviewer@acme.com").await;
     assert_eq!(replayed, r);
@@ -330,13 +330,7 @@ async fn aba_a_stale_session_approve_conflicts_even_when_the_live_tree_matches_t
     .await;
     // Revert --to X -> (1,3). Now current.tree == beta == Q's base tree, but the generation moved on.
     let rop = op("62000000-0000-4000-8000-000000000004");
-    let rsig = sign_revert(&fx, &key, "dk", &w, &s, x, &rop, gn(1, 2)).await;
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk".to_owned(),
-        op: DeviceOp::Revert,
-        signature: rsig,
-        expected: gn(1, 2),
-    };
+    let rdev = revert_request("dk", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -642,13 +636,13 @@ async fn session_reject_flips_open_to_rejected_and_records_the_reason_verbatim(p
     )
     .await;
 
-    // Reject ⇒ OK (no pointer data, nothing signed); the reason lands verbatim with WHO and WHEN.
+    // Reject ⇒ OK (no pointer data, no pointer move); the reason lands verbatim with WHO and WHEN.
     let reason = "too broad for our deploy flow";
     let rid = "68000000-0000-4000-8000-000000000003";
     let r = reject_session(&fx, &w, &s, cp, gn(1, 1), reason, rid, "reviewer@acme.com").await;
     assert_eq!(r.outcome, TerminalOutcome::Ok);
     assert_eq!(code_of(&r).as_deref(), Some("PROPOSAL_REJECTED"));
-    assert!(r.signed_record.is_none());
+    assert!(r.record.is_none());
     assert_eq!(current_commit(&fx, &w, &s).await, g);
     assert_eq!(
         resolution_of(&pool, "w_acme", cp, gn(1, 1)).await,
@@ -1063,7 +1057,7 @@ async fn a_raced_device_and_session_approve_sharing_one_op_id_executes_once(pool
     let key = dev_key(73);
     register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
     seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
-    let (_g, cp, digest_) = open_proposal(
+    let (_g, cp, _digest_) = open_proposal(
         &fx,
         &w,
         &s,
@@ -1078,21 +1072,9 @@ async fn a_raced_device_and_session_approve_sharing_one_op_id_executes_once(pool
     // promote, never a CONFLICT (replay runs before the CAS on both lanes).
     let shared = "6d000000-0000-4000-8000-000000000003";
     let op_shared = op(shared);
-    let sig = sign_op(
-        &key,
-        "dk",
-        &w,
-        &s,
-        DeviceOp::ReviewApprove,
-        &op_shared,
-        gn(1, 1),
-        cp.0,
-        digest_,
-    );
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: "dk".to_owned(),
         op: DeviceOp::ReviewApprove,
-        signature: sig,
         expected: gn(1, 1),
     };
     let (rd, rs) = tokio::join!(
@@ -1449,7 +1431,7 @@ async fn session_pretxn_misses_are_synthesized_never_durable(pool: PgPool) {
 // member never triggers the forward-commit staging. These witness: the reviewer happy path + byte-
 // identical replay, the owner|reviewer/member/stranger role matrix (a member's refusal is SYNTHESIZED,
 // unlike approve's durable one — the pre-stage recording rule), the not-accepted-target refusal, the
-// stale CAS CONFLICT (no signature to fail), cross-lane op-id closure, and self-host denial.
+// stale CAS CONFLICT (no credential to fail), cross-lane op-id closure, and self-host denial.
 
 /// A session revert on the CLOUD posture, panicking only on a store fault.
 async fn revert_session(
@@ -1474,7 +1456,7 @@ async fn two_versions(
     fx: &Fixture,
     w: &WorkspaceId,
     s: &SkillId,
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
     op0: &str,
     op1: &str,
 ) -> (CommitId, CommitId, [u8; 32]) {
@@ -1539,7 +1521,7 @@ async fn a_session_revert_by_a_reviewer_moves_current_forward_and_replays_byte_i
     assert_ne!(forward, v0, "revert is a NEW forward commit, not v0 itself");
     assert_eq!(current_commit(&fx, &w, &s).await, forward);
 
-    // The receipt is recorded on the SESSION lane (method + acting email), not device-signed.
+    // The receipt is recorded on the SESSION lane (method + acting email), not a device-lane write.
     let rows = receipts_for(&pool, "w_acme", rid).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -1759,7 +1741,7 @@ async fn a_stale_session_revert_conflicts_with_the_live_generation(pool: PgPool)
     .await;
 
     // The session revert at the STALE expected (1,2) ⇒ a clean CONFLICT carrying the live (1,3). Unlike
-    // the device lane (where a stale parent surfaces as a signature DENIED), the keyless session lane
+    // the device lane (where a stale parent surfaces as a DENIED), the keyless session lane
     // falls straight through to the whole-(epoch,seq) CAS — the same CONFLICT approve gets.
     let rid = "73000000-0000-4000-8000-000000000004";
     let r = revert_session(&fx, &w, &s, v0, gn(1, 2), rid, "reviewer@acme.com").await;
@@ -1794,13 +1776,7 @@ async fn a_device_revert_cannot_reuse_a_session_reverts_request_id(pool: PgPool)
     // forward-commit lease released on the Mismatch arm — no strand). The two lanes never replay each
     // other.
     let dop = op(shared);
-    let dsig = sign_revert(&fx, &key, "dk", &w, &s, v1, &dop, gn(1, 3)).await;
-    let ddev = DeviceSignedOp {
-        device_key_id: "dk".to_owned(),
-        op: DeviceOp::Revert,
-        signature: dsig,
-        expected: gn(1, 3),
-    };
+    let ddev = revert_request("dk", gn(1, 3));
     let rd = fx
         .authority
         .revert(

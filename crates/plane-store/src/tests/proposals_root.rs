@@ -8,7 +8,7 @@ async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_an
     // The keep-set == read-surface crux: an open, non-stale proposal's unique object is kept + readable; the
     // instant a publish stales the proposal the SAME object drops out of read AND retention together (no
     // event, no reaper), and
-    // a read of the reclaimed object is 404 — never an Integrity corruption alarm.
+    // a read of the reclaimed object is 404 — never an Integrity corruption fault.
     let fx = Fixture::new(pool, "prop-crux").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
@@ -56,7 +56,7 @@ async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_an
         a.db().object_status(&w, x).await.unwrap(),
         ObjectStatus::Absent
     );
-    // A read of the reclaimed object is 404 — NEVER an Integrity alarm (keep-set == read surface).
+    // A read of the reclaimed object is 404 — NEVER an Integrity fault (keep-set == read surface).
     assert!(matches!(
         a.read_object(&reader, &w, &s, x).await,
         Err(AuthorityError::NotFound)
@@ -179,7 +179,7 @@ async fn genuine_corruption_under_an_open_proposal_is_integrity_not_masked_as_40
     // The read-time TOCTOU guard re-authorizes on a fetch miss and downgrades to 404 ONLY when the object is
     // no longer authorized (a legitimately reclaimed proposal object). An object STILL rooted by an open,
     // non-stale proposal whose bytes are gone is genuine corruption — the guard's re-authorize returns Some,
-    // so the Integrity alarm must STAND, never be masked. (The guard's converse — the concurrent
+    // so the Integrity fault must STAND, never be masked. (The guard's converse — the concurrent
     // authorize→stale→reclaim→fetch race that downgrades to 404 — is a window the single-threaded harness
     // cannot interleave; its outcome equals the reclaimed-object 404 the crux test asserts.)
     let fx = Fixture::new(pool, "prop-corrupt").await;

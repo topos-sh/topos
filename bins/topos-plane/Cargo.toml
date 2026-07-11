@@ -67,15 +67,15 @@ uuid.workspace = true # validate that a write op_id is a canonical UUID at the e
 
 [dev-dependencies]
 # The per-route tests drive `router(state)` via `oneshot` (no socket), seeding an authority through the
-# feature-gated shims and signing device ops with a deterministic key. `plane-store/test-fixtures` is dev-ONLY
-# here, so the production `cargo build -p topos-plane` never enables it (the CI guard asserts this).
+# feature-gated shims and presenting the device credential (the body's `device_key_id`) — no signatures.
+# `plane-store/test-fixtures` is dev-ONLY here, so the production `cargo build -p topos-plane` never enables
+# it (the CI guard asserts this).
 plane-store = { workspace = true, features = ["test-fixtures"] }
 # The route tests inject a per-test Postgres via `#[sqlx::test]` into `Authority::from_pool`; the single
 # parity test that exercises the production `PlaneState::open(database_url)` path provisions its own database
 # and passes its URL. Dev-only, so the production plane build never carries a driver it doesn't use.
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 tower = { version = "0.5", features = ["util"] }
-ed25519-dalek = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use topos_core::digest::{self, FileMode, ManifestEntry, RejectReason};
 use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
-use topos_types::{Generation, SignedCurrentRecord};
+use topos_types::{Generation, WireCurrentRecord};
 
 use crate::authority::{Authority, run_blocking};
 use crate::db::{Location, ReadLane};
@@ -146,10 +146,21 @@ impl ReadScope {
             lane: ReadLane::WorkspaceMember,
         }
     }
+    /// The skill-roster-lane constructor — called ONLY by the directory's read-token resolver, from the
+    /// trusted token row's own `(workspace, skill, principal)` (never a caller-asserted id). The scope's
+    /// reads then re-gate on the roster lane per statement.
+    pub(crate) fn for_skill_roster(ws: WorkspaceId, skill: SkillId, principal: Principal) -> Self {
+        Self {
+            ws,
+            skill,
+            principal,
+            lane: ReadLane::SkillRoster,
+        }
+    }
 }
 
-/// A skill's signed `current` pointer, ready to serve: the raw `SignedCurrentRecord` bytes a follower
-/// verifies, plus the `(epoch, seq)` AND the `version_id` extracted from them (so the caller can build a
+/// A skill's `current` pointer, ready to serve: the raw `WireCurrentRecord` bytes a follower applies,
+/// plus the `(epoch, seq)` AND the `version_id` extracted from them (so the caller can build a
 /// **commit-sensitive** ETag / `304` — a clean field comparison against the client's known commit — without
 /// re-parsing the blob in the handler).
 #[derive(Debug, Clone)]
@@ -158,7 +169,7 @@ pub struct CurrentPointer {
     /// The commit id `current` names — pulled from the deserialized `record.record.version_id` so the
     /// current handler can compare it to the client's `Topos-Known-Version-Id` for the commit-sensitive 304.
     pub version_id: [u8; 32],
-    pub signed_record: Vec<u8>,
+    pub record: Vec<u8>,
 }
 
 /// One file of a version's metadata — its bundle-relative path, mode, and content id (`object_id`). The
@@ -195,40 +206,9 @@ pub struct OpenProposalSummary {
     pub created_at: String,
 }
 
-/// Resolve a presented read token to its opaque [`ReadScope`] — the read-credential resolver.
-///
-/// Hashes the token (the table stores ONLY the sha256 — the plaintext is a `0600` secret at rest on the
-/// follower, never recoverable from a database read) and does one indexed lookup on the hash. A miss is the
-/// single indistinguishable [`AuthorityError::NotFound`], so a caller can never probe which tokens,
-/// workspaces, or skills exist; a stored row that fails to re-parse is store corruption (handled in
-/// [`crate::db`], not surfaced as not-found).
-///
-/// # Errors
-/// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
-/// [`AuthorityError::Integrity`] if a stored row is corrupt.
-pub(crate) async fn resolve_read_token(
-    authority: &Authority,
-    token: &str,
-    now: i64,
-) -> Result<ReadScope> {
-    let token_sha256 = digest::sha256(token.as_bytes());
-    // `now` enforces the token's `expires_at` (a NULL expiry never expires — legacy + non-expiring rows): an
-    // expired token resolves to the same indistinguishable `NotFound` as an unknown one, so a per-device
-    // revoke (which also drops the row) and an expiry are both an instant 404, never an enumeration oracle.
-    match authority.db().lookup_read_token(&token_sha256, now).await? {
-        Some((ws, skill, principal)) => Ok(ReadScope {
-            ws,
-            skill,
-            principal,
-            lane: ReadLane::SkillRoster,
-        }),
-        None => Err(AuthorityError::NotFound),
-    }
-}
-
-/// Read a skill's signed `current` pointer for an authenticated scope. `None` until the pointer has been
-/// moved (signed). Reuses the unauthenticated [`Authority::read_signed_record`] for the raw bytes, then
-/// extracts the generation from the deserialized record.
+/// Read a skill's `current` pointer for an authenticated scope. `None` until the pointer has first been
+/// moved. Reads the stored record bytes, then extracts the generation + version id from the deserialized
+/// record.
 ///
 /// # Errors
 /// [`AuthorityError::Integrity`] if the stored record blob is unparseable — corruption, NEVER a not-found
@@ -237,14 +217,15 @@ pub(crate) async fn read_current(
     authority: &Authority,
     scope: &ReadScope,
 ) -> Result<Option<CurrentPointer>> {
-    let Some(signed_record) = authority
-        .read_signed_record(scope.ws(), scope.skill())
+    let Some(record_bytes) = authority
+        .db()
+        .read_current_record(scope.ws(), scope.skill())
         .await?
     else {
         return Ok(None);
     };
-    let record: SignedCurrentRecord =
-        serde_json::from_slice(&signed_record).map_err(AuthorityError::integrity)?;
+    let record: WireCurrentRecord =
+        serde_json::from_slice(&record_bytes).map_err(AuthorityError::integrity)?;
     // Pull the version_id (hex64 → [u8;32]) alongside the generation: the record exists, so a malformed
     // version_id field is store corruption (an Integrity fault), never a not-found.
     let version_id = parse_hex32(&record.record.version_id)
@@ -252,12 +233,12 @@ pub(crate) async fn read_current(
     Ok(Some(CurrentPointer {
         generation: record.record.generation,
         version_id,
-        signed_record,
+        record: record_bytes,
     }))
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("a stored signed record carries a malformed version_id")]
+#[error("a stored current record carries a malformed version_id")]
 struct BadVersionIdHex;
 
 /// Serve one object's bytes for an authenticated scope, asserting the scope's `(ws, skill)` matches the

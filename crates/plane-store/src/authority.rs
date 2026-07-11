@@ -15,7 +15,7 @@ use crate::enroll::{
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
     ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
-    GovernanceOutcome, GovernanceSignedOp, MintClaimOutcome,
+    GovernanceOutcome, GovernanceRequest, MintClaimOutcome,
 };
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
@@ -24,8 +24,7 @@ use crate::session_read::SkillIndexRow;
 use crate::session_roster::{
     RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
-use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
-use crate::signer::PlaneSigner;
+use crate::set_current::{DeviceOpRequest, SetCurrentReceipt};
 use crate::upload::CandidateUpload;
 
 /// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
@@ -84,10 +83,6 @@ pub struct Authority {
     large_threshold: u64,
     /// Per-blob hard reject cap, enforced at ingest.
     large_reject_cap: u64,
-    /// The in-process plane signer — the ONLY private-key holder, loaded by
-    /// [`with_plane_key`](Self::with_plane_key). Absent until configured: the pointer-move requires it (a
-    /// typed precondition), while every other operation (read/upload/lineage/lifecycle) never signs.
-    signer: Option<PlaneSigner>,
     /// The enrollment + governance issuance state — the `0600` HMAC secret + the static config, loaded by
     /// [`with_enrollment_config`](Self::with_enrollment_config). Absent until configured: every
     /// enrollment/governance op requires it (a typed precondition); every other op never touches it.
@@ -129,7 +124,6 @@ impl Authority {
             large_root: large_root.to_path_buf(),
             large_threshold: DEFAULT_LARGE_THRESHOLD,
             large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
-            signer: None,
             enrollment: None,
         })
     }
@@ -152,13 +146,12 @@ impl Authority {
             large_root: large_root.to_path_buf(),
             large_threshold: DEFAULT_LARGE_THRESHOLD,
             large_reject_cap: DEFAULT_LARGE_REJECT_CAP,
-            signer: None,
             enrollment: None,
         })
     }
 
     /// Load (or first-run generate + persist `0600`) the enrollment HMAC secret from the config's
-    /// `secret_path`, enabling the enrollment + governance ops. Mirrors [`with_plane_key`](Self::with_plane_key)
+    /// `secret_path`, enabling the enrollment + governance ops. Uses the same `0600` seed custody
     /// (the secret's custody is the plane key's exact custody — re-validated owner-only, atomically published)
     /// and holds the static config the bootstrap reads. The secret is read once here — never per-op, never
     /// inside a transaction.
@@ -167,18 +160,6 @@ impl Authority {
     /// [`AuthorityError::Internal`] if the secret file cannot be read/created/validated.
     pub fn with_enrollment_config(mut self, config: EnrollmentConfig) -> Result<Self> {
         self.enrollment = Some(EnrollmentState::load(config)?);
-        Ok(self)
-    }
-
-    /// Load (or, on first run, generate + persist `0600`) the plane signing key from `path`, enabling the
-    /// pointer-move. The key is read once here — never per-op, never inside a transaction. Self-host needs
-    /// zero config (the key is generated on first run); an operator may pre-place a 32-byte seed at `path`
-    /// instead. At-rest encryption / KMS is the named next step.
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if the key file cannot be read/created/validated.
-    pub fn with_plane_key(mut self, path: &Path) -> Result<Self> {
-        self.signer = Some(PlaneSigner::load_or_generate(path)?);
         Ok(self)
     }
 
@@ -244,12 +225,12 @@ impl Authority {
     /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
     /// [`AuthorityError::Integrity`] if a stored token row is corrupt.
     pub async fn resolve_read_token(&self, token: &str, now: i64) -> Result<ReadScope> {
-        crate::read::resolve_read_token(self, token, now).await
+        crate::enroll::resolve_read_token(self, token, now).await
     }
 
-    /// Read a skill's signed `current` pointer for an authenticated [`ReadScope`] — the public authenticated
+    /// Read a skill's `current` pointer for an authenticated [`ReadScope`] — the public authenticated
     /// pointer-fetch surface (what a follower's currency check returns). `None` until the pointer has been
-    /// moved (signed); otherwise the raw `SignedCurrentRecord` bytes plus the extracted `(epoch, seq)`.
+    /// moved; otherwise the raw `WireCurrentRecord` bytes plus the extracted `(epoch, seq)`.
     ///
     /// # Errors
     /// [`AuthorityError::Integrity`] if the stored record blob is unparseable (corruption, never not-found);
@@ -303,7 +284,7 @@ impl Authority {
     /// object/version reads (keep == read == list). A NON-rostered principal with a valid token yields an
     /// EMPTY list, never a not-found (the roster JOIN is the authz; there is no per-row probe); a scope/path
     /// mismatch is the single indistinguishable [`AuthorityError::NotFound`]. This is a READ — nothing is
-    /// signed, no governance is consulted, no body is taken.
+    /// moved, no governance is consulted, no body is taken.
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on a scope/path mismatch; [`AuthorityError::Integrity`] if a stored row is
@@ -342,8 +323,7 @@ impl Authority {
     /// keeps any existing name.
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
-    /// configured ([`with_plane_key`](Self::with_plane_key)).
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish(
         &self,
@@ -351,16 +331,16 @@ impl Authority {
         skill: &SkillId,
         op_id: &OpId,
         candidate: CandidateUpload,
-        device: DeviceSignedOp,
+        device: DeviceOpRequest,
         display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        // A direct publish must be signed as exactly that. Forwarding an arbitrary device op (e.g. a
+        // A direct publish must arrive as exactly that. Forwarding an arbitrary device op (e.g. a
         // `Revert`-labelled candidate of new bytes) would skip the direct-publish review gate while still
         // reaching the promote path — a review bypass. Reject anything but `PublishDirect` BEFORE ingesting
         // (so a misuse uploads/migrates/leases nothing).
-        if !matches!(device.op, topos_core::sign::DeviceOp::PublishDirect) {
+        if !matches!(device.op, crate::set_current::DeviceOp::PublishDirect) {
             return crate::set_current::reject_non_publish_op(
                 self, ws, skill, op_id, &device, created_at,
             )
@@ -409,17 +389,17 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         good: CommitId,
-        device: DeviceSignedOp,
+        device: DeviceOpRequest,
         author: &str,
         message: &str,
         op_id: &OpId,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        // A revert must be signed as exactly `Revert` (mirroring the publish/propose/review guards): a
+        // A revert must arrive as exactly `Revert` (mirroring the publish/propose/review guards): a
         // mismatched op would otherwise mis-route into the promote arms. Reject it before constructing the
         // forward commit, recording nothing.
-        if !matches!(device.op, topos_core::sign::DeviceOp::Revert) {
+        if !matches!(device.op, crate::set_current::DeviceOp::Revert) {
             return crate::set_current::reject_op_mismatch(
                 self,
                 ws,
@@ -427,7 +407,7 @@ impl Authority {
                 op_id,
                 &device,
                 created_at,
-                "a revert must be signed as Revert",
+                "a revert must arrive as Revert",
             )
             .await;
         }
@@ -438,7 +418,6 @@ impl Authority {
             good,
             crate::actor::WriteActor::Device {
                 device_key_id: &device.device_key_id,
-                signature: &device.signature,
             },
             device.expected,
             author,
@@ -454,7 +433,7 @@ impl Authority {
     /// motion's first half). The full flow: ingest + migrate (the crash-safe quarantine → lease → install →
     /// record, exactly as `publish`), then the one pure-DB transaction opens a `proposals` row and roots the
     /// candidate's bytes through `proposal_object` (gated on `open ∧ non-stale` for both retention and read).
-    /// Returns `NEEDS_REVIEW`; `current` is byte-for-byte unchanged and nothing is signed. A later
+    /// Returns `NEEDS_REVIEW`; `current` is byte-for-byte unchanged and no pointer moves. A later
     /// [`review_approve`](Self::review_approve) promotes it. Genesis cannot be proposed (publish the first
     /// version directly); a `--propose` against a skill with no `current` is a typed failure that uploads nothing.
     ///
@@ -462,8 +441,7 @@ impl Authority {
     /// proposal moves no pointer, so no name is recorded until a later publish/approve advances `current`.
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the plane key must be
-    /// configured ([`with_plane_key`](Self::with_plane_key)).
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault.
     #[allow(clippy::too_many_arguments)]
     pub async fn propose(
         &self,
@@ -471,15 +449,15 @@ impl Authority {
         skill: &SkillId,
         op_id: &OpId,
         candidate: CandidateUpload,
-        device: DeviceSignedOp,
+        device: DeviceOpRequest,
         display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        // A proposal must be signed as exactly `PublishPropose`. Forwarding another device op could reach the
+        // A proposal must arrive as exactly `PublishPropose`. Forwarding another device op could reach the
         // promote path (which moves `current`) — a gate bypass — so reject anything else BEFORE ingesting (a
         // misuse uploads/migrates/opens nothing).
-        if !matches!(device.op, topos_core::sign::DeviceOp::PublishPropose) {
+        if !matches!(device.op, crate::set_current::DeviceOp::PublishPropose) {
             return crate::set_current::reject_op_mismatch(
                 self,
                 ws,
@@ -487,7 +465,7 @@ impl Authority {
                 op_id,
                 &device,
                 created_at,
-                "a proposal must be signed as PublishPropose",
+                "a proposal must arrive as PublishPropose",
             )
             .await;
         }
@@ -536,12 +514,12 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         commit: CommitId,
-        device: DeviceSignedOp,
+        device: DeviceOpRequest,
         op_id: &OpId,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        if !matches!(device.op, topos_core::sign::DeviceOp::ReviewApprove) {
+        if !matches!(device.op, crate::set_current::DeviceOp::ReviewApprove) {
             return crate::set_current::reject_op_mismatch(
                 self,
                 ws,
@@ -549,7 +527,7 @@ impl Authority {
                 op_id,
                 &device,
                 created_at,
-                "a review approval must be signed as ReviewApprove",
+                "a review approval must arrive as ReviewApprove",
             )
             .await;
         }
@@ -560,7 +538,6 @@ impl Authority {
             commit,
             crate::actor::WriteActor::Device {
                 device_key_id: &device.device_key_id,
-                signature: &device.signature,
             },
             device.expected,
             op_id,
@@ -583,11 +560,11 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         commit: CommitId,
-        device: DeviceSignedOp,
+        device: DeviceOpRequest,
         op_id: &OpId,
         created_at: &str,
     ) -> Result<SetCurrentReceipt> {
-        if !matches!(device.op, topos_core::sign::DeviceOp::ReviewReject) {
+        if !matches!(device.op, crate::set_current::DeviceOp::ReviewReject) {
             return crate::set_current::reject_op_mismatch(
                 self,
                 ws,
@@ -595,7 +572,7 @@ impl Authority {
                 op_id,
                 &device,
                 created_at,
-                "a review rejection must be signed as ReviewReject",
+                "a review rejection must arrive as ReviewReject",
             )
             .await;
         }
@@ -606,7 +583,6 @@ impl Authority {
             commit,
             crate::actor::WriteActor::Device {
                 device_key_id: &device.device_key_id,
-                signature: &device.signature,
             },
             device.expected,
             None,
@@ -622,8 +598,8 @@ impl Authority {
     // these with the session's VERIFIED email — the composing caller's session verification is the
     // authentication; the in-transaction gate (a confirmed OWNER or REVIEWER workspace seat — the first
     // enforcement of the reviewer role) is the authorization. The write terminates in the SAME
-    // serializable transaction as the device lane (one approve predicate, one CAS, one plane-signed
-    // pointer, one four-eyes gate); `plane_mode` is the plane's own posture threaded by the composer,
+    // serializable transaction as the device lane (one approve predicate, one CAS, one pointer
+    // advance, one four-eyes gate); `plane_mode` is the plane's own posture threaded by the composer,
     // never a request field; self-host is uniformly denied.
 
     /// **Approve an open proposal from a verified web session** — the browser's "Make current".
@@ -632,8 +608,8 @@ impl Authority {
     /// applies across lanes (the proposer's canonical email may not approve its own proposal).
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
-    /// configured ([`Authority::with_plane_key`]). Every protocol outcome is a receipt, not an error.
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault. Every protocol
+    /// outcome is a receipt, not an error.
     #[allow(clippy::too_many_arguments)]
     pub async fn review_approve_session(
         &self,
@@ -708,8 +684,8 @@ impl Authority {
     /// `method = web_session` + the acting principal. Idempotent per `request_id` (a canonical UUID).
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
-    /// configured ([`Authority::with_plane_key`]). Every protocol outcome is a receipt, not an error.
+    /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault. Every protocol
+    /// outcome is a receipt, not an error.
     #[allow(clippy::too_many_arguments)]
     pub async fn revert_session(
         &self,
@@ -769,27 +745,28 @@ impl Authority {
 
     // ── enrollment + governance issuance (every op decided in-Authority; requires with_enrollment_config) ──
 
-    /// Create an owner-signed **invite** — mint the opaque `/i/<token>` link, store it (hash-only), seed the
-    /// invited members at `role` (`status = 'invited'`), and record the governance receipt. GOVERNANCE-signed
-    /// (the signing owner's device-op signature is verified in-transaction). `op_id`-idempotent: a retry with
-    /// the matching bound identity re-derives the IDENTICAL link and replays the receipt; a different request
-    /// under the same op id is a denied key-reuse. The role + skills come from `signed.op` (a `GovernanceOp::Invite`).
+    /// Create an owner-driven **invite** — mint the opaque `/i/<token>` link, store it (hash-only), seed the
+    /// invited members at `role` (`status = 'invited'`), and record the governance receipt. The acting
+    /// device credential is authenticated by registry lookup in-transaction and its principal's OWNER role
+    /// enforced there. `op_id`-idempotent: a retry with the matching bound identity re-derives the
+    /// IDENTICAL link and replays the receipt; a different request under the same op id is a denied
+    /// key-reuse. The role + skills come from `request.op` (a `GovernanceOp::Invite`).
     ///
     /// # Errors
-    /// [`AuthorityError::Internal`] if no enrollment config / plane key is set; a database fault.
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
     pub async fn create_invite(
         &self,
         ws: &WorkspaceId,
         op_id: &str,
-        signed: GovernanceSignedOp,
+        request: GovernanceRequest,
         created_at: &str,
     ) -> Result<CreateInviteOutcome> {
-        crate::governance::create_invite(self, ws, op_id, &signed, created_at).await
+        crate::governance::create_invite(self, ws, op_id, &request, created_at).await
     }
 
-    /// Resolve an invite link to its **bootstrap payload** — the workspace identity, the offered skills, and
-    /// the plane signing root to TOFU-pin (no bytes, no role). A revoked/expired/absent invite is the single
-    /// indistinguishable [`AuthorityError::NotFound`].
+    /// Resolve an invite link to its **bootstrap payload** — the workspace identity, the offered skills,
+    /// and the API base to enroll against (no bytes, no role). A revoked/expired/absent invite is the
+    /// single indistinguishable [`AuthorityError::NotFound`].
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
@@ -927,31 +904,24 @@ impl Authority {
         crate::enroll::complete_passcode(self, user_code, email, code, now).await
     }
 
-    /// **Redeem** an enrollment grant — THE central op. In one transaction: re-derive the device key id, check
-    /// the grant binds this device, verify the enrollment possession proof against the grant's bound key
-    /// ([`topos_core::sign::verify_enroll`]), apply the roster gate (cloud requires a confirmed identity;
-    /// self-host grants membership), register the device, and mint per-skill read tokens. **Returns no user
-    /// token, ever.** Naturally idempotent — a replay re-derives identical read tokens.
+    /// **Redeem** an enrollment grant — THE central op. The GRANT is the bearer credential (a
+    /// deterministic HMAC secret, stored only as its sha256). In one transaction: re-derive the device key
+    /// id, check the grant binds exactly this presented device key, apply the roster gate (cloud requires
+    /// a confirmed identity; self-host grants membership), register the device, and mint per-skill read
+    /// tokens. **Returns no user token, ever.** Naturally idempotent — a replay re-derives identical read
+    /// tokens.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
     pub async fn redeem_enrollment(
         &self,
         grant_token: &str,
-        enroll_sig: &[u8; 64],
         device_public_key: [u8; 32],
         now: i64,
         created_at: &str,
     ) -> Result<RedeemOutcome> {
-        crate::enroll::redeem_enrollment(
-            self,
-            grant_token,
-            enroll_sig,
-            device_public_key,
-            now,
-            created_at,
-        )
-        .await
+        crate::enroll::redeem_enrollment(self, grant_token, device_public_key, now, created_at)
+            .await
     }
 
     /// **Admin claim** (the one-time first-boot bearer: self-host standup + the cloud break-glass) —
@@ -1082,7 +1052,7 @@ impl Authority {
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
     /// threaded by the composing caller — never a request field. ALL session roster ops are uniformly
-    /// denied on a self-host plane (self-host membership stays the device-signed invite chain).
+    /// denied on a self-host plane (self-host membership stays the device invite chain).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1214,14 +1184,14 @@ impl Authority {
         crate::session_read::list_skills_session(self, ws, acting_email, plane_mode).await
     }
 
-    /// The workspace catalog for a DEVICE-signed member read (`list --remote`) — the catalog-visibility
+    /// The workspace catalog for a DEVICE-credential member read (`list --remote`) — the catalog-visibility
     /// twin of [`list_skills_session`](Self::list_skills_session), authorized WITHOUT a web session and
     /// available on BOTH cloud and self-host (device auth IS the self-host membership story, so this op
     /// does **not** take or consult a [`DeploymentMode`]). Authorized iff the device is a NON-REVOKED
-    /// registered device, its catalog-read signature over `(workspace_id, device_key_id)` verifies against
-    /// its registered key, and its bound principal is a CONFIRMED workspace member. Every unknown/revoked
-    /// device, bad signature, or non-member is the single indistinguishable [`AuthorityError::NotFound`]. A
-    /// pool read — no transaction, no receipt, no op id. `now` is accepted for signature parity with the
+    /// registered device (the credential lookup IS the authentication) and its bound principal is a
+    /// CONFIRMED workspace member. Every unknown/revoked
+    /// device, or non-member, is the single indistinguishable [`AuthorityError::NotFound`]. A
+    /// pool read — no transaction, no receipt, no op id. `now` is accepted for call-shape parity with the
     /// token-lane reads (device registration carries no expiry to enforce).
     ///
     /// # Errors
@@ -1231,14 +1201,13 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         device_key_id: &str,
-        signature: &[u8; 64],
         now: i64,
     ) -> Result<Vec<SkillIndexRow>> {
-        crate::session_read::list_skills_device(self, ws, device_key_id, signature, now).await
+        crate::session_read::list_skills_device(self, ws, device_key_id, now).await
     }
 
-    /// A skill's signed `current` pointer for a confirmed member. `Ok(None)` — no signed pointer exists
-    /// for this (ws, skill): a cataloged-but-never-signed skill and an unknown skill id are deliberately
+    /// A skill's `current` pointer for a confirmed member. `Ok(None)` — no pointer record exists
+    /// for this (ws, skill): a cataloged-but-recordless skill and an unknown skill id are deliberately
     /// indistinguishable here; the composing wrapper folds both into the uniform miss — is a
     /// member-entitled post-gate outcome, distinct from this layer's uniform `NotFound`.
     ///
@@ -1326,7 +1295,7 @@ impl Authority {
 
     /// Resolve an admin-claim link token to its **bootstrap payload** (the `/i/` claim branch): the
     /// workspace-to-be's identity from the claim row, no skills, `enrollment_method = "admin_claim"`, and
-    /// the plane signing root to TOFU-pin. A consumed/expired/unknown claim is the single indistinguishable
+    /// the enrollment method + API base. A consumed/expired/unknown claim is the single indistinguishable
     /// [`AuthorityError::NotFound`]. Claim resolution never touches the invites table (nor vice versa).
     ///
     /// # Errors
@@ -1336,7 +1305,7 @@ impl Authority {
     }
 
     /// **Set** a principal's workspace role (owner-only governance op, with the last-owner-lockout guard).
-    /// GOVERNANCE-signed + `op_id`-idempotent. The role + target come from `signed.op` (a `GovernanceOp::RosterSet`).
+    /// Device-credential authenticated + `op_id`-idempotent. The role + target come from `request.op` (a `GovernanceOp::RosterSet`).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1344,17 +1313,17 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         op_id: &str,
-        signed: GovernanceSignedOp,
+        request: GovernanceRequest,
         created_at: &str,
     ) -> Result<GovernanceOutcome> {
-        if !matches!(signed.op, GovernanceOp::RosterSet { .. }) {
+        if !matches!(request.op, GovernanceOp::RosterSet { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a roster_set"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &signed, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
     }
 
     /// **Remove** a principal from the workspace roster (owner-only, with the last-owner-lockout guard).
-    /// GOVERNANCE-signed + `op_id`-idempotent. The target comes from `signed.op` (a `GovernanceOp::RosterRemove`).
+    /// Device-credential authenticated + `op_id`-idempotent. The target comes from `request.op` (a `GovernanceOp::RosterRemove`).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1362,18 +1331,18 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         op_id: &str,
-        signed: GovernanceSignedOp,
+        request: GovernanceRequest,
         created_at: &str,
     ) -> Result<GovernanceOutcome> {
-        if !matches!(signed.op, GovernanceOp::RosterRemove { .. }) {
+        if !matches!(request.op, GovernanceOp::RosterRemove { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a roster_remove"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &signed, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
     }
 
     /// **Revoke** a registered device — flip `revoked` AND drop its read tokens in one transaction (instant
-    /// per-device revoke). Owner OR the device's own principal may sign. GOVERNANCE-signed + `op_id`-idempotent.
-    /// The target device key id comes from `signed.op` (a `GovernanceOp::DeviceRevoke`).
+    /// per-device revoke). Owner OR the device's own principal may act. Device-credential authenticated +
+    /// `op_id`-idempotent. The target device key id comes from `request.op` (a `GovernanceOp::DeviceRevoke`).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1381,13 +1350,13 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         op_id: &str,
-        signed: GovernanceSignedOp,
+        request: GovernanceRequest,
         created_at: &str,
     ) -> Result<GovernanceOutcome> {
-        if !matches!(signed.op, GovernanceOp::DeviceRevoke { .. }) {
+        if !matches!(request.op, GovernanceOp::DeviceRevoke { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a device_revoke"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &signed, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
     }
 
     /// Every workspace currently holding stored objects (an `object_presence` row exists) — the enumeration
@@ -1447,29 +1416,13 @@ impl Authority {
     /// direct publish short-circuits to `APPROVAL_REQUIRED` (ingesting nothing) and an approval requires a
     /// second, distinct reviewer (four-eyes); genesis + revert bypass it. This is the authorized public op a
     /// downstream plane (or its admin console) toggles; the test-only `seed_review_required` shim delegates
-    /// to it. A trusted caller (the toggle is not itself device-op-signed — the device-signed governance
+    /// to it. A trusted caller (the toggle carries no device credential of its own — the device-credential governance
     /// route over this policy is later work); authorization to call it is the composing plane's concern.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
     pub async fn set_review_required(&self, ws: &WorkspaceId, review_required: bool) -> Result<()> {
         self.db.set_review_required(ws, review_required).await
-    }
-
-    /// The plane's raw 32-byte Ed25519 **public** key — for a follower to pin the trust root out-of-band.
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if no plane key is configured.
-    pub fn plane_public_key(&self) -> Result<[u8; 32]> {
-        Ok(self.plane_signer()?.public_key())
-    }
-
-    /// The plane's signing key id (the `key_id` in a signed pointer + an OK receipt).
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if no plane key is configured.
-    pub fn plane_key_id(&self) -> Result<String> {
-        Ok(self.plane_signer()?.key_id().to_owned())
     }
 
     /// The enrollment-config disclosure (API base URL / deployment posture / enrollment method) — what a
@@ -1488,33 +1441,11 @@ impl Authority {
         })
     }
 
-    /// Read back a skill's signed `current` record — the serialized `SignedCurrentRecord` bytes. `None`
-    /// until the pointer has been moved (signed). **Unauthenticated** and `pub(crate)`: the public
-    /// authenticated pointer-fetch surface is [`read_current`](Self::read_current), which takes a resolved
-    /// [`ReadScope`]; this raw read is an internal building block (and the in-crate tests' assertion hook).
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] on a database fault.
-    pub(crate) async fn read_signed_record(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-    ) -> Result<Option<Vec<u8>>> {
-        self.db.read_signed_record(ws, skill).await
-    }
-
     // ── pub(crate) internals the port modules drive ──────────────────────────────────────────────
 
     /// The Postgres backend handle (raw SQL stays inside `mod db`).
     pub(crate) fn db(&self) -> &Db {
         &self.db
-    }
-
-    /// The configured plane signer, or a typed precondition fault — the pointer-move requires a key.
-    pub(crate) fn plane_signer(&self) -> Result<&PlaneSigner> {
-        self.signer
-            .as_ref()
-            .ok_or_else(|| AuthorityError::internal(NoPlaneKey))
     }
 
     /// The configured enrollment state (secret + config), or a typed precondition fault — every
@@ -1625,9 +1556,3 @@ where
         .await
         .map_err(AuthorityError::internal)?
 }
-
-/// The pointer-move was attempted with no plane signing key configured (a precondition fault, not a
-/// protocol outcome — wired as an internal error so no key state crosses the public boundary).
-#[derive(Debug, thiserror::Error)]
-#[error("no plane signing key configured (call with_plane_key)")]
-struct NoPlaneKey;

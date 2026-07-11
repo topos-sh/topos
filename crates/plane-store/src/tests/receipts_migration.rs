@@ -1,18 +1,23 @@
-//! The migration-0012 op_receipts widening (rename + lane columns), probed against MIRROR tables.
+//! The op_receipts migration chain (0012 widening + 0013 de-crypto), probed against MIRROR tables.
 //!
-//! An honest caveat up front: `#[sqlx::test]` databases arrive with `0012_web_review` already
-//! applied — the rename, the new columns, and their CHECKs are live on the real `op_receipts` — so
-//! the pre-migration state (rows keyed `device_key_id`, no `method`) can no longer be seeded there.
-//! Each test therefore creates PROBE tables whose DDL is hand-copied from migrations `0003`
-//! (`op_receipts`) and `0004` (`proposals`) — the pre-0012 shapes — seeds device-era receipt rows,
-//! and executes the statements of `migrations/0012_web_review.sql` ITSELF (`include_str!`, table
-//! names textually rewritten to the probe names, split on `;`). If the migration file's SQL ever
-//! drifts, these tests re-run the new text verbatim (the `canonical_migration` pattern).
+//! An honest caveat up front: `#[sqlx::test]` databases arrive with the WHOLE migration set applied —
+//! 0012's rename/new-columns/CHECKs AND 0013's de-crypto (signed_record → record, DROP key_id, method
+//! 'device_signed' → 'device') are already live on the real `op_receipts` — so the pre-migration state
+//! (rows keyed `device_key_id`, no `method`) can no longer be seeded there. Each test therefore creates
+//! PROBE tables whose DDL is hand-copied from migrations `0003` (`op_receipts`) and `0004` (`proposals`)
+//! — the pre-0012 shapes — seeds device-era receipt rows, then executes the statements of
+//! `migrations/0012_web_review.sql` AND the op_receipts statements of `migrations/0013_decrypto.sql`
+//! ITSELF (`include_str!`, table names textually rewritten to the probe names, split on `;`), so the probe
+//! reaches the FINAL post-all-migrations receipt shape. If the migration files' SQL ever drifts, these
+//! tests re-run the new text verbatim (the `canonical_migration` pattern).
 
 use sqlx::PgPool;
 
-/// The migration under probe, verbatim from the file the migrator ran.
+/// The 0012 migration under probe, verbatim from the file the migrator ran.
 const MIGRATION_0012: &str = include_str!("../../migrations/0012_web_review.sql");
+
+/// The 0013 de-crypto migration under probe, verbatim from the file the migrator ran.
+const MIGRATION_0013: &str = include_str!("../../migrations/0013_decrypto.sql");
 
 /// One migrated probe row, as the backfill assertion reads it:
 /// `(workspace_id, actor, op_id, method, request_sha256, step_up_attestation, outcome)`.
@@ -109,6 +114,38 @@ async fn run_probe_migration(pool: &PgPool) {
     }
 }
 
+/// The 0013 statements that touch `op_receipts`, rewritten to `probe_op_receipts`. 0013 also rewrites
+/// `current` + `workspace_events` (tables the probe does not create), so every statement NOT naming
+/// `op_receipts` is dropped — leaving exactly the receipt de-crypto (signed_record → record, strip the
+/// legacy signed-envelope json field, DROP key_id, and rename method 'device_signed' → 'device' behind a
+/// re-added CHECK).
+fn probe_statements_0013() -> Vec<String> {
+    let rewritten = MIGRATION_0013
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("op_receipts", "probe_op_receipts");
+    rewritten
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| s.contains("probe_op_receipts"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Execute the rewritten 0013 op_receipts statements in file order (after `run_probe_migration`), so the
+/// probe carries the final receipt shape.
+async fn run_probe_migration_0013(pool: &PgPool) {
+    for stmt in probe_statements_0013() {
+        sqlx::query(&stmt)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("0013 probe statement failed: {e}\n{stmt}"));
+    }
+}
+
 /// Seed a device-era receipt row in the pre-0012 shape (the minimal NOT NULL set + the outcome).
 async fn seed_device_receipt(
     pool: &PgPool,
@@ -175,9 +212,10 @@ async fn the_probe_renames_the_actor_column_and_backfills_every_device_row(pool:
     .await;
 
     run_probe_migration(&pool).await;
+    run_probe_migration_0013(&pool).await;
 
-    // The rename preserved every row byte-for-byte under the new `actor` name; the kept DEFAULT
-    // backfilled `method = 'device_signed'`; the new nullable columns arrived NULL.
+    // The rename preserved every row byte-for-byte under the new `actor` name; 0012's DEFAULT backfilled
+    // 'device_signed', then 0013 renamed it to 'device'; the new nullable columns arrived NULL.
     let rows: Vec<MigratedReceiptRow> = sqlx::query_as(
         "SELECT workspace_id, actor, op_id, method, request_sha256, step_up_attestation, outcome \
              FROM probe_op_receipts ORDER BY workspace_id, actor, op_id",
@@ -189,7 +227,10 @@ async fn the_probe_renames_the_actor_column_and_backfills_every_device_row(pool:
     let facts: Vec<(&str, &str, &str, &str)> = rows
         .iter()
         .map(|(ws, actor, op, method, sha, step_up, outcome)| {
-            assert_eq!(method, "device_signed", "the DEFAULT is the backfill");
+            assert_eq!(
+                method, "device",
+                "0013 renamed the backfilled 'device_signed' to 'device'"
+            );
             assert!(sha.is_none(), "device-era rows carry no request identity");
             assert!(step_up.is_none(), "the step-up slot is schema-only");
             (ws.as_str(), actor.as_str(), op.as_str(), outcome.as_str())
@@ -203,6 +244,23 @@ async fn the_probe_renames_the_actor_column_and_backfills_every_device_row(pool:
             ("w2", "dk_alpha", "op-1", "NEEDS_REVIEW"),
         ]
     );
+
+    // 0013 renamed signed_record → record and dropped key_id (the final receipt columns).
+    let cols: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'probe_op_receipts'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        cols.iter().any(|c| c == "record"),
+        "signed_record renamed to record"
+    );
+    assert!(
+        !cols.iter().any(|c| c == "signed_record"),
+        "signed_record is gone"
+    );
+    assert!(!cols.iter().any(|c| c == "key_id"), "key_id is dropped");
 
     // The (workspace, op id) replay-probe index landed on the probe — and the REAL one exists on the
     // real table (the applied migration, probed through pg_indexes).
@@ -236,6 +294,7 @@ async fn the_probe_renames_the_actor_column_and_backfills_every_device_row(pool:
 async fn the_widened_receipt_columns_enforce_their_checks(pool: PgPool) {
     create_probe_tables(&pool).await;
     run_probe_migration(&pool).await;
+    run_probe_migration_0013(&pool).await;
 
     let insert = |method: Option<&str>, sha: Option<Vec<u8>>, op_id: &str| {
         let pool = pool.clone();
@@ -273,19 +332,26 @@ async fn the_widened_receipt_columns_enforce_their_checks(pool: PgPool) {
             .await
             .is_err()
     );
+    // 0013 tightened the vocabulary: the pre-0013 'device_signed' spelling is no longer accepted.
+    assert!(
+        insert(Some("device_signed"), None, "op-old-method")
+            .await
+            .is_err()
+    );
     // A request identity that is not exactly 32 bytes violates its width CHECK.
     assert!(
         insert(Some("web_session"), Some(vec![0u8; 33]), "op-bad-sha")
             .await
             .is_err()
     );
-    // The positive controls: a well-formed session row lands, and an insert that OMITS `method`
-    // still lands as a device row (the kept DEFAULT is load-bearing for the pre-lane writers).
+    // The positive controls: a well-formed session row and an explicit device row both land, and an
+    // insert that OMITS `method` still lands as a device row (the kept DEFAULT, now 'device').
     assert!(
         insert(Some("web_session"), Some(vec![0u8; 32]), "op-good")
             .await
             .is_ok()
     );
+    assert!(insert(Some("device"), None, "op-device").await.is_ok());
     assert!(insert(None, None, "op-default").await.is_ok());
     let defaulted = sqlx::query_scalar::<_, String>(
         "SELECT method FROM probe_op_receipts WHERE workspace_id = 'w1' AND op_id = 'op-default'",
@@ -293,5 +359,5 @@ async fn the_widened_receipt_columns_enforce_their_checks(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(defaulted, "device_signed");
+    assert_eq!(defaulted, "device");
 }

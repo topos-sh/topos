@@ -1,8 +1,8 @@
 //! The governance + admin-claim core — the orchestration half (outside the transaction).
 //!
 //! Split from [`crate::enroll`] (the enrollment issuance orchestration) so the role-gated governance
-//! surface — the owner-signed invite mint, the roster/revoke mutations, and the self-host first-boot
-//! admin claim — reads on its own. This module models the signed governance ops and the workspace roles
+//! surface — the owner-driven invite mint, the roster/revoke mutations, and the self-host first-boot
+//! admin claim — reads on its own. This module models the governance ops and the workspace roles
 //! and does the work OUTSIDE the one write transaction (parse the op id, derive the deterministic invite
 //! link, build the server-trusted inputs); the raw SQL — and the `SERIALIZABLE` (`run_serializable!`)
 //! governance/claim transactions — live in [`crate::db`]. The credential derivations (HMAC token mint,
@@ -16,13 +16,12 @@ use crate::enroll::{
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
 
-// ── governance op modeling (an owned mirror of the kernel's borrowed GovernanceOpKind) ─────────────────
+// ── governance op modeling ──────────────────────────────────────────────────────────────────────────────
 
-/// An owned mirror of [`topos_core::sign::GovernanceOpKind`], so the [`Authority`](crate::Authority) can
-/// carry a governance op across the call/transaction boundary and rebuild the borrowed
-/// `GovernanceOpFields` for the signing preimage in-transaction. Each variant carries its full signed
-/// parameter set; `Invite` additionally carries the per-skill display `name`s (NOT bound into the preimage —
-/// only the skill ids are — so a rename never forks the deterministic invite link).
+/// A typed governance op the [`Authority`](crate::Authority) carries across the call/transaction
+/// boundary; the transaction binds its full parameter set into the request identity the idempotency slot
+/// compares. `Invite` additionally carries the per-skill display `name`s (NOT bound into the identity or
+/// the deterministic invite link — only the skill ids are — so a rename never forks either).
 #[derive(Debug, Clone)]
 pub enum GovernanceOp {
     /// Invite principals at `role`, expiring `expires_at` (epoch-ms; `None` = never), pre-offering `skills`.
@@ -81,17 +80,15 @@ impl GovernanceOp {
     }
 }
 
-/// A governance request signed by an owner's registered device key. The signature is over the kernel
-/// governance frame the plane reconstructs from server-trusted values (the request scope + the typed `op`),
-/// so a valid signature IS the binding of this device to this exact op — never a client-claimed authority.
+/// A governance request presented by a device credential. The transaction authenticates the credential
+/// by registry-row lookup (non-revoked, bound to a confirmed principal whose ROLE the op-specific check
+/// then gates) — authority comes from the directory rows, never a client claim.
 #[derive(Debug, Clone)]
-pub struct GovernanceSignedOp {
-    /// The id of the **signing** owner's device key (the registry selects the public key by this).
+pub struct GovernanceRequest {
+    /// The **acting** device's presented credential (the registry row is selected by this).
     pub device_key_id: String,
-    /// The governance op (its kind + parameter tail are rebuilt into the signing preimage).
+    /// The governance op (its kind + parameter tail bind the request's idempotency identity).
     pub op: GovernanceOp,
-    /// The raw 64-byte Ed25519 governance-op signature.
-    pub signature: [u8; 64],
 }
 
 /// The result of creating an invite — the shareable link plus the roster + skills it seeded. Re-derives
@@ -125,8 +122,8 @@ pub enum GovernanceOutcome {
 }
 
 /// A workspace-level governance role (the `workspace_member` RBAC roster — DISTINCT from the per-skill read
-/// `roster`). `owner` signs invites + roster mutations; `member`/`reviewer` cannot. The `signing_byte` is the
-/// `u8` bound into the governance/invite signing frames — one mapping, used on both the sign and verify sides.
+/// `roster`). `owner` drives invites + roster mutations; `member`/`reviewer` cannot. The `derivation_byte`
+/// is the `u8` bound into the deterministic invite-token derivation and the request identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Full governance authority (invite, roster, revoke).
@@ -159,19 +156,23 @@ impl Role {
         }
     }
 
-    /// The `u8` bound into the invite/governance signing frame (owner = 1, reviewer = 2, member = 3) —
-    /// delegating to the kernel's `GovernanceRole`, the single mapping the client signer calls too, so
-    /// this signature-preimage input can never fork between the halves.
+    /// The `u8` bound into the deterministic invite-token derivation and the governance request
+    /// identity (owner = 1, reviewer = 2, member = 3). ONE mapping — a fork would change every derived
+    /// invite link and idempotency identity.
     #[must_use]
-    pub fn signing_byte(self) -> u8 {
+    pub fn derivation_byte(self) -> u8 {
         match self {
-            Role::Owner => topos_core::sign::GovernanceRole::Owner,
-            Role::Reviewer => topos_core::sign::GovernanceRole::Reviewer,
-            Role::Member => topos_core::sign::GovernanceRole::Member,
+            Role::Owner => 1,
+            Role::Reviewer => 2,
+            Role::Member => 3,
         }
-        .signing_byte()
     }
 }
+
+/// The `expires_at` value the invite-token derivation binds for "never expires" — v0 invites carry no
+/// expiry, so the mint AND the deterministic re-derivations (the genesis self-invite, the standing door)
+/// all bind this one sentinel. Changing it would change every derived invite link.
+pub(crate) const INVITE_NO_EXPIRY: u64 = 0;
 
 /// A freshly-minted one-time admin claim. The `token` is the bearer plaintext, returned ONCE (only its
 /// sha256 is stored); `Debug` REDACTS it so it can never reach a log or trace through a formatted value.
@@ -266,23 +267,21 @@ pub(crate) struct GovernanceInput<'a> {
     pub ws: &'a WorkspaceId,
     /// The client-minted op id (the idempotency key).
     pub op_id: &'a str,
-    /// The op id's raw 16 bytes (bound into the governance signing frame).
-    pub op_id_bytes: [u8; 16],
-    /// The signed governance op (the signing device key id + the typed op + the signature).
-    pub signed: &'a GovernanceSignedOp,
+    /// The governance request (the acting device credential + the typed op).
+    pub request: &'a GovernanceRequest,
     /// The server-stamped creation timestamp (governance rows are timestamped by `created_at`, not the clock).
     pub created_at: &'a str,
 }
 
 // ── the orchestration ops (the public Authority methods delegate to these) ─────────────────────────────
 
-/// Create an owner-signed invite (the orchestration half of [`Authority::create_invite`]). Derives the
+/// Create an owner-driven invite (the orchestration half of [`Authority::create_invite`]). Derives the
 /// deterministic invite token, then runs the one governance transaction (authz + store + roster + receipt).
 pub(crate) async fn create_invite(
     authority: &Authority,
     ws: &WorkspaceId,
     op_id: &str,
-    signed: &GovernanceSignedOp,
+    request: &GovernanceRequest,
     created_at: &str,
 ) -> Result<CreateInviteOutcome> {
     let GovernanceOp::Invite {
@@ -290,7 +289,7 @@ pub(crate) async fn create_invite(
         expires_at,
         emails,
         skills,
-    } = &signed.op
+    } = &request.op
     else {
         return Ok(CreateInviteOutcome::Denied("op is not an invite"));
     };
@@ -304,13 +303,10 @@ pub(crate) async fn create_invite(
     ids.sort_unstable();
     ids.dedup();
     let joined = ids.join("\n");
-    let role_byte = [role.signing_byte()];
-    // An absent expiry binds the shared no-expiry sentinel — the same value the client signs and the
-    // governance frame encodes (`expires_to_u64(None)`); 0i64 and 0u64 share the identical be-bytes.
-    let expires_be = expires_at.map_or(
-        topos_core::sign::INVITE_NO_EXPIRY.to_be_bytes(),
-        i64::to_be_bytes,
-    );
+    let role_byte = [role.derivation_byte()];
+    // An absent expiry binds the shared no-expiry sentinel (`expires_to_u64(None)` in the transaction's
+    // request identity encodes the same value); 0i64 and 0u64 share the identical be-bytes.
+    let expires_be = expires_at.map_or(INVITE_NO_EXPIRY.to_be_bytes(), i64::to_be_bytes);
     let token = authority.derive_token(
         b"invite",
         &[
@@ -329,8 +325,7 @@ pub(crate) async fn create_invite(
     let input = GovernanceInput {
         ws,
         op_id,
-        op_id_bytes,
-        signed,
+        request,
         created_at,
     };
     match authority
@@ -354,17 +349,17 @@ pub(crate) async fn governance_mutation(
     authority: &Authority,
     ws: &WorkspaceId,
     op_id: &str,
-    signed: &GovernanceSignedOp,
+    request: &GovernanceRequest,
     created_at: &str,
 ) -> Result<GovernanceOutcome> {
-    let Some(op_id_bytes) = parse_op_id(op_id) else {
+    // The canonical-UUID check keeps the idempotency slot's key 1:1 with one op-id spelling.
+    if parse_op_id(op_id).is_none() {
         return Ok(GovernanceOutcome::Denied("op_id is not a canonical UUID"));
-    };
+    }
     let input = GovernanceInput {
         ws,
         op_id,
-        op_id_bytes,
-        signed,
+        request,
         created_at,
     };
     authority.db().governance_mutation_txn(&input).await
@@ -537,8 +532,6 @@ pub(crate) async fn read_claim_bootstrap(
     else {
         return Err(AuthorityError::NotFound);
     };
-    let plane_public_key = authority.plane_public_key()?;
-    let plane_key_id = authority.plane_key_id()?;
     let config = &authority.enrollment()?.config;
     let display_name = row
         .display_name
@@ -552,8 +545,6 @@ pub(crate) async fn read_claim_bootstrap(
         verified_domain: None,
         verified_domain_status: "unverified".to_owned(),
         skills: Vec::new(),
-        plane_public_key,
-        plane_key_id,
         base_url: config.base_url.clone(),
         link_base: config.link_base().to_owned(),
         enrollment_method: "admin_claim".to_owned(),

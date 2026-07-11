@@ -258,10 +258,10 @@ impl Db {
         Ok(())
     }
 
-    /// Overwrite a skill's `current.signed_record` with arbitrary bytes (test-only) — drives the
+    /// Overwrite a skill's `current.record` with arbitrary bytes (test-only) — drives the
     /// `read_current` corrupt-blob path (an unparseable stored record is an Integrity fault, never not-found).
     /// Requires the pointer to exist first.
-    pub(crate) async fn force_signed_record(
+    pub(crate) async fn force_current_record(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
@@ -269,7 +269,7 @@ impl Db {
     ) -> Result<()> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         sqlx::query!(
-            "UPDATE current SET signed_record = $3 WHERE workspace_id = $1 AND skill_id = $2",
+            "UPDATE current SET record = $3 WHERE workspace_id = $1 AND skill_id = $2",
             ws_s,
             skill_s,
             bytes,
@@ -363,7 +363,7 @@ impl Db {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         let cid = commit.0.as_slice();
         sqlx::query!(
-            "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, signed_record, updated_at) \
+            "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at) \
              VALUES ($1, $2, $3, $4, $5, NULL, 0) \
              ON CONFLICT (workspace_id, skill_id) DO NOTHING",
             ws_s,

@@ -1,4 +1,4 @@
-//! The operator backup/restore epoch bump (`Authority::restore_bump_epochs`) — re-sign `current` one epoch
+//! The operator backup/restore epoch bump (`Authority::restore_bump_epochs`) — rewrite `current` one epoch
 //! forward (same commit, same seq) so a restored plane's next record beats every tuple followers recorded.
 use super::*;
 
@@ -38,7 +38,7 @@ async fn genesis_and_child(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> Commit
 }
 
 #[sqlx::test]
-async fn bump_re_signs_current_same_commit_and_verifies(pool: PgPool) {
+async fn bump_rewrites_current_same_commit(pool: PgPool) {
     let fx = Fixture::new(pool, "restore-bump").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let c2 = genesis_and_child(&fx, &w, &s).await;
@@ -55,9 +55,8 @@ async fn bump_re_signs_current_same_commit_and_verifies(pool: PgPool) {
     assert_eq!(r.commit, c2, "the bump never changes the named commit");
     assert_eq!(r.old, gn(1, 2));
     assert_eq!(r.new, gn(2, 2), "epoch bumps by one; seq is preserved");
-    assert_eq!(r.key_id, fx.authority.plane_key_id().unwrap());
 
-    // The stored pointer moved to (2,2), same commit, and the fresh signature verifies under the plane key.
+    // The stored pointer moved to (2,2), same commit, and the rewritten record carries the new generation.
     assert_eq!(
         fx.authority
             .db()
@@ -72,15 +71,16 @@ async fn bump_re_signs_current_same_commit_and_verifies(pool: PgPool) {
     );
     let record = fx
         .authority
-        .read_signed_record(&w, &s)
+        .db()
+        .read_current_record(&w, &s)
         .await
         .unwrap()
-        .expect("signed");
-    let pubkey = fx.authority.plane_public_key().unwrap();
-    assert!(verify_record(&record, "w_acme", "s_deploy", &pubkey));
-    let parsed: SignedCurrentRecord = serde_json::from_slice(&record).unwrap();
-    assert_eq!(parsed.record.generation, gn(2, 2));
-    assert_eq!(parsed.record.version_id, topos_core::digest::to_hex(&c2.0));
+        .expect("a current record");
+    let wire = wire_record(&record);
+    assert_eq!(wire.scope.workspace_id, "w_acme");
+    assert_eq!(wire.scope.skill_id, "s_deploy");
+    assert_eq!(wire.record.generation, gn(2, 2));
+    assert_eq!(wire.record.version_id, topos_core::digest::to_hex(&c2.0));
 
     // Running twice bumps twice — one more ordinary forward move, unguarded on purpose.
     let again = fx
@@ -100,50 +100,54 @@ async fn bump_re_signs_current_same_commit_and_verifies(pool: PgPool) {
     );
 }
 
-/// ENVELOPE PARITY — the pin on the rebuilt serializer. The promote path's envelope serializer is private
-/// to the off-limits `db/set_current.rs`, so the bump reconstructs the typed DTO; this test JSON-parses a
-/// publish-produced record and a bump-produced one and asserts an identical field set/shape (recursive key
-/// structure, the signature `alg`/`key_id`, and the 86-char base64url signature length).
+/// RECORD PARITY — the pin on the rebuilt serializer. The promote path's record serializer is private to
+/// the off-limits `db/set_current.rs`, so the bump reconstructs the typed DTO; this test JSON-parses a
+/// publish-produced record and a bump-produced one and asserts an identical field set/shape (recursive
+/// key structure), the same scope + version id (the bump preserves the commit), and only the generation
+/// advancing — and that both parse as the one unsigned `WireCurrentRecord` wire DTO.
 #[sqlx::test]
-async fn bump_envelope_matches_the_publish_envelope_shape(pool: PgPool) {
+async fn bump_record_matches_the_publish_record_shape(pool: PgPool) {
     let fx = Fixture::new(pool, "restore-parity").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     genesis_and_child(&fx, &w, &s).await;
 
     let published = fx
         .authority
-        .read_signed_record(&w, &s)
+        .db()
+        .read_current_record(&w, &s)
         .await
         .unwrap()
-        .expect("publish-signed record");
+        .expect("publish-produced record");
     fx.authority
         .restore_bump_epochs(None, None, NOW + 1)
         .await
         .unwrap();
     let bumped = fx
         .authority
-        .read_signed_record(&w, &s)
+        .db()
+        .read_current_record(&w, &s)
         .await
         .unwrap()
-        .expect("bump-signed record");
+        .expect("bump-produced record");
 
     let a: serde_json::Value = serde_json::from_slice(&published).unwrap();
     let b: serde_json::Value = serde_json::from_slice(&bumped).unwrap();
     assert_eq!(
         shape(&a),
         shape(&b),
-        "the two envelopes must carry the identical field set/shape"
+        "the two records must carry the identical field set/shape"
     );
     assert_eq!(a["schema_version"], b["schema_version"]);
-    assert_eq!(a["signature"]["alg"], b["signature"]["alg"]);
-    assert_eq!(a["signature"]["key_id"], b["signature"]["key_id"]);
-    let sig_a = a["signature"]["value"].as_str().unwrap();
-    let sig_b = b["signature"]["value"].as_str().unwrap();
-    assert_eq!(sig_a.len(), 86, "base64url-unpadded 64-byte signature");
-    assert_eq!(sig_b.len(), 86);
-    // Both parse as the one wire DTO (the closed alg enum would fail-close any drift).
-    let _: SignedCurrentRecord = serde_json::from_slice(&published).unwrap();
-    let _: SignedCurrentRecord = serde_json::from_slice(&bumped).unwrap();
+    assert_eq!(a["scope"], b["scope"], "same scope");
+    assert_eq!(
+        a["record"]["version_id"], b["record"]["version_id"],
+        "the bump preserves the commit"
+    );
+    // Both parse as the one unsigned wire DTO; only the generation advances (publish at (1,2) → bump (2,2)).
+    let pub_wire = wire_record(&published);
+    let bump_wire = wire_record(&bumped);
+    assert_eq!(pub_wire.record.generation, gn(1, 2));
+    assert_eq!(bump_wire.record.generation, gn(2, 2));
 }
 
 /// The structural skeleton of a JSON value: objects → their (sorted) keys mapped to child skeletons, arrays
@@ -189,8 +193,8 @@ async fn epoch_at_least_is_a_max_floor(pool: PgPool) {
     assert_eq!(r[0].new, gn(8, 2));
 }
 
-/// A bump past the JCS safe-integer bound (2^53 − 1) fails typed with NOTHING written or signed — and the
-/// failure is all-or-nothing across the selection (an intact sibling row is rolled back too).
+/// A bump past the JCS safe-integer bound (2^53 − 1) fails typed with NOTHING written — and the failure is
+/// all-or-nothing across the selection (an intact sibling row is rolled back too).
 #[sqlx::test]
 async fn bump_past_the_safe_integer_bound_fails_typed_and_writes_nothing(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "restore-bound").await;
@@ -236,8 +240,18 @@ async fn bump_past_the_safe_integer_bound_fails_typed_and_writes_nothing(pool: P
     .execute(&pool)
     .await
     .unwrap();
-    let record_a_before = fx.authority.read_signed_record(&w, &s_a).await.unwrap();
-    let record_b_before = fx.authority.read_signed_record(&w, &s_b).await.unwrap();
+    let record_a_before = fx
+        .authority
+        .db()
+        .read_current_record(&w, &s_a)
+        .await
+        .unwrap();
+    let record_b_before = fx
+        .authority
+        .db()
+        .read_current_record(&w, &s_b)
+        .await
+        .unwrap();
 
     let err = fx
         .authority
@@ -251,7 +265,7 @@ async fn bump_past_the_safe_integer_bound_fails_typed_and_writes_nothing(pool: P
         "the source names the bound: {source}"
     );
 
-    // Nothing was written or signed — BOTH rows (the poisoned one and its intact sibling) are untouched.
+    // Nothing was written — BOTH rows (the poisoned one and its intact sibling) are untouched.
     assert_eq!(
         fx.authority
             .db()
@@ -269,11 +283,19 @@ async fn bump_past_the_safe_integer_bound_fails_typed_and_writes_nothing(pool: P
         Some(gn(1, 1))
     );
     assert_eq!(
-        fx.authority.read_signed_record(&w, &s_a).await.unwrap(),
+        fx.authority
+            .db()
+            .read_current_record(&w, &s_a)
+            .await
+            .unwrap(),
         record_a_before
     );
     assert_eq!(
-        fx.authority.read_signed_record(&w, &s_b).await.unwrap(),
+        fx.authority
+            .db()
+            .read_current_record(&w, &s_b)
+            .await
+            .unwrap(),
         record_b_before
     );
 }

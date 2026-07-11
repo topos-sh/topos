@@ -724,7 +724,7 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
 
     // GENESIS PUBLISH: the registered device + confirmed membership pass the genesis roster gate — the
     // first publish self-rosters and lands at (1,1).
-    let key = ed25519_dalek::SigningKey::from_bytes(&device_seed);
+    let key = device_pub(&device_seed);
     let s = skill("s_onboarding");
     let receipt = publish(
         &fx,

@@ -1,15 +1,15 @@
 //! Per-route integration tests — `tower::ServiceExt::oneshot` against `router(state)`, no socket.
 //!
 //! Each test seeds a real [`Authority`] through the feature-gated test-fixtures shims (a registered device,
-//! a rostered principal, a minted read token, and — where needed — a signed genesis), then drives the wire
-//! exactly as a client would: a `Topos-Device-Signature` header over the SERVER-rehashed candidate ids, a
-//! JSON body, the conditional-GET headers. They assert the status, the canonical receipt/envelope shape, and
-//! the commit-sensitive 304.
+//! a rostered principal, a minted read token, and — where needed — a published genesis), then drives the wire
+//! exactly as a client would: the presented `device_key_id` in the JSON body (no signature — the credential
+//! is the body, authenticated by registry-row lookup), and the conditional-GET headers. They assert the
+//! status, the canonical receipt/envelope shape, and the commit-sensitive 304.
 //!
 //! The suite mirrors `src/routes/`: one child module per route family, plus `misc` for the cross-route
 //! tests (state construction, the maintenance pass, the wire-error envelope). This module is the shared
 //! support half — the two seeded fixtures ([`Ctx`] for the write/read routes, [`EnrollCtx`] for
-//! enrollment + governance) and the request/signing helpers they drive.
+//! enrollment + governance) and the request/wire helpers they drive.
 
 mod bootstrap;
 mod bundles;
@@ -30,19 +30,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
 use sqlx::PgPool;
 use tower::ServiceExt as _;
 
 use plane_store::{
-    Authority, DeploymentMode, EnrollmentConfig, FileMode, OpId, Principal, Role, SkillId,
-    UploadedFile, WorkspaceId,
+    Authority, DeploymentMode, EnrollmentConfig, FileMode, OpId, Principal, SkillId, UploadedFile,
+    WorkspaceId,
 };
 use topos_core::digest::{self, ManifestEntry};
-use topos_core::sign::{
-    self, Commit, DeviceOp, DeviceOpFields, EnrollFields, GovernanceOpFields, GovernanceOpKind,
-    device_op_preimage, enroll_preimage, governance_op_preimage,
-};
+use topos_core::identity::{self, Commit};
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, PasscodeConfirmResponse,
     PasscodeConfirmStatus,
@@ -70,7 +66,6 @@ const KEY_SEED: u8 = 7;
 struct Ctx {
     dir: PathBuf,
     state: PlaneState,
-    key: SigningKey,
 }
 
 impl Drop for Ctx {
@@ -99,28 +94,21 @@ fn unique_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn dev_key(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
+/// A deterministic device public key from a seed byte. Nothing signs or verifies with it anymore — the
+/// registry row it registers is looked up by `device_key_id`; the key is just the device's presented identity.
+fn dev_pubkey(seed: u8) -> [u8; 32] {
+    [seed; 32]
 }
 
 async fn setup(pool: PgPool, tag: &str) -> Ctx {
     let dir = unique_dir(tag);
-    let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
-        .expect("open authority")
-        .with_plane_key(&dir.join("plane.key"))
-        .expect("plane key");
+    let authority =
+        Authority::from_pool(pool, &dir.join("git"), &dir.join("large")).expect("open authority");
     let ws = WorkspaceId::parse(WS).unwrap();
     let skill = SkillId::parse(SKILL).unwrap();
     let principal = Principal::parse(PRINCIPAL).unwrap();
-    let key = dev_key(KEY_SEED);
     authority
-        .seed_device(
-            &ws,
-            DKID,
-            &key.verifying_key().to_bytes(),
-            &principal,
-            false,
-        )
+        .seed_device(&ws, DKID, &dev_pubkey(KEY_SEED), &principal, false)
         .await
         .unwrap();
     authority
@@ -137,10 +125,10 @@ async fn setup(pool: PgPool, tag: &str) -> Ctx {
         refill_per_sec: 1.0,
         enabled: false,
     });
-    Ctx { dir, state, key }
+    Ctx { dir, state }
 }
 
-/// Seed a signed genesis at (1,1); returns (genesis version_id, genesis bundle_digest).
+/// Seed a published genesis at (1,1); returns (genesis version_id, genesis bundle_digest).
 async fn seed_genesis(ctx: &Ctx, op_id: &str) -> ([u8; 32], [u8; 32]) {
     let receipt = ctx
         .authority()
@@ -148,7 +136,6 @@ async fn seed_genesis(ctx: &Ctx, op_id: &str) -> ([u8; 32], [u8; 32]) {
             &WorkspaceId::parse(WS).unwrap(),
             &SkillId::parse(SKILL).unwrap(),
             DKID,
-            &[KEY_SEED; 32],
             &OpId::parse(op_id).unwrap(),
             vec![file("SKILL.md", b"genesis v0\n")],
             AUTHOR,
@@ -180,7 +167,8 @@ fn file(path: &str, bytes: &[u8]) -> UploadedFile {
     }
 }
 
-/// Recompute the server-trusted ids a candidate publish will derive (the device op signs over these).
+/// Recompute the server-trusted ids a candidate publish will derive (so a test can assert the receipt's
+/// server-rehashed `version_id` / `bundle_digest`).
 fn compute_ids(parents: &[[u8; 32]], files: &[UploadedFile]) -> ([u8; 32], [u8; 32]) {
     let manifest: Vec<ManifestEntry> = files
         .iter()
@@ -191,7 +179,7 @@ fn compute_ids(parents: &[[u8; 32]], files: &[UploadedFile]) -> ([u8; 32], [u8; 
         })
         .collect();
     let digest = digest::bundle_digest(&manifest).unwrap();
-    let version_id = sign::commit_id(&Commit {
+    let version_id = identity::commit_id(&Commit {
         parents,
         tree: digest,
         author: AUTHOR,
@@ -199,39 +187,6 @@ fn compute_ids(parents: &[[u8; 32]], files: &[UploadedFile]) -> ([u8; 32], [u8; 
     })
     .unwrap();
     (version_id, digest)
-}
-
-/// Parse a canonical UUID op-id into its 16 bytes (no `uuid` dep — hex over the hyphen-stripped string).
-fn op_id_bytes(op_id: &str) -> [u8; 16] {
-    let hex: String = op_id.chars().filter(|c| *c != '-').collect();
-    let mut out = [0u8; 16];
-    hex::decode_to_slice(&hex, &mut out).unwrap();
-    out
-}
-
-/// Sign a device op over the server-trusted identity → base64url-unpadded (the `Topos-Device-Signature`).
-#[allow(clippy::too_many_arguments)]
-fn sign_sig(
-    key: &SigningKey,
-    op: DeviceOp,
-    op_id: &str,
-    expected: Generation,
-    version_id: [u8; 32],
-    digest: [u8; 32],
-) -> String {
-    let fields = DeviceOpFields {
-        workspace_id: WS,
-        skill_id: SKILL,
-        op,
-        op_id: op_id_bytes(op_id),
-        device_key_id: DKID,
-        expected_epoch: expected.epoch,
-        expected_seq: expected.seq,
-        commit_id: version_id,
-        bundle_digest: digest,
-    };
-    let sig = key.sign(&device_op_preimage(&fields).unwrap()).to_bytes();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig)
 }
 
 /// Build a candidate-bearing request body (publish/propose share the shape).
@@ -267,12 +222,12 @@ fn candidate_body(
     serde_json::to_vec(&body).unwrap()
 }
 
-fn post(uri: &str, sig: &str, body: Vec<u8>) -> Request<Body> {
+/// A candidate-write POST — the credential is the `device_key_id` in the JSON body, no signature header.
+fn post(uri: &str, body: Vec<u8>) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
-        .header("topos-device-signature", sig)
         .body(Body::from(body))
         .unwrap()
 }
@@ -313,7 +268,7 @@ fn envelope(bytes: &[u8]) -> JsonEnvelope {
 // ══ the enrollment + governance fixture family ════════════════════════════════════════════════════════
 //
 // The shared support for the `bootstrap` / `enroll` / `governance` test modules: the [`EnrollCtx`] scaffold
-// (a cloud workspace, a confirmed owner + device, a FakeMailer) and the signing/wire helpers their per-route
+// (a cloud workspace, a confirmed owner + device, a FakeMailer) and the wire helpers their per-route
 // proofs drive. The comprehensive acceptance suite + the cross-component `follow` e2e live in `tests/`.
 
 const OWNER_DK: &str = "dk_owner";
@@ -334,7 +289,6 @@ const ENROLL_BASE_URL: &str = "https://plane.test";
 struct EnrollCtx {
     dir: PathBuf,
     state: PlaneState,
-    owner_key: SigningKey,
     fake: Arc<FakeMailer>,
 }
 
@@ -379,8 +333,6 @@ async fn enroll_setup_full(
     let dir = unique_dir(tag);
     let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
-        .with_plane_key(&dir.join("plane.key"))
-        .expect("plane key")
         .with_enrollment_config(EnrollmentConfig {
             secret_path: dir.join("enroll.secret"),
             base_url: ENROLL_BASE_URL.to_owned(),
@@ -400,15 +352,8 @@ async fn enroll_setup_full(
         .seed_workspace_member(&ws, &owner, "owner", "confirmed")
         .await
         .unwrap();
-    let owner_key = dev_key(OWNER_SEED);
     authority
-        .seed_device(
-            &ws,
-            OWNER_DK,
-            &owner_key.verifying_key().to_bytes(),
-            &owner,
-            false,
-        )
+        .seed_device(&ws, OWNER_DK, &dev_pubkey(OWNER_SEED), &owner, false)
         .await
         .unwrap();
 
@@ -431,12 +376,7 @@ async fn enroll_setup_full(
             smtp: None,
         })
         .with_mailer(fake.clone());
-    EnrollCtx {
-        dir,
-        state,
-        owner_key,
-        fake,
-    }
+    EnrollCtx { dir, state, fake }
 }
 
 /// The server-derived device key id from a raw public key — `dk_<first 32 hex of sha256(pubkey)>` (the same
@@ -451,64 +391,19 @@ fn b64key(pubkey: &[u8; 32]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey)
 }
 
-/// Sign a governance op over the canonical frame → base64url (the `Topos-Device-Signature` header value).
-fn sign_governance(
-    signer: &SigningKey,
-    signer_dk: &str,
-    op_id: &str,
-    op: GovernanceOpKind,
-) -> String {
-    let fields = GovernanceOpFields {
-        workspace_id: WS,
-        op_id: op_id_bytes(op_id),
-        device_key_id: signer_dk,
-        op,
-    };
-    let sig = signer
-        .sign(&governance_op_preimage(&fields).unwrap())
-        .to_bytes();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig)
-}
-
-/// Sign an enrollment possession frame over the SERVER-trusted values → base64url. `device_auth_id` is the
-/// session's `user_code` (what the authority binds), `offered` the invite's offered skill ids.
-fn sign_enroll(
-    signer: &SigningKey,
-    grant_hash: [u8; 32],
-    device_auth_id: &str,
-    device_key_id: &str,
-    pubkey: [u8; 32],
-    offered: &[&str],
-) -> String {
-    let fields = EnrollFields {
-        workspace_id: WS,
-        grant_hash,
-        device_auth_id,
-        device_key_id,
-        device_public_key: pubkey,
-        offered_skill_ids: offered,
-    };
-    let sig = signer.sign(&enroll_preimage(&fields).unwrap()).to_bytes();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig)
-}
-
-/// A POST with a JSON body and NO device-signature header (the enrollment reads/steps that are not signed).
+/// A POST with a JSON body — the enrollment reads/steps and the credential-authenticated writes (the
+/// presented `device_key_id` / grant rides the body, never a header).
 fn post_nosig(uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
+    req_json("POST", uri, body)
 }
 
-/// A request with a JSON body + a device-signature header, for any method (POST/PUT/DELETE governance/redeem).
-fn signed_req(method: &str, uri: &str, sig: &str, body: serde_json::Value) -> Request<Body> {
+/// A request with a JSON body for any method (POST/PUT/DELETE governance/redeem). The credential is the
+/// body's `device_key_id` (or the enrollment grant) — no signature header.
+fn req_json(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
-        .header("topos-device-signature", sig)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -532,20 +427,9 @@ fn wait_for_passcode(fake: &FakeMailer) -> String {
     panic!("no passcode mailed within the timeout");
 }
 
-/// Drive `POST /v1/invites` as the owner; return the success envelope (asserts a 200).
+/// Drive `POST /v1/invites` as the owner (the owner device credential rides the body); return the success
+/// envelope (asserts a 200).
 async fn create_invite(ctx: &EnrollCtx, op_id: &str, emails: &[&str], skill: &str) -> JsonEnvelope {
-    let skills = [skill];
-    let sig = sign_governance(
-        &ctx.owner_key,
-        OWNER_DK,
-        op_id,
-        GovernanceOpKind::Invite {
-            role: Role::Member.signing_byte(),
-            expires_at: 0,
-            emails,
-            skills: &skills,
-        },
-    );
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op_id,
@@ -554,25 +438,24 @@ async fn create_invite(ctx: &EnrollCtx, op_id: &str, emails: &[&str], skill: &st
         "role": "member",
         "skills": [{ "skill_id": skill, "name": "Deploy" }],
     });
-    let (status, _, bytes) = send(ctx.app(), signed_req("POST", "/v1/invites", &sig, body)).await;
+    let (status, _, bytes) = send(ctx.app(), post_nosig("/v1/invites", body)).await;
     assert_eq!(status, StatusCode::OK);
     envelope(&bytes)
 }
 
 /// Run the full cloud device-auth flow (authorize → poll → passcode → confirm → poll) to a `Granted` grant.
-/// Returns `(grant, user_code, device_public_key, device_key)`.
+/// Returns `(grant, user_code, device_public_key)`.
 async fn enroll_to_grant(
     ctx: &EnrollCtx,
     invite_op: &str,
     device_seed: u8,
     email: &str,
     skill: &str,
-) -> (String, String, [u8; 32], SigningKey) {
+) -> (String, String, [u8; 32]) {
     let invite = create_invite(ctx, invite_op, &[email], skill).await;
     let token = token_from_link(invite.data["invite_link"].as_str().unwrap());
 
-    let device = dev_key(device_seed);
-    let device_pk = device.verifying_key().to_bytes();
+    let device_pk = dev_pubkey(device_seed);
 
     // authorize.
     let (s, _, b) = send(
@@ -642,5 +525,5 @@ async fn enroll_to_grant(
     assert_eq!(poll.status, DeviceTokenStatus::Granted);
     let grant = poll.grant.expect("a granted poll carries the grant");
 
-    (grant, auth.user_code, device_pk, device)
+    (grant, auth.user_code, device_pk)
 }

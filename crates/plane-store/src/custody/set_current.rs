@@ -1,8 +1,8 @@
 //! The one pointer-move write — `set-current` (publish · genesis · revert), the orchestration half.
 //!
 //! `publish`, `revert`, and (later) `review --approve` are three intents, **one** operation: advance the
-//! per-skill `current` pointer by exactly one `(epoch, seq)` step, under a compare-and-set, signing the new
-//! pointer and re-rooting the migrated bytes — all in one serializable, pure-DB transaction. This module
+//! per-skill `current` pointer by exactly one `(epoch, seq)` step, under a compare-and-set, re-rooting
+//! the migrated bytes — all in one serializable, pure-DB transaction. This module
 //! does the work that happens **outside** that transaction (no filesystem op may run inside it): it
 //! re-verifies the migrated candidate is renderable, derives the candidate's object set, and — for a revert
 //! — constructs the forward commit. Then it drives the one transaction in [`crate::db`].
@@ -11,7 +11,7 @@
 //! The propose -> review-approve promotion, two-parent author merges, the client pull engine, and the HTTP
 //! surface are later work; this is exercised in-process against a real Postgres + git store.
 
-use topos_core::sign::{self, Commit, DeviceOp};
+use topos_core::identity::{self, Commit};
 use topos_types::{Generation, TerminalOutcome};
 
 use crate::actor::WriteActor;
@@ -20,18 +20,32 @@ use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, OpId, SkillId, WorkspaceId};
 use crate::lifecycle::{self, StagedCandidate};
 
-/// The device-signed request fields that accompany a pointer-move. The signature is over the device-op
-/// preimage (`topos_core::sign::device_op_preimage`) the **plane reconstructs from server-trusted values**
-/// (the rehashed candidate id + bundle digest + the request scope), so a valid signature *is* the binding
-/// of this device to this exact promotion — never a client-claimed commit/digest.
+/// The pointer-move operations — the server's op vocabulary. Dispatches the transaction's op tail and
+/// keys each receipt's canonical `command` string; the CLIENT never carries it (the route names the op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceOp {
+    /// A direct publish (or the genesis create).
+    PublishDirect,
+    /// `publish --propose` — open a proposal, move nothing.
+    PublishPropose,
+    /// `revert --to` — the forward promote of a prior version's tree.
+    Revert,
+    /// `review --approve` — promote the locked open proposal sideways.
+    ReviewApprove,
+    /// `review --reject` / proposer-withdraw — the standalone status flip.
+    ReviewReject,
+}
+
+/// The device-lane request fields that accompany a pointer-move. The device credential is the
+/// presented `device_key_id`, authenticated INSIDE the transaction by registry-row lookup (non-revoked,
+/// bound to a rostered principal) — and every identity the receipt binds is the **server's** value (the
+/// rehashed candidate id + bundle digest + the request scope), never a client claim.
 #[derive(Debug, Clone)]
-pub struct DeviceSignedOp {
-    /// The id of the device signing key (the registry selects the public key by this).
+pub struct DeviceOpRequest {
+    /// The presented device credential (the registry row is selected by this).
     pub device_key_id: String,
     /// The operation: `PublishDirect` (direct publish / genesis) or `Revert` in the backbone.
     pub op: DeviceOp,
-    /// The raw 64-byte Ed25519 device-op signature.
-    pub signature: [u8; 64],
     /// The `(epoch, seq)` the compare-and-set targets.
     pub expected: Generation,
 }
@@ -59,11 +73,9 @@ pub struct SetCurrentReceipt {
     pub outcome: TerminalOutcome,
     /// The live `(epoch, seq)` — the **new** generation on `OK`, the **current** generation on `CONFLICT`.
     pub current: Option<Generation>,
-    /// The serialized `SignedCurrentRecord` envelope (`OK` only) — re-served byte-identically on replay,
+    /// The serialized `WireCurrentRecord` document (`OK` only) — re-served byte-identically on replay,
     /// even after `current` has advanced to a later version.
-    pub signed_record: Option<Vec<u8>>,
-    /// The plane signing key id (`OK` only).
-    pub key_id: Option<String>,
+    pub record: Option<Vec<u8>>,
     /// The server-stamped creation timestamp — STORED (not recomputed), so a lost-ack retry replays it
     /// byte-for-byte.
     pub created_at: String,
@@ -86,7 +98,6 @@ pub(crate) struct PromoteInput<'a> {
     pub ws: &'a WorkspaceId,
     pub skill: &'a SkillId,
     pub op_id: &'a str,
-    pub op_id_bytes: [u8; 16],
     /// Which lane the request arrived on — the txn body branches on it ONLY at its authz step.
     pub actor: WriteActor<'a>,
     pub op: DeviceOp,
@@ -109,15 +120,14 @@ pub(crate) struct PromoteInput<'a> {
 /// re-check to here), then runs the one serializable write.
 ///
 /// # Errors
-/// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault; the signer must be
-/// configured ([`Authority::with_plane_key`]).
+/// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn publish(
     authority: &Authority,
     ws: &WorkspaceId,
     skill: &SkillId,
     staged: &StagedCandidate,
-    device: &DeviceSignedOp,
+    device: &DeviceOpRequest,
     display_name: Option<&str>,
     created_at: &str,
     now: i64,
@@ -144,7 +154,6 @@ pub(crate) async fn publish(
         },
         WriteActor::Device {
             device_key_id: &device.device_key_id,
-            signature: &device.signature,
         },
         device.op,
         device.expected,
@@ -161,7 +170,7 @@ pub(crate) async fn reject_non_publish_op(
     ws: &WorkspaceId,
     skill: &SkillId,
     op_id: &OpId,
-    device: &DeviceSignedOp,
+    device: &DeviceOpRequest,
     created_at: &str,
 ) -> Result<SetCurrentReceipt> {
     authority
@@ -176,7 +185,7 @@ pub(crate) async fn reject_non_publish_op(
             None,
             device.expected,
             TerminalOutcome::PermanentFailure,
-            detail_msg("a direct publish must be signed as PublishDirect"),
+            detail_msg("a direct publish must arrive as PublishDirect"),
             created_at,
         ))
         .await
@@ -190,7 +199,7 @@ pub(crate) async fn reject_non_publish_op(
 /// promote — the git commit does not persist it). A `good` with no recorded digest (a legacy version) or no
 /// `current` to revert from is a typed `PERMANENT_FAILURE`.
 ///
-/// The `actor` names the lane (device-signed, or a verified web session) and `expected` is that lane's CAS
+/// The `actor` names the lane (a device credential, or a verified web session) and `expected` is that lane's CAS
 /// target generation. The forward commit is server-constructed identically for BOTH lanes, so a keyless web
 /// session names only the full `good` id. Every pre-transaction failure routes through [`pretxn_fail`], so
 /// it is DURABLE for a device (its replay surface) and SYNTHESIZED for a session (the recording rule).
@@ -343,7 +352,7 @@ pub(crate) async fn revert(
     // The forward commit: same tree (digest) as good, parented on current. Re-derive its id through the
     // kernel; the store refuses a lying id.
     let parents = [current];
-    let version_id = sign::commit_id(&Commit {
+    let version_id = identity::commit_id(&Commit {
         parents: &[current.0],
         tree: good_digest,
         author,
@@ -391,8 +400,8 @@ pub(crate) async fn revert(
 }
 
 /// The server-trusted inputs to the reject transaction (built here, consumed in [`crate::db`]). The
-/// identity fields are the device-signed values the plane reconstructs (the proposal's commit + its recorded
-/// digest + the request scope), never a client claim.
+/// identity fields are server-derived values (the proposal's commit + its recorded digest + the request
+/// scope), never a client claim.
 pub(crate) struct RejectInput<'a> {
     pub ws: &'a WorkspaceId,
     pub skill: &'a SkillId,
@@ -402,7 +411,6 @@ pub(crate) struct RejectInput<'a> {
     pub actor: WriteActor<'a>,
     pub op: DeviceOp,
     pub op_id: &'a str,
-    pub op_id_bytes: [u8; 16],
     pub expected: Generation,
     /// The session lane's mandatory rejection reason (`Some(trimmed non-empty)`); the device lane
     /// carries `None` (CLI reason parity is deliberately not built).
@@ -413,14 +421,14 @@ pub(crate) struct RejectInput<'a> {
 /// Drive a `publish --propose` for an already-staged-and-migrated candidate: open a proposal WITHOUT moving
 /// `current`. Same shape as [`publish`] (re-verify renderability before the transaction, then run the one
 /// write), but the device op is `PublishPropose`, so the shared `run`'s propose arm fires — recording the
-/// proposal + its gated object roots and returning NEEDS_REVIEW. `current` is untouched; nothing is signed.
+/// proposal + its gated object roots and returning NEEDS_REVIEW. `current` is untouched; no pointer moves.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn propose(
     authority: &Authority,
     ws: &WorkspaceId,
     skill: &SkillId,
     staged: &StagedCandidate,
-    device: &DeviceSignedOp,
+    device: &DeviceOpRequest,
     display_name: Option<&str>,
     created_at: &str,
     now: i64,
@@ -445,7 +453,6 @@ pub(crate) async fn propose(
         },
         WriteActor::Device {
             device_key_id: &device.device_key_id,
-            signature: &device.signature,
         },
         device.op,
         device.expected,
@@ -479,9 +486,9 @@ pub(crate) async fn review_approve(
     let base = expected;
     let command = device_op_command(DeviceOp::ReviewApprove);
 
-    // The proposal commit's recorded digest (server-trusted, written at propose) — needed to verify a
-    // device-op signature, bound the receipt, and render. Absent ⇒ this skill has no such commit ⇒ a typed
-    // permanent failure (there is nothing to approve).
+    // The proposal commit's recorded digest (server-trusted, written at propose) — needed to bound the
+    // receipt and render. Absent ⇒ this skill has no such commit ⇒ a typed permanent failure (there is
+    // nothing to approve).
     let Some(digest) = authority
         .db()
         .skill_commit_bundle_digest(ws, skill, commit)
@@ -528,7 +535,7 @@ pub(crate) async fn review_approve(
         .await;
     };
 
-    let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
+    if !op_id_is_canonical(op_id.as_str()) {
         return pretxn_fail(
             authority,
             &actor,
@@ -544,7 +551,7 @@ pub(crate) async fn review_approve(
             created_at,
         )
         .await;
-    };
+    }
 
     // Re-verify the proposal's bytes are renderable BEFORE the transaction — availability (Step E) is DB-only
     // (`status = 'present'`), so a crash that lost a present row's bytes would otherwise promote a missing
@@ -565,12 +572,10 @@ pub(crate) async fn review_approve(
         }
     }
 
-    let signer = authority.plane_signer()?;
     let input = PromoteInput {
         ws,
         skill,
         op_id: op_id.as_str(),
-        op_id_bytes,
         actor,
         op: DeviceOp::ReviewApprove,
         expected: base,
@@ -583,12 +588,12 @@ pub(crate) async fn review_approve(
         created_at,
         now,
     };
-    authority.db().set_current_txn(input, signer).await
+    authority.db().set_current_txn(input).await
 }
 
-/// Drive a `review --reject` / proposer-withdraw: flip an open proposal to `rejected` — signing nothing,
-/// moving no pointer. Resolves the proposal commit's recorded digest (for the device-op signature + the bound
-/// receipt identity), then runs the standalone reject transaction.
+/// Drive a `review --reject` / proposer-withdraw: flip an open proposal to `rejected` — moving no
+/// pointer. Resolves the proposal commit's recorded digest (the bound receipt identity), then runs the
+/// standalone reject transaction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn review_reject(
     authority: &Authority,
@@ -623,7 +628,7 @@ pub(crate) async fn review_reject(
         )
         .await;
     };
-    let Some(op_id_bytes) = parse_op_id(op_id.as_str()) else {
+    if !op_id_is_canonical(op_id.as_str()) {
         return pretxn_fail(
             authority,
             &actor,
@@ -639,7 +644,7 @@ pub(crate) async fn review_reject(
             created_at,
         )
         .await;
-    };
+    }
     authority
         .db()
         .review_reject_txn(RejectInput {
@@ -650,7 +655,6 @@ pub(crate) async fn review_reject(
             actor,
             op: DeviceOp::ReviewReject,
             op_id: op_id.as_str(),
-            op_id_bytes,
             expected,
             reason,
             created_at,
@@ -706,8 +710,7 @@ async fn pretxn_fail(
             expected,
             outcome,
             current: None,
-            signed_record: None,
-            key_id: None,
+            record: None,
             created_at: created_at.to_owned(),
             details,
         }),
@@ -722,7 +725,7 @@ pub(crate) async fn reject_op_mismatch(
     ws: &WorkspaceId,
     skill: &SkillId,
     op_id: &OpId,
-    device: &DeviceSignedOp,
+    device: &DeviceOpRequest,
     created_at: &str,
     msg: &str,
 ) -> Result<SetCurrentReceipt> {
@@ -771,11 +774,12 @@ async fn drive(
 ) -> Result<SetCurrentReceipt> {
     let command = device_op_command(op);
 
-    // The op_id must bridge to the 16 bytes the device-op signature binds (and, on the session lane, is the
-    // request id the composing route already proved canonical). A non-bridgeable op id (not a canonical
-    // UUID) could have migrated but can never be verified — a permanent failure, DURABLE for a device (its
-    // replay surface) and SYNTHESIZED for a session (the recording rule), routed through `pretxn_fail`.
-    let Some(op_id_bytes) = parse_op_id(cand.op_id.as_str()) else {
+    // The op_id must be a CANONICAL lowercase-hyphenated UUID (and, on the session lane, is the request
+    // id the composing route already proved canonical) — the receipt slot's key must stay 1:1 with one
+    // spelling, or a varied-form retry would miss its receipt and re-execute. A non-canonical op id is a
+    // permanent failure, DURABLE for a device (its replay surface) and SYNTHESIZED for a session (the
+    // recording rule), routed through `pretxn_fail`.
+    if !op_id_is_canonical(cand.op_id.as_str()) {
         return pretxn_fail(
             authority,
             &actor,
@@ -791,7 +795,7 @@ async fn drive(
             created_at,
         )
         .await;
-    };
+    }
 
     // Re-verify the migrated candidate is renderable BEFORE the transaction (the migrate path defers this
     // renderability re-check to the pointer-move). A failure is a genuine fault — a `present` row whose bytes
@@ -800,12 +804,10 @@ async fn drive(
     // would replay forever as a sticky terminal even after the underlying fault cleared).
     crate::read::render_version(authority, cand.ws, cand.commit.0, cand.bundle_digest).await?;
 
-    let signer = authority.plane_signer()?;
     let input = PromoteInput {
         ws: cand.ws,
         skill: cand.skill,
         op_id: cand.op_id.as_str(),
-        op_id_bytes,
         actor,
         op,
         expected,
@@ -817,7 +819,7 @@ async fn drive(
         created_at,
         now,
     };
-    authority.db().set_current_txn(input, signer).await
+    authority.db().set_current_txn(input).await
 }
 
 /// The cheap **review-required preflight** (before any ingest): a direct publish into a `review_required`
@@ -967,15 +969,13 @@ pub(crate) fn detail_msg(msg: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "message": msg }))
 }
 
-/// Parse a **canonical** lowercase-hyphenated UUID op-id string into the raw 16 bytes the device-op
-/// signature binds. `None` unless the string is *exactly* its canonical hyphenated form — `parse_str` also
-/// accepts the simple (32-hex) and braced spellings, which decode to the SAME 16 bytes, so without this
-/// check two distinct receipt-key strings could map to one signed identity and split the idempotency slot
+/// Whether an op-id string is **exactly** the canonical lowercase-hyphenated UUID form — `parse_str`
+/// also accepts the simple (32-hex) and braced spellings, which decode to the SAME 16 bytes, so without
+/// this check two distinct receipt-key strings could name one operation and split the idempotency slot
 /// (a varied-form retry would miss its receipt and re-execute). Requiring the canonical form keeps the
-/// receipt key (the string) 1:1 with the signed identity (the 16 bytes), so they can never split.
-fn parse_op_id(op_id: &str) -> Option<[u8; 16]> {
-    let uuid = uuid::Uuid::parse_str(op_id).ok()?;
-    (uuid.as_hyphenated().to_string() == op_id).then(|| uuid.into_bytes())
+/// receipt key 1:1 with the operation, so they can never split.
+fn op_id_is_canonical(op_id: &str) -> bool {
+    uuid::Uuid::parse_str(op_id).is_ok_and(|uuid| uuid.as_hyphenated().to_string() == op_id)
 }
 
 /// The revert commit frame was rejected by the kernel (an internal fault — the inputs are server-derived).

@@ -6,8 +6,8 @@
 //! [`roster_cmd`](crate::roster_cmd), every signature carries only plain/owned types, and each
 //! wrapper parses the plane's deployment mode STRICTLY (fail closed); the ops themselves uniformly
 //! deny a self-host plane. The write terminates in the authority's one serializable pointer-move
-//! transaction — same approve predicate, same compare-and-set, same plane-signed pointer, same
-//! four-eyes gate as the device-signed lane.
+//! transaction — same approve predicate, same compare-and-set, same pointer advance, same
+//! four-eyes gate as the device-credential lane.
 //!
 //! CLASSIFICATION POSTURE: reviews disclose nothing on a malformed or unknown identity — a
 //! non-parsing workspace/skill/version id, the uniform acting-gate denial, and a synthesized
@@ -445,8 +445,7 @@ mod tests {
             expected: Generation { epoch: 1, seq: 1 },
             outcome,
             current: None,
-            signed_record: None,
-            key_id: None,
+            record: None,
             created_at: "2026-07-07T00:00:00Z".to_owned(),
             details,
         }

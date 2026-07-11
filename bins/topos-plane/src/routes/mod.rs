@@ -1,4 +1,4 @@
-//! The thin route handlers: 4 device-signed writes (publish / propose / revert / review), 3 token-scoped
+//! The thin route handlers: 4 device-credential writes (publish / propose / revert / review), 3 token-scoped
 //! reads (current / bundles / versions), the unauthenticated invite bootstrap, the enrollment flow
 //! (device-auth / passcode / redeem / admin-claim), and the governance mutations (invite / roster / revoke).
 //!

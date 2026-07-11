@@ -254,7 +254,7 @@ pub(crate) async fn invite_members_session(
         .map(Principal::as_str)
         .collect::<Vec<_>>()
         .join("\n");
-    let role_byte = [role.as_role().signing_byte()];
+    let role_byte = [role.as_role().derivation_byte()];
     let request_sha256 = session_request_sha256(
         "invite",
         ws,

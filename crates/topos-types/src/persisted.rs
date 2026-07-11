@@ -13,22 +13,24 @@ use crate::{Generation, Receipt};
 use serde::{Deserialize, Serialize};
 
 /// `skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).
-/// **Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from these
-/// fields, never stored.
+/// **Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from
+/// `observed`/`applied` vs the working tree, never stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SyncState {
     #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
     pub schema_version: u32,
-    /// Highest AUTHENTICATED (signature-verified) generation ever seen — the anti-rollback floor and
-    /// the retry target. Only a signed record raises it.
+    /// The generation the plane most recently served — the sync target the engine drives `applied`
+    /// toward.
     pub observed: Generation,
-    /// Highest generation actually MATERIALIZED — advances only after a successful swap (`≤ observed`).
+    /// The `version_id` (the 64-hex commit) the served `observed` generation named — the target bytes
+    /// the engine materializes and re-verifies by digest on apply.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub observed_version_id: String,
+    /// Highest generation actually MATERIALIZED — advances only after a successful swap. After a server
+    /// restore the served target may sit below this; that is a legitimate state the engine simply
+    /// applies toward.
     pub applied: Generation,
-    /// Per observed generation, the commit it carried — a reused tuple with a *different* commit is a
-    /// loud ALARM; same tuple + same commit is a no-op.
-    #[serde(default)]
-    pub recorded: Vec<RecordedTuple>,
     /// The commit the working tree derives from (= the applied commit when clean).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_commit: String,
@@ -37,17 +39,6 @@ pub struct SyncState {
     pub work_hash: String,
     /// A transient local pin (a `pull <skill>@<hash>` go-back) suppressing one auto fast-forward.
     pub held: bool,
-}
-
-/// One `(generation → commit)` record in [`SyncState::recorded`]. (A list, not a JSON-object map,
-/// because the key is the `(epoch,seq)` pair.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct RecordedTuple {
-    pub generation: Generation,
-    /// The commit (`version_id`) seen at this generation.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub commit_id: String,
 }
 
 /// `skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the
@@ -222,9 +213,8 @@ pub enum ConflictPathKind {
     Oversize,
 }
 
-/// The device-signed operation an [`OpRecord`] carries — a serde mirror of the kernel's `DeviceOp` (which
-/// lives in `topos-core`, not a dependency of this crate). The client maps it 1:1 to `DeviceOp` when
-/// re-signing a replayed op. snake_case on the wire/disk.
+/// The device operation an [`OpRecord`] carries — the durable record of a replayed write's kind (the op
+/// kind an idempotent retry re-sends; the kind otherwise rides the route). snake_case on the wire/disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -243,8 +233,9 @@ pub enum OpKind {
 
 /// `ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so
 /// an uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no
-/// double-advance, no duplicate commit). It carries the full bound identity the device-op signature binds,
-/// so a replay re-signs the identical frame. **Field-set pinned.**
+/// double-advance, no duplicate commit). It carries the full bound identity of the op — the workspace,
+/// skill, kind, candidate commit, digest, and expected generation — so an idempotent replay re-sends the
+/// identical request. **Field-set pinned.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct OpRecord {
@@ -257,16 +248,16 @@ pub struct OpRecord {
     pub workspace_id: String,
     /// The skill this op targets — part of the device-op bound identity.
     pub skill_id: String,
-    /// The operation kind (the device-op subtype is an integrity property — an approve never replays as a
+    /// The operation kind (the kind is part of the op's identity — an approve never replays as a
     /// reject).
     pub op: OpKind,
-    /// The built commit (`version_id`) this op publishes / reverts / reviews — bound by the signature.
+    /// The built commit (`version_id`) this op publishes / reverts / reviews — part of the op's bound identity.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub candidate_commit: String,
-    /// The candidate's byte-exact bundle digest (the consent hash) — bound by the signature.
+    /// The candidate's byte-exact bundle digest (the consent hash) — part of the op's bound identity.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.
+    /// The `(epoch,seq)` this op's compare-and-set targets — part of the op's bound identity.
     pub expected_generation: Generation,
     /// The GOOD version a `revert` restores (the wire `good`) — present only for a `Revert` op (the
     /// server builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry
@@ -275,8 +266,8 @@ pub struct OpRecord {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub good: Option<String>,
     /// The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a
-    /// replay re-sends the identical value. UNSIGNED — it names the follower's folder + the dashboard entry,
-    /// never the digest or the signed frame. `None` for a revert/review and for pre-existing WALs.
+    /// replay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard
+    /// entry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
@@ -289,22 +280,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sync_state_round_trips_with_recorded_tuples() {
+    fn sync_state_round_trips() {
         let s = SyncState {
             schema_version: 1,
             observed: Generation { epoch: 1, seq: 7 },
+            observed_version_id: "a".repeat(64),
             applied: Generation { epoch: 1, seq: 7 },
-            recorded: vec![RecordedTuple {
-                generation: Generation { epoch: 1, seq: 7 },
-                commit_id: "a".repeat(64),
-            }],
             base_commit: "a".repeat(64),
             work_hash: "b".repeat(64),
             held: false,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["observed"]["seq"], 7);
-        assert_eq!(v["recorded"][0]["commit_id"], "a".repeat(64));
+        assert_eq!(v["observed_version_id"], "a".repeat(64));
         let back: SyncState = serde_json::from_value(v).unwrap();
         assert_eq!(back.applied.seq, 7);
         assert!(!back.held);

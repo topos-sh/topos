@@ -38,7 +38,7 @@ pub struct PullSkill {
     /// the workspace so a session-start sweep does not show two same-named skills indistinguishably.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// Highest authenticated `(epoch,seq)` seen — the anti-rollback floor.
+    /// The generation the plane most recently served — the sync target.
     pub observed: Generation,
     /// Highest generation actually materialized to disk.
     pub applied: Generation,
@@ -74,8 +74,6 @@ pub enum PullAction {
     Conflicted,
     /// A transient local hold (e.g. a local go-back is pinned).
     Held,
-    /// A reused/replayed generation tuple was seen — a loud integrity alarm.
-    Alarm,
 }
 
 /// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the
@@ -224,7 +222,7 @@ pub struct UntrackedEntry {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct SkillEntry {
     pub skill: String,
-    /// The workspace this skill is followed in (its signed-pointer scope), or `None` for a purely local,
+    /// The workspace this skill is followed in (its pointer scope), or `None` for a purely local,
     /// never-followed `add`'d skill. Provenance so two same-named skills from different workspaces are
     /// distinguishable; `--json` carries it flat, the TTY groups by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

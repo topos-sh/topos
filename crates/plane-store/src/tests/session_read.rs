@@ -4,7 +4,6 @@
 //! (per-skill roster vs workspace membership).
 use super::*;
 use crate::enroll::DeploymentMode;
-use topos_core::sign::{CatalogReadFields, catalog_read_preimage};
 
 const CLOUD: DeploymentMode = DeploymentMode::Cloud;
 
@@ -23,7 +22,7 @@ async fn published_skill(
     fx: &Fixture,
     w: &WorkspaceId,
     s: &SkillId,
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
     op_id: &str,
     body: &[u8],
 ) -> (CommitId, [u8; 32], ObjectId) {
@@ -88,7 +87,7 @@ async fn a_confirmed_member_of_every_role_reads_all_five_ops_with_no_roster_row(
             .read_current_session(&w, "s_deploy", &acting, CLOUD)
             .await
             .unwrap()
-            .expect("a published skill has a signed pointer");
+            .expect("a published skill has a pointer");
         assert_eq!(cur.version_id, g.0);
 
         let meta = a
@@ -298,7 +297,7 @@ async fn a_reclaimed_object_reads_404_on_the_member_lane_never_integrity(pool: P
     );
 
     // Stale it, reclaim the unique bytes, and the member-lane read is the uniform 404 — never an
-    // Integrity alarm (the re-authorize-on-miss guard re-gates on the MEMBER lane).
+    // Integrity fault (the re-authorize-on-miss guard re-gates on the MEMBER lane).
     publish(
         &fx,
         &key,
@@ -320,7 +319,7 @@ async fn a_reclaimed_object_reads_404_on_the_member_lane_never_integrity(pool: P
 
 /// The lane-threading pin (the design-gate MAJOR): genuine corruption under a MEMBER-lane read must
 /// surface Integrity, not fold to 404. The reader holds NO per-skill roster row, so a wrong-lane
-/// (skill-roster) re-authorize inside the guard would return None and mask the alarm as the uniform
+/// (skill-roster) re-authorize inside the guard would return None and mask the fault as the uniform
 /// miss — this test fails under exactly that bug.
 #[sqlx::test]
 async fn genuine_corruption_on_the_member_lane_is_integrity_not_masked_as_404(pool: PgPool) {
@@ -413,7 +412,7 @@ async fn tampered_bytes_under_a_recorded_id_read_integrity_on_the_member_lane(po
     std::fs::write(&tampered, b"attacker bytes under the honest id").unwrap();
 
     // The presence row still says `present`, the member is confirmed, the id is honest — the only
-    // tripwire left is the read-time hash re-verification, and it must alarm, not serve or 404.
+    // tripwire left is the read-time hash re-verification, and it must fault, not serve or 404.
     assert!(matches!(
         a.serve_object_session(&w, "s_deploy", &o_hex, "member@acme.com", CLOUD)
             .await,
@@ -583,11 +582,12 @@ async fn a_null_digest_under_a_current_row_is_integrity(pool: PgPool) {
     ));
 }
 
-// ── the DEVICE-signed catalog read (`list --remote`) — the workspace-membership device lane ────────────
+// ── the DEVICE catalog read (`list --remote`) — the workspace-membership device lane ────────────────────
 //
-// Authorized by a NON-REVOKED registered device whose catalog-read signature over (ws, device_key_id)
-// verifies against its registered key AND whose bound principal is a CONFIRMED workspace member — on BOTH
-// cloud and self-host (the lane never consults a deployment mode). Every miss is the one uniform NotFound.
+// Authorized by a NON-REVOKED registered device (resolved by its presented `device_key_id`) whose bound
+// principal is a CONFIRMED workspace member — on BOTH cloud and self-host (the lane never consults a
+// deployment mode). The registry is workspace-scoped, so a device is only ever presented against the
+// workspace it was registered in. Every miss is the one uniform NotFound.
 
 /// Seed a NON-REVOKED reader device bound to `email`, and seat that email as a CONFIRMED member — the
 /// device catalog lane's whole entitlement (deliberately NO per-skill roster row).
@@ -595,32 +595,15 @@ async fn seat_device_member(
     fx: &Fixture,
     w: &WorkspaceId,
     dkid: &str,
-    key: &ed25519_dalek::SigningKey,
+    key: &[u8; 32],
     email: &str,
 ) {
     fx.authority
         .db()
-        .seed_device(
-            w,
-            dkid,
-            &key.verifying_key().to_bytes(),
-            &prin(email),
-            false,
-        )
+        .seed_device(w, dkid, key, &prin(email), false)
         .await
         .unwrap();
     seat(fx, w, email, "member").await;
-}
-
-/// The device's catalog-read signature over `(ws, device_key_id)` — the kernel frame `list --remote` signs.
-fn sign_catalog_read(key: &ed25519_dalek::SigningKey, w: &WorkspaceId, dkid: &str) -> [u8; 64] {
-    use ed25519_dalek::Signer as _;
-    let fields = CatalogReadFields {
-        workspace_id: w.as_str(),
-        device_key_id: dkid,
-    };
-    key.sign(&catalog_read_preimage(&fields).unwrap())
-        .to_bytes()
 }
 
 #[sqlx::test]
@@ -644,12 +627,8 @@ async fn a_member_device_reads_the_catalog(pool: PgPool) {
     // A DISTINCT reader device whose principal is a confirmed member, holding NO per-skill roster row.
     let rk = dev_key(71);
     seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
-    let sig = sign_catalog_read(&rk, &w, "dk_read");
 
-    let idx = a
-        .list_skills_device(&w, "dk_read", &sig, NOW)
-        .await
-        .unwrap();
+    let idx = a.list_skills_device(&w, "dk_read", NOW).await.unwrap();
     assert_eq!(idx.len(), 1);
     assert_eq!(idx[0].skill_id, "s_deploy");
     assert_eq!(idx[0].version_id, g.0);
@@ -679,11 +658,10 @@ async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: Pg
 
     let rk = dev_key(73);
     seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
-    let sig = sign_catalog_read(&rk, &w, "dk_read");
 
     // The device lane serves the catalog — it never consults deployment mode.
     assert_eq!(
-        a.list_skills_device(&w, "dk_read", &sig, NOW)
+        a.list_skills_device(&w, "dk_read", NOW)
             .await
             .unwrap()
             .len(),
@@ -698,8 +676,8 @@ async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: Pg
 }
 
 #[sqlx::test]
-async fn a_tampered_or_cross_workspace_catalog_signature_is_notfound(pool: PgPool) {
-    let fx = Fixture::new(pool, "sd-badsig").await;
+async fn an_unknown_or_cross_workspace_device_is_notfound(pool: PgPool) {
+    let fx = Fixture::new(pool, "sd-badkey").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let pk = dev_key(74);
@@ -716,23 +694,15 @@ async fn a_tampered_or_cross_workspace_catalog_signature_is_notfound(pool: PgPoo
     let rk = dev_key(75);
     seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
 
-    // A one-byte-tampered signature no longer verifies → the uniform miss.
-    let mut sig = sign_catalog_read(&rk, &w, "dk_read");
-    sig[0] ^= 0xff;
+    // An UNKNOWN device key id (never registered) is the uniform miss — the credential lookup fails.
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        a.list_skills_device(&w, "dk_ghost", NOW).await,
         Err(AuthorityError::NotFound)
     ));
-    // A signature that binds a DIFFERENT workspace can't authorize this one (no cross-workspace replay).
-    let cross = sign_catalog_read(&rk, &ws("w_other"), "dk_read");
+    // The registry is WORKSPACE-scoped: `dk_read` is registered in `w_acme`, so presenting it against a
+    // DIFFERENT workspace resolves nothing → the uniform miss (no cross-workspace catalog leak).
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", &cross, NOW).await,
-        Err(AuthorityError::NotFound)
-    ));
-    // An UNKNOWN device key id (never registered) is the same miss (resolve fails before any verify).
-    let ghost = sign_catalog_read(&rk, &w, "dk_ghost");
-    assert!(matches!(
-        a.list_skills_device(&w, "dk_ghost", &ghost, NOW).await,
+        a.list_skills_device(&ws("w_other"), "dk_read", NOW).await,
         Err(AuthorityError::NotFound)
     ));
 }
@@ -754,22 +724,15 @@ async fn a_revoked_device_is_notfound_on_the_catalog_read(pool: PgPool) {
     )
     .await;
 
-    // A REVOKED reader device whose principal is nonetheless a confirmed member, with a VALID signature.
+    // A REVOKED reader device whose principal is nonetheless a confirmed member.
     let rk = dev_key(77);
     a.db()
-        .seed_device(
-            &w,
-            "dk_read",
-            &rk.verifying_key().to_bytes(),
-            &prin("reader@acme.com"),
-            true,
-        )
+        .seed_device(&w, "dk_read", &rk, &prin("reader@acme.com"), true)
         .await
         .unwrap();
     seat(&fx, &w, "reader@acme.com", "member").await;
-    let sig = sign_catalog_read(&rk, &w, "dk_read");
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        a.list_skills_device(&w, "dk_read", NOW).await,
         Err(AuthorityError::NotFound)
     ));
 }
@@ -791,21 +754,14 @@ async fn a_registered_device_whose_principal_is_not_a_confirmed_member_is_notfou
     )
     .await;
 
-    // A registered, non-revoked device with a VALID signature, but its principal holds no confirmed seat.
+    // A registered, non-revoked device, but its principal holds no confirmed seat.
     let rk = dev_key(79);
     a.db()
-        .seed_device(
-            &w,
-            "dk_read",
-            &rk.verifying_key().to_bytes(),
-            &prin("stranger@acme.com"),
-            false,
-        )
+        .seed_device(&w, "dk_read", &rk, &prin("stranger@acme.com"), false)
         .await
         .unwrap();
-    let sig = sign_catalog_read(&rk, &w, "dk_read");
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        a.list_skills_device(&w, "dk_read", NOW).await,
         Err(AuthorityError::NotFound)
     ));
     // Even an INVITED (unconfirmed) seat is not a confirmed member → still the uniform miss.
@@ -814,7 +770,7 @@ async fn a_registered_device_whose_principal_is_not_a_confirmed_member_is_notfou
         .await
         .unwrap();
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", &sig, NOW).await,
+        a.list_skills_device(&w, "dk_read", NOW).await,
         Err(AuthorityError::NotFound)
     ));
 }

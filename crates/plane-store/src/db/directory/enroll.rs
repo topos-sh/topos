@@ -10,7 +10,6 @@
 
 use sqlx::{Postgres, Transaction};
 use topos_core::digest;
-use topos_core::sign::{EnrollFields, verify_enroll};
 
 use crate::db::{Db, blob32};
 use crate::enroll::{
@@ -707,14 +706,13 @@ async fn complete_passcode_run(
     }
 }
 
-// ── redeem: the central possession-proof + gate + register + mint transaction ──────────────────────────
+// ── redeem: the central grant-redemption + gate + register + mint transaction ──────────────────────────
 
 struct GrantRow {
     workspace_id: WorkspaceId,
     principal: String,
     device_pubkey: [u8; 32],
     device_key_id: String,
-    device_auth_id: String,
     expires_at: i64,
 }
 
@@ -752,25 +750,10 @@ async fn redeem_run(
     {
         return Ok(RedeemOutcome::Denied("device key mismatch"));
     }
-    // The grant's offered skills (needed for the possession frame AND the mint loop).
+    // The grant's offered skills (the mint loop's set).
     let offered = read_grant_skills(tx, gs).await?;
 
-    // (4) POSSESSION PROOF: rebuild the enroll frame from SERVER-trusted values and verify against the
-    // GRANT's bound public key (never a client-body key). A tampered key/skill-set changes the frame and fails.
-    let offered_strs: Vec<&str> = offered.iter().map(SkillId::as_str).collect();
-    let fields = EnrollFields {
-        workspace_id: grant.workspace_id.as_str(),
-        grant_hash: input.grant_sha256,
-        device_auth_id: &grant.device_auth_id,
-        device_key_id: input.server_device_key_id,
-        device_public_key: input.device_public_key,
-        offered_skill_ids: &offered_strs,
-    };
-    if !verify_enroll(&fields, input.enroll_sig, &grant.device_pubkey) {
-        return Ok(RedeemOutcome::Denied("possession proof failed"));
-    }
-
-    // (5) THE GATE (deployment mode from the workspace row). The stored mode is parsed STRICTLY — an
+    // (4) THE GATE (deployment mode from the workspace row). The stored mode is parsed STRICTLY — an
     // unknown/corrupted value is an Integrity fault (fail closed, matching start_device_auth and
     // read_invite_bootstrap), NEVER a silent fall-through to the self-host bearer semantics: a garbage
     // mode must not admit a device that would have had to pass the cloud roster gate.
@@ -795,7 +778,7 @@ async fn redeem_run(
         DeploymentMode::SelfHost => false,
     };
 
-    // (6) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
+    // (5) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
     // AND must NOT be revoked. Without the revoked check, a revoked device could re-redeem its still-live
     // grant (a ~12-min TTL) and the deterministic mint loop below would RE-CREATE the read tokens the revoke
     // just deleted — undoing the kill switch within the grant window. A revoked device cannot re-enroll.
@@ -817,7 +800,7 @@ async fn redeem_run(
     let ws_s = grant.workspace_id.as_str();
     let prin = principal.as_str();
 
-    // (5') Membership: cloud flips an `invited` row to `confirmed`; self-host inserts a confirmed member.
+    // (4') Membership: cloud flips an `invited` row to `confirmed`; self-host inserts a confirmed member.
     if cloud_invited {
         sqlx::query!(
             "UPDATE workspace_member SET status = 'confirmed' \
@@ -842,7 +825,7 @@ async fn redeem_run(
         .map_err(AuthorityError::internal)?;
     }
 
-    // (5'') REGISTER the device (idempotent — step 6 proved no conflicting row).
+    // (4'') REGISTER the device (idempotent — step 5 proved no conflicting row).
     let pk = input.device_public_key.as_slice();
     sqlx::query!(
         "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
@@ -857,7 +840,7 @@ async fn redeem_run(
     .await
     .map_err(AuthorityError::internal)?;
 
-    // (6') Per offered skill: roster the principal + mint the deterministic read token (store only its sha256).
+    // (5') Per offered skill: roster the principal + mint the deterministic read token (store only its sha256).
     let mut read_tokens = Vec::with_capacity(offered.len());
     for skill in &offered {
         let sk = skill.as_str();
@@ -901,7 +884,7 @@ async fn redeem_run(
         });
     }
 
-    // (7) Audit marker (idempotent — a replay re-stamps, harmless).
+    // (6) Audit marker (idempotent — a replay re-stamps, harmless).
     sqlx::query!(
         "UPDATE enrollment_grants SET consumed_at = $2 WHERE grant_sha256 = $1 AND consumed_at IS NULL",
         gs,
@@ -937,7 +920,6 @@ async fn read_grant(tx: &mut Transaction<'_, Postgres>, gs: &[u8]) -> Result<Opt
             principal: r.principal,
             device_pubkey: blob32(&r.device_pubkey)?,
             device_key_id: r.device_key_id,
-            device_auth_id: r.device_auth_id,
             expires_at: r.expires_at,
         })),
     }

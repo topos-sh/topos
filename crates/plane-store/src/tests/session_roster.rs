@@ -4,7 +4,7 @@
 //! acting gate (one uniform denial for member / reviewer / invited / absent — and only a confirmed
 //! member's denial is ever recorded), role-on-the-seat seeding, the self-host uniform denial, the
 //! `request_id` replay/divergence discipline (including the cross-leg id collision with a
-//! device-signed op), the last-owner lockout + instant revoke on remove, the standing-door family
+//! device-lane op), the last-owner lockout + instant revoke on remove, the standing-door family
 //! (genesis continuity, lazy epoch mint, rotation that blocks future redemption only), and the
 //! `web_session` receipt method + acting-principal audit trail.
 
@@ -379,7 +379,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
         GovernanceOutcome::Denied("op id reused with a different request")
     ));
 
-    // CROSS-LEG: a device-signed governance op's op_id can never replay as a session op (the
+    // CROSS-LEG: a device-lane governance op's op_id can never replay as a session op (the
     // session preimage tag differs from the kernel frame), and fails closed as a key reuse.
     let device_op = op_id(11);
     make_invite(
@@ -912,7 +912,7 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
         ),
         (owner.as_str(), "link_rotate", "OK", "web_session")
     );
-    // The device leg names the SIGNING DEVICE and the device_signed method.
+    // The device leg names the acting DEVICE KEY and the 'device' method.
     let (actor, verb, outcome, method) = &by_op[&op_id(4)];
     assert_eq!(
         (
@@ -921,7 +921,7 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
             outcome.as_str(),
             method.as_str()
         ),
-        (owner_dk.as_str(), "invite", "OK", "device_signed")
+        (owner_dk.as_str(), "invite", "OK", "device")
     );
 
     // The standing door link never lands in a receipt: no details value contains a token-bearing
@@ -1035,7 +1035,7 @@ async fn raced_mutual_owner_removes_keep_one_owner(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_session_request_id_slot_is_closed_to_a_later_device_op(pool: PgPool) {
-    // The reverse cross-leg direction: a session op takes an op-id slot; a device-signed governance
+    // The reverse cross-leg direction: a session op takes an op-id slot; a device-lane governance
     // op that reuses that id later fails closed as a key reuse (the two preimages can never match).
     let fx = Fixture::new(pool, "sr-cross-leg").await;
     let a = &fx.authority;
@@ -1052,7 +1052,7 @@ async fn a_session_request_id_slot_is_closed_to_a_later_device_op(pool: PgPool) 
         SessionInviteRole::Member,
     )
     .await;
-    // A device-signed invite reusing the session's request_id as its op_id is denied key-reuse.
+    // A device-lane invite reusing the session's request_id as its op_id is denied key-reuse.
     let signed = super::enrollment_governance::sign_governance(
         &owner_seed,
         w.as_str(),

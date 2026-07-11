@@ -35,17 +35,15 @@ sqlx = { workspace = true, features = ["runtime-tokio", "macros", "migrate", "po
 # `runtime-tokio`, and the client takes NO edge to `plane-store` (check-arch forbids it), so this never
 # reaches the CLI.
 tokio = { workspace = true, features = ["time", "rt"] }
-# The in-process plane SIGNER — this crate is the ONLY private-key holder (topos-core stays verify-only
-# no_std). `std` gives std::error::Error on SignatureError; `zeroize` restores SigningKey's ZeroizeOnDrop
-# (the root pin is default-features=false, which strips it). `getrandom` seeds first-run key generation;
-# `base64` encodes the signed pointer's Signature.value (base64url-unpadded); `uuid` parses the canonical
-# op_id into the 16 bytes the device-op signature binds. None of this reaches the client (no topos -> plane-store edge).
-ed25519-dalek = { workspace = true, features = ["std", "zeroize"] }
+# `zeroize` wraps the enrollment secret's seed buffer; `getrandom` mints fresh device/user codes + the
+# retry jitter; `base64` is the opaque-credential codec (base64url-unpadded); `uuid` validates the
+# canonical op-id spelling the receipt slots key on. None of this reaches the client (no
+# topos -> plane-store edge).
 zeroize.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 uuid = { workspace = true }
-# Serialize the signed `current` record (a topos-types DTO) into the stored BLOB + the open receipt `details`.
+# Serialize the `current` record (a topos-types DTO) into the stored BLOB + the open receipt `details`.
 serde_json.workspace = true
 # The deterministic opaque-credential derivation: HMAC-SHA256 over the 0600 enrollment secret mints every
 # invite / grant / read-token plaintext, so a lost-ack retry re-derives the IDENTICAL credential (and only its

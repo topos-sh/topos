@@ -1,7 +1,7 @@
 //! The crate's one public error type.
 //!
 //! The privacy boundary extends to errors: no `sqlx` or git-store type appears in any public
-//! signature. Internal faults carry a **boxed** source (the chain is preserved for diagnostics) but
+//! shape. Internal faults carry a **boxed** source (the chain is preserved for diagnostics) but
 //! their `Display` is generic, so a wire layer maps the *variant* and never echoes internals.
 
 /// The result of an authorized authority operation.

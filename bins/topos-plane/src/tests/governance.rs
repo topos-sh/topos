@@ -3,7 +3,7 @@
 use super::*;
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn an_owner_signed_invite_returns_invite_data(pool: PgPool) {
+async fn an_owner_device_invite_returns_invite_data(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-invite-ok").await;
     let env = create_invite(
         &ctx,
@@ -12,7 +12,7 @@ async fn an_owner_signed_invite_returns_invite_data(pool: PgPool) {
         SKILL,
     )
     .await;
-    assert!(env.ok, "an owner-signed invite should be ok: {env:?}");
+    assert!(env.ok, "an owner invite should be ok: {env:?}");
     assert_eq!(env.command, "invite");
     assert!(
         env.data["invite_link"]
@@ -37,11 +37,10 @@ async fn an_owner_signed_invite_returns_invite_data(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn a_member_signed_invite_is_denied(pool: PgPool) {
+async fn a_member_device_invite_is_denied(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-invite-denied").await;
     // A non-owner member device (governance requires the owner role for invite).
     let ws = WorkspaceId::parse(WS).unwrap();
-    let member = dev_key(MEMBER_SEED);
     let member_principal = Principal::parse(MEMBER_PRINCIPAL).unwrap();
     ctx.authority()
         .seed_workspace_member(&ws, &member_principal, "member", "confirmed")
@@ -51,7 +50,7 @@ async fn a_member_signed_invite_is_denied(pool: PgPool) {
         .seed_device(
             &ws,
             MEMBER_DK,
-            &member.verifying_key().to_bytes(),
+            &dev_pubkey(MEMBER_SEED),
             &member_principal,
             false,
         )
@@ -60,18 +59,6 @@ async fn a_member_signed_invite_is_denied(pool: PgPool) {
 
     let op = "eeeeeeee-0000-4000-8000-000000000001";
     let emails = [ALICE_EMAIL];
-    let skills = [SKILL];
-    let sig = sign_governance(
-        &member,
-        MEMBER_DK,
-        op,
-        GovernanceOpKind::Invite {
-            role: Role::Member.signing_byte(),
-            expires_at: 0,
-            emails: &emails,
-            skills: &skills,
-        },
-    );
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op,
@@ -81,11 +68,11 @@ async fn a_member_signed_invite_is_denied(pool: PgPool) {
         "skills": [{ "skill_id": SKILL, "name": "Deploy" }],
     });
 
-    let (status, _, bytes) = send(ctx.app(), signed_req("POST", "/v1/invites", &sig, body)).await;
+    let (status, _, bytes) = send(ctx.app(), post_nosig("/v1/invites", body)).await;
     // A role-denial is a 200 + DENIED envelope (the actor is an authenticated member — nothing to hide).
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
-    assert!(!env.ok, "a member-signed invite must be denied: {env:?}");
+    assert!(!env.ok, "a member's invite must be denied: {env:?}");
     assert_eq!(
         env.error.expect("DENIED carries a WireError").outcome,
         TerminalOutcome::Denied
@@ -97,13 +84,12 @@ async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-revoke").await;
     // A target device for the owner to revoke.
     let ws = WorkspaceId::parse(WS).unwrap();
-    let target = dev_key(TARGET_SEED);
     let target_principal = Principal::parse(TARGET_PRINCIPAL).unwrap();
     ctx.authority()
         .seed_device(
             &ws,
             TARGET_DK,
-            &target.verifying_key().to_bytes(),
+            &dev_pubkey(TARGET_SEED),
             &target_principal,
             false,
         )
@@ -111,14 +97,6 @@ async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
         .unwrap();
 
     let op = "ffffffff-0000-4000-8000-000000000001";
-    let sig = sign_governance(
-        &ctx.owner_key,
-        OWNER_DK,
-        op,
-        GovernanceOpKind::DeviceRevoke {
-            target_device_key_id: TARGET_DK,
-        },
-    );
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op,
@@ -128,12 +106,7 @@ async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
 
     let (status, _, bytes) = send(
         ctx.app(),
-        signed_req(
-            "DELETE",
-            &format!("/v1/workspaces/{WS}/devices"),
-            &sig,
-            body,
-        ),
+        req_json("DELETE", &format!("/v1/workspaces/{WS}/devices"), body),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

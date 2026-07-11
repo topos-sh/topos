@@ -37,24 +37,6 @@ where
     }
 }
 
-/// Parse the WRITE credential — the `Topos-Device-Signature` header (base64url-unpadded, 86 chars) → the raw
-/// 64-byte Ed25519 signature. Missing or malformed → a 400 (`BadDeviceSignature`); verification itself is the
-/// authority's, server-side.
-pub(crate) fn device_signature(headers: &HeaderMap) -> Result<[u8; 64], PlaneHttpError> {
-    let raw = headers
-        .get("topos-device-signature")
-        .ok_or(PlaneHttpError::BadDeviceSignature)?;
-    let text = raw
-        .to_str()
-        .map_err(|_| PlaneHttpError::BadDeviceSignature)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(text.as_bytes())
-        .map_err(|_| PlaneHttpError::BadDeviceSignature)?;
-    bytes
-        .try_into()
-        .map_err(|_| PlaneHttpError::BadDeviceSignature)
-}
-
 /// Parse + validate a WRITE `op_id` at the edge. The authority binds `op_id` as 16 bytes in the device-op
 /// preimage and, on the write paths, **ingests + leases the candidate BEFORE** that bind — so a path-safe but
 /// non-canonical-UUID `op_id` accepted here would let an unauthenticated malformed request pin the uploaded
@@ -107,26 +89,6 @@ pub(crate) fn device_key_id_header(headers: &HeaderMap) -> Result<String, PlaneH
         return Err(PlaneHttpError::MissingReadCredential);
     }
     Ok(text.to_owned())
-}
-
-/// Parse the catalog-READ credential — the `Topos-Device-Signature` header decoded EXACTLY as the write
-/// routes decode it ([`device_signature`]: base64url-unpadded → the raw 64-byte Ed25519 signature). Unlike
-/// the write path (a malformed signature there is an honest 400), a missing/malformed header on this READ is
-/// the single indistinguishable `MissingReadCredential` (→ 404): the read must not distinguish a missing
-/// credential from an unknown device / workspace / non-membership.
-pub(crate) fn read_signature(headers: &HeaderMap) -> Result<[u8; 64], PlaneHttpError> {
-    let raw = headers
-        .get("topos-device-signature")
-        .ok_or(PlaneHttpError::MissingReadCredential)?;
-    let text = raw
-        .to_str()
-        .map_err(|_| PlaneHttpError::MissingReadCredential)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(text.as_bytes())
-        .map_err(|_| PlaneHttpError::MissingReadCredential)?;
-    bytes
-        .try_into()
-        .map_err(|_: Vec<u8>| PlaneHttpError::MissingReadCredential)
 }
 
 /// Decode a base64url-unpadded raw 32-byte key (a device public key in an enrollment body) → `[u8; 32]`.

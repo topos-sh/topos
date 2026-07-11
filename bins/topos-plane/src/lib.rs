@@ -19,7 +19,7 @@
 //! - [`PlaneConfig`] + [`PlaneState::open`] — the one construction path: plain/owned config in, a
 //!   serving [`PlaneState`] out, the authority + enrollment config built internally.
 //! - [`PlaneState`] — the shared, cheap-to-clone handle (`Arc<Authority>` + the in-process rate limiter).
-//! - [`router`] — wires the seven routes (4 device-signed writes + 3 token-scoped reads) with the
+//! - [`router`] — wires the seven routes (4 device-credential writes + 3 token-scoped reads) with the
 //!   rate-limit middleware, request-level tracing (method + matched route template + status + latency —
 //!   never a raw, credential-bearing path), and a body-size limit; every handler is **thin** (parse → call
 //!   the authority → serialize), never a trust decision.

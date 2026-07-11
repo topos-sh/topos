@@ -4,10 +4,9 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use plane_store::{CommitId, DeviceSignedOp, SkillId, WorkspaceId};
-use topos_core::sign::DeviceOp;
+use plane_store::{CommitId, DeviceOp, DeviceOpRequest, SkillId, WorkspaceId};
 use topos_types::JsonEnvelope;
 use topos_types::requests::ReviewRequest;
 use topos_types::results::ReviewDecision;
@@ -21,20 +20,17 @@ use crate::wire::{self, ApiJson, map};
     path = "/v1/reviews",
     tag = "writes",
     request_body = ReviewRequest,
-    params(("Topos-Device-Signature" = String, Header, description = "base64url(64-byte Ed25519 device-op signature), 86 chars")),
     responses(
         (status = 200, description = "The review receipt (OK on an approve that promoted; CONFLICT / DENIED / … otherwise).", body = JsonEnvelope),
-        (status = 400, description = "Malformed body, identifier, or device signature.", body = JsonEnvelope),
+        (status = 400, description = "Malformed body or identifier.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
 pub(crate) async fn review(
     State(state): State<PlaneState>,
-    headers: HeaderMap,
     ApiJson(req): ApiJson<ReviewRequest>,
 ) -> Result<Response, PlaneHttpError> {
-    let signature = wire::device_signature(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
@@ -46,10 +42,9 @@ pub(crate) async fn review(
 
     let receipt = match req.decision {
         ReviewDecision::Approve => {
-            let device = DeviceSignedOp {
+            let device = DeviceOpRequest {
                 device_key_id: req.device_key_id,
                 op: DeviceOp::ReviewApprove,
-                signature,
                 expected: req.expected,
             };
             state
@@ -58,10 +53,9 @@ pub(crate) async fn review(
                 .await?
         }
         ReviewDecision::Reject => {
-            let device = DeviceSignedOp {
+            let device = DeviceOpRequest {
                 device_key_id: req.device_key_id,
                 op: DeviceOp::ReviewReject,
-                signature,
                 expected: req.expected,
             };
             state

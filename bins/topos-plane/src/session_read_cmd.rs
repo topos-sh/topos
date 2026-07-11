@@ -32,8 +32,8 @@ pub struct SkillIndexEntrySummary {
     pub updated_at_ms: i64,
     /// The pointed version's consent digest (hex64).
     pub bundle_digest: String,
-    /// The skill's UNSIGNED advisory display name (the author's folder name), or `None` (show the skill
-    /// id). Display only — never part of the digest or any signature.
+    /// The skill's advisory display name (the author's folder name), or `None` (show the skill
+    /// id). Display only — never part of the bundle digest, so a rename never forks a version.
     pub display_name: Option<String>,
     pub open_proposals: u64,
 }
@@ -51,12 +51,12 @@ pub enum SkillsIndexSummary {
 /// The outcome of [`PlaneState::read_current_session`].
 #[derive(Debug, Clone)]
 pub enum SessionCurrentSummary {
-    /// The stored `SignedCurrentRecord` JSON, byte-verbatim (what a follower verifies; what the
-    /// token-scoped current route serves). The authority's `Ok(None)` — no signed pointer exists for
-    /// this (ws, skill): a cataloged-but-never-signed skill and an unknown skill id are deliberately
+    /// The stored `WireCurrentRecord` JSON, byte-verbatim (what a follower re-verifies against; what the
+    /// token-scoped current route serves). The authority's `Ok(None)` — no record row exists for
+    /// this (ws, skill): a cataloged-but-no-record skill and an unknown skill id are deliberately
     /// indistinguishable there — is FOLDED into the uniform `NotFound` here; this wrapper is that
     /// composing fold (pre-first-publish visibility would be a conscious new arm, not this fold).
-    Current { signed_record: Vec<u8> },
+    Current { record: Vec<u8> },
     /// The single uniform miss.
     NotFound,
 }
@@ -129,7 +129,7 @@ impl PlaneState {
         }
     }
 
-    /// A skill's signed `current` pointer for a session-verified confirmed member — the stored
+    /// A skill's `current` pointer for a session-verified confirmed member — the stored
     /// record bytes verbatim (parity with the token-scoped current route by construction).
     ///
     /// # Errors
@@ -150,9 +150,9 @@ impl PlaneState {
             .await
         {
             Ok(Some(pointer)) => Ok(SessionCurrentSummary::Current {
-                signed_record: pointer.signed_record,
+                record: pointer.record,
             }),
-            // The deliberate fold: no signed pointer for this (ws, skill) reads as the uniform miss here.
+            // The deliberate fold: no record row for this (ws, skill) reads as the uniform miss here.
             Ok(None) => Ok(SessionCurrentSummary::NotFound),
             Err(AuthorityError::NotFound) => Ok(SessionCurrentSummary::NotFound),
             Err(error) => Err(anyhow::anyhow!("reading the current pointer: {error}")),

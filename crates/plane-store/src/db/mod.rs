@@ -14,12 +14,11 @@
 
 use std::time::Duration;
 
+use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Postgres};
 
 use crate::authority::PoolConfig;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
 /// The bounded number of times the `run_serializable!` macro re-runs a write closure that hit a
 /// serialization failure (SQLSTATE `40001`) or deadlock (`40P01`). Contention on one team's skill is
@@ -55,7 +54,8 @@ pub(in crate::db) async fn retry_backoff(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 }
 
-/// Which principal gate authorizes a read — the lane of the gate/reach split ([`Db::read_gate`]). The
+/// Which principal gate authorizes a read — the lane of the gate/reach split (the access witness's
+/// `read_gate`). The
 /// reachability statements are lane-blind; the lane decides ONLY who may ask.
 ///
 /// - [`SkillRoster`](Self::SkillRoster) — the device lane: a per-skill `roster` row exists (the
@@ -263,8 +263,8 @@ impl Db {
     #[cfg(test)]
     pub(crate) async fn test_force_one_serialization_retry(
         &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
+        ws: &crate::id::WorkspaceId,
+        skill: &crate::id::SkillId,
     ) -> Result<()> {
         let inject = std::sync::atomic::AtomicBool::new(true);
         let ws_s = ws.as_str();
@@ -309,275 +309,6 @@ impl Db {
             }
             .await
         )
-    }
-
-    /// The principal GATE of the read-authorization **gate/reach split**, dispatched by [`ReadLane`].
-    /// Each authorization ([`Self::authorize_object_read`] / [`Self::authorize_version_read`] /
-    /// [`Self::list_open_proposals`]) runs this gate and then ONE principal-free reachability statement,
-    /// so every lane shares the identical reachability SQL and the lane decides only WHO may ask. Zero
-    /// new SQL: each arm delegates to an existing probe. The gate and the reach are two statements — a
-    /// principal revoked between them completes one in-flight read, the same accepted window as the
-    /// authorize-then-fetch TOCTOU [`crate::read::read_object`] already re-guards (and re-runs on a miss).
-    pub(in crate::db) async fn read_gate(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        lane: ReadLane,
-    ) -> Result<bool> {
-        match lane {
-            ReadLane::SkillRoster => roster_exists(&self.pool, ws, skill, principal).await,
-            ReadLane::WorkspaceMember => {
-                workspace_member_confirmed(&self.pool, ws, principal).await
-            }
-        }
-    }
-
-    /// A CONFIRMED `workspace_member` row exists — the session-read preamble's probe (the same predicate
-    /// the [`ReadLane::WorkspaceMember`] gate runs; exposed separately so the preamble can deny BEFORE any
-    /// per-skill work).
-    pub(crate) async fn confirmed_member(
-        &self,
-        ws: &WorkspaceId,
-        principal: &Principal,
-    ) -> Result<bool> {
-        workspace_member_confirmed(&self.pool, ws, principal).await
-    }
-
-    /// The principal's `(role, status)` on this workspace, or `None` for no seat — a POOL read the session
-    /// revert leg uses as a cheap pre-stage owner|reviewer fence (it constructs a forward commit before the
-    /// transaction, so an unauthorized member must be turned away BEFORE that git work; the in-txn gate stays
-    /// authoritative). Mirrors the in-txn [`governance::read_member_role`](super::governance::read_member_role)
-    /// query against the pool.
-    pub(crate) async fn member_role(
-        &self,
-        ws: &WorkspaceId,
-        principal: &Principal,
-    ) -> Result<Option<(String, String)>> {
-        let (ws_s, prin) = (ws.as_str(), principal.as_str());
-        let row = sqlx::query!(
-            r#"SELECT role AS "role!", status AS "status!" FROM workspace_member
-               WHERE workspace_id = $1 AND principal = $2"#,
-            ws_s,
-            prin,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(row.map(|r| (r.role, r.status)))
-    }
-
-    /// The object-read authorization: the lane's principal gate ([`Self::read_gate`]), then the
-    /// principal-free reachability witness ([`Self::object_witness`]). Returns the **witness** commit id
-    /// iff the gate admits the principal AND the skill makes the object readable. An empty result is the
-    /// single not-entitled/not-found signal (gate-denied, skill-doesn't-reach, and object-nonexistent are
-    /// indistinguishable).
-    pub(crate) async fn authorize_object_read(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        object_id: ObjectId,
-        lane: ReadLane,
-    ) -> Result<Option<CommitId>> {
-        if !self.read_gate(ws, skill, principal, lane).await? {
-            return Ok(None);
-        }
-        self.object_witness(ws, skill, object_id).await
-    }
-
-    /// The principal-free object-reachability witness — the reach half of the split (the lane gate has
-    /// already admitted the caller). Two disjoint arms over the SAME (workspace-bound, skill-scoped)
-    /// envelope:
-    /// - **trunk**: `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)` — any accepted version of
-    ///   the skill reaches the object.
-    /// - **proposal**: `∃ p: proposal_object(w,p,object_id) ∧ p.skill=s ∧ p.status='open' ∧ p.base ==
-    ///   current(w,s)` — an OPEN, NON-STALE proposal of the skill roots the object. This arm shares its
-    ///   `open ∧ non-stale` predicate **verbatim** with the two GC keep-checks
-    ///   ([`claim_for_delete`](Self::claim_for_delete) / [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)),
-    ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
-    ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
-    ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
-    ///   and the bind-parameter numbering differs per call site); there are **FIVE** verbatim copies of
-    ///   `open ∧ base == current` — this witness's proposal arm, [`Self::version_readable`]'s proposal arm,
-    ///   the two GC keep-checks ([`claim_for_delete`](Self::claim_for_delete) /
-    ///   [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)), and the proposals listing
-    ///   ([`Self::open_proposal_rows`]) — and a dedicated equivalence test pins the three
-    ///   object-keyed copies (this arm + the two GC keep-checks) together against drift, while behavioral
-    ///   tests pin the version-read and the listing copies to the same staleness semantics. A reclaimed object
-    ///   that briefly outlives this check on a concurrent read is handled by
-    ///   [`crate::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
-    ///
-    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
-    async fn object_witness(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        object_id: ObjectId,
-    ) -> Result<Option<CommitId>> {
-        let ws = ws.as_str();
-        let skill = skill.as_str();
-        let object = object_id.0.as_slice();
-        let row = sqlx::query!(
-            r#"
-            SELECT w.commit_id AS "commit_id!: Vec<u8>" FROM (
-                SELECT sc.commit_id AS commit_id
-                FROM skill_commit  sc
-                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
-                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND co.object_id = $3
-              UNION ALL
-                SELECT p.commit_id AS commit_id
-                FROM proposal_object po
-                JOIN proposals p  ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
-                JOIN current    c  ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                WHERE po.workspace_id = $1 AND po.object_id = $3 AND p.skill_id = $2
-                  AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq
-            ) w
-            LIMIT 1
-            "#,
-            ws,
-            skill,
-            object,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        row.map(|r| commit_id_from_row(&r.commit_id)).transpose()
-    }
-
-    /// Gather the owning skill of each given commit id that has provenance in this workspace (absent
-    /// ids — no provenance in any skill — are simply not returned). The cross-skill lineage predicate
-    /// turns this into its membership facts; keeping the read here keeps `sqlx` out of that pure logic.
-    pub(crate) async fn commit_owners(
-        &self,
-        ws: &WorkspaceId,
-        commit_ids: &[CommitId],
-    ) -> Result<Vec<(CommitId, SkillId)>> {
-        let ws_s = ws.as_str();
-        let mut out = Vec::new();
-        // One bound lookup per id (the candidate-and-parents set is tiny). A per-id `query!` keeps
-        // compile-time checking and the offline metadata; a dynamic `IN (..)` list would forfeit both.
-        for &id in commit_ids {
-            let cid = id.0.as_slice();
-            let row = sqlx::query!(
-                r#"SELECT skill_id AS "skill_id!" FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2"#,
-                ws_s,
-                cid,
-            )
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(AuthorityError::internal)?;
-            if let Some(row) = row {
-                // A stored skill_id is always pre-validated on the way in, so a re-parse failure here is
-                // store corruption — map it to an integrity fault, not the boundary `InvalidId` (mirroring
-                // `commit_id_from_row`'s handling of a bad-width BLOB).
-                let skill = SkillId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
-                out.push((id, skill));
-            }
-        }
-        Ok(out)
-    }
-
-    /// Resolve a read token's sha256 to its `(workspace, skill, principal)` scope — the read-credential
-    /// resolver. **The one lookup NOT bound on `workspace_id`:** the token IS what resolves the workspace,
-    /// so this probes the globally-unique `token_sha256` primary key (O(1)) and ESTABLISHES the binding
-    /// every subsequent query carries. Only the hash is stored, never the plaintext. The row's strings were
-    /// validated when the token was minted, so a re-parse failure is store corruption (an integrity fault),
-    /// not a client error — mirroring `commit_owners` / `resolve_device`. `None` ⇒ no such token.
-    pub(crate) async fn lookup_read_token(
-        &self,
-        token_sha256: &[u8; 32],
-        now: i64,
-    ) -> Result<Option<(WorkspaceId, SkillId, Principal)>> {
-        let key = token_sha256.as_slice();
-        let row = sqlx::query!(
-            r#"SELECT workspace_id AS "workspace_id!", skill_id AS "skill_id!", principal AS "principal!"
-               FROM read_token WHERE token_sha256 = $1 AND (expires_at IS NULL OR expires_at > $2)"#,
-            key,
-            now,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        match row {
-            None => Ok(None),
-            Some(r) => Ok(Some((
-                WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity)?,
-                SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
-                Principal::parse(&r.principal).map_err(AuthorityError::integrity)?,
-            ))),
-        }
-    }
-
-    /// The version-read authorization — the R1 gate the version-metadata route runs, mirroring
-    /// [`Self::authorize_object_read`]'s gate/reach split but anchored on a VERSION (`commit_id`) rather
-    /// than an object: the lane's principal gate ([`Self::read_gate`]), then the principal-free
-    /// [`Self::version_readable`]. `false` collapses gate-denied and not-reachable into the caller's one
-    /// indistinguishable not-found.
-    pub(crate) async fn authorize_version_read(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        version_id: CommitId,
-        lane: ReadLane,
-    ) -> Result<bool> {
-        if !self.read_gate(ws, skill, principal, lane).await? {
-            return Ok(false);
-        }
-        self.version_readable(ws, skill, version_id).await
-    }
-
-    /// The principal-free version-reachability test — the reach half of the version read (the lane gate
-    /// has already admitted the caller). `true` iff the version is readable through EITHER:
-    /// - **trunk**: the version is owned by the skill (`skill_commit`) AND has ≥1 `commit_object` edge — the
-    ///   accepted-trunk test (every accepted version roots ≥1 object, so a non-empty edge set is exact), OR
-    /// - **proposal**: an OPEN, NON-STALE proposal of the skill whose `commit_id` is this version. This arm
-    ///   reuses the SAME `status='open' ∧ (base_epoch, base_seq) == current.(epoch, seq)` staleness predicate
-    ///   the object-reach arm ([`Self::object_witness`]) and the two GC keep-checks
-    ///   ([`Self::claim_for_delete`] / [`Self::claim_stale_for_recovery`]) use — here anchored on
-    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is the 4th copy
-    ///   of the literal — the proposals listing [`Self::open_proposal_rows`] is the 5th — not a shared
-    ///   string; the behavioral proposal-version tests pin it to the same
-    ///   staleness semantics). It deliberately does NOT authorize on bare `skill_commit`, which also names
-    ///   unaccepted/rejected proposal candidates — that would leak a never-accepted version's metadata (the
-    ///   `commit_object` ≥1-edge join is load-bearing; a rejected-candidate-404 test pins it).
-    ///
-    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
-    async fn version_readable(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        version_id: CommitId,
-    ) -> Result<bool> {
-        let ws = ws.as_str();
-        let skill = skill.as_str();
-        let cid = version_id.0.as_slice();
-        let row = sqlx::query!(
-            r#"
-            SELECT 1::int8 AS "ok!: i64" FROM (
-                SELECT 1 AS ok
-                FROM skill_commit  sc
-                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
-                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND sc.commit_id = $3
-              UNION ALL
-                SELECT 1 AS ok
-                FROM proposals p
-                JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                WHERE p.workspace_id = $1 AND p.skill_id = $2
-                  AND p.commit_id = $3 AND p.status = 'open'
-                  AND c.epoch = p.base_epoch AND c.seq = p.base_seq
-            ) w
-            LIMIT 1
-            "#,
-            ws,
-            skill,
-            cid,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(row.is_some())
     }
 }
 
@@ -637,90 +368,6 @@ pub(in crate::db) fn is_serialization_failure(e: &AuthorityError) -> bool {
 /// as "disabled" — but callers pass whole seconds, so that is not reachable in practice.
 fn duration_millis(d: Option<Duration>) -> Option<u64> {
     d.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// Shared roster-existence probe (used by both the cheap pre-read on the pool and the authoritative
-/// check inside the transaction). Generic over the executor so the identical query serves both.
-async fn roster_exists<'e, E>(
-    executor: E,
-    ws: &WorkspaceId,
-    skill: &SkillId,
-    principal: &Principal,
-) -> Result<bool>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let ws = ws.as_str();
-    let skill = skill.as_str();
-    let principal = principal.as_str();
-    let row = sqlx::query!(
-        "SELECT principal FROM roster WHERE workspace_id = $1 AND skill_id = $2 AND principal = $3 LIMIT 1",
-        ws,
-        skill,
-        principal,
-    )
-    .fetch_optional(executor)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(row.is_some())
-}
-
-/// A CONFIRMED `workspace_member` row exists for this principal — the genesis-standup trust gate (the
-/// workspace-level RBAC roster, distinct from the per-skill read `roster`). The query text is byte-identical
-/// to `enroll::read_member_status`, so the committed `.sqlx` cache already covers it.
-async fn workspace_member_confirmed<'e, E>(
-    executor: E,
-    ws: &WorkspaceId,
-    principal: &Principal,
-) -> Result<bool>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let ws_s = ws.as_str();
-    let principal = principal.as_str();
-    let row = sqlx::query!(
-        r#"SELECT status AS "status!" FROM workspace_member WHERE workspace_id = $1 AND principal = $2"#,
-        ws_s,
-        principal,
-    )
-    .fetch_optional(executor)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(matches!(row, Some(r) if r.status == "confirmed"))
-}
-
-/// Self-insert a per-skill roster row — the genesis standup's one write (a first publish rosters its own
-/// author for the skill it creates, inside the same transaction as the pointer). The INSERT text is
-/// byte-identical to `enroll::redeem_run`'s roster grant, so the committed `.sqlx` cache already covers it;
-/// `ON CONFLICT DO NOTHING` keeps a concurrent standup / governance roster mutation convergent.
-async fn insert_roster<'e, E>(
-    executor: E,
-    ws: &WorkspaceId,
-    skill: &SkillId,
-    principal: &Principal,
-) -> Result<()>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let ws_s = ws.as_str();
-    let sk = skill.as_str();
-    let prin = principal.as_str();
-    sqlx::query!(
-        "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ($1, $2, $3) \
-         ON CONFLICT (workspace_id, skill_id, principal) DO NOTHING",
-        ws_s,
-        sk,
-        prin,
-    )
-    .execute(executor)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(())
-}
-
-/// Convert a stored 32-byte BLOB into a [`CommitId`] via the shared [`blob32`].
-fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
-    Ok(CommitId(blob32(bytes)?))
 }
 
 /// A stored commit-id BLOB was not exactly 32 bytes (the schema CHECK should forbid this).

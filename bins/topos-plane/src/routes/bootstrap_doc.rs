@@ -174,10 +174,9 @@ pub(crate) fn agent_instructions(data: &BootstrapData, link: Option<&str>) -> St
 
 #[cfg(test)]
 mod tests {
-    use topos_types::SignatureAlg;
     use topos_types::bootstrap::{
-        BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
-        BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+        BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
+        ConsentMode, DeploymentMode, VerifiedDomainStatus,
     };
 
     use super::agent_instructions;
@@ -199,11 +198,6 @@ mod tests {
                 base_url: "https://api.plane.test".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: method.to_owned(),
-                signing_key: BootstrapSigningKey {
-                    alg: SignatureAlg::Ed25519,
-                    key_id: "pk_demo".to_owned(),
-                    value: "AAAA".to_owned(),
-                },
             },
             workspace: BootstrapWorkspace {
                 workspace_id: "w_acme".to_owned(),

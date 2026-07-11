@@ -30,10 +30,10 @@ struct Cli {
 /// The operator subcommands (the bare invocation — no subcommand — serves).
 #[derive(Debug, clap::Subcommand)]
 enum Command {
-    /// Re-sign every selected skill's `current` pointer one epoch forward (same version, same seq) — the
-    /// recovery step after restoring the database from a backup, so every follower's next pull is an
-    /// ordinary forward move instead of a reused-generation alarm. Requires an explicit selection
-    /// (`--workspace` or `--all-workspaces`); run it with the plane stopped.
+    /// Bump every selected skill's `current` pointer one epoch forward (same version, same seq) — the
+    /// concurrency-correctness step after restoring the database from a backup, so a reused `(epoch, seq)`
+    /// tuple can't confuse the proposal-staleness predicate or an in-flight CAS / conditional GET. Requires
+    /// an explicit selection (`--workspace` or `--all-workspaces`); run it with the plane stopped.
     RestoreBumpEpoch {
         /// A workspace to bump (repeatable).
         #[arg(long = "workspace")]
@@ -101,9 +101,6 @@ struct Config {
     /// The per-workspace large-object store root (created if absent).
     #[arg(long, env = "TOPOS_PLANE_LARGE_ROOT")]
     large_root: PathBuf,
-    /// The plane signing key (a `0600` seed; generated on first run if absent).
-    #[arg(long, env = "TOPOS_PLANE_KEY")]
-    plane_key: PathBuf,
     /// The enrollment HMAC secret (a `0600` seed; generated on first run if absent) — the root every opaque
     /// invite / grant / read-token is derived from.
     #[arg(long, env = "TOPOS_PLANE_ENROLL_SECRET")]
@@ -282,10 +279,9 @@ async fn serve(cfg: Config) -> Result<()> {
     Ok(())
 }
 
-/// The `restore-bump-epoch` subcommand: open the SAME plane state serve does (the database + the plane key
-/// — never the listen socket), run the bump, and print one line per re-signed pointer plus a summary. The
-/// printed `key <key_id>` is the operator's tripwire that the restored data directory still holds the
-/// pre-incident signing seed. An empty selection result is a success (`re-signed 0 pointer(s)`, exit 0).
+/// The `restore-bump-epoch` subcommand: open the SAME plane state serve does (the database — never the
+/// listen socket), run the bump, and print one line per bumped pointer plus a summary. An empty selection
+/// result is a success (`bumped 0 pointer(s)`, exit 0).
 async fn restore_bump_epoch(
     cfg: Config,
     workspaces: Vec<String>,
@@ -308,7 +304,7 @@ async fn restore_bump_epoch(
     let bumps = state.restore_bump_epochs(selection, epoch_at_least).await?;
     for b in &bumps {
         println!(
-            "{}/{}: ({},{}) -> ({},{})  commit {}  key {}",
+            "{}/{}: ({},{}) -> ({},{})  commit {}",
             b.workspace_id,
             b.skill_id,
             b.old_epoch,
@@ -316,25 +312,17 @@ async fn restore_bump_epoch(
             b.new_epoch,
             b.new_seq,
             &b.commit_hex[..8],
-            b.key_id,
         );
     }
-    match bumps.first() {
-        Some(first) => println!(
-            "re-signed {} pointer(s) with key {}",
-            bumps.len(),
-            first.key_id
-        ),
-        None => println!("re-signed 0 pointer(s)"),
-    }
+    println!("bumped {} pointer(s)", bumps.len());
     Ok(())
 }
 
 /// The ONE construction home serve and the operator subcommands share: the two bin-local marshals
 /// (default the public base URL to the bind address; assemble the SMTP relay from the five all-or-nothing
 /// fields — any missing ⇒ no passcode email, the no-op mailer), then the library's leak-free constructor
-/// (the same one a downstream plane uses), which opens the authority, loads/generates the `0600` plane key
-/// + enrollment secret, and builds the enrollment config internally. Binds no socket.
+/// (the same one a downstream plane uses), which opens the authority, loads/generates the `0600` enrollment
+/// secret, and builds the enrollment config internally. Binds no socket.
 async fn open_state(cfg: Config) -> Result<PlaneState> {
     let base_url = cfg
         .base_url
@@ -361,7 +349,6 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
         database_url: cfg.database_url,
         git_root: cfg.git_root,
         large_root: cfg.large_root,
-        plane_key_path: cfg.plane_key,
         enroll_secret_path: cfg.enroll_secret,
         base_url,
         verify_base_url: cfg.verify_base_url,

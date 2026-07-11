@@ -53,7 +53,7 @@ pub struct SkillId(String);
 /// A principal identifier — the rostered reader/uploader identity (device id, account, …).
 ///
 /// Parsing **canonicalizes**: the accepted charset is mixed-case (humans type `Alice@Acme.com`),
-/// but the stored form is the kernel's ASCII-lowercase fold ([`topos_core::sign::canonical_principal`]) —
+/// but the stored form is the kernel's ASCII-lowercase fold ([`topos_core::identity::canonical_principal`]) —
 /// so one mailbox is ONE identity at every roster gate, seat write, and idempotency hash, however it
 /// was cased at the edge. Every durable principal column holds this canonical form: values fold at
 /// their parse edge before storage (ephemeral flow rows copied between tables inherit it), and
@@ -153,7 +153,7 @@ impl Principal {
     /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
     pub fn parse(s: &str) -> Result<Self, IdError> {
         validate(s, is_principal_char)?;
-        Ok(Self(topos_core::sign::canonical_principal(s)))
+        Ok(Self(topos_core::identity::canonical_principal(s)))
     }
 
     /// The id as a string slice.

@@ -2,7 +2,7 @@
 use super::*;
 
 #[sqlx::test]
-async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies(pool: PgPool) {
+async fn genesis_creates_a_pointer_at_1_1_with_the_expected_record(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-genesis").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(11);
@@ -22,32 +22,26 @@ async fn genesis_creates_a_signed_pointer_at_1_1_and_verifies(pool: PgPool) {
     assert!(r.is_ok());
     assert_eq!(r.current, Some(gn(1, 1)));
 
-    // Read the signed record back + verify under the plane public key (the signer round-trip).
-    let pubkey = fx.authority.plane_public_key().unwrap();
+    // Read the stored record back — it is unsigned: authority is the row behind the pointer, and
+    // integrity is the content-addressed version id re-verified byte-for-byte on apply. It names THIS
+    // skill/ws at (1,1) and pins the promoted version id; the scope is what stops the record from being
+    // replayed into another skill/ws (a follower checks it), so we pin exactly that scope.
     let record = fx
         .authority
-        .read_signed_record(&w, &s)
+        .db()
+        .read_current_record(&w, &s)
         .await
         .unwrap()
-        .expect("signed");
-    assert!(verify_record(&record, "w_acme", "s_deploy", &pubkey));
-
-    // A one-bit flip fails; a wrong scope fails (the pointer cannot be replayed into another skill/ws).
-    let mut tampered = record.clone();
-    let i = tampered.len() / 2;
-    tampered[i] ^= 0x01;
-    // (The tampered bytes may not even deserialize; either way it must NOT verify.)
-    let tampered_ok = std::panic::catch_unwind(|| {
-        serde_json::from_slice::<SignedCurrentRecord>(&tampered)
-            .map(|_| ())
-            .is_ok()
-    })
-    .unwrap_or(false);
-    if tampered_ok {
-        assert!(!verify_record(&tampered, "w_acme", "s_deploy", &pubkey));
-    }
-    assert!(!verify_record(&record, "w_acme", "s_OTHER", &pubkey));
-    assert!(!verify_record(&record, "w_OTHER", "s_deploy", &pubkey));
+        .expect("a current record");
+    let wire = wire_record(&record);
+    assert_eq!(wire.scope.workspace_id, "w_acme");
+    assert_eq!(wire.scope.skill_id, "s_deploy");
+    assert_eq!(wire.record.generation, gn(1, 1));
+    assert_eq!(
+        wire.record.version_id,
+        digest::to_hex(&r.version_id.unwrap().0),
+        "the record pins the promoted version id"
+    );
 }
 
 #[sqlx::test]
@@ -249,13 +243,7 @@ async fn revert_advances_seq_and_a_stale_publish_conflicts(pool: PgPool) {
 
     // revert --to X → R(tree=β, parents=[Y]) → (1,3). seq advances; bytes return to β.
     let rop = op("cccccccc-0000-4000-8000-000000000002");
-    let rsig = sign_revert(&fx, &key, "dk_a", &w, &s, x, &rop, gn(1, 2)).await;
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk_a".to_owned(),
-        op: DeviceOp::Revert,
-        signature: rsig,
-        expected: gn(1, 2),
-    };
+    let rdev = revert_request("dk_a", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -371,7 +359,7 @@ async fn restore_aba_matching_seq_bumped_epoch_conflicts(pool: PgPool) {
 }
 
 /// Interleaving E — a lost-ack retry: the original op committed (seq=2), the team moved on (seq=3), and the
-/// retry returns the BYTE-IDENTICAL original receipt (the original signed record), not a spurious conflict.
+/// retry returns the BYTE-IDENTICAL original receipt (the original stored record), not a spurious conflict.
 #[sqlx::test]
 async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-lostack").await;
@@ -436,7 +424,7 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
     )
     .await;
 
-    // Retry op K (its ack was lost): the replay returns the ORIGINAL receipt byte-for-byte (the (1,2) signed
+    // Retry op K (its ack was lost): the replay returns the ORIGINAL receipt byte-for-byte (the (1,2)
     // record), even though current is now (1,3).
     let retry = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, CREATED_AT, NOW)
         .await
@@ -448,7 +436,7 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
 /// A device revoked BEFORE the promotion (committed ahead of the pointer-move txn) blocks the move.
 #[sqlx::test]
 async fn a_revoke_before_promotion_blocks_the_move(pool: PgPool) {
-    let fx = Fixture::new(pool, "sc-revoke").await;
+    let fx = Fixture::new(pool.clone(), "sc-revoke").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(17);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -494,6 +482,13 @@ async fn a_revoke_before_promotion_blocks_the_move(pool: PgPool) {
     assert_eq!(
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
         Some(c0)
+    );
+    // A revoked credential is a pre-auth cause: the DENIED is synthesized, never a durable receipt row
+    // (the credential-model counterpart of the retired forged-credential pre-auth case).
+    assert_eq!(
+        receipt_rows(&pool, "f0000000-0000-4000-8000-000000000001").await,
+        0,
+        "a revoked device's DENIED must not mint a durable receipt row"
     );
 }
 
@@ -604,7 +599,7 @@ async fn first_parent_mismatch_is_denied_even_when_the_cas_matches(pool: PgPool)
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
         Some(c1)
     ); // unmoved
-    // The receipt carries the live commit id for a clock-anomaly alarm.
+    // The receipt carries the live commit id for a clock-anomaly diagnostic.
     let detail = r.details.unwrap();
     assert_eq!(detail["code"], "FIRST_PARENT_MISMATCH");
 }
@@ -1027,12 +1022,7 @@ async fn revert_to_another_skills_commit_is_refused(pool: PgPool) {
 
     // s1 reverts to c2 (s2's commit) — refused; the skill-scoped digest lookup returns nothing.
     let rop = op("30000000-0000-4000-8000-cccccccccccc");
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk_a".to_owned(),
-        op: DeviceOp::Revert,
-        signature: [0u8; 64],
-        expected: gn(1, 1),
-    };
+    let rdev = revert_request("dk_a", gn(1, 1));
     let r = fx
         .authority
         .revert(
@@ -1060,10 +1050,10 @@ async fn revert_to_another_skills_commit_is_refused(pool: PgPool) {
     );
 }
 
-/// A candidate of new bytes submitted to the PUBLISH entry signed as a non-direct op (e.g. `Revert`) is
+/// A candidate of new bytes submitted to the PUBLISH entry LABELLED as a non-direct op (e.g. `Revert`) is
 /// rejected before ingest — otherwise it would skip the review gate while reaching the promote path.
 #[sqlx::test]
-async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest(pool: PgPool) {
+async fn publish_labelled_as_a_non_direct_op_is_rejected_before_ingest(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-opbypass").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(31);
@@ -1075,10 +1065,9 @@ async fn publish_signed_as_a_non_direct_op_is_rejected_before_ingest(pool: PgPoo
         .unwrap();
 
     let op_id = op("31000000-0000-4000-8000-000000000000");
-    let dev = DeviceSignedOp {
+    let dev = DeviceOpRequest {
         device_key_id: "dk_a".to_owned(),
         op: DeviceOp::Revert,
-        signature: [0u8; 64],
         expected: gn(0, 0),
     };
     let r = fx
@@ -1233,13 +1222,7 @@ async fn a_revert_lost_ack_retry_replays_the_original_ok(pool: PgPool) {
 
     // First revert (op K) → (1,3).
     let rop = op("33000000-0000-4000-8000-000000000002");
-    let rsig = sign_revert(&fx, &key, "dk_a", &w, &s, x, &rop, gn(1, 2)).await;
-    let rdev = DeviceSignedOp {
-        device_key_id: "dk_a".to_owned(),
-        op: DeviceOp::Revert,
-        signature: rsig,
-        expected: gn(1, 2),
-    };
+    let rdev = revert_request("dk_a", gn(1, 2));
     let first = fx
         .authority
         .revert(
@@ -1280,8 +1263,8 @@ async fn a_revert_lost_ack_retry_replays_the_original_ok(pool: PgPool) {
 }
 
 /// A non-canonical UUID op id (the valid-but-unhyphenated 32-hex form) is rejected — its string is a
-/// distinct receipt key that decodes to the SAME 16 signed bytes, so accepting it would split the
-/// idempotency slot. Requiring the canonical hyphenated form keeps the key 1:1 with the signed identity.
+/// distinct receipt key that decodes to the SAME 16 bytes, so accepting it would split the idempotency
+/// slot. Requiring the canonical hyphenated form keeps the key 1:1 with the op identity.
 #[sqlx::test]
 async fn a_non_canonical_uuid_op_id_is_rejected(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-opid-canon").await;
@@ -1325,7 +1308,7 @@ async fn genesis_by_a_confirmed_member_stands_up_the_roster(pool: PgPool) {
     let p = prin("p_author");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false)
         .await
         .unwrap();
     fx.authority
@@ -1383,7 +1366,7 @@ async fn genesis_by_an_invited_unconfirmed_member_is_denied(pool: PgPool) {
     let p = prin("p_invitee");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false)
         .await
         .unwrap();
     fx.authority
@@ -1425,7 +1408,7 @@ async fn concurrent_genesis_standups_one_ok_one_conflict(pool: PgPool) {
     let p = prin("p_author");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key.verifying_key().to_bytes(), &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false)
         .await
         .unwrap();
     fx.authority
@@ -1494,110 +1477,10 @@ async fn receipt_rows(pool: &PgPool, op_id: &str) -> i64 {
         .get::<i64, _>("n")
 }
 
-/// The server-trusted genesis ids for a candidate — the same kernel derivation ingest re-runs — so a test
-/// can sign a device op (or tamper its signature) BEFORE driving the full `Authority::publish`.
-fn genesis_ids(files: &[UploadedFile]) -> ([u8; 32], [u8; 32]) {
-    let manifest: Vec<digest::ManifestEntry> = files
-        .iter()
-        .map(|f| digest::ManifestEntry {
-            path: f.path.clone(),
-            mode: f.mode,
-            content_sha256: digest::sha256(&f.bytes),
-        })
-        .collect();
-    let bd = digest::bundle_digest(&manifest).unwrap();
-    let commit = topos_core::sign::commit_id(&topos_core::sign::Commit {
-        parents: &[],
-        tree: bd,
-        author: "d_test",
-        message: "topos publish",
-    })
-    .unwrap();
-    (commit, bd)
-}
-
-/// An invalid device signature is DENIED with NO durable `op_receipts` row (mirroring the governance
-/// preamble's pre-auth posture), the abandoned candidate's lease is still released (its bytes stay
-/// GC-reclaimable), and a CORRECTED retry of the SAME op id proceeds fresh — the unauthenticated attempt
-/// never burned the idempotency slot.
-#[sqlx::test]
-async fn a_bad_signature_denied_is_never_persisted_and_a_corrected_retry_succeeds(pool: PgPool) {
-    let fx = Fixture::new(pool.clone(), "sc-preauth-sig").await;
-    let (w, s) = (ws("w_acme"), skill("s_deploy"));
-    let key = dev_key(41);
-    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
-
-    let files = vec![file("SKILL.md", b"pre-auth denied bytes")];
-    let (commit, bd) = genesis_ids(&files);
-    let op_id = op("42424242-0000-4000-8000-000000000000");
-    let good = sign_op(
-        &key,
-        "dk_a",
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        &op_id,
-        gn(0, 0),
-        commit,
-        bd,
-    );
-    let mut bad = good;
-    bad[0] ^= 1;
-
-    let denied = fx
-        .authority
-        .publish(
-            &w,
-            &s,
-            &op_id,
-            genesis(files.clone()),
-            DeviceSignedOp {
-                device_key_id: "dk_a".to_owned(),
-                op: DeviceOp::PublishDirect,
-                signature: bad,
-                expected: gn(0, 0),
-            },
-            None,
-            CREATED_AT,
-            NOW,
-        )
-        .await
-        .unwrap();
-    assert_eq!(denied.outcome, TerminalOutcome::Denied);
-    assert_eq!(
-        receipt_rows(&pool, op_id.as_str()).await,
-        0,
-        "a pre-auth DENIED must not mint a durable attacker-keyed receipt row"
-    );
-    // The lease was still released, so the unauthenticated upload's bytes are ordinary garbage.
-    assert_eq!(gc::run_gc(&fx.authority, &w, NOW).await.unwrap(), 1);
-
-    // The corrected retry (same op id, valid signature) proceeds fresh and succeeds.
-    let ok = fx
-        .authority
-        .publish(
-            &w,
-            &s,
-            &op_id,
-            genesis(files),
-            DeviceSignedOp {
-                device_key_id: "dk_a".to_owned(),
-                op: DeviceOp::PublishDirect,
-                signature: good,
-                expected: gn(0, 0),
-            },
-            None,
-            CREATED_AT,
-            NOW,
-        )
-        .await
-        .unwrap();
-    assert!(ok.is_ok(), "the corrected retry must succeed: {ok:?}");
-    assert_eq!(receipt_rows(&pool, op_id.as_str()).await, 1);
-}
-
 /// An UNKNOWN device id is the same synthesized, never-persisted DENIED — for both the pointer-move
-/// transaction and the standalone reject transaction.
+/// transaction and the standalone reject transaction. (A forged-credential proof is no longer a pre-auth
+/// cause — nothing signs — so the credential-model pre-auth causes are exactly an unknown or a revoked
+/// `device_key_id`; the revoked case is pinned by `a_revoke_before_promotion_blocks_the_move`.)
 #[sqlx::test]
 async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sc-preauth-ghost").await;
@@ -1626,7 +1509,7 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
         .unwrap()
         .unwrap();
 
-    // Pointer-move path: a publish signed by a never-registered device.
+    // Pointer-move path: a publish presenting a never-registered device key.
     let ghost_op = op("43000000-0000-4000-8000-000000000001");
     let r = fx
         .authority
@@ -1635,10 +1518,9 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
             &s,
             &ghost_op,
             child(c0, vec![file("f", b"v1")]),
-            DeviceSignedOp {
+            DeviceOpRequest {
                 device_key_id: "dk_ghost".to_owned(),
                 op: DeviceOp::PublishDirect,
-                signature: [0u8; 64],
                 expected: gn(1, 1),
             },
             None,
@@ -1650,7 +1532,7 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     assert_eq!(receipt_rows(&pool, ghost_op.as_str()).await, 0);
 
-    // Reject path: a review --reject signed by a never-registered device.
+    // Reject path: a review --reject presenting a never-registered device key.
     let ghost_reject = op("43000000-0000-4000-8000-000000000002");
     let r = fx
         .authority
@@ -1658,10 +1540,9 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
             &w,
             &s,
             c0,
-            DeviceSignedOp {
+            DeviceOpRequest {
                 device_key_id: "dk_ghost".to_owned(),
                 op: DeviceOp::ReviewReject,
-                signature: [0u8; 64],
                 expected: gn(1, 1),
             },
             &ghost_reject,
@@ -1673,42 +1554,30 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
     assert_eq!(receipt_rows(&pool, ghost_reject.as_str()).await, 0);
 }
 
-/// An AUTHENTICATED denial (a verified device whose principal fails an authorization gate) stays durable
-/// and replays byte-identically — the pre-auth carve-out narrows exactly to unverifiable actors.
+/// An AUTHENTICATED denial (a resolved, non-revoked device whose principal fails an authorization gate)
+/// stays durable and replays byte-identically — the pre-auth carve-out narrows exactly to unresolvable
+/// actors (an unknown or revoked device key).
 #[sqlx::test]
 async fn an_authenticated_denial_stays_durable_and_replays(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sc-authz-denied").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(44);
-    // Registered device (the signature WILL verify) — but no roster row and no confirmed workspace
-    // membership, so the genesis-shaped publish fails the authenticated member gate.
+    // Registered device (the credential lookup WILL resolve) — but no roster row and no confirmed
+    // workspace membership, so the genesis-shaped publish fails the authenticated member gate.
     let p = prin("p_out");
     fx.authority
         .db()
-        .seed_device(&w, "dk_out", &key.verifying_key().to_bytes(), &p, false)
+        .seed_device(&w, "dk_out", &key, &p, false)
         .await
         .unwrap();
 
-    let files = vec![file("SKILL.md", b"outsider genesis")];
-    let (commit, bd) = genesis_ids(&files);
     let op_id = op("44000000-0000-4000-8000-000000000000");
-    let sig = sign_op(
-        &key,
-        "dk_out",
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        &op_id,
-        gn(0, 0),
-        commit,
-        bd,
-    );
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: "dk_out".to_owned(),
         op: DeviceOp::PublishDirect,
-        signature: sig,
         expected: gn(0, 0),
     };
+    let files = vec![file("SKILL.md", b"outsider genesis")];
     let first = fx
         .authority
         .publish(
@@ -1747,35 +1616,22 @@ async fn an_authenticated_denial_stays_durable_and_replays(pool: PgPool) {
     assert_eq!(retry, first);
 }
 
-// ── a corrupt stored receipt alarms instead of replaying altered bytes ──────────────────────────────
+// ── a corrupt stored receipt faults instead of replaying altered bytes ──────────────────────────────
 
-/// A stored receipt whose `details` column no longer parses is an Integrity alarm on replay — never a
+/// A stored receipt whose `details` column no longer parses is an Integrity fault on replay — never a
 /// silent replay with the details dropped (which would violate byte-identical replay without a sound).
 #[sqlx::test]
-async fn a_corrupt_stored_receipt_details_alarms_instead_of_replaying(pool: PgPool) {
+async fn a_corrupt_stored_receipt_details_is_integrity_instead_of_replaying(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sc-baddetails").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(45);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
 
     let files = vec![file("SKILL.md", b"replay me")];
-    let (commit, bd) = genesis_ids(&files);
     let op_id = op("45000000-0000-4000-8000-000000000000");
-    let sig = sign_op(
-        &key,
-        "dk_a",
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        &op_id,
-        gn(0, 0),
-        commit,
-        bd,
-    );
-    let device = DeviceSignedOp {
+    let device = DeviceOpRequest {
         device_key_id: "dk_a".to_owned(),
         op: DeviceOp::PublishDirect,
-        signature: sig,
         expected: gn(0, 0),
     };
     let first = fx
@@ -1801,7 +1657,7 @@ async fn a_corrupt_stored_receipt_details_alarms_instead_of_replaying(pool: PgPo
         .await
         .unwrap();
 
-    // The same-op retry must alarm, never replay an altered receipt.
+    // The same-op retry must fault, never replay an altered receipt.
     let r = fx
         .authority
         .publish(
@@ -1817,6 +1673,6 @@ async fn a_corrupt_stored_receipt_details_alarms_instead_of_replaying(pool: PgPo
         .await;
     assert!(
         matches!(r, Err(AuthorityError::Integrity(_))),
-        "a corrupt receipt row must alarm as Integrity: {r:?}"
+        "a corrupt receipt row must fault as Integrity: {r:?}"
     );
 }

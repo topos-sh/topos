@@ -1058,7 +1058,126 @@ fn check_arch() -> Result<()> {
     check_member_lints()?;
     // The self-host image and the workspace must build on the same pinned compiler.
     check_toolchain_pins()?;
+    // Custody never reaches into the directory: not by module path, not by SQL table.
+    check_seam()?;
     Ok(())
+}
+
+/// The vault/directory seam gate: `plane-store`'s CUSTODY modules (bytes, versions, pointers, GC —
+/// `src/custody/` + `src/db/custody/`) must consume access decisions ONLY through the witness trait the
+/// directory implements — never by importing a directory module, and never by querying a directory table.
+/// Two scans over the custody sources:
+/// 1. no `directory` MODULE PATH reference (`crate::directory`, `db::directory`, `super::directory`);
+/// 2. no directory TABLE named after FROM / JOIN / INTO / UPDATE in any SQL string (word-boundary match,
+///    so custody's ubiquitous `workspace_id` columns never trip the bare `workspace` ban).
+/// The reverse direction is deliberately unchecked: the directory MAY call custody (a review approve
+/// terminates in the shared pointer-move transaction — that is the row/byte rule, not a violation).
+fn check_seam() -> Result<()> {
+    // Both the module-group paths AND the crate-root forwarding aliases (lib.rs re-exports the
+    // directory modules at the crate root for the facade/tests) — an alias path would otherwise
+    // slip a custody→directory import past the group check.
+    const DIRECTORY_PATHS: [&str; 9] = [
+        "crate::directory",
+        "db::directory",
+        "super::directory",
+        "crate::enroll",
+        "crate::governance",
+        "crate::session_read",
+        "crate::session_review",
+        "crate::session_roster",
+        "crate::secret",
+    ];
+    const DIRECTORY_TABLES: [&str; 15] = [
+        "workspace",
+        "workspace_member",
+        "workspace_policy",
+        "roster",
+        "device_registry",
+        "read_token",
+        "invites",
+        "invite_skill",
+        "enrollment_grants",
+        "enrollment_grant_skill",
+        "device_auth_sessions",
+        "passcodes",
+        "admin_claim",
+        "workspace_events",
+        "genesis_requests",
+    ];
+    const SQL_INTRODUCERS: [&str; 4] = ["from", "join", "into", "update"];
+    let root = workspace_root();
+    let custody_dirs = [
+        root.join("crates/plane-store/src/custody"),
+        root.join("crates/plane-store/src/db/custody"),
+    ];
+    let mut violations = Vec::new();
+    for dir in &custody_dirs {
+        for file in rust_files_under(dir)? {
+            let text = fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let shown = file.strip_prefix(&root).unwrap_or(&file).display();
+            for (n, line) in text.lines().enumerate() {
+                for needle in DIRECTORY_PATHS {
+                    if line.contains(needle) {
+                        violations.push(format!("{shown}:{}: `{needle}`", n + 1));
+                    }
+                }
+                let tokens: Vec<&str> = line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                for pair in tokens.windows(2) {
+                    let introducer = pair[0].to_ascii_lowercase();
+                    if SQL_INTRODUCERS.contains(&introducer.as_str())
+                        && DIRECTORY_TABLES.contains(&pair[1])
+                    {
+                        violations.push(format!(
+                            "{shown}:{}: SQL `{} {}` names a directory table",
+                            n + 1,
+                            pair[0],
+                            pair[1]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "custody reaches into the directory (the witness trait is the only allowed seam):\n  {}",
+            violations.join("\n  ")
+        );
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively (deterministic order). An absent dir is a gate failure —
+/// the seam check must never silently pass because the tree moved out from under it.
+fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    if !dir.is_dir() {
+        bail!(
+            "seam check: expected custody module dir {} to exist",
+            dir.display()
+        );
+    }
+    while let Some(d) = stack.pop() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&d)
+            .with_context(|| format!("reading {}", d.display()))?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<_>>()?;
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Run a cargo subcommand from the workspace root as a gate step, with optional extra env.

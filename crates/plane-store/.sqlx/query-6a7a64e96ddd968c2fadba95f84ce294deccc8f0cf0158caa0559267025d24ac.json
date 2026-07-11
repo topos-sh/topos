@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT public_key AS \"public_key!: Vec<u8>\", principal AS \"principal!\", revoked AS \"revoked!: i64\"\n           FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2",
+  "query": "SELECT public_key AS \"public_key!: Vec<u8>\", principal AS \"principal!\", revoked AS \"revoked!: i64\"\n               FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2",
   "describe": {
     "columns": [
       {
@@ -31,5 +31,5 @@
       false
     ]
   },
-  "hash": "506a5e31fce8fe46f3191cdd4a8d82177531c2b13af4f8ab48726dadc4d9ae09"
+  "hash": "6a7a64e96ddd968c2fadba95f84ce294deccc8f0cf0158caa0559267025d24ac"
 }

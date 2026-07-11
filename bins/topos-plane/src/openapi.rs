@@ -11,8 +11,8 @@
 use utoipa::OpenApi;
 
 use topos_types::bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
-    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
+    ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
@@ -30,14 +30,14 @@ use topos_types::results::{
 };
 use topos_types::{
     ActionCode, Affected, CurrentRecord, Generation, JsonEnvelope, NextAction, PointerScope,
-    Receipt, Signature, SignatureAlg, SignedCurrentRecord, TerminalOutcome, WireError,
+    Receipt, TerminalOutcome, WireCurrentRecord, WireError,
 };
 
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "Topos OSS plane",
-        description = "The self-hostable Topos plane — device-signed writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The self-hostable Topos plane — device-credential writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -50,9 +50,9 @@ use topos_types::{
         crate::routes::bundles::get_bundle,
         crate::routes::versions::get_version,
         crate::routes::proposals::list_proposals,
-        // The device-signed workspace catalog read (catalog visibility == membership).
+        // The device-credential workspace catalog read (catalog visibility == membership).
         crate::routes::skills_index::list_skills,
-        // The unauthenticated invite bootstrap (TOFU).
+        // The unauthenticated invite bootstrap.
         crate::routes::bootstrap::read_invite_bootstrap,
         // Enrollment flow.
         crate::routes::enroll::start_device_auth,
@@ -90,19 +90,17 @@ use topos_types::{
         TerminalOutcome,
         Generation,
         Affected,
-        // The signed `current` pointer envelope.
-        SignedCurrentRecord,
+        // The `current` pointer envelope.
+        WireCurrentRecord,
         PointerScope,
         CurrentRecord,
-        Signature,
-        SignatureAlg,
         // Version metadata.
         WireVersionMeta,
         WireVersionFile,
         // The proposals-listing read.
         WireProposalList,
         WireOpenProposal,
-        // The device-signed workspace catalog read.
+        // The device-credential workspace catalog read.
         WireSkillIndex,
         WireSkillIndexEntry,
         // Per-verb `data` shapes (the agent's typed payloads).
@@ -111,13 +109,12 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
-        // The invite bootstrap (TOFU) payload.
+        // The invite bootstrap payload.
         BootstrapData,
         BootstrapInvite,
         ConsentMode,
         BootstrapPlane,
         DeploymentMode,
-        BootstrapSigningKey,
         BootstrapWorkspace,
         VerifiedDomainStatus,
         BootstrapSkill,
@@ -150,10 +147,10 @@ use topos_types::{
         InviteData,
     )),
     tags(
-        (name = "writes", description = "Device-signed writes (publish / propose / revert / review)."),
+        (name = "writes", description = "Device-credential writes (publish / propose / revert / review)."),
         (name = "reads", description = "Token-scoped reads (current / bundles / versions)."),
         (name = "enrollment", description = "Invite bootstrap + the device-auth / passcode / redeem / admin-claim enrollment flow."),
-        (name = "governance", description = "Owner/admin device-op-signed mutations (invite / roster / revoke)."),
+        (name = "governance", description = "Owner/admin device-credential mutations (invite / roster / revoke)."),
     ),
 )]
 struct ApiDoc;

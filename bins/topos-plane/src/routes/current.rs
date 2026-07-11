@@ -1,8 +1,9 @@
 //! `GET /v1/current/{read_token}` — a follower's currency check. Resolves the path token to an opaque scope
-//! and serves the skill's signed `current` record, with a **commit-sensitive 304**: the ETag is the frozen
+//! and serves the skill's `current` record, with a **commit-sensitive 304**: the ETag is the frozen
 //! `"<epoch>.<seq>"` (for caching), but a 304 fires ONLY when the client's `If-None-Match` AND its
 //! `Topos-Known-Version-Id` both match the served record — so a record that reuses a generation for a
-//! DIFFERENT commit is always returned (and the client catches it as a reused-tuple ALARM), never hidden.
+//! DIFFERENT commit is always returned (the client re-verifies the new bytes against the content-addressed
+//! version id), never hidden.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -27,7 +28,7 @@ const CACHE_CONTROL_CURRENT: &str = "max-age=10, must-revalidate";
         ("Topos-Known-Version-Id" = Option<String>, Header, description = "The client's known current commit id (hex64) — the commit-sensitive half of the 304."),
     ),
     responses(
-        (status = 200, description = "The signed current record (application/json) + a commit-sensitive ETag.", body = topos_types::SignedCurrentRecord, content_type = "application/json"),
+        (status = 200, description = "The current record (application/json) + a commit-sensitive ETag.", body = topos_types::WireCurrentRecord, content_type = "application/json"),
         (status = 304, description = "Pointer unchanged (the ETag AND the known version both match)."),
         (status = 404, description = "No such token, or no current pointer yet.", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
@@ -81,6 +82,6 @@ pub(crate) async fn get_current(
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, CACHE_CONTROL_CURRENT)
-        .body(Body::from(pointer.signed_record))
+        .body(Body::from(pointer.record))
         .expect("a 200 current response with static headers is always well-formed"))
 }

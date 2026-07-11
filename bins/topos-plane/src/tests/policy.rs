@@ -65,13 +65,10 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     let op = "30000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"gated update\n")];
     let parents = [g_vid];
-    let (vid, digest) = compute_ids(&parents, &files);
-    let sig = sign_sig(&ctx.key, DeviceOp::PublishDirect, op, gn(1, 1), vid, digest);
     let (status, _h, bytes) = run(
         &ctx,
         post(
             "/v1/publish",
-            &sig,
             candidate_body(op, gn(1, 1), &parents, &files),
         ),
     )
@@ -86,19 +83,10 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     let (status, _h, _b) = run(&ctx, put_policy(Some("op_secret"), false)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let op2 = "30000000-0000-4000-8000-000000000002";
-    let sig2 = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishDirect,
-        op2,
-        gn(1, 1),
-        vid,
-        digest,
-    );
     let (status, _h, bytes) = run(
         &ctx,
         post(
             "/v1/publish",
-            &sig2,
             candidate_body(op2, gn(1, 1), &parents, &files),
         ),
     )

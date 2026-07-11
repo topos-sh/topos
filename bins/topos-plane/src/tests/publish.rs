@@ -1,7 +1,7 @@
 //! `POST /v1/publish` — the direct pointer-move write: the canonical OK receipt, the edge op_id
 //! guard, byte-identical idempotent replay, and the 200-CONFLICT stale-expected outcome.
 
-use topos_types::SignedCurrentRecord;
+use topos_types::WireCurrentRecord;
 
 use super::*;
 
@@ -15,11 +15,10 @@ async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt(poo
     let op = "00000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"genesis v0\nplus more\n")];
     let parents = [g_vid];
-    let (vid, digest) = compute_ids(&parents, &files);
-    let sig = sign_sig(&ctx.key, DeviceOp::PublishDirect, op, gn(1, 1), vid, digest);
+    let (vid, _digest) = compute_ids(&parents, &files);
     let body = candidate_body(op, gn(1, 1), &parents, &files);
 
-    let (status, _h, bytes) = run(&ctx, post("/v1/publish", &sig, body)).await;
+    let (status, _h, bytes) = run(&ctx, post("/v1/publish", body)).await;
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
     assert!(env.ok, "publish should be ok: {env:?}");
@@ -34,9 +33,9 @@ async fn publish_happy_path_moves_current_and_returns_a_canonical_ok_receipt(poo
         Some(hex::encode(vid).as_str())
     );
     assert_eq!(receipt.current_generation, Some(gn(1, 2)));
-    // On OK, `data` carries the signed current record (a future client advances its floor from it).
-    let record: SignedCurrentRecord =
-        serde_json::from_value(env.data).expect("OK data is the SignedCurrentRecord");
+    // On OK, `data` carries the current record (a client reads the moved pointer from it).
+    let record: WireCurrentRecord =
+        serde_json::from_value(env.data).expect("OK data is the WireCurrentRecord");
     assert_eq!(record.scope.workspace_id, WS);
     assert_eq!(record.scope.skill_id, SKILL);
 }
@@ -53,12 +52,9 @@ async fn a_write_with_a_non_uuid_op_id_is_rejected_before_ingest(pool: PgPool) {
     let op = "not-a-canonical-uuid"; // lowercase + hyphens → path-safe, but not a UUID
     let files = vec![file("SKILL.md", b"must never be ingested\n")];
     let parents = [g_vid];
-    // A well-formed (86-char base64url) but unchecked signature: the op_id is rejected before the authority
-    // ever verifies a signature, so a real one is unnecessary.
-    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
     let body = candidate_body(op, gn(1, 1), &parents, &files);
 
-    let (status, _h, bytes) = run(&ctx, post("/v1/publish", &sig, body)).await;
+    let (status, _h, bytes) = run(&ctx, post("/v1/publish", body)).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -84,14 +80,11 @@ async fn an_idempotent_retry_replays_a_byte_identical_response(pool: PgPool) {
     let op = "10000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"retry me\n")];
     let parents = [g_vid];
-    let (vid, digest) = compute_ids(&parents, &files);
-    let sig = sign_sig(&ctx.key, DeviceOp::PublishDirect, op, gn(1, 1), vid, digest);
 
     let (s1, _, b1) = run(
         &ctx,
         post(
             "/v1/publish",
-            &sig,
             candidate_body(op, gn(1, 1), &parents, &files),
         ),
     )
@@ -100,7 +93,6 @@ async fn an_idempotent_retry_replays_a_byte_identical_response(pool: PgPool) {
         &ctx,
         post(
             "/v1/publish",
-            &sig,
             candidate_body(op, gn(1, 1), &parents, &files),
         ),
     )
@@ -122,20 +114,10 @@ async fn a_stale_publish_is_a_200_conflict_with_a_rebase_next_action(pool: PgPoo
     // First child wins → (1,2).
     let op_a = "20000000-0000-4000-8000-000000000001";
     let files_a = vec![file("SKILL.md", b"winner\n")];
-    let (vid_a, dig_a) = compute_ids(&[g_vid], &files_a);
-    let sig_a = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishDirect,
-        op_a,
-        gn(1, 1),
-        vid_a,
-        dig_a,
-    );
     let (sa, _, ba) = run(
         &ctx,
         post(
             "/v1/publish",
-            &sig_a,
             candidate_body(op_a, gn(1, 1), &[g_vid], &files_a),
         ),
     )
@@ -149,20 +131,10 @@ async fn a_stale_publish_is_a_200_conflict_with_a_rebase_next_action(pool: PgPoo
     // Second child, still based on (1,1) → CONFLICT (current is now (1,2)).
     let op_b = "20000000-0000-4000-8000-000000000002";
     let files_b = vec![file("SKILL.md", b"loser\n")];
-    let (vid_b, dig_b) = compute_ids(&[g_vid], &files_b);
-    let sig_b = sign_sig(
-        &ctx.key,
-        DeviceOp::PublishDirect,
-        op_b,
-        gn(1, 1),
-        vid_b,
-        dig_b,
-    );
     let (sb, _, bb) = run(
         &ctx,
         post(
             "/v1/publish",
-            &sig_b,
             candidate_body(op_b, gn(1, 1), &[g_vid], &files_b),
         ),
     )

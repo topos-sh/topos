@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use gix::objs::tree::EntryKind;
 
 use topos_core::digest::{self, FileMode};
-use topos_core::sign::{self, Commit};
+use topos_core::identity::{self, Commit};
 
 use crate::error::VerifyError;
 use crate::store::{ImportFile, Store};
@@ -35,7 +35,7 @@ impl Drop for Scratch {
 
 /// Compute the kernel `version_id` for a genesis bundle (parents = none).
 fn genesis_version_id(bundle_digest: [u8; 32]) -> [u8; 32] {
-    sign::commit_id(&Commit {
+    identity::commit_id(&Commit {
         parents: &[],
         tree: bundle_digest,
         author: AUTHOR,
@@ -258,7 +258,7 @@ fn first_parent_lineage_and_missing_parent() {
             bytes: b"v2\n",
         }])
         .expect("write2");
-    let vid2 = sign::commit_id(&Commit {
+    let vid2 = identity::commit_id(&Commit {
         parents: &[vid1],
         tree: th2.bundle_digest,
         author: AUTHOR,
@@ -293,7 +293,7 @@ fn first_parent_lineage_and_missing_parent() {
         }])
         .expect("write3");
     let bogus_parent = [0x99u8; 32];
-    let vid3 = sign::commit_id(&Commit {
+    let vid3 = identity::commit_id(&Commit {
         parents: &[bogus_parent],
         tree: th3.bundle_digest,
         author: AUTHOR,
@@ -327,7 +327,7 @@ fn read_commit_meta_reads_exact_metadata_and_fails_on_an_unmapped_parent() {
             bytes: b"v2\n",
         }])
         .expect("write2");
-    let vid2 = sign::commit_id(&Commit {
+    let vid2 = identity::commit_id(&Commit {
         parents: &[vid1],
         tree: th2.bundle_digest,
         author: "alice",
@@ -586,7 +586,7 @@ fn version_durability_names_exactly_the_versions_objects() {
         },
     ];
     let th = store.write_bundle(&files).expect("write_bundle");
-    let v2 = sign::commit_id(&Commit {
+    let v2 = identity::commit_id(&Commit {
         parents: &[v1],
         tree: th.bundle_digest,
         author: AUTHOR,
@@ -1062,7 +1062,7 @@ fn version_with_one_offloaded_blob(root: &std::path::Path) -> (Store, crate::Sta
         .iter()
         .map(|e| (e.path.as_str(), e.mode, e.git_oid))
         .collect();
-    let vid = sign::commit_id(&Commit {
+    let vid = identity::commit_id(&Commit {
         parents: &[],
         tree: staged.bundle_digest,
         author: AUTHOR,
@@ -1079,7 +1079,7 @@ fn read_tree_structure_yields_every_leaf_including_an_offloaded_one() {
     let scratch = Scratch::new("tree-struct");
     std::fs::create_dir_all(&scratch.0).unwrap();
     let (main, staged) = version_with_one_offloaded_blob(&scratch.0);
-    let vid = sign::commit_id(&Commit {
+    let vid = identity::commit_id(&Commit {
         parents: &[],
         tree: staged.bundle_digest,
         author: AUTHOR,

@@ -186,19 +186,20 @@ async fn read_current_present_absent_and_corrupt_blob(pool: PgPool) {
         .expect("present");
     assert_eq!(cp.generation, gn(1, 1));
     assert_eq!(
-        cp.signed_record,
+        cp.record,
         fx.authority
-            .read_signed_record(&w, &s)
+            .db()
+            .read_current_record(&w, &s)
             .await
             .unwrap()
             .unwrap(),
-        "read_current serves exactly the stored signed record bytes"
+        "read_current serves exactly the stored record bytes"
     );
 
     // Corrupt: an unparseable stored record blob is an Integrity fault, NEVER a not-found (the record exists).
     fx.authority
         .db()
-        .force_signed_record(&w, &s, b"{ not json")
+        .force_current_record(&w, &s, b"{ not json")
         .await
         .unwrap();
     assert!(matches!(

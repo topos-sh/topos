@@ -9,13 +9,13 @@
 //! the outcome codecs. Plain free fns over the open `Transaction` — no ordering decision lives here; the
 //! callers (`run` / `reject_run`) own the load-bearing step order.
 
+use crate::custody::set_current::DeviceOp;
 use sqlx::{Postgres, Transaction};
-use topos_core::sign::DeviceOp;
 use topos_types::{Generation, TerminalOutcome};
 
+use crate::actor::{ReceiptActor, ReceiptMethod};
 use crate::db::custody::set_current::{CurrentRow, delete_lease, i64_to_u64, u64_to_i64};
 use crate::db::{Db, blob32};
-use crate::actor::{ReceiptActor, ReceiptMethod};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, SkillId, WorkspaceId};
 use crate::set_current::{PretxnReceipt, PromoteInput, RejectInput, SetCurrentReceipt};
@@ -211,7 +211,7 @@ async fn record_pretxn_body(
     // synthesized, never persisted — see `crate::set_current`'s pre-txn sink).
     let who = ReceiptActor {
         actor: r.device_key_id,
-        method: ReceiptMethod::DeviceSigned,
+        method: ReceiptMethod::Device,
         request_sha256: None,
     };
     let outcome = match replay(tx, r.ws, &who, r.op_id, &bound).await? {
@@ -227,8 +227,7 @@ async fn record_pretxn_body(
                 expected: r.expected,
                 outcome: r.outcome,
                 current: None,
-                signed_record: None,
-                key_id: None,
+                record: None,
                 created_at: r.created_at.to_owned(),
                 details: r.details.clone(),
             };
@@ -254,13 +253,12 @@ pub(super) async fn denied(
         TerminalOutcome::Denied,
         None,
         None,
-        None,
         detail(msg),
     )
     .await
 }
 
-/// A **pre-authentication** DENIED (unknown/revoked device, invalid signature): synthesize the receipt
+/// A **pre-authentication** DENIED (an unknown or revoked device): synthesize the receipt
 /// WITHOUT persisting it — mirroring the governance preamble's posture (`db/enroll`): the failure is not
 /// attributable to any verified actor, so a durable row keyed on the attacker-chosen `(device_key_id,
 /// op_id)` would let an UNAUTHENTICATED client mint audit noise and grow `op_receipts` without bound.
@@ -290,8 +288,7 @@ pub(super) async fn denied_preauth(
         expected: bound.expected,
         outcome: TerminalOutcome::Denied,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: input.created_at.to_owned(),
         details: detail(msg),
     })
@@ -309,7 +306,6 @@ pub(super) async fn conflict(
         bound,
         TerminalOutcome::Conflict,
         Some(live),
-        None,
         None,
         None,
     )
@@ -333,7 +329,6 @@ pub(super) async fn first_parent_mismatch(
         TerminalOutcome::Denied,
         Some(cur.generation),
         None,
-        None,
         details,
     )
     .await
@@ -349,7 +344,6 @@ pub(super) async fn approval_required(
         input,
         bound,
         TerminalOutcome::ApprovalRequired,
-        None,
         None,
         None,
         detail("direct publish under review-required; re-run as a proposal"),
@@ -370,7 +364,6 @@ pub(super) async fn retryable(
         TerminalOutcome::RetryableFailure,
         None,
         None,
-        None,
         detail(msg),
     )
     .await
@@ -387,7 +380,6 @@ pub(super) async fn permanent(
         input,
         bound,
         TerminalOutcome::PermanentFailure,
-        None,
         None,
         None,
         detail(msg),
@@ -413,7 +405,6 @@ pub(super) async fn denied_code(
         TerminalOutcome::Denied,
         None,
         None,
-        None,
         details,
     )
     .await
@@ -426,8 +417,7 @@ async fn write_terminal(
     bound: &BoundIdentity<'_>,
     outcome: TerminalOutcome,
     current: Option<Generation>,
-    signed_record: Option<Vec<u8>>,
-    key_id: Option<String>,
+    record: Option<Vec<u8>>,
     details: Option<serde_json::Value>,
 ) -> Result<SetCurrentReceipt> {
     let stored = StoredReceipt {
@@ -439,8 +429,7 @@ async fn write_terminal(
         expected: bound.expected,
         outcome,
         current,
-        signed_record,
-        key_id,
+        record,
         created_at: input.created_at.to_owned(),
         details,
     };
@@ -482,8 +471,7 @@ pub(super) fn permanent_key_reuse(
         expected: bound.expected,
         outcome: TerminalOutcome::PermanentFailure,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: created_at.to_owned(),
         details: Some(serde_json::json!({ "code": "OP_ID_REUSED" })),
     }
@@ -509,8 +497,7 @@ pub(super) async fn reject_terminal(
         expected: r.expected,
         outcome,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: r.created_at.to_owned(),
         details: Some(serde_json::json!({ "code": code })),
     };
@@ -530,8 +517,7 @@ pub(super) fn reject_denied_preauth(r: &RejectInput<'_>, msg: &str) -> SetCurren
         expected: r.expected,
         outcome: TerminalOutcome::Denied,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: r.created_at.to_owned(),
         details: detail(msg),
     }
@@ -551,8 +537,7 @@ pub(super) async fn reject_denied(
         expected: r.expected,
         outcome: TerminalOutcome::Denied,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: r.created_at.to_owned(),
         details: detail(msg),
     };
@@ -577,8 +562,7 @@ pub(super) async fn reject_denied_code(
         expected: r.expected,
         outcome: TerminalOutcome::Denied,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: r.created_at.to_owned(),
         details: Some(serde_json::json!({ "code": code, "message": msg })),
     };
@@ -632,8 +616,8 @@ pub(super) async fn replay(
                   commit_id AS "commit_id?: Vec<u8>", bundle_digest AS "bundle_digest?: Vec<u8>",
                   expected_epoch AS "expected_epoch!: i64", expected_seq AS "expected_seq!: i64",
                   outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
-                  current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
-                  key_id AS "key_id?", created_at AS "created_at!", details AS "details?"
+                  current_seq AS "current_seq?: i64", record AS "record?: Vec<u8>",
+                  created_at AS "created_at!", details AS "details?"
            FROM op_receipts WHERE workspace_id = $1 AND op_id = $2
            ORDER BY created_at, actor"#,
         ws_s,
@@ -678,8 +662,7 @@ pub(super) async fn replay(
             },
             outcome: parse_outcome(&own.outcome)?,
             current,
-            signed_record: own.signed_record.clone(),
-            key_id: own.key_id.clone(),
+            record: own.record.clone(),
             created_at: own.created_at.clone(),
             // See `get_receipt`: an unparseable stored `details` must alarm, never replay altered.
             details: own
@@ -707,7 +690,7 @@ pub(super) async fn replay(
     // synthesized reuse receipt's byte stability) is stable across retries.
     match who.method {
         ReceiptMethod::WebSession => Ok(Replay::Mismatch(rows[0].created_at.clone())),
-        ReceiptMethod::DeviceSigned => match rows.iter().find(|r| r.method == "web_session") {
+        ReceiptMethod::Device => match rows.iter().find(|r| r.method == "web_session") {
             Some(w) => Ok(Replay::Mismatch(w.created_at.clone())),
             None => Ok(Replay::Fresh),
         },
@@ -725,8 +708,7 @@ pub(super) struct StoredReceipt {
     pub(super) expected: Generation,
     pub(super) outcome: TerminalOutcome,
     pub(super) current: Option<Generation>,
-    pub(super) signed_record: Option<Vec<u8>>,
-    pub(super) key_id: Option<String>,
+    pub(super) record: Option<Vec<u8>>,
     pub(super) created_at: String,
     pub(super) details: Option<serde_json::Value>,
 }
@@ -742,8 +724,7 @@ impl StoredReceipt {
             expected: self.expected,
             outcome: self.outcome,
             current: self.current,
-            signed_record: self.signed_record,
-            key_id: self.key_id,
+            record: self.record,
             created_at: self.created_at,
             details: self.details,
         }
@@ -753,7 +734,7 @@ impl StoredReceipt {
 // --- the op_receipts row SQL (workspace-scoped; the one durable receipt slot per (device, op id)) ---
 
 /// The DEVICE-only point lookup (the pre-txn replay fast paths: `replay_revert` /
-/// `replay_gated_publish` / `published_ok_exists`). The explicit `method = 'device_signed'` keeps a
+/// `replay_gated_publish` / `published_ok_exists`). The explicit `method = 'device'` keeps a
 /// session receipt out of a device flow even if the two lanes ever shared an actor string.
 async fn get_receipt<'e, E>(
     executor: E,
@@ -770,10 +751,10 @@ where
                   commit_id AS "commit_id?: Vec<u8>", bundle_digest AS "bundle_digest?: Vec<u8>",
                   expected_epoch AS "expected_epoch!: i64", expected_seq AS "expected_seq!: i64",
                   outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
-                  current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
-                  key_id AS "key_id?", created_at AS "created_at!", details AS "details?"
+                  current_seq AS "current_seq?: i64", record AS "record?: Vec<u8>",
+                  created_at AS "created_at!", details AS "details?"
            FROM op_receipts
-           WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'device_signed'"#,
+           WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'device'"#,
         ws_s,
         device_key_id,
         op_id,
@@ -801,8 +782,7 @@ where
         },
         outcome: parse_outcome(&r.outcome)?,
         current,
-        signed_record: r.signed_record,
-        key_id: r.key_id,
+        record: r.record,
         created_at: r.created_at,
         // A stored `details` column that no longer parses is store corruption: silently dropping it (an
         // `.ok()`) would REPLAY an altered receipt — breaking the byte-identical-replay invariant without a
@@ -820,7 +800,7 @@ where
 /// but filters `method = 'web_session'` and ALSO returns the stored `request_sha256` (the session lane's
 /// full-request identity the caller compares). The explicit method filter keeps a device receipt out of a
 /// session flow even if the two lanes ever shared an actor string (the mirror of `get_receipt`'s own
-/// `method = 'device_signed'` guard).
+/// `method = 'device'` guard).
 async fn get_receipt_session<'e, E>(
     executor: E,
     ws: &WorkspaceId,
@@ -836,8 +816,8 @@ where
                   commit_id AS "commit_id?: Vec<u8>", bundle_digest AS "bundle_digest?: Vec<u8>",
                   expected_epoch AS "expected_epoch!: i64", expected_seq AS "expected_seq!: i64",
                   outcome AS "outcome!", current_epoch AS "current_epoch?: i64",
-                  current_seq AS "current_seq?: i64", signed_record AS "signed_record?: Vec<u8>",
-                  key_id AS "key_id?", created_at AS "created_at!", details AS "details?",
+                  current_seq AS "current_seq?: i64", record AS "record?: Vec<u8>",
+                  created_at AS "created_at!", details AS "details?",
                   request_sha256 AS "request_sha256?: Vec<u8>"
            FROM op_receipts
            WHERE workspace_id = $1 AND actor = $2 AND op_id = $3 AND method = 'web_session'"#,
@@ -869,8 +849,7 @@ where
         },
         outcome: parse_outcome(&r.outcome)?,
         current,
-        signed_record: r.signed_record,
-        key_id: r.key_id,
+        record: r.record,
         created_at: r.created_at,
         // A stored `details` that no longer parses is store corruption: alarm, never replay altered
         // (identical rationale to `get_receipt`).
@@ -904,8 +883,8 @@ pub(super) async fn insert_receipt(
     sqlx::query!(
         "INSERT INTO op_receipts (workspace_id, actor, op_id, method, request_sha256, command, \
             skill_id, commit_id, bundle_digest, expected_epoch, expected_seq, outcome, \
-            current_epoch, current_seq, signed_record, key_id, created_at, details) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+            current_epoch, current_seq, record, created_at, details) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         ws_s,
         who.actor,
         r.op_id,
@@ -920,8 +899,7 @@ pub(super) async fn insert_receipt(
         outcome,
         current_epoch,
         current_seq,
-        r.signed_record,
-        r.key_id,
+        r.record,
         r.created_at,
         details,
     )
@@ -943,7 +921,6 @@ fn outcome_str(o: TerminalOutcome) -> &'static str {
         TerminalOutcome::Denied => "DENIED",
         TerminalOutcome::Unavailable => "UNAVAILABLE",
         TerminalOutcome::AmbiguousName => "AMBIGUOUS_NAME",
-        TerminalOutcome::KeyRepinRequired => "KEY_REPIN_REQUIRED",
         TerminalOutcome::RetryableFailure => "RETRYABLE_FAILURE",
         TerminalOutcome::PermanentFailure => "PERMANENT_FAILURE",
     }
@@ -959,7 +936,6 @@ fn parse_outcome(s: &str) -> Result<TerminalOutcome> {
         "DENIED" => TerminalOutcome::Denied,
         "UNAVAILABLE" => TerminalOutcome::Unavailable,
         "AMBIGUOUS_NAME" => TerminalOutcome::AmbiguousName,
-        "KEY_REPIN_REQUIRED" => TerminalOutcome::KeyRepinRequired,
         "RETRYABLE_FAILURE" => TerminalOutcome::RetryableFailure,
         "PERMANENT_FAILURE" => TerminalOutcome::PermanentFailure,
         _ => return Err(AuthorityError::integrity(BadOutcome)),

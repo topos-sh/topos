@@ -1,12 +1,11 @@
-//! `GET /i/{token}` — the unauthenticated TOFU bootstrap.
+//! `GET /i/{token}` — the unauthenticated bootstrap.
 
-use topos_types::SignatureAlg;
 use topos_types::bootstrap::{BootstrapData, ConsentMode};
 
 use super::*;
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_false(pool: PgPool) {
+async fn invite_bootstrap_returns_no_role_and_auto_land_false(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-bootstrap").await;
     let env = create_invite(
         &ctx,
@@ -23,10 +22,8 @@ async fn invite_bootstrap_returns_the_pinned_plane_key_no_role_and_auto_land_fal
     // An INVITE bootstrap still echoes the link token as the non-secret token_id (a shareable link's
     // own tail) — the claim door, by contrast, must not (see the claim test below).
     assert_eq!(data.invite.token_id, token);
-    // The plane signing key is pinned (the trust root the device TOFU-pins).
-    assert_eq!(data.plane.signing_key.alg, SignatureAlg::Ed25519);
-    assert!(!data.plane.signing_key.key_id.is_empty());
-    assert!(!data.plane.signing_key.value.is_empty());
+    // The plane block carries only the API base + posture + method — no trust root to pin.
+    assert_eq!(data.plane.base_url, ENROLL_BASE_URL);
     // No role; a first-received skill is never silently landed; the offered skill is disclosed.
     assert!(!data.invite.first_receive_auto_land);
     assert_eq!(data.invite.consent, ConsentMode::DirectHumanFirstReceive);
@@ -65,10 +62,6 @@ async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool
     assert_eq!(data.workspace.display_name, "Newco");
     assert_eq!(data.plane.enrollment_method, "admin_claim");
     assert!(data.offered_skills.is_empty());
-    assert!(
-        !data.plane.signing_key.value.is_empty(),
-        "the TOFU root rides the claim bootstrap"
-    );
     // The claim token is the LIVE one-time bearer owner capability: unlike an invite, the body must not
     // echo it anywhere (`token_id` is the empty placeholder) — a body-logging proxy learns nothing.
     assert_eq!(data.invite.token_id, "");
@@ -79,8 +72,7 @@ async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool
     );
 
     // Redeem it over the wire (the request display_name is disclosure-only — the row's name wins)…
-    let device = dev_key(31);
-    let device_pk = device.verifying_key().to_bytes();
+    let device_pk = dev_pubkey(31);
     let (status, _, bytes) = send(
         ctx.app(),
         post_nosig(

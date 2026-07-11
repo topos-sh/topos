@@ -11,7 +11,7 @@
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
-use crate::set_current::{DeviceSignedOp, SetCurrentReceipt};
+use crate::set_current::{DeviceOp, DeviceOpRequest, SetCurrentReceipt};
 
 impl Authority {
     /// Stage a roster membership (the read/write entitlement for a principal on a skill). Test-only.
@@ -110,11 +110,9 @@ impl Authority {
             .await
     }
 
-    /// Drive a REAL genesis [`publish`](Self::publish): recompute the server-trusted ids the publish's ingest
-    /// will derive (so the device op signs over them, exactly as an honest client would), sign with the given
-    /// device seed, then publish — producing a SIGNED `current` pointer at generation (1,1). The device must
-    /// already be registered ([`seed_device`](Self::seed_device)) + rostered ([`seed_roster`](Self::seed_roster)).
-    /// Test-only.
+    /// Drive a REAL genesis [`publish`](Self::publish) for a registered + rostered device — producing a
+    /// `current` pointer at generation (1,1). The device must already be registered
+    /// ([`seed_device`](Self::seed_device)) + rostered ([`seed_roster`](Self::seed_roster)). Test-only.
     ///
     /// Returns the durable [`SetCurrentReceipt`] (its `version_id`/`current` drive a follow-up test).
     ///
@@ -126,7 +124,6 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         device_key_id: &str,
-        device_seed: &[u8; 32],
         op_id: &OpId,
         files: Vec<crate::UploadedFile>,
         author: &str,
@@ -134,58 +131,9 @@ impl Authority {
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        use ed25519_dalek::{Signer as _, SigningKey};
-        use topos_core::digest::{self, ManifestEntry};
-        use topos_core::sign::{self, Commit, DeviceOp, DeviceOpFields, device_op_preimage};
-
-        // The server-trusted genesis ids — identical to what `publish`'s ingest recomputes (both run the
-        // kernel digest over the same `(path, mode, sha256(bytes))` manifest, with `parents = []`), so the
-        // device op below signs over exactly what the in-transaction authz reconstructs.
-        let manifest: Vec<ManifestEntry> = files
-            .iter()
-            .map(|f| ManifestEntry {
-                path: f.path.clone(),
-                mode: f.mode,
-                content_sha256: digest::sha256(&f.bytes),
-            })
-            .collect();
-        let bundle_digest = digest::bundle_digest(&manifest)
-            .map_err(|r| AuthorityError::RejectedUpload(format!("{r:?}")))?;
-        let version_id = sign::commit_id(&Commit {
-            parents: &[],
-            tree: bundle_digest,
-            author,
-            message,
-        })
-        .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
-
-        // Sign the device op over those ids at the genesis base (0,0).
-        let op_id_bytes = uuid::Uuid::parse_str(op_id.as_str())
-            .map_err(|_| {
-                AuthorityError::RejectedUpload("op_id is not a canonical UUID".to_owned())
-            })?
-            .into_bytes();
-        let fields = DeviceOpFields {
-            workspace_id: ws.as_str(),
-            skill_id: skill.as_str(),
-            op: DeviceOp::PublishDirect,
-            op_id: op_id_bytes,
-            device_key_id,
-            expected_epoch: 0,
-            expected_seq: 0,
-            commit_id: version_id,
-            bundle_digest,
-        };
-        let preimage = device_op_preimage(&fields)
-            .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
-        let signature = SigningKey::from_bytes(device_seed)
-            .sign(&preimage)
-            .to_bytes();
-
-        let device = DeviceSignedOp {
+        let device = DeviceOpRequest {
             device_key_id: device_key_id.to_owned(),
             op: DeviceOp::PublishDirect,
-            signature,
             expected: topos_types::Generation { epoch: 0, seq: 0 },
         };
         let candidate = crate::CandidateUpload {
@@ -201,9 +149,8 @@ impl Authority {
     /// Drive a REAL one-parent forward [`publish`](Self::publish) on top of `parent` (mirrors
     /// [`seed_published_genesis`](Self::seed_published_genesis), but a child move rather than genesis), so a
     /// test can advance `current` to a v2. The expected base generation is read from the skill's live
-    /// `current` (so a child right after the genesis seed bases on `(1,1)`), the server-trusted child ids are
-    /// recomputed over `(parents = [parent], tree, author, message)`, the device op is signed over them, and
-    /// the publish runs through the same CAS/availability/lineage/sign/receipt backbone. Test-only.
+    /// `current` (so a child right after the genesis seed bases on `(1,1)`) and the publish runs through
+    /// the same CAS/availability/lineage/receipt backbone. Test-only.
     ///
     /// # Errors
     /// As [`publish`](Self::publish); [`AuthorityError::RejectedUpload`] if the candidate is malformed or the
@@ -214,7 +161,6 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         device_key_id: &str,
-        device_seed: &[u8; 32],
         op_id: &OpId,
         parent: CommitId,
         files: Vec<crate::UploadedFile>,
@@ -223,65 +169,22 @@ impl Authority {
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        use ed25519_dalek::{Signer as _, SigningKey};
-        use topos_core::digest::{self, ManifestEntry};
-        use topos_core::sign::{self, Commit, DeviceOp, DeviceOpFields, device_op_preimage};
-
         // The base generation a child must match is whatever `current` is right now (after a genesis seed,
-        // `(1,1)`) — read it from the live signed record so the CAS in `publish` accepts the move.
-        let record_bytes = self.read_signed_record(ws, skill).await?.ok_or_else(|| {
-            AuthorityError::RejectedUpload("no current to base a child on".to_owned())
-        })?;
-        let record: topos_types::SignedCurrentRecord =
+        // `(1,1)`) — read it from the live record so the CAS in `publish` accepts the move.
+        let record_bytes = self
+            .db()
+            .read_current_record(ws, skill)
+            .await?
+            .ok_or_else(|| {
+                AuthorityError::RejectedUpload("no current to base a child on".to_owned())
+            })?;
+        let record: topos_types::WireCurrentRecord =
             serde_json::from_slice(&record_bytes).map_err(AuthorityError::internal)?;
         let expected = record.record.generation;
 
-        // The server-trusted child ids — identical to what `publish`'s ingest recomputes, with the single
-        // trunk parent — so the device op signs exactly what the in-transaction authz reconstructs.
-        let manifest: Vec<ManifestEntry> = files
-            .iter()
-            .map(|f| ManifestEntry {
-                path: f.path.clone(),
-                mode: f.mode,
-                content_sha256: digest::sha256(&f.bytes),
-            })
-            .collect();
-        let bundle_digest = digest::bundle_digest(&manifest)
-            .map_err(|r| AuthorityError::RejectedUpload(format!("{r:?}")))?;
-        let version_id = sign::commit_id(&Commit {
-            parents: &[parent.0],
-            tree: bundle_digest,
-            author,
-            message,
-        })
-        .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
-
-        let op_id_bytes = uuid::Uuid::parse_str(op_id.as_str())
-            .map_err(|_| {
-                AuthorityError::RejectedUpload("op_id is not a canonical UUID".to_owned())
-            })?
-            .into_bytes();
-        let fields = DeviceOpFields {
-            workspace_id: ws.as_str(),
-            skill_id: skill.as_str(),
-            op: DeviceOp::PublishDirect,
-            op_id: op_id_bytes,
-            device_key_id,
-            expected_epoch: expected.epoch,
-            expected_seq: expected.seq,
-            commit_id: version_id,
-            bundle_digest,
-        };
-        let preimage = device_op_preimage(&fields)
-            .map_err(|e| AuthorityError::RejectedUpload(format!("{e:?}")))?;
-        let signature = SigningKey::from_bytes(device_seed)
-            .sign(&preimage)
-            .to_bytes();
-
-        let device = DeviceSignedOp {
+        let device = DeviceOpRequest {
             device_key_id: device_key_id.to_owned(),
             op: DeviceOp::PublishDirect,
-            signature,
             expected,
         };
         let candidate = crate::CandidateUpload {
@@ -294,32 +197,17 @@ impl Authority {
             .await
     }
 
-    /// Corrupt the skill's stored signed `current` record so its signature no longer verifies, leaving the
-    /// `(epoch, seq)` generation AND the named `version_id` UNCHANGED. Reads the live record, flips ONE byte
-    /// of its base64url signature value to a different (still well-formed) character, and writes it back via
-    /// [`force_signed_record`](crate::db::Db::force_signed_record). A follower then fetches a record whose
-    /// version/generation look advanced but whose signature fails the pinned-key check → a refuse/ALARM that
-    /// retains last-known-good. Test-only.
+    /// Overwrite the skill's stored `current` record with arbitrary bytes — drives the corrupt-stored-blob
+    /// integrity path (an unparseable record is an Integrity fault, never a not-found). Test-only.
     ///
     /// # Errors
-    /// [`AuthorityError::RejectedUpload`] if the skill has no signed `current` yet;
-    /// [`AuthorityError::Internal`] on a (de)serialization or database fault.
-    pub async fn tamper_current_signature(&self, ws: &WorkspaceId, skill: &SkillId) -> Result<()> {
-        let record_bytes = self.read_signed_record(ws, skill).await?.ok_or_else(|| {
-            AuthorityError::RejectedUpload("no signed current to tamper".to_owned())
-        })?;
-        let mut record: topos_types::SignedCurrentRecord =
-            serde_json::from_slice(&record_bytes).map_err(AuthorityError::internal)?;
-        // Flip exactly the first character of the base64url-unpadded signature (all ASCII, so byte 0 IS a
-        // whole char) to a guaranteed-different valid one — the record still parses, but the 64-byte
-        // signature it decodes to no longer matches, so `verify_pointer` fails.
-        let first =
-            record.signature.value.chars().next().ok_or_else(|| {
-                AuthorityError::RejectedUpload("empty signature value".to_owned())
-            })?;
-        let replacement = if first == 'A' { "B" } else { "A" };
-        record.signature.value.replace_range(0..1, replacement);
-        let new_bytes = serde_json::to_vec(&record).map_err(AuthorityError::internal)?;
-        self.db().force_signed_record(ws, skill, &new_bytes).await
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn force_current_record(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.db().force_current_record(ws, skill, bytes).await
     }
 }

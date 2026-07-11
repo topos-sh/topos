@@ -11,9 +11,6 @@
 
 use sqlx::{Postgres, Transaction};
 use topos_core::digest;
-use topos_core::sign::{
-    GovernanceOpFields, GovernanceOpKind, governance_op_preimage, verify_governance_op,
-};
 
 use super::enroll::{EnrollCorrupt, read_device};
 use crate::db::{Db, blob32};
@@ -25,10 +22,10 @@ use crate::governance::{
 };
 use crate::id::{Principal, SkillId, WorkspaceId};
 
-// ── governance: create-invite + roster/revoke mutations (owner-signed, in-txn authorized) ──────────────
+// ── governance: create-invite + roster/revoke mutations (device-credential, in-txn authorized) ─────────
 
-/// The signing device resolved + verified — the shared governance preamble's success result.
-struct GovernSigner {
+/// The acting device resolved — the shared governance preamble's success result.
+struct GovernActor {
     principal: Principal,
     role: Role,
     request_sha256: [u8; 32],
@@ -38,61 +35,78 @@ struct GovernSigner {
 enum Preamble {
     /// A workspace_events hit — replay the stored outcome (or a key-reuse `Denied`).
     Replay(GovernanceOutcome),
-    /// Authorized: the signer's confirmed principal + role + the request identity to record.
-    Proceed(GovernSigner),
-    /// A device/signature/role-resolution failure — record a DENIED event with this request identity.
+    /// Authorized: the actor's confirmed principal + role + the request identity to record.
+    Proceed(GovernActor),
+    /// A device/role-resolution failure — record a DENIED event with this request identity.
     Fail(&'static str, [u8; 32]),
 }
 
-/// The shared in-transaction governance authorization: build the signing preimage, replay-check the op id,
-/// resolve the SIGNING device to a non-revoked registered key + its bound principal, verify the governance
-/// signature, and look up that principal's confirmed workspace role. The op-specific ROLE check (owner-only,
-/// or owner-or-self) is the caller's — this returns the actor + role.
+/// The versioned domain tag the governance request identity binds — distinct from every session-lane
+/// tag, so no stored identity from another domain can byte-match a governance request.
+const GOVERNANCE_TAG: &[u8] = b"TOPOS_DEVICE_GOVERNANCE_V1";
+
+/// The governance request identity: sha256 over [`GOVERNANCE_TAG`] + u64-be length-prefixed parts of the
+/// FULL request — workspace, op id, the acting device key id, the op's kind byte, and every parameter
+/// (list parameters ride as their count then per-element parts, emails/skills each pre-sorted by the
+/// orchestration's canonical order). The `workspace_events` idempotency slot binds it: a same-op_id retry
+/// must byte-match to replay; any divergent payload is a denied key-reuse. Deterministic, built from
+/// server-trusted values.
+fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
+    fn put(buf: &mut Vec<u8>, part: &[u8]) {
+        buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        buf.extend_from_slice(part);
+    }
+    let mut buf = Vec::new();
+    buf.extend_from_slice(GOVERNANCE_TAG);
+    put(&mut buf, input.ws.as_str().as_bytes());
+    put(&mut buf, input.op_id.as_bytes());
+    put(&mut buf, input.request.device_key_id.as_bytes());
+    match &input.request.op {
+        GovernanceOp::Invite {
+            role,
+            expires_at,
+            emails,
+            skills,
+        } => {
+            put(&mut buf, &[1, role.derivation_byte()]);
+            put(&mut buf, &expires_to_u64(*expires_at).to_be_bytes());
+            put(&mut buf, &(emails.len() as u64).to_be_bytes());
+            for email in emails {
+                put(&mut buf, email.as_str().as_bytes());
+            }
+            put(&mut buf, &(skills.len() as u64).to_be_bytes());
+            for (id, _name) in skills {
+                // Display names are advisory (never identity): only the skill ids bind.
+                put(&mut buf, id.as_str().as_bytes());
+            }
+        }
+        GovernanceOp::RosterSet { role, target } => {
+            put(&mut buf, &[2, role.derivation_byte()]);
+            put(&mut buf, target.as_str().as_bytes());
+        }
+        GovernanceOp::RosterRemove { target } => {
+            put(&mut buf, &[3]);
+            put(&mut buf, target.as_str().as_bytes());
+        }
+        GovernanceOp::DeviceRevoke {
+            target_device_key_id,
+        } => {
+            put(&mut buf, &[4]);
+            put(&mut buf, target_device_key_id.as_bytes());
+        }
+    }
+    digest::sha256(&buf)
+}
+
+/// The shared in-transaction governance authorization: build the request identity, replay-check the op
+/// id, resolve the ACTING device credential to a non-revoked registry row + its bound principal (the
+/// lookup IS the authentication), and look up that principal's confirmed workspace role. The op-specific
+/// ROLE check (owner-only, or owner-or-self) is the caller's — this returns the actor + role.
 async fn govern_preamble(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
 ) -> Result<Preamble> {
-    // Build the kernel governance frame from server-trusted values (the request scope + the typed op).
-    let emails: Vec<&str>;
-    let skills: Vec<&str>;
-    let kind = match &input.signed.op {
-        GovernanceOp::Invite {
-            role,
-            expires_at,
-            emails: e,
-            skills: s,
-        } => {
-            emails = e.iter().map(Principal::as_str).collect();
-            skills = s.iter().map(|(id, _)| id.as_str()).collect();
-            GovernanceOpKind::Invite {
-                role: role.signing_byte(),
-                expires_at: expires_to_u64(*expires_at),
-                emails: &emails,
-                skills: &skills,
-            }
-        }
-        GovernanceOp::RosterSet { role, target } => GovernanceOpKind::RosterSet {
-            role: role.signing_byte(),
-            target: target.as_str(),
-        },
-        GovernanceOp::RosterRemove { target } => GovernanceOpKind::RosterRemove {
-            target: target.as_str(),
-        },
-        GovernanceOp::DeviceRevoke {
-            target_device_key_id,
-        } => GovernanceOpKind::DeviceRevoke {
-            target_device_key_id: target_device_key_id.as_str(),
-        },
-    };
-    let fields = GovernanceOpFields {
-        workspace_id: input.ws.as_str(),
-        op_id: input.op_id_bytes,
-        device_key_id: &input.signed.device_key_id,
-        op: kind,
-    };
-    let preimage = governance_op_preimage(&fields)
-        .map_err(|_| AuthorityError::internal(EnrollCorrupt("governance preimage")))?;
-    let request_sha256 = digest::sha256(&preimage);
+    let request_sha256 = governance_request_sha256(input);
 
     // Replay BEFORE authz (mirrors the pointer-move): a since-revoked owner still replays its committed OK.
     if let Some(stored) = read_event(tx, input.ws, input.op_id).await? {
@@ -107,38 +121,32 @@ async fn govern_preamble(
         return Ok(Preamble::Replay(replay));
     }
 
-    // Resolve the SIGNING device (non-revoked) + verify the governance signature.
-    let Some((public_key, principal_s)) =
-        read_active_device(tx, input.ws, &input.signed.device_key_id).await?
+    // Resolve the ACTING device (non-revoked) — the credential lookup is the authentication.
+    let Some((_public_key, principal_s)) =
+        read_active_device(tx, input.ws, &input.request.device_key_id).await?
     else {
         return Ok(Preamble::Fail(
-            "signing device unknown or revoked",
+            "acting device unknown or revoked",
             request_sha256,
         ));
     };
-    if !verify_governance_op(&fields, &input.signed.signature, &public_key) {
-        return Ok(Preamble::Fail(
-            "governance signature invalid",
-            request_sha256,
-        ));
-    }
     let principal = Principal::parse(&principal_s).map_err(AuthorityError::integrity)?;
-    // The signer must be a CONFIRMED member with a governance role.
+    // The actor must be a CONFIRMED member with a governance role.
     let Some((role_s, status)) = read_member_role(tx, input.ws, &principal).await? else {
         return Ok(Preamble::Fail(
-            "signer is not a workspace member",
+            "actor is not a workspace member",
             request_sha256,
         ));
     };
     if status != "confirmed" {
         return Ok(Preamble::Fail(
-            "signer is not a confirmed member",
+            "actor is not a confirmed member",
             request_sha256,
         ));
     }
     let role = Role::parse(&role_s)
         .ok_or_else(|| AuthorityError::integrity(EnrollCorrupt("member role")))?;
-    Ok(Preamble::Proceed(GovernSigner {
+    Ok(Preamble::Proceed(GovernActor {
         principal,
         role,
         request_sha256,
@@ -182,11 +190,11 @@ async fn create_invite_run(
         expires_at,
         emails,
         skills,
-    } = &input.signed.op
+    } = &input.request.op
     else {
         return Ok(GovernanceOutcome::Denied("op is not an invite"));
     };
-    let signer = match govern_preamble(tx, input).await? {
+    let actor = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
         // A PRE-AUTHENTICATION failure (an unknown/revoked signing device or an invalid signature) is NOT
         // attributable to any verified actor, so it must NOT write a durable workspace_events row: recording it
@@ -197,8 +205,8 @@ async fn create_invite_run(
         Preamble::Proceed(s) => s,
     };
     // Owner-only.
-    if signer.role != Role::Owner {
-        record_event(tx, input, &signer.request_sha256, "DENIED", None).await?;
+    if actor.role != Role::Owner {
+        record_event(tx, input, &actor.request_sha256, "DENIED", None).await?;
         return Ok(GovernanceOutcome::Denied("invite requires the owner role"));
     }
 
@@ -207,7 +215,7 @@ async fn create_invite_run(
         input.ws,
         invite_token_sha256,
         *expires_at,
-        signer.principal.as_str(),
+        actor.principal.as_str(),
         *role,
         emails,
         skills,
@@ -215,7 +223,7 @@ async fn create_invite_run(
     )
     .await?;
     let details = serde_json::json!({ "emails": emails.len(), "skills": skills.len() }).to_string();
-    record_event(tx, input, &signer.request_sha256, "OK", Some(&details)).await?;
+    record_event(tx, input, &actor.request_sha256, "OK", Some(&details)).await?;
     Ok(GovernanceOutcome::Ok)
 }
 
@@ -297,7 +305,7 @@ async fn governance_mutation_run(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
 ) -> Result<GovernanceOutcome> {
-    let signer = match govern_preamble(tx, input).await? {
+    let actor = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
         // Pre-authentication failure (unknown/revoked device or invalid signature): NOT attributable to a
         // verified actor, so record NOTHING (see create_invite_run) — an unauthenticated request can't forge
@@ -307,9 +315,9 @@ async fn governance_mutation_run(
     };
     let ws_s = input.ws.as_str();
 
-    let outcome = match &input.signed.op {
+    let outcome = match &input.request.op {
         GovernanceOp::RosterSet { role, target } => {
-            if signer.role != Role::Owner {
+            if actor.role != Role::Owner {
                 GovernanceOutcome::Denied("roster mutation requires the owner role")
             } else if would_orphan_owner(tx, input.ws, target.as_str(), Some(*role)).await? {
                 GovernanceOutcome::Denied("would remove the last owner")
@@ -332,7 +340,7 @@ async fn governance_mutation_run(
             }
         }
         GovernanceOp::RosterRemove { target } => {
-            if signer.role != Role::Owner {
+            if actor.role != Role::Owner {
                 GovernanceOutcome::Denied("roster mutation requires the owner role")
             } else if would_orphan_owner(tx, input.ws, target.as_str(), None).await? {
                 GovernanceOutcome::Denied("would remove the last owner")
@@ -376,8 +384,8 @@ async fn governance_mutation_run(
             let target_principal = read_device(tx, input.ws, target_device_key_id)
                 .await?
                 .map(|(_, p, _)| p);
-            let is_self = target_principal.as_deref() == Some(signer.principal.as_str());
-            if signer.role != Role::Owner && !is_self {
+            let is_self = target_principal.as_deref() == Some(actor.principal.as_str());
+            if actor.role != Role::Owner && !is_self {
                 GovernanceOutcome::Denied(
                     "revoke requires the owner role or the device's own principal",
                 )
@@ -410,7 +418,7 @@ async fn governance_mutation_run(
     } else {
         "DENIED"
     };
-    record_event(tx, input, &signer.request_sha256, outcome_s, None).await?;
+    record_event(tx, input, &actor.request_sha256, outcome_s, None).await?;
     Ok(outcome)
 }
 
@@ -1058,8 +1066,8 @@ pub(super) fn self_invite_token(
     request_sha256: &[u8; 32],
     ws: &WorkspaceId,
 ) -> String {
-    let role_byte = [Role::Member.signing_byte()];
-    let expires_be = topos_core::sign::INVITE_NO_EXPIRY.to_be_bytes();
+    let role_byte = [Role::Member.derivation_byte()];
+    let expires_be = crate::governance::INVITE_NO_EXPIRY.to_be_bytes();
     enroll::derive_token(
         secret,
         b"invite",
@@ -1248,7 +1256,7 @@ pub(super) async fn read_event(
 }
 
 /// The plain-field workspace_events row both legs write through — the device lane via
-/// [`record_event`] (actor = the signing device key id, method `device_signed`), the session lane in
+/// [`record_event`] (actor = the acting device key id, method `device`), the session lane in
 /// [`super::session_roster`] (actor = the acting principal's verified email, method `web_session`).
 pub(super) struct EventRecord<'a> {
     pub(super) ws: &'a WorkspaceId,
@@ -1301,7 +1309,7 @@ pub(super) async fn record_event_raw(
 }
 
 /// The DEVICE lane's receipt: actor = the SIGNING device key id (the confirmed principal is resolved per
-/// row; the audit "who" is the device that signed — the request is bound to it), method `device_signed`.
+/// row; the audit "who" is the acting device — the request identity is bound to it), method `device`.
 async fn record_event(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
@@ -1314,13 +1322,13 @@ async fn record_event(
         &EventRecord {
             ws: input.ws,
             op_id: input.op_id,
-            actor: input.signed.device_key_id.as_str(),
-            gov_op_type: input.signed.op.audit_verb(),
+            actor: input.request.device_key_id.as_str(),
+            gov_op_type: input.request.op.audit_verb(),
             request_sha256,
-            target: input.signed.op.audit_target(),
+            target: input.request.op.audit_target(),
             outcome,
             details,
-            method: "device_signed",
+            method: "device",
             created_at: input.created_at,
         },
     )

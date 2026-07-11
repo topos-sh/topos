@@ -9,10 +9,10 @@
 //! never supplies a wall clock (an ambient time would be a replay / skew lever). The handler derives both
 //! the RFC-3339 string and the `now: i64` it passes into the authority op.
 //!
-//! **The write credential rides in a header, not the body.** The 64-byte Ed25519 device signature travels
-//! as the `Topos-Device-Signature` request header (base64url, 86 chars); the body carries only the
-//! `device_key_id` that names the key. The `op` (publish / propose / revert / review-decision) is derived
-//! from the route, never the body.
+//! **The write credential is the `device_key_id` in the body.** A write body carries the `device_key_id`
+//! that names the presented device; authority is resolved in-transaction from the non-revoked registry
+//! row for `(workspace, device_key_id)` → its principal → the roster gate. The `op` (publish / propose /
+//! revert / review-decision) is derived from the route, never the body.
 //!
 //! Field names are snake_case as written (no `rename_all`). Hex id fields carry the same `^[0-9a-f]{64}$`
 //! constraint used across [`crate`].
@@ -83,9 +83,9 @@ pub struct WireCandidate {
     pub message: String,
 }
 
-/// `POST /v1/publish` body — a direct publish that moves `current`. The device signature is the
-/// `Topos-Device-Signature` header (not a body field); the server stamps `created_at`. Under
-/// `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.
+/// `POST /v1/publish` body — a direct publish that moves `current`. The body names the acting device by
+/// `device_key_id` (authority is the in-transaction registry + roster gate); the server stamps `created_at`.
+/// Under `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -99,23 +99,23 @@ pub struct PublishRequest {
     /// The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device key whose signature (in the header) authorizes this op.
+    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
     pub device_key_id: String,
     /// The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`.
     pub expected: Generation,
     /// The full candidate bundle to ingest + publish.
     pub candidate: WireCandidate,
-    /// The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata the
-    /// plane stores last-writer-wins and serves for display only (a follower names its folder by it; the
-    /// dashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the device-op
-    /// signing preimage — a rename never changes a version id, digest, or signature. Absent ⇒ the plane
-    /// keeps any existing name (never clobbered to NULL).
+    /// The skill's human display name (the author's skill-folder name) — ADVISORY metadata the plane
+    /// stores last-writer-wins and serves for display only (a follower names its folder by it; the
+    /// dashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the commit
+    /// id — a rename never changes a version id or digest. Absent ⇒ the plane keeps any existing name
+    /// (never clobbered to NULL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
 
 /// `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
-/// `current` or signing** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as
+/// `current`** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as
 /// `publish` (candidate + device + `op_id` + `expected`); there is **no** separate title/body on the op (a
 /// title/body, if ever surfaced, would be composed into the candidate's commit message).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,15 +131,15 @@ pub struct ProposeRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device key whose signature (in the header) authorizes this op.
+    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
     pub device_key_id: String,
     /// The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current.
     pub expected: Generation,
     /// The full candidate bundle to ingest as the proposal's content.
     pub candidate: WireCandidate,
-    /// The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata, carried
-    /// for symmetry with [`PublishRequest`]. It rides the proposal but is never signed, digested, or part of
-    /// the candidate; the plane records a name only when the pointer actually moves (a later approve/publish).
+    /// The skill's human display name (the author's skill-folder name) — ADVISORY metadata, carried for
+    /// symmetry with [`PublishRequest`]. It rides the proposal but is never digested or part of the
+    /// candidate; the plane records a name only when the pointer actually moves (a later approve/publish).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
@@ -160,7 +160,7 @@ pub struct RevertRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device key whose signature (in the header) authorizes this op.
+    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
     pub device_key_id: String,
     /// The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`.
     pub expected: Generation,
@@ -176,7 +176,7 @@ pub struct RevertRequest {
 /// `POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared
 /// `(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
 /// `review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`
-/// is a standalone status flip (nothing signed).
+/// is a standalone status flip (no pointer move).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -190,7 +190,7 @@ pub struct ReviewRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device key whose signature (in the header) authorizes this op.
+    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
     pub device_key_id: String,
     /// The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an
     /// `approve` yields `CONFLICT`.
@@ -310,8 +310,9 @@ pub struct WireSkillIndexEntry {
 }
 
 /// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
-/// authorized by workspace membership via a device-signed read (catalog visibility == membership, on both
-/// cloud and self-host). Metadata only, no bytes; a possibly-empty list ordered by `skill_id`.
+/// authorized by workspace membership (the `Topos-Device-Key-Id` header names the device; catalog
+/// visibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list
+/// ordered by `skill_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -327,8 +328,8 @@ pub struct WireSkillIndex {
 //
 // The enrollment credentials (device code, grant, read token, device public key) are OPAQUE strings,
 // never trusted as ids: the server re-derives every id from the bytes (the device key id from the public
-// key, the grant by its sha256). The enroll-frame possession signature rides the `Topos-Device-Signature`
-// header on redeem, NOT the body. Field names are snake_case as written.
+// key, the grant by its sha256). Redeem binds the device by checking its body `device_public_key` equals
+// the grant's bound key — a binding check, not a possession proof. Field names are snake_case as written.
 // =================================================================================================
 
 /// A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace through
@@ -364,8 +365,8 @@ pub struct DeviceAuthorizeRequest {
     /// The session intent. Absent defaults to `enroll` when an invite token is present, `standup` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<SessionIntent>,
-    /// The device's raw 32-byte Ed25519 public key, base64url-unpadded. The server derives the device key id
-    /// from it (never a client-asserted id) and binds it into the enrollment possession frame.
+    /// The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from
+    /// it (never a client-asserted id) and binds it to the enrollment session.
     pub device_public_key: String,
     /// A human-readable machine name shown on the verification page (a confused-deputy guard, not authority).
     pub machine_name: String,
@@ -393,8 +394,8 @@ pub struct DeviceAuthorizeResponse {
     pub expires_in: u64,
     /// The minimum poll interval, in seconds (RFC-8628 `interval`).
     pub interval: u64,
-    /// The plane block a STANDUP start carries (base URL, deployment posture, and the signing key to
-    /// TOFU-pin) — a standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start.
+    /// The plane block a STANDUP start carries (base URL, deployment posture, enrollment method) — a
+    /// standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<crate::bootstrap::BootstrapPlane>,
 }
@@ -576,8 +577,8 @@ pub struct PasscodeConfirmResponse {
 }
 
 /// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted
-/// per-skill read tokens. The enrollment possession signature rides the `Topos-Device-Signature` header
-/// (NOT a body field); the server re-derives the device key id from `device_public_key`.
+/// per-skill read tokens. The server checks `device_public_key` equals the grant's bound key (a binding
+/// check) and re-derives the device key id from it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -588,7 +589,7 @@ pub struct RedeemRequest {
     pub workspace_id: String,
     /// The opaque single-use enrollment grant (from a `granted` device-token poll).
     pub grant: String,
-    /// The device's raw 32-byte Ed25519 public key, base64url-unpadded (must equal the grant's bound key).
+    /// The device's raw 32-byte public key, base64url-unpadded (must equal the grant's bound key).
     pub device_public_key: String,
 }
 
@@ -639,7 +640,7 @@ pub struct RedeemedSkillCred {
 pub struct AdminClaimRequest {
     /// The one-time admin-claim token.
     pub claim_token: String,
-    /// The claiming device's raw 32-byte Ed25519 public key, base64url-unpadded.
+    /// The claiming device's raw 32-byte public key, base64url-unpadded.
     pub device_public_key: String,
     /// The display name for the standing-up workspace.
     pub display_name: String,
@@ -658,8 +659,9 @@ impl std::fmt::Debug for AdminClaimRequest {
 }
 
 // =================================================================================================
-// Governance request bodies — owner/admin device-op-signed mutations. The governance-frame signature rides
-// the `Topos-Device-Signature` header; the op is derived from the route + body. `op_id` is a UUIDv4.
+// Governance request bodies — owner/admin mutations. The body names the acting device by `device_key_id`
+// (authority is the in-transaction registry row + role matrix); the op is derived from the route + body.
+// `op_id` is a UUIDv4.
 // =================================================================================================
 
 /// A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
@@ -678,8 +680,8 @@ pub enum WorkspaceRole {
     Member,
 }
 
-/// One skill an invite pre-offers, with an optional display name (the name is NOT bound into the invite
-/// signing frame — only the skill id is — so a rename never forks the deterministic invite link).
+/// One skill an invite pre-offers, with an optional display name (the name is NOT part of the invite's
+/// identity — only the skill id is — so a rename never forks the deterministic invite link).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -694,22 +696,21 @@ pub struct InviteSkill {
 }
 
 /// `POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster
-/// (omitted `role` defaults to `member`; the client must sign the same role byte). Returns
-/// [`InviteData`](crate::results::InviteData) on success.
+/// (omitted `role` defaults to `member`). Returns [`InviteData`](crate::results::InviteData) on success.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct InviteRequest {
-    /// The target workspace id (bound into the governance signing frame).
+    /// The target workspace id (scopes the op to one workspace).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key (a retry replays the deterministic link + receipt).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the signing OWNER's device key (the registry selects the verifying key by this).
+    /// The id of the acting OWNER's device (the registry resolves its principal + role by this).
     pub device_key_id: String,
-    /// The emails to invite (seeded onto the roster as `invited`), bound as a set in the signing frame.
+    /// The emails to invite (seeded onto the roster as `invited`).
     pub emails: Vec<String>,
     /// The role the invitees are granted — omitted defaults to `member` (the client signs the same byte).
     #[serde(default)]
@@ -720,19 +721,19 @@ pub struct InviteRequest {
 }
 
 /// `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
-/// principal is the `{email}` path segment; the role rides the body (bound into the signing frame).
+/// principal is the `{email}` path segment; the role rides the body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct RosterSetRequest {
-    /// The target workspace id (bound into the governance signing frame).
+    /// The target workspace id (scopes the op to one workspace).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the signing owner's device key.
+    /// The id of the acting owner's device (the registry resolves its principal + role by this).
     pub device_key_id: String,
     /// The role to set on the `{email}` target.
     pub role: WorkspaceRole,
@@ -746,12 +747,12 @@ pub struct RosterSetRequest {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct RosterRemoveRequest {
-    /// The target workspace id (bound into the governance signing frame).
+    /// The target workspace id (scopes the op to one workspace).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the signing owner's device key.
+    /// The id of the acting owner's device (the registry resolves its principal + role by this).
     pub device_key_id: String,
 }
 
@@ -763,12 +764,12 @@ pub struct RosterRemoveRequest {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceRevokeRequest {
-    /// The target workspace id (bound into the governance signing frame).
+    /// The target workspace id (scopes the op to one workspace).
     pub workspace_id: String,
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the SIGNING device key (the actor; not the target).
+    /// The id of the ACTING device (the actor; not the target).
     pub device_key_id: String,
     /// The id of the device key to revoke.
     pub target_device_key_id: String,
@@ -776,7 +777,7 @@ pub struct DeviceRevokeRequest {
 
 /// `PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the
 /// `review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a
-/// path-shape change). Authenticated by the plane's admin token, not a device-op signature; the route is
+/// path-shape change). Authenticated by the plane's admin token, not a device credential; the route is
 /// invisible (404) on a plane with no admin token configured.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(

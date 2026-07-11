@@ -21,12 +21,12 @@ use topos_types::{Generation, TerminalOutcome};
 
 use crate::actor::WriteActor;
 use crate::authority::Authority;
+use crate::custody::set_current::DeviceOp;
 use crate::enroll::{DeploymentMode, parse_op_id};
 use crate::error::Result;
 use crate::governance::Role;
 use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
 use crate::set_current::{self, SetCurrentReceipt, device_op_command};
-use topos_core::sign::DeviceOp;
 
 /// The domain tag of the session review request identity (`request_sha256`) — versioned, and distinct
 /// from every kernel signing-frame tag AND the roster leg's tag, so no stored identity from another
@@ -42,18 +42,11 @@ const SESSION_REVERT_TAG: &[u8] = b"TOPOS_SESSION_REVERT_V1\0";
 /// uses (`bins/topos`'s `REVERT_MESSAGE`), so team history reads identically whichever lane rolled back.
 const SESSION_REVERT_MESSAGE: &str = "topos: revert";
 
-/// The ONE uniform acting-gate denial: a non-member, a merely-invited seat, an absent workspace, and a
-/// self-host caller past the posture belt all read the same (the static reason is for the composing
-/// wrapper's classification, never an oracle — and it is never persisted).
-pub const SESSION_REVIEW_ACTING_DENIED: &str =
-    "session review ops require a confirmed workspace member";
-
-/// The machine-branchable code on the DURABLE role denial (a confirmed plain member).
-pub const REVIEWER_ROLE_REQUIRED_CODE: &str = "REVIEWER_ROLE_REQUIRED";
-
-/// The role denial's message — a plane→web byte contract (the cloud pins it verbatim).
-pub(crate) const REVIEWER_ROLE_REQUIRED_MSG: &str =
-    "approving or rejecting needs an owner or reviewer seat";
+// The uniform acting-gate denial + the durable role-denial code/message live in the shared lane
+// vocabulary (`crate::actor`) — custody's transaction writes them too; re-exported here so the public
+// names keep their home on the review leg.
+pub(crate) use crate::actor::REVIEWER_ROLE_REQUIRED_MSG;
+pub use crate::actor::{REVIEWER_ROLE_REQUIRED_CODE, SESSION_REVIEW_ACTING_DENIED};
 
 /// The machine-branchable code on a reject with an empty reason (an orchestration belt; the composing
 /// route rejects it earlier with a 400).
@@ -153,8 +146,7 @@ fn synth_denied(
         expected,
         outcome: TerminalOutcome::Denied,
         current: None,
-        signed_record: None,
-        key_id: None,
+        record: None,
         created_at: created_at.to_owned(),
         details: Some(details),
     }

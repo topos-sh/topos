@@ -11,6 +11,7 @@
 use sqlx::{Postgres, Transaction};
 use topos_types::Generation;
 
+use crate::db::custody::witness::AccessWitness;
 use crate::db::{Db, ReadLane, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};

@@ -23,7 +23,6 @@
 //! [`list_skills_session`]'s delegated index reads are principal-free, so a removal mid-call returns
 //! that one in-flight catalog whole.
 
-use topos_core::sign::{CatalogReadFields, verify_catalog_read};
 use topos_types::Generation;
 
 use crate::authority::Authority;
@@ -124,15 +123,15 @@ async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Ve
     Ok(out)
 }
 
-/// The DEVICE-signed catalog read (`list --remote`) — the catalog-visibility twin of
+/// The DEVICE-lane catalog read (`list --remote`) — the catalog-visibility twin of
 /// [`list_skills_session`] authorized WITHOUT a web session, on BOTH cloud and self-host: device auth IS
-/// the self-host membership story, so this lane does NOT take or consult a [`DeploymentMode`]. Three gates,
+/// the self-host membership story, so this lane does NOT take or consult a [`DeploymentMode`]. Two gates,
 /// every failure the ONE uniform [`AuthorityError::NotFound`] (mirroring [`member_gate`]'s
 /// indistinguishability):
-/// 1. resolve the NON-REVOKED device → its registered public key + bound principal (miss ⇒ NotFound);
-/// 2. verify the catalog-read signature over `(workspace_id, device_key_id)` against that key (false ⇒
-///    NotFound) — the frame binds the workspace, so no cross-workspace replay;
-/// 3. the device's bound principal must be a CONFIRMED workspace member (catalog visibility == membership).
+/// 1. resolve the presented device credential to a NON-REVOKED registry row + its bound principal (the
+///    lookup is the authentication; a miss ⇒ NotFound) — the row is workspace-scoped, so a credential
+///    never reads across workspaces;
+/// 2. the device's bound principal must be a CONFIRMED workspace member (catalog visibility == membership).
 ///
 /// Then the SAME [`build_skill_index`] body the session lane builds. A pool read only — no transaction, no
 /// receipt, no op id. `_now` is accepted for signature parity with the token-lane reads; device
@@ -141,23 +140,15 @@ pub(crate) async fn list_skills_device(
     authority: &Authority,
     ws: &WorkspaceId,
     device_key_id: &str,
-    signature: &[u8; 64],
     _now: i64,
 ) -> Result<Vec<SkillIndexRow>> {
-    let Some((public_key, principal_s)) =
+    let Some((_public_key, principal_s)) =
         authority.db().read_active_device(ws, device_key_id).await?
     else {
         return Err(AuthorityError::NotFound);
     };
-    let fields = CatalogReadFields {
-        workspace_id: ws.as_str(),
-        device_key_id,
-    };
-    if !verify_catalog_read(&fields, signature, &public_key) {
-        return Err(AuthorityError::NotFound);
-    }
     // A device_registry principal was validated at registration, so a re-parse failure is store corruption
-    // (Integrity), never a not-found — the same convention `govern_preamble` follows for a signing device.
+    // (Integrity), never a not-found — the same convention `govern_preamble` follows for an acting device.
     let principal = Principal::parse(&principal_s).map_err(AuthorityError::integrity)?;
     if !authority.db().confirmed_member(ws, &principal).await? {
         return Err(AuthorityError::NotFound);
@@ -165,9 +156,9 @@ pub(crate) async fn list_skills_device(
     build_skill_index(authority, ws).await
 }
 
-/// A skill's signed `current` pointer for a confirmed member — [`crate::read::read_current`] verbatim
-/// over the member-lane scope. `Ok(None)` means no signed pointer exists for this (ws, skill) — a
-/// cataloged-but-never-signed skill and an unknown skill id are deliberately indistinguishable here; the
+/// A skill's `current` pointer for a confirmed member — [`crate::read::read_current`] verbatim
+/// over the member-lane scope. `Ok(None)` means no pointer record exists for this (ws, skill) — a
+/// cataloged-but-recordless skill and an unknown skill id are deliberately indistinguishable here; the
 /// composing wrapper folds both into the uniform miss. It is a member-entitled post-gate outcome,
 /// deliberately distinct from this layer's uniform `NotFound`.
 pub(crate) async fn read_current_session(

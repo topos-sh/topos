@@ -10,8 +10,8 @@ use plane_store::{
     SkillIndexRow, UploadedFile, VerificationContext, VersionMeta,
 };
 use topos_types::bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
-    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
+    ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
@@ -21,8 +21,8 @@ use topos_types::requests::{
 };
 use topos_types::results::InviteData;
 use topos_types::{
-    ActionCode, Affected, JsonEnvelope, NextAction, RECEIPT_SCHEMA_VERSION, Receipt, SignatureAlg,
-    SignedCurrentRecord, TerminalOutcome, WIRE_SCHEMA_VERSION, WireError,
+    ActionCode, Affected, JsonEnvelope, NextAction, RECEIPT_SCHEMA_VERSION, Receipt,
+    TerminalOutcome, WIRE_SCHEMA_VERSION, WireCurrentRecord, WireError,
 };
 
 use super::error::PlaneHttpError;
@@ -31,8 +31,8 @@ use super::error::PlaneHttpError;
 ///
 /// HTTP status is ALWAYS 200 for a returned receipt — EVERY protocol outcome rides in the body. `ok` is true
 /// for `OK` / `NEEDS_REVIEW`; on a failure outcome a flat [`WireError`] carries the code + retryability + the
-/// right next-actions (mirrored onto the envelope). On `OK` the parsed `SignedCurrentRecord` lands in `data`
-/// (so a future client can advance its anti-rollback floor from the response); otherwise `data` is `{}`.
+/// right next-actions (mirrored onto the envelope). On `OK` the parsed `WireCurrentRecord` lands in `data`
+/// (so a client can read the moved pointer straight from the response); otherwise `data` is `{}`.
 pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvelope {
     let outcome = receipt.outcome;
     let version_hex = receipt.version_id.map(|c| hex::encode(c.0));
@@ -50,18 +50,17 @@ pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvel
         expected_generation: Some(receipt.expected),
         current_generation: receipt.current,
         created_at: receipt.created_at.clone(),
-        key_id: receipt.key_id.clone(),
         details: receipt.details.clone(),
     };
 
     let ok = matches!(outcome, TerminalOutcome::Ok | TerminalOutcome::NeedsReview);
 
-    // On OK, surface the signed record in `data` (the client advances its floor from it); else `data = {}`.
+    // On OK, surface the current record in `data` (a client reads the moved pointer from it); else `data = {}`.
     let data = if outcome == TerminalOutcome::Ok {
         receipt
-            .signed_record
+            .record
             .as_ref()
-            .and_then(|bytes| serde_json::from_slice::<SignedCurrentRecord>(bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<WireCurrentRecord>(bytes).ok())
             .and_then(|record| serde_json::to_value(record).ok())
             .unwrap_or_else(|| serde_json::json!({}))
     } else {
@@ -251,7 +250,6 @@ fn default_code(outcome: TerminalOutcome) -> &'static str {
         TerminalOutcome::Denied => "DENIED",
         TerminalOutcome::Unavailable => "UNAVAILABLE",
         TerminalOutcome::AmbiguousName => "AMBIGUOUS_NAME",
-        TerminalOutcome::KeyRepinRequired => "KEY_REPIN_REQUIRED",
         TerminalOutcome::RetryableFailure => "RETRYABLE_FAILURE",
         TerminalOutcome::PermanentFailure => "PERMANENT_FAILURE",
     }
@@ -265,10 +263,11 @@ fn default_code(outcome: TerminalOutcome) -> &'static str {
 // skill-scoped object reads).
 // =================================================================================================
 
-/// Map an [`InviteBootstrap`] to the wire [`BootstrapData`] — the pre-enrollment TOFU payload. `token` is the
+/// Map an [`InviteBootstrap`] to the wire [`BootstrapData`] — the pre-enrollment payload. `token` is the
 /// invite link token the client used, echoed as the non-secret `token_id` — for an INVITE only; the claim
 /// route passes an empty placeholder instead, because a claim token is the live one-time bearer owner
-/// capability and must never be repeated into a response body. The plane key is pinned here.
+/// capability and must never be repeated into a response body. The payload carries no trust root: the client
+/// enrolls against the declared API base, and a `current` pointer's authority is the database row behind it.
 pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapData {
     BootstrapData {
         schema_version: WIRE_SCHEMA_VERSION,
@@ -285,11 +284,6 @@ pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapDat
             base_url: b.base_url,
             deployment_mode: deployment_mode_to_wire(b.deployment_mode),
             enrollment_method: b.enrollment_method,
-            signing_key: BootstrapSigningKey {
-                alg: SignatureAlg::Ed25519,
-                key_id: b.plane_key_id,
-                value: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b.plane_public_key),
-            },
         },
         workspace: BootstrapWorkspace {
             workspace_id: b.workspace_id.as_str().to_owned(),
@@ -303,7 +297,7 @@ pub(crate) fn bootstrap_to_wire(token: &str, b: InviteBootstrap) -> BootstrapDat
 
 /// Map a [`DeviceAuthStart`] to the wire [`DeviceAuthorizeResponse`]. `now` (the server clock the start was
 /// stamped with) converts the absolute `expires_at` (epoch-ms) into the RFC-8628 relative `expires_in` (s).
-/// `plane` is the TOFU block a STANDUP start carries (`None` on an enroll start — `/i/` already served it).
+/// `plane` is the plane block a STANDUP start carries (`None` on an enroll start — `/i/` already served it).
 pub(crate) fn device_auth_to_wire(
     s: DeviceAuthStart,
     now: i64,
@@ -320,9 +314,9 @@ pub(crate) fn device_auth_to_wire(
     }
 }
 
-/// The plane block a STANDUP `device/authorize` response carries — the base URL, deployment posture,
-/// enrollment method, and the signing key to TOFU-pin (exactly what the `/i/` bootstrap serves an invited
-/// device; a standup device has no `/i/` link to fetch it from).
+/// The plane block a STANDUP `device/authorize` response carries — the base URL, deployment posture, and
+/// enrollment method (exactly what the `/i/` bootstrap serves an invited device; a standup device has no
+/// `/i/` link to fetch them from). It carries no trust root: the client re-roots onto the declared base.
 pub(crate) fn standup_plane_block(
     state: &crate::state::PlaneState,
 ) -> Result<BootstrapPlane, PlaneHttpError> {
@@ -333,12 +327,6 @@ pub(crate) fn standup_plane_block(
         base_url: disclosure.base_url,
         deployment_mode: deployment_mode_to_wire(disclosure.deployment_mode),
         enrollment_method: disclosure.enrollment_method,
-        signing_key: BootstrapSigningKey {
-            alg: SignatureAlg::Ed25519,
-            key_id: state.authority().plane_key_id()?,
-            value: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(state.authority().plane_public_key()?),
-        },
     })
 }
 

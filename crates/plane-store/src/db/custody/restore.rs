@@ -1,13 +1,13 @@
 //! The operator backup/restore **epoch bump** — the raw-SQL half of `restore-bump-epochs`.
 //!
 //! ONE `SERIALIZABLE` (`run_serializable!`) transaction locks every selected `current` row (`FOR UPDATE`,
-//! in one stable order), re-signs each pointer at `max(epoch + 1, the operator floor)` — **same commit,
+//! in one stable order), rewrites each pointer at `max(epoch + 1, the operator floor)` — **same commit,
 //! same seq** — and updates the row in place. This is an OPERATOR helper, not a protocol write: it touches
 //! ONLY the `current` table (no receipt, no provenance, no proposal, no lease, no generation-advance logic
 //! anywhere else), because a restored database already holds every one of those rows for the versions it
-//! knows — only the pointer's *generation* has moved backward relative to what followers recorded. All
-//! `sqlx` stays here; the caller ([`crate::restore`]) hands in the validated selection and a signer and
-//! gets back domain [`EpochBumpReport`]s.
+//! knows — only the pointer's *generation* has moved backward relative to what was already served. All
+//! `sqlx` stays here; the caller ([`crate::custody::restore`]) hands in the validated selection and gets
+//! back domain [`EpochBumpReport`]s.
 //!
 //! Concurrency: the serializable transaction + the `FOR UPDATE` row locks mean a concurrent publish either
 //! lands first (this transaction's read then sees — and bumps — the new row, after a serialization retry if
@@ -15,57 +15,54 @@
 //! says stop the plane first.
 
 use sqlx::{Postgres, Transaction};
-use topos_core::sign::CurrentPointer;
 use topos_types::{
-    CurrentRecord, Generation, PointerScope, Signature, SignatureAlg, SignedCurrentRecord,
+    CurrentRecord, Generation, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord,
 };
 
+use crate::custody::restore::EpochBumpReport;
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{SkillId, WorkspaceId};
-use crate::restore::EpochBumpReport;
-use crate::signer::PlaneSigner;
 
-/// The JCS / I-JSON safe-integer bound (2^53 − 1) the pointer preimage enforces — a generation a follower
-/// could never verify is never stored or signed. Mirrors the pointer-move's own bound (private to
-/// `db/set_current.rs`, which is deliberately untouched by this helper).
+/// The I-JSON safe-integer bound (2^53 − 1) the wire record enforces — a generation a JSON consumer could
+/// not represent exactly is never stored or served. Mirrors the pointer-move's own bound (private to
+/// `db/custody/set_current.rs`, which is deliberately untouched by this helper).
 const MAX_SAFE_INT: u64 = (1u64 << 53) - 1;
 
 impl Db {
     /// Run the one epoch-bump transaction over the selected workspaces (`None` ⇒ every workspace on the
-    /// plane). Returns one [`EpochBumpReport`] per re-signed `current` row (an empty selection is an empty
-    /// report, not an error). All-or-nothing: any per-row fault (an out-of-range bump, a signer fault, a
-    /// store corruption) rolls the whole transaction back with nothing written or signed.
+    /// plane). Returns one [`EpochBumpReport`] per bumped `current` row (an empty selection is an empty
+    /// report, not an error). All-or-nothing: any per-row fault (an out-of-range bump, a store corruption)
+    /// rolls the whole transaction back with nothing written.
     pub(crate) async fn restore_bump_epochs_txn(
         &self,
         workspaces: Option<&[WorkspaceId]>,
         epoch_at_least: Option<u64>,
         now: i64,
-        signer: &PlaneSigner,
     ) -> Result<Vec<EpochBumpReport>> {
         let filter: Option<Vec<String>> =
             workspaces.map(|ids| ids.iter().map(|w| w.as_str().to_owned()).collect());
         run_serializable!(
             self,
             tx,
-            run(&mut tx, filter.as_deref(), epoch_at_least, now, signer).await
+            run(&mut tx, filter.as_deref(), epoch_at_least, now).await
         )
     }
 }
 
-/// The transaction body (re-runnable: it borrows its inputs, signing is deterministic, and every write is
-/// in-transaction — a serialization retry re-reads fresh committed rows and re-derives the same bumps).
+/// The transaction body (re-runnable: it borrows its inputs, serialization is deterministic, and every
+/// write is in-transaction — a serialization retry re-reads fresh committed rows and re-derives the same
+/// bumps).
 async fn run(
     tx: &mut Transaction<'_, Postgres>,
     filter: Option<&[String]>,
     epoch_at_least: Option<u64>,
     now: i64,
-    signer: &PlaneSigner,
 ) -> Result<Vec<EpochBumpReport>> {
     let rows = lock_current_rows(tx, filter).await?;
     let mut reports = Vec::with_capacity(rows.len());
     for row in rows {
-        let commit = crate::db::commit_id_from_row(&row.commit_id)?;
+        let commit = crate::db::custody::read::commit_id_from_row(&row.commit_id)?;
         let old = Generation {
             epoch: i64_to_u64(row.epoch)?,
             seq: i64_to_u64(row.seq)?,
@@ -86,8 +83,8 @@ async fn run(
             .checked_add(1)
             .map(|bumped| bumped.max(epoch_at_least.unwrap_or(0)))
         {
-            // The JCS safe-integer guard: past the bound the pointer preimage could never be verified, so
-            // fail typed with NOTHING written or signed (the whole transaction rolls back).
+            // The safe-integer guard: past the bound a JSON consumer could not represent the epoch
+            // exactly, so fail typed with NOTHING written (the whole transaction rolls back).
             Some(epoch) if epoch <= MAX_SAFE_INT => epoch,
             _ => return Err(AuthorityError::internal(EpochBumpOutOfRange)),
         };
@@ -95,16 +92,8 @@ async fn run(
             epoch: new_epoch,
             seq: old.seq,
         };
-        let pointer = CurrentPointer {
-            workspace_id: &row.workspace_id,
-            skill_id: &row.skill_id,
-            version_id: commit.0,
-            epoch: new.epoch,
-            seq: new.seq,
-        };
-        let signature = signer.sign_pointer(&pointer)?;
-        let signed_record = serialize_signed_record(&pointer, signer.key_id(), &signature)?;
-        bump_row(tx, &row, new.epoch, &signed_record, now).await?;
+        let record = serialize_record(&row.workspace_id, &row.skill_id, &commit.0, new)?;
+        bump_row(tx, &row, new.epoch, &record, now).await?;
         // Stored ids were validated on the way in, so a re-parse failure here is store corruption.
         reports.push(EpochBumpReport {
             workspace_id: WorkspaceId::parse(&row.workspace_id)
@@ -113,7 +102,6 @@ async fn run(
             commit,
             old,
             new,
-            key_id: signer.key_id().to_owned(),
         });
     }
     Ok(reports)
@@ -179,23 +167,23 @@ async fn lock_current_rows(
     }
 }
 
-/// Write one bump: `epoch`, the fresh `signed_record`, and `updated_at` — the commit id and `seq` are
+/// Write one bump: `epoch`, the fresh `record`, and `updated_at` — the commit id and `seq` are
 /// deliberately untouched. The `WHERE` re-asserts the exact generation the row was read (and locked) at.
 async fn bump_row(
     tx: &mut Transaction<'_, Postgres>,
     row: &LockedCurrentRow,
     new_epoch: u64,
-    signed_record: &[u8],
+    record: &[u8],
     now: i64,
 ) -> Result<()> {
     let epoch = u64_to_i64(new_epoch)?;
     let ws_s = row.workspace_id.as_str();
     let skill_s = row.skill_id.as_str();
     let done = sqlx::query!(
-        "UPDATE current SET epoch = $1, signed_record = $2, updated_at = $3 \
+        "UPDATE current SET epoch = $1, record = $2, updated_at = $3 \
          WHERE workspace_id = $4 AND skill_id = $5 AND epoch = $6 AND seq = $7",
         epoch,
-        signed_record,
+        record,
         now,
         ws_s,
         skill_s,
@@ -214,43 +202,28 @@ async fn bump_row(
     Ok(())
 }
 
-/// Serialize the `SignedCurrentRecord` envelope stored in `current.signed_record` — the SAME typed-DTO
-/// construction the pointer-move's promote path performs (its serializer is private to `db/set_current.rs`,
-/// which this helper deliberately never touches; the envelope-parity test in `tests/restore.rs` pins the two
-/// shapes together against drift). The signature is over `pointer_preimage` (the JCS string), NOT this
-/// envelope — a verifier reconstructs the `CurrentPointer` strictly from {scope, record} and re-derives the
-/// preimage; `key_id`/`schema_version` are NOT part of the signed bytes.
-fn serialize_signed_record(
-    pointer: &CurrentPointer<'_>,
-    key_id: &str,
-    signature: &[u8; 64],
+/// Serialize the [`WireCurrentRecord`] document stored in `current.record` — the SAME typed-DTO
+/// construction the pointer-move's promote path performs (its serializer is private to
+/// `db/custody/set_current.rs`, which this helper deliberately never touches; the record-parity test in
+/// `tests/restore.rs` pins the two shapes together against drift).
+fn serialize_record(
+    workspace_id: &str,
+    skill_id: &str,
+    version_id: &[u8; 32],
+    generation: Generation,
 ) -> Result<Vec<u8>> {
-    let record = SignedCurrentRecord {
-        schema_version: 1,
+    let record = WireCurrentRecord {
+        schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
-            workspace_id: pointer.workspace_id.to_owned(),
-            skill_id: pointer.skill_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            skill_id: skill_id.to_owned(),
         },
         record: CurrentRecord {
-            version_id: topos_core::digest::to_hex(&pointer.version_id),
-            generation: Generation {
-                epoch: pointer.epoch,
-                seq: pointer.seq,
-            },
-        },
-        signature: Signature {
-            alg: SignatureAlg::Ed25519,
-            key_id: key_id.to_owned(),
-            value: base64_url(signature),
+            version_id: topos_core::digest::to_hex(version_id),
+            generation,
         },
     };
     serde_json::to_vec(&record).map_err(AuthorityError::internal)
-}
-
-/// base64url, unpadded — the frozen wire form of a 64-byte signature (86 chars).
-fn base64_url(signature: &[u8; 64]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
 }
 
 // --- small conversions (a stored value that violates a width/range CHECK is store corruption) ---
@@ -268,9 +241,7 @@ fn u64_to_i64(v: u64) -> Result<i64> {
 struct GenerationOutOfRange;
 
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "the bumped epoch would exceed the JCS safe-integer bound (2^53 - 1); nothing was re-signed"
-)]
+#[error("the bumped epoch would exceed the safe-integer bound (2^53 - 1); nothing was written")]
 struct EpochBumpOutOfRange;
 
 #[derive(Debug, thiserror::Error)]
