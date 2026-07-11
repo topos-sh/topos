@@ -47,21 +47,17 @@ fn default_domain_status() -> VerifiedDomainStatus {
     VerifiedDomainStatus::Unverified
 }
 
-/// `instance.json` — the PLANE this client is enrolled with + the pinned plane public key. Plane-scoped
-/// only (v0 is one plane per install); every PER-WORKSPACE fact (display name, verified-domain provenance,
-/// membership metadata) lives on a [`Membership`] in `user.json`, so one install can follow skills from
-/// several workspaces on the same plane. Public metadata only (the plane key is a PUBLIC Ed25519 key —
-/// ordinary file perms are fine).
+/// `instance.json` — the PLANE this client is enrolled with. Plane-scoped only (v0 is one plane per
+/// install); every PER-WORKSPACE fact (display name, verified-domain provenance, membership metadata) lives
+/// on a [`Membership`] in `user.json`, so one install can follow skills from several workspaces on the same
+/// plane. Public metadata only (ordinary file perms). No trust root is stored — the `current` pointer is
+/// unsigned, its authority the database row and its integrity the content-addressed version id; a stale
+/// `instance.json` from an older build may carry ignored extra fields (serde default tolerates them).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Instance {
     pub schema_version: u32,
     /// The plane base URL (no trailing slash required; the transport normalizes it), e.g. `https://topos.sh`.
     pub base_url: String,
-    /// The pinned plane **public** Ed25519 key, 32 bytes as 64-char lowercase hex — the signed `current`
-    /// pointer is verified against it.
-    pub plane_key: String,
-    /// The id of that plane key (advisory; the signature carries its own key id).
-    pub plane_key_id: String,
     /// The plane's deployment posture (disclosed at enrollment; not a trust input).
     #[serde(default = "default_deployment_mode")]
     pub deployment_mode: DeploymentMode,
@@ -280,9 +276,6 @@ fn default_enroll_root() -> EnrollRoot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EnrollContext {
     pub base_url: String,
-    /// The TOFU-decided plane public key (32-byte lowercase hex) — pinned at this `base_url`.
-    pub pinned_plane_key: String,
-    pub plane_key_id: String,
     pub deployment_mode: DeploymentMode,
     pub enrollment_method: String,
     pub workspace_id: String,
@@ -351,9 +344,6 @@ pub(crate) enum EnrollPhase {
     AuthorizingStandup {
         /// The plane base URL this standup was started against (env override or the hosted default).
         base_url: String,
-        /// The TOFU-decided plane public key (32-byte lowercase hex) — pinned at this `base_url`.
-        pinned_plane_key: String,
-        plane_key_id: String,
         /// The plane's deployment posture (from the authorize response's plane block; disclosure).
         deployment_mode: DeploymentMode,
         /// The enrollment method the plane advertised (disclosure only).
@@ -373,9 +363,6 @@ pub(crate) enum EnrollPhase {
     /// a consumed claim bootstraps 404 by design; the server's same-device replay re-answers Redeemed).
     ClaimPending {
         base_url: String,
-        /// The TOFU-decided plane public key (32-byte lowercase hex) — pinned at this `base_url`.
-        pinned_plane_key: String,
-        plane_key_id: String,
         /// The plane's deployment posture (from the claim bootstrap; disclosure).
         deployment_mode: DeploymentMode,
         /// The enrollment method the bootstrap advertised (`"admin_claim"`; disclosure only).
@@ -777,8 +764,6 @@ mod tests {
         Instance {
             schema_version: 1,
             base_url: "https://topos.sh".to_owned(),
-            plane_key: "a".repeat(64),
-            plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
         }
@@ -863,7 +848,7 @@ mod tests {
     #[test]
     fn fail_closed_on_newer_or_legacy_schema_version() {
         // A NEWER schema_version is never handed to serde — an upgrade error, fail closed.
-        let newer = br#"{"schema_version":2,"base_url":"x","plane_key":"a","plane_key_id":"k"}"#;
+        let newer = br#"{"schema_version":2,"base_url":"x"}"#;
         assert!(matches!(
             load_versioned::<Instance>(newer, PERSISTED_SCHEMA_VERSION),
             Err(ClientError::UnknownSchemaVersion { found: 2, .. })
@@ -949,8 +934,6 @@ mod tests {
             state: EnrollPhase::Redeemed {
                 context: EnrollContext {
                     base_url: "https://acme.topos.test".to_owned(),
-                    pinned_plane_key: "a".repeat(64),
-                    plane_key_id: "pk".to_owned(),
                     deployment_mode: DeploymentMode::SelfHost,
                     enrollment_method: "device_code".to_owned(),
                     workspace_id: "w_acme".to_owned(),
@@ -990,8 +973,6 @@ mod tests {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::AuthorizingStandup {
                 base_url: "https://api.topos.sh".to_owned(),
-                pinned_plane_key: "a".repeat(64),
-                plane_key_id: "pk_hosted".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "device_code".to_owned(),
                 device_code: "dc_standup_secret".to_owned(),
@@ -1016,8 +997,6 @@ mod tests {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::ClaimPending {
                 base_url: "https://plane.acme.test".to_owned(),
-                pinned_plane_key: "b".repeat(64),
-                plane_key_id: "pk_selfhost".to_owned(),
                 deployment_mode: DeploymentMode::SelfHost,
                 enrollment_method: "admin_claim".to_owned(),
                 workspace_id: "w_acme".to_owned(),
@@ -1038,8 +1017,6 @@ mod tests {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::ClaimPending {
                 base_url: "https://plane.acme.test".to_owned(),
-                pinned_plane_key: "b".repeat(64),
-                plane_key_id: "pk_selfhost".to_owned(),
                 deployment_mode: DeploymentMode::SelfHost,
                 enrollment_method: "admin_claim".to_owned(),
                 // A parent-traversal workspace id, assembled (not a source literal) so the repo hygiene
@@ -1061,8 +1038,6 @@ mod tests {
             state: EnrollPhase::Redeemed {
                 context: EnrollContext {
                     base_url: "https://acme.topos.test".to_owned(),
-                    pinned_plane_key: "a".repeat(64),
-                    plane_key_id: "pk".to_owned(),
                     deployment_mode: DeploymentMode::SelfHost,
                     enrollment_method: "device_code".to_owned(),
                     workspace_id: "w_acme".to_owned(),
@@ -1215,8 +1190,6 @@ mod tests {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::AuthorizingStandup {
                 base_url: "https://api.topos.sh".to_owned(),
-                pinned_plane_key: "a".repeat(64),
-                plane_key_id: "pk".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "device_code".to_owned(),
                 device_code: "dc".to_owned(),
@@ -1238,8 +1211,6 @@ mod tests {
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: EnrollPhase::ClaimPending {
                 base_url: "https://plane.acme.test".to_owned(),
-                pinned_plane_key: "b".repeat(64),
-                plane_key_id: "pk".to_owned(),
                 deployment_mode: DeploymentMode::SelfHost,
                 enrollment_method: "admin_claim".to_owned(),
                 workspace_id: "w_acme".to_owned(),

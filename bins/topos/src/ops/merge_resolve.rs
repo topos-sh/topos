@@ -28,11 +28,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
+use topos_core::identity::{self, Commit};
 use topos_core::merge::{
     ContentMergeResult, FileId, FileSetConflictKind, MergeOutcome, PathPlan, decide_outcome,
     plan_merge,
 };
-use topos_core::sign::{self, Commit};
 use topos_gitstore::{
     DiffFile, ImportFile, MergeFileResult, RenderedBundle, RenderedFile, Store, merge_file,
     unified_diff,
@@ -697,7 +697,7 @@ fn commit_result(
     bundle: &RenderedBundle,
     message: &str,
 ) -> Result<[u8; 32], ClientError> {
-    let id = sign::commit_id(&Commit {
+    let id = identity::commit_id(&Commit {
         parents: &[parent],
         tree: bundle.bundle_digest,
         author: &ctx.device_id,

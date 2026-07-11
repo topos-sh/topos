@@ -56,23 +56,22 @@ pub fn run() -> ExitCode {
     }
 
     // The plane + follow-state sources. When enrollment has been written (`instance.json` present —
-    // `follow` writes it), wire the REAL `ureq` transport + the on-disk follow state + the pinned plane
-    // key; otherwise keep the INERT pair (a never-enrolled install stays a truthful no-op). The inert
-    // ZSTs and the loaded enrollment are both stack locals so the `&dyn` trait objects below borrow
-    // correctly for the rest of `run`.
+    // `follow` writes it), wire the REAL `ureq` transport + the on-disk follow state; otherwise keep the
+    // INERT pair (a never-enrolled install stays a truthful no-op). The inert ZSTs and the loaded
+    // enrollment are both stack locals so the `&dyn` trait objects below borrow correctly for the rest of
+    // `run`.
     let inert_plane = crate::plane::InertPlane;
     let inert_follow = crate::plane::InertFollow;
     let enrollment = match load_enrollment(&fs, &layout) {
         Ok(e) => e,
         Err(e) => return emit_err(json, cmd_name, &e, &diag),
     };
-    let (plane, follow, plane_key): (
+    let (plane, follow): (
         &dyn crate::plane::PlaneSource,
         &dyn crate::plane::FollowSource,
-        [u8; 32],
     ) = match &enrollment {
-        Some(e) => (&e.plane, &e.follow, e.plane_key),
-        None => (&inert_plane, &inert_follow, [0u8; 32]),
+        Some(e) => (&e.plane, &e.follow),
+        None => (&inert_plane, &inert_follow),
     };
 
     // `add` and `pull` author commits (adoption / a draft snapshot before a divergence), so both load
@@ -101,7 +100,6 @@ pub fn run() -> ExitCode {
         layout,
         harness: harness.as_ref(),
         plane,
-        plane_key,
         follow,
     };
 
@@ -910,17 +908,15 @@ pub(crate) fn pull_with_name_fallback(
 struct Enrollment {
     plane: UreqPlane,
     follow: FileFollow,
-    plane_key: [u8; 32],
 }
 
 /// Load the enrollment docs read-only. Returns `Some` whenever `instance.json` is present — enrollment is
 /// what writes it, so its presence IS the enrolled state; `follows.json` is optional (an empty membership
-/// door, or every follow since flipped off by `unfollow`). The pinned plane key must stay loaded even with
-/// zero active follows: the write verbs (publish/revert/review) verify the OK receipt's signed pointer
-/// against it, and an enrolled author with nothing followed is a normal state. The bare `pull` stays an
-/// honest no-op either way (the sweep skips a `following == false` entry, and renders "No followed
-/// skills." over an empty set). A corrupt / newer-schema doc fails closed (propagated), never silently
-/// degraded to inert.
+/// door, or every follow since flipped off by `unfollow`). The transport stays wired even with zero active
+/// follows: the write verbs (publish/revert/review) still need the plane base, and an enrolled author with
+/// nothing followed is a normal state. The bare `pull` stays an honest no-op either way (the sweep skips a
+/// `following == false` entry, and renders "No followed skills." over an empty set). A corrupt /
+/// newer-schema doc fails closed (propagated), never silently degraded to inert.
 fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>, ClientError> {
     let Some(instance) = enroll::read_instance(fs, layout)? else {
         return Ok(None);
@@ -929,16 +925,9 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
         follows: Vec::new(),
     });
-    let plane_key = ops::parse_hex32(&instance.plane_key).map_err(|_| {
-        ClientError::Corrupt("instance.json plane_key is not 32-byte lowercase hex".into())
-    })?;
     let plane = UreqPlane::new(instance.base_url, enroll::skill_creds(&follows));
     let follow = FileFollow::new(enroll::follow_contexts(&follows));
-    Ok(Some(Enrollment {
-        plane,
-        follow,
-        plane_key,
-    }))
+    Ok(Some(Enrollment { plane, follow }))
 }
 
 /// Build the harness adapter for `id`, borrowing the shared config-store seam. Adding a harness is ONE

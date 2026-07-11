@@ -166,7 +166,6 @@ impl Harness {
             layout: Layout::new(&self.home.0),
             harness,
             plane: &self.plane,
-            plane_key: [0u8; 32],
             follow: &self.follow,
         }
     }
@@ -777,7 +776,6 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         layout: Layout::new(&probe_home.0),
         harness: &no_harness,
         plane: &no_plane,
-        plane_key: [0u8; 32],
         follow: &no_follow,
     };
     ops::add(&probe_ctx, &root).unwrap();
@@ -797,7 +795,6 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             layout: layout.clone(),
             harness: &no_harness,
             plane: &no_plane,
-            plane_key: [0u8; 32],
             follow: &no_follow,
         };
         let result = ops::add(&ctx, &root);
@@ -821,7 +818,6 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             layout: layout.clone(),
             harness: &no_harness,
             plane: &no_plane,
-            plane_key: [0u8; 32],
             follow: &no_follow,
         };
         let tracked = ops::list(&clean_ctx, None, false, None, None)
@@ -1280,8 +1276,6 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         &Instance {
             schema_version: 1,
             base_url: "https://topos.example".to_owned(),
-            plane_key: "a".repeat(64),
-            plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
         },
@@ -1418,8 +1412,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         &Instance {
             schema_version: 1,
             base_url: "https://topos.example".to_owned(),
-            plane_key: "a".repeat(64),
-            plane_key_id: "pk_demo".to_owned(),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
         },

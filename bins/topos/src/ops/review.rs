@@ -144,10 +144,10 @@ fn map_outcome(
             // Approve moved `current` to the proposal — advance the reviewer's floor (the bytes land at the
             // next pull). Reject moves nothing (the plane returns OK with no signed pointer).
             let current_generation = if matches!(decision, ReviewDecision::Approve) {
-                let signed = receipt.signed_record.as_ref().ok_or_else(|| {
-                    ClientError::Corrupt("an approved proposal carried no signed pointer".into())
+                let record = receipt.wire_record.as_ref().ok_or_else(|| {
+                    ClientError::Corrupt("an approved proposal carried no current pointer".into())
                 })?;
-                Some(contribute::apply_light_advance(ctx, sp, rec, signed)?)
+                Some(contribute::apply_light_advance(ctx, sp, rec, record)?)
             } else {
                 None
             };

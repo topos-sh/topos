@@ -1,29 +1,26 @@
-//! The client device signer — the client's **only** private-key holder.
+//! The client device keypair — the device's presented identity.
 //!
-//! Mirrors the plane's in-process signer: an Ed25519 signing key load-or-generated from a `0600` seed
-//! file (`identity/device.key`), holding only the `SigningKey` (which self-zeroizes on drop via dalek's
-//! `zeroize` feature), the raw public key, and a stable, pubkey-derived `device_key_id` — it **never**
-//! retains the raw seed, and its `Debug` is hand-written so a key seed can never reach a log or panic.
+//! An Ed25519 keypair load-or-generated from a `0600` seed file (`identity/device.key`), holding only the
+//! `SigningKey` (which self-zeroizes on drop via dalek's `zeroize` feature), the raw public key, and a
+//! stable, pubkey-derived `device_key_id`. It **never** retains the raw seed, and its `Debug` is
+//! hand-written so a key seed can never reach a log or panic.
 //!
-//! **Cross-component agreement.** `device_key_id` (`dk_` + the first 32 hex chars of
-//! `sha256(public_key)`) is the ONE kernel derivation — `topos_core::sign::device_key_id` — which the
-//! plane's server-side re-derivation also calls. The client SIGNS the enroll / governance / device-op
-//! frames binding this id, and the plane re-derives the SAME id from the registered public key and
-//! verifies; a second implementation could silently fork the halves, so neither side carries one.
+//! **What the keypair is for.** The public key REGISTERS the device with the plane at enroll; the
+//! `device_key_id` (`dk_…`, derived from that public key) is the device's presented identity on every
+//! request. **Nothing signs with the private key** — the trust model is git/GitHub-level (the client
+//! trusts the plane it enrolled with; authority is the plane's database policy rows, integrity is the
+//! content-addressed `version_id` re-verified by digest on apply). The private key sits unused; a later
+//! increment owns the per-workspace credential redesign.
 //!
-//! **One signer.** `topos-core` builds every signing preimage and verifies; the concrete `sign` is the
-//! caller's — here — over the same `ed25519-dalek` crate. This file never re-implements a preimage: it
-//! signs exactly the bytes `topos_core::sign` framed.
+//! **Cross-component agreement.** `device_key_id` (`dk_` + the first 32 hex chars of `sha256(public_key)`)
+//! is the ONE kernel derivation — `topos_core::identity::device_key_id` — which the plane's server-side
+//! re-derivation also calls, so the id the client presents is the SAME id the plane re-derives from the
+//! registered public key.
 
 use std::path::Path;
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use zeroize::Zeroizing;
-
-use topos_core::sign::{
-    CatalogReadFields, DeviceOpFields, EnrollFields, GovernanceOpFields, PreimageError,
-    catalog_read_preimage, device_op_preimage, enroll_preimage, governance_op_preimage,
-};
 
 use crate::atomic::atomic_write_private;
 use crate::error::ClientError;
@@ -33,12 +30,15 @@ use crate::sidecar::Layout;
 /// The Ed25519 seed length (the dalek `SecretKey` is `[u8; 32]`).
 const SEED_LEN: usize = 32;
 
-/// The client's device signer. Holds the Ed25519 signing key, the raw public key, and the stable
-/// pubkey-derived `device_key_id`; signs the enroll / governance / device-op frames `topos-core` frames.
+/// The client's device keypair. Holds the Ed25519 signing key (custody only — nothing signs), the raw
+/// public key (the plane's registration credential), and the stable pubkey-derived `device_key_id` (the
+/// device's presented identity).
 pub(crate) struct DeviceSigner {
-    /// The signing key (self-zeroizes on drop — dalek's `zeroize` feature is enabled for this crate).
+    /// The signing key (self-zeroizes on drop — dalek's `zeroize` feature is enabled for this crate). Held
+    /// for custody only; the client no longer signs anything with it.
+    #[allow(dead_code)]
     signing_key: SigningKey,
-    /// The raw 32-byte public key (the verify credential the plane registers + pins).
+    /// The raw 32-byte public key (the credential the plane registers).
     public_key: [u8; 32],
     /// The stable, public selector derived from the public key (byte-identical to the server derivation).
     device_key_id: String,
@@ -69,7 +69,7 @@ impl DeviceSigner {
         let public_key = signing_key.verifying_key().to_bytes();
         // The ONE kernel derivation (`dk_` + first 32 hex of sha256(pubkey)) — the plane re-derives the
         // SAME id from the registered key via the same fn, so the halves cannot drift.
-        let device_key_id = topos_core::sign::device_key_id(&public_key);
+        let device_key_id = topos_core::identity::device_key_id(&public_key);
         Self {
             signing_key,
             public_key,
@@ -77,61 +77,14 @@ impl DeviceSigner {
         }
     }
 
-    /// The raw 32-byte device public key (what the plane registers and a frame verifies against).
+    /// The raw 32-byte device public key (what the plane registers).
     pub(crate) fn public_key(&self) -> [u8; 32] {
         self.public_key
     }
 
-    /// The stable device key id (`dk_<…>`), bound into every signed frame; the plane re-derives + matches it.
+    /// The stable device key id (`dk_<…>`) presented on requests; the plane re-derives + matches it.
     pub(crate) fn device_key_id(&self) -> &str {
         &self.device_key_id
-    }
-
-    /// Sign a device-enrollment possession proof: the signed message is **exactly** the bytes
-    /// `verify_enroll` reconstructs — `topos_core::sign::enroll_preimage`. Deterministic (no RNG).
-    ///
-    /// # Errors
-    /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
-    pub(crate) fn sign_enroll(&self, fields: &EnrollFields) -> Result<[u8; 64], ClientError> {
-        let preimage = enroll_preimage(fields).map_err(preimage_err)?;
-        Ok(self.signing_key.sign(&preimage).to_bytes())
-    }
-
-    /// Sign a governance op (invite / roster mutation / device revoke) over
-    /// `topos_core::sign::governance_op_preimage`. Deterministic (no RNG).
-    ///
-    /// # Errors
-    /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
-    pub(crate) fn sign_governance(
-        &self,
-        fields: &GovernanceOpFields,
-    ) -> Result<[u8; 64], ClientError> {
-        let preimage = governance_op_preimage(fields).map_err(preimage_err)?;
-        Ok(self.signing_key.sign(&preimage).to_bytes())
-    }
-
-    /// Sign a device op (publish / revert / review) over `topos_core::sign::device_op_preimage` — the
-    /// contribute verbs' signature. Deterministic (no RNG).
-    ///
-    /// # Errors
-    /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
-    pub(crate) fn sign_device_op(&self, fields: &DeviceOpFields) -> Result<[u8; 64], ClientError> {
-        let preimage = device_op_preimage(fields).map_err(preimage_err)?;
-        Ok(self.signing_key.sign(&preimage).to_bytes())
-    }
-
-    /// Sign a workspace-catalog read (`list --remote`) over `topos_core::sign::catalog_read_preimage` —
-    /// the read binds only `workspace_id` + this signer's `device_key_id`. Deterministic (no RNG).
-    ///
-    /// # Errors
-    /// [`ClientError::Corrupt`] if the preimage cannot be framed (unreachable for well-formed inputs).
-    pub(crate) fn sign_catalog_read(&self, workspace_id: &str) -> Result<[u8; 64], ClientError> {
-        let fields = CatalogReadFields {
-            workspace_id,
-            device_key_id: &self.device_key_id,
-        };
-        let preimage = catalog_read_preimage(&fields).map_err(preimage_err)?;
-        Ok(self.signing_key.sign(&preimage).to_bytes())
     }
 }
 
@@ -147,17 +100,9 @@ impl std::fmt::Debug for DeviceSigner {
     }
 }
 
-/// Map a `topos-core` preimage-framing failure to the client error family. Every case is unreachable for
-/// well-formed inputs (a > 4 GiB string, or an `epoch`/`seq` past 2^53), so this is an internal-fault path.
-fn preimage_err(e: PreimageError) -> ClientError {
-    ClientError::Corrupt(format!(
-        "could not build the device signing preimage: {e:?}"
-    ))
-}
-
 /// Load (or, on first run, generate + persist `0600`) the raw 32-byte device seed, serialized under the
 /// identity lock so two first-runs converge on one key (the `FsOps` seam has no `O_EXCL` create, so the
-/// lock + a re-read is how we mirror the plane signer's race-safety). Returned in a [`Zeroizing`] buffer.
+/// lock + a re-read is how we mirror the race-safety). Returned in a [`Zeroizing`] buffer.
 fn load_or_generate_seed(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -186,8 +131,8 @@ fn generate_seed() -> Result<Zeroizing<[u8; SEED_LEN]>, ClientError> {
 }
 
 /// Read + validate the seed at `path`: `Ok(None)` if absent; a typed fault if present but readable by
-/// group/other (refuse-on-permissive, like the plane signer's seed read) or not exactly 32 bytes — a
-/// tampered/world-readable device key is refused, never silently used.
+/// group/other (refuse-on-permissive) or not exactly 32 bytes — a tampered/world-readable device key is
+/// refused, never silently used.
 fn read_seed(
     fs: &dyn FsOps,
     path: &Path,
@@ -214,10 +159,6 @@ mod tests {
 
     use super::*;
     use crate::fs_seam::RealFs;
-    use topos_core::sign::{
-        CatalogReadFields, DeviceOp, GovernanceOpKind, verify_catalog_read, verify_device_op,
-        verify_enroll, verify_governance_op,
-    };
 
     /// The kernel's frozen device-key known-answer (seed = bytes 00..1f → this public key).
     const KERNEL_DEVICE_PK: &str =
@@ -279,7 +220,7 @@ mod tests {
 
     #[test]
     fn device_key_id_matches_the_server_derivation() {
-        // The kernel's frozen seed 00..1f → KERNEL_DEVICE_PK, so this signer's public key is a known answer.
+        // The kernel's frozen seed 00..1f → KERNEL_DEVICE_PK, so this keypair's public key is a known answer.
         let seed: [u8; SEED_LEN] = std::array::from_fn(|i| i as u8);
         let signer = DeviceSigner::from_seed(&seed);
         assert_eq!(
@@ -287,95 +228,17 @@ mod tests {
             KERNEL_DEVICE_PK
         );
 
-        // (1) Recompute the id from the formula, independent of the signer's own derivation path.
+        // (1) Recompute the id from the formula, independent of the keypair's own derivation path.
         let hex = topos_core::digest::to_hex(&topos_core::digest::sha256(&signer.public_key()));
         assert_eq!(signer.device_key_id(), format!("dk_{}", &hex[..32]));
         assert!(signer.device_key_id().starts_with("dk_"));
         assert_eq!(signer.device_key_id().len(), 3 + 32);
 
         // (2) Pin the exact server-side known-answer (`dk_` + first 32 hex of sha256(KERNEL_DEVICE_PK)),
-        // computed independently — the SAME value the plane's `device_key_id_for` produces.
+        // computed independently — the SAME value the plane's `device_key_id` produces.
         assert_eq!(
             signer.device_key_id(),
             "dk_56475aa75463474c0285df5dbf2bcab7"
         );
-    }
-
-    #[test]
-    fn sign_enroll_round_trips_through_the_kernel_verify() {
-        let signer = DeviceSigner::from_seed(&[7u8; SEED_LEN]);
-        let fields = EnrollFields {
-            workspace_id: "w_acme",
-            grant_hash: [0x33; 32],
-            device_auth_id: "da_acme_001",
-            device_key_id: signer.device_key_id(),
-            device_public_key: signer.public_key(),
-            offered_skill_ids: &["s_deploy", "s_prdescribe"],
-        };
-        let sig = signer.sign_enroll(&fields).unwrap();
-        assert!(verify_enroll(&fields, &sig, &signer.public_key()));
-        // A one-bit flip in the signature fails verification (the kernel is the integrity authority).
-        let mut tampered = sig;
-        tampered[0] ^= 0x01;
-        assert!(!verify_enroll(&fields, &tampered, &signer.public_key()));
-    }
-
-    #[test]
-    fn sign_governance_round_trips_through_the_kernel_verify() {
-        let signer = DeviceSigner::from_seed(&[9u8; SEED_LEN]);
-        let fields = GovernanceOpFields {
-            workspace_id: "w_acme",
-            op_id: [0xAB; 16],
-            device_key_id: signer.device_key_id(),
-            op: GovernanceOpKind::RosterRemove { target: "p_bob" },
-        };
-        let sig = signer.sign_governance(&fields).unwrap();
-        assert!(verify_governance_op(&fields, &sig, &signer.public_key()));
-    }
-
-    #[test]
-    fn sign_device_op_round_trips_through_the_kernel_verify() {
-        // Exercises the device-op signer (so it is not dead code) AND proves client/kernel agree on bytes.
-        let signer = DeviceSigner::from_seed(&[11u8; SEED_LEN]);
-        let fields = DeviceOpFields {
-            workspace_id: "w_acme",
-            skill_id: "s_deploy",
-            op: DeviceOp::PublishDirect,
-            op_id: [0x01; 16],
-            device_key_id: signer.device_key_id(),
-            expected_epoch: 1,
-            expected_seq: 1,
-            commit_id: [0x22; 32],
-            bundle_digest: [0x33; 32],
-        };
-        let sig = signer.sign_device_op(&fields).unwrap();
-        assert!(verify_device_op(&fields, &sig, &signer.public_key()));
-    }
-
-    #[test]
-    fn sign_catalog_read_round_trips_through_the_kernel_verify() {
-        // The client signs the catalog-read frame; the kernel verifies the SAME bytes it framed — so
-        // the plane-store leg's `verify_catalog_read` will accept exactly what this signer produces.
-        let signer = DeviceSigner::from_seed(&[13u8; SEED_LEN]);
-        let sig = signer.sign_catalog_read("w_acme").unwrap();
-        let fields = CatalogReadFields {
-            workspace_id: "w_acme",
-            device_key_id: signer.device_key_id(),
-        };
-        assert!(verify_catalog_read(&fields, &sig, &signer.public_key()));
-        // A one-bit flip in the signature fails (the kernel is the integrity authority).
-        let mut tampered = sig;
-        tampered[0] ^= 0x01;
-        assert!(!verify_catalog_read(
-            &fields,
-            &tampered,
-            &signer.public_key()
-        ));
-        // A different workspace was not what was signed — verification fails.
-        let other_ws = CatalogReadFields {
-            workspace_id: "w_other",
-            ..fields
-        };
-        assert!(!verify_catalog_read(&other_ws, &sig, &signer.public_key()));
     }
 }

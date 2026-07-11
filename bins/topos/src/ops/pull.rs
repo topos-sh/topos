@@ -211,7 +211,6 @@ fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -> Ctx<'a> {
         layout: ctx.layout.clone(),
         harness: ctx.harness,
         plane,
-        plane_key: ctx.plane_key,
         follow: ctx.follow,
     }
 }

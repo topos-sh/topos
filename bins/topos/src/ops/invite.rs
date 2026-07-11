@@ -1,20 +1,12 @@
-//! `invite` — an OWNER mints an `/i/<token>` invite link by signing the governance Invite op + POSTing it.
+//! `invite` — an OWNER mints an `/i/<token>` invite link by POSTing the governance Invite op.
 //!
-//! Requires prior enrollment: the pinned plane (`base_url`), the workspace (`workspace_id`), and the device
-//! key all come from the sidecar `follow` wrote. The client SIGNS the governance frame the plane
-//! RE-DERIVES + verifies, so a single disagreement on the bytes ⇒ every invite DENIED. The load-bearing
-//! agreements live ONCE, in the kernel, and both halves call them:
-//!
-//! - **the role byte** — `topos_core::sign::GovernanceRole::signing_byte` (`Owner=1, Reviewer=2,
-//!   Member=3`; the plane's `Role::signing_byte` delegates to the same enum), and an OMITTED `--role`
-//!   is the enum's shared default **Member** (the plane's handler signs `role.unwrap_or(member)`);
-//! - **`expires_at`** — the shared no-expiry sentinel `topos_core::sign::INVITE_NO_EXPIRY` (the plane's
-//!   invite handler hardcodes `expires_at: None`, which its frame binds as the same sentinel — an
-//!   invite never expires in v0);
-//! - **emails + skill IDS as SETS** — the kernel `governance_op_preimage` sorts + dedups both in-frame, so
-//!   the order is irrelevant; the skill **ids** (never names) are what the frame binds.
+//! Requires prior enrollment: the plane (`base_url`), the workspace (`workspace_id`), and the device key
+//! all come from the sidecar `follow` wrote. The request names the acting `device_key_id`; the plane
+//! resolves the non-revoked registry row for it → its principal → the role matrix (a non-owner is DENIED).
+//! Nothing is signed — the trust level is git/GitHub-level. The role rides the wire body; emails are folded
+//! to the kernel's canonical (ASCII-lowercase) principal form so the roster rows carry one identity per
+//! human; the skill **ids** (never names) are what the invite pre-offers.
 
-use topos_core::sign::{GovernanceOpFields, GovernanceOpKind, GovernanceRole, INVITE_NO_EXPIRY};
 use topos_types::requests::{InviteRequest, InviteSkill, WorkspaceRole};
 use topos_types::results::InviteData;
 
@@ -28,20 +20,6 @@ use crate::plane::GovernanceSource;
 /// `instance.json`, so it can't be pre-built in the composition root (mirrors `follow`'s enroll connector).
 /// Production wires `UreqDeviceClient`; the tests wire a fake (no HTTP).
 pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
-
-/// Map the wire [`WorkspaceRole`] onto the kernel's [`GovernanceRole`] and take ITS signing byte — the
-/// one mapping the plane's `Role::signing_byte` also delegates to, so the byte can never fork between
-/// the halves. An omitted `--role` is the kernel enum's shared default (Member), matching the plane's
-/// invite handler (`role.unwrap_or(member)`).
-fn role_signing_byte(role: Option<WorkspaceRole>) -> u8 {
-    match role {
-        Some(WorkspaceRole::Owner) => GovernanceRole::Owner,
-        Some(WorkspaceRole::Reviewer) => GovernanceRole::Reviewer,
-        Some(WorkspaceRole::Member) => GovernanceRole::Member,
-        None => GovernanceRole::default(),
-    }
-    .signing_byte()
-}
 
 /// Validate every `--skills` token at the argv boundary with the client id rules (`crate::id` — the same
 /// lowercase path-safe charset every other id boundary enforces, and the rule the plane's own parse
@@ -81,15 +59,14 @@ pub(crate) fn invite(
     skills: Vec<String>,
     workspace: Option<&str>,
 ) -> Result<InviteData, ClientError> {
-    // The argv boundary: refuse a malformed skill id before signing or contacting anything.
+    // The argv boundary: refuse a malformed skill id before contacting anything.
     validate_skill_tokens(&skills)?;
-    // Fold the emails to the kernel's canonical (ASCII-lowercase) principal form ONCE, before they
-    // reach the signing frame OR the wire body — the plane folds at its parse boundary and rebuilds
-    // the preimage from the folded form, so signing unfolded bytes would fail verification there
-    // (and an older, case-preserving plane verifies the wire bytes, so frame and body must agree).
+    // Fold the emails to the kernel's canonical (ASCII-lowercase) principal form ONCE, before they reach
+    // the wire body — the plane folds at its parse boundary, so the roster rows carry one identity per human
+    // regardless of how the address was typed.
     let emails: Vec<String> = emails
         .iter()
-        .map(|e| topos_core::sign::canonical_principal(e))
+        .map(|e| topos_core::identity::canonical_principal(e))
         .collect();
     // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
@@ -110,41 +87,20 @@ pub(crate) fn invite(
         .workspace_id
         .clone();
 
-    // The device key (the client's only private-key edge) — its id is the one the plane re-derives + selects
-    // to verify the governance signature against the registered (owner) public key.
+    // The device key — its id is the one the plane resolves to the acting registry row (its principal + role
+    // authorize the invite).
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
 
-    // The client-minted idempotency key: the raw 16 bytes are bound into the signed frame; the canonical
-    // hyphenated UUID rides the wire (the plane's `parse_op_id` parses it back to the SAME 16 bytes, so a
-    // lost-ack retry replays the deterministic link + receipt).
-    let op_id_bytes = ctx.ids.new_op_id();
-    let op_id = uuid::Uuid::from_bytes(op_id_bytes)
+    // The client-minted idempotency key: the canonical hyphenated UUID rides the wire (the plane's
+    // `parse_op_id` parses it back to the SAME 16 bytes, so a lost-ack retry replays the deterministic
+    // link + receipt).
+    let op_id = uuid::Uuid::from_bytes(ctx.ids.new_op_id())
         .as_hyphenated()
         .to_string();
 
-    // Build + sign the governance Invite frame the plane re-derives. emails + skill IDS are bound as SETS
-    // (the kernel sorts + dedups in-frame), so we pass them in argv order; the skill **ids** (not names).
-    let email_refs: Vec<&str> = emails.iter().map(String::as_str).collect();
-    let skill_refs: Vec<&str> = skills.iter().map(String::as_str).collect();
-    let fields = GovernanceOpFields {
-        workspace_id: &workspace_id,
-        op_id: op_id_bytes,
-        device_key_id: signer.device_key_id(),
-        op: GovernanceOpKind::Invite {
-            role: role_signing_byte(role),
-            expires_at: INVITE_NO_EXPIRY,
-            emails: &email_refs,
-            skills: &skill_refs,
-        },
-    };
-    let signature = signer.sign_governance(&fields)?;
-    // The borrows into `emails` / `skills` (via the *_refs above) end here — they are free to move below.
-    drop(email_refs);
-    drop(skill_refs);
-
-    // POST the signed op. The role rides the body as the SAME `WorkspaceRole` whose byte we signed (omitted
-    // ⇒ the plane defaults it to member, matching our default byte). The link never carries a role — it is a
-    // property of the seeded roster row. `name: None` — only the skill id is bound into the signing frame.
+    // POST the op (naming the acting `device_key_id`). The role rides the body as a `WorkspaceRole` (omitted
+    // ⇒ the plane defaults it to member). The link never carries a role — it is a property of the seeded
+    // roster row. `name: None` — only the skill id pre-offers.
     let body = InviteRequest {
         workspace_id,
         op_id,
@@ -160,7 +116,7 @@ pub(crate) fn invite(
             .collect(),
     };
     let transport = connect(&instance.base_url);
-    transport.create_invite(body, signature)
+    transport.create_invite(body)
 }
 
 #[cfg(test)]
@@ -170,9 +126,6 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_core::sign::{
-        GovernanceOpFields, GovernanceOpKind, governance_op_preimage, verify_governance_op,
-    };
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
     use topos_types::requests::{InviteRequest, WorkspaceRole};
@@ -255,10 +208,10 @@ mod tests {
         }
     }
 
-    // ---- the fake governance transport: captures the request + signature, returns a canned outcome ----
+    // ---- the fake governance transport: captures the request, returns a canned outcome ----
 
-    /// One captured POST: the wire body + the 64-byte governance signature that rode the header.
-    type CapturedInvite = (InviteRequest, [u8; 64]);
+    /// One captured POST: the wire body (the request names the acting `device_key_id`; nothing is signed).
+    type CapturedInvite = InviteRequest;
     type Captured = Rc<RefCell<Option<CapturedInvite>>>;
     /// A `run_invite` outcome: the op result + whatever reached the transport (`None` if it never did).
     type InviteRun = (Result<InviteData, ClientError>, Option<CapturedInvite>);
@@ -276,12 +229,8 @@ mod tests {
         resp: Resp,
     }
     impl GovernanceSource for FakeGov {
-        fn create_invite(
-            &self,
-            body: InviteRequest,
-            governance_sig: [u8; 64],
-        ) -> Result<InviteData, ClientError> {
-            *self.captured.borrow_mut() = Some((body, governance_sig));
+        fn create_invite(&self, body: InviteRequest) -> Result<InviteData, ClientError> {
+            *self.captured.borrow_mut() = Some(body);
             match &self.resp {
                 Resp::Ok(data) => Ok(data.clone()),
                 Resp::Denied(code) => Err(ClientError::Plane(format!("invite refused ({code})"))),
@@ -319,8 +268,6 @@ mod tests {
                 &enroll::Instance {
                     schema_version: 1,
                     base_url: BASE_URL.to_owned(),
-                    plane_key: "a".repeat(64),
-                    plane_key_id: "pk_acme".to_owned(),
                     deployment_mode: DeploymentMode::Cloud,
                     enrollment_method: "device_code".to_owned(),
                 },
@@ -355,19 +302,12 @@ mod tests {
                 layout: self.layout(),
                 harness: &self.harness,
                 plane,
-                plane_key: [0u8; 32],
                 follow,
             }
         }
-        /// The device public key the op's signer would mint (load-or-generate is idempotent — same key).
-        fn signer_pubkey(&self) -> [u8; 32] {
-            DeviceSigner::load_or_generate(&self.fs, &self.layout())
-                .unwrap()
-                .public_key()
-        }
     }
 
-    /// Run the `invite` op over the fake transport, returning the op result + the captured (body, sig).
+    /// Run the `invite` op over the fake transport, returning the op result + the captured wire body.
     fn run_invite(
         rig: &Rig,
         resp: Resp,
@@ -397,59 +337,6 @@ mod tests {
         (out, cap)
     }
 
-    /// The cross-component proof: the captured signature VERIFIES over the SAME `GovernanceOpFields` the
-    /// plane rebuilds — its `op_id` parsed back from the canonical wire string, the chosen role byte, the
-    /// `expires_at = 0`, and the email + skill-id sets. (Run for an explicit role AND the omitted default.)
-    fn assert_frame_agreement(rig: &Rig, role: Option<WorkspaceRole>, expected_byte: u8) {
-        rig.seed_enrolled();
-        let (out, cap) = run_invite(
-            rig,
-            Resp::Ok(InviteData {
-                invite_link: format!("{BASE_URL}/i/tok_abc"),
-                roster_added: vec!["alice@acme.com".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
-            }),
-            // DELIBERATELY unsorted + duplicated — the kernel canonicalizes both sets in-frame.
-            &["bob@acme.com", "alice@acme.com", "bob@acme.com"],
-            role,
-            &["s_review", "s_deploy"],
-        );
-        out.expect("the op POSTs the signed invite");
-        let (body, sig) = cap.expect("the op reached the transport");
-
-        // The wire `op_id` must be the canonical hyphenated form (the plane's `parse_op_id` requires it),
-        // and it parses back to the 16 bytes the frame binds.
-        let uuid = uuid::Uuid::parse_str(&body.op_id).expect("op_id is a UUID");
-        assert_eq!(
-            uuid.as_hyphenated().to_string(),
-            body.op_id,
-            "op_id must be the canonical hyphenated UUID the plane re-parses"
-        );
-        let op_id_bytes = uuid.into_bytes();
-
-        // Rebuild the frame from the WIRE body exactly as the plane's `govern_preamble` does (skill IDS).
-        let email_refs: Vec<&str> = body.emails.iter().map(String::as_str).collect();
-        let skill_refs: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
-        let fields = GovernanceOpFields {
-            workspace_id: &body.workspace_id,
-            op_id: op_id_bytes,
-            device_key_id: &body.device_key_id,
-            op: GovernanceOpKind::Invite {
-                role: expected_byte,
-                expires_at: 0,
-                emails: &email_refs,
-                skills: &skill_refs,
-            },
-        };
-        assert!(
-            verify_governance_op(&fields, &sig, &rig.signer_pubkey()),
-            "the client signature must verify over the frame the plane rebuilds (role byte {expected_byte})"
-        );
-        // The scope + device id on the wire match the enrolled state + the signing key.
-        assert_eq!(body.workspace_id, WS);
-        assert_eq!(body.device_key_id, rig_device_key_id(rig));
-    }
-
     fn rig_device_key_id(rig: &Rig) -> String {
         DeviceSigner::load_or_generate(&rig.fs, &rig.layout())
             .unwrap()
@@ -460,17 +347,34 @@ mod tests {
     // ---- tests ----
 
     #[test]
-    fn signs_a_frame_the_plane_verifies_for_an_explicit_role() {
-        let rig = Rig::new("explicit-role");
-        // Reviewer = byte 2 (the plane's Role::signing_byte).
-        assert_frame_agreement(&rig, Some(WorkspaceRole::Reviewer), 2);
-    }
-
-    #[test]
-    fn an_omitted_role_signs_the_member_byte() {
-        let rig = Rig::new("default-role");
-        // Omitted --role ⇒ the plane defaults to member (byte 3); the client must sign the same byte.
-        assert_frame_agreement(&rig, None, 3);
+    fn posts_the_expected_wire_body_naming_the_acting_device_key() {
+        // The op POSTs a body naming the enrolled workspace, the acting `device_key_id` (the plane resolves
+        // its registry row → principal → role matrix), the chosen role, the canonical hyphenated op_id, and
+        // the skill ids. Nothing is signed.
+        let rig = Rig::new("wire-body");
+        rig.seed_enrolled();
+        let (out, cap) = run_invite(
+            &rig,
+            Resp::Ok(InviteData {
+                invite_link: format!("{BASE_URL}/i/tok_abc"),
+                roster_added: vec!["alice@acme.com".to_owned()],
+                skills: vec!["s_deploy".to_owned()],
+            }),
+            &["alice@acme.com"],
+            Some(WorkspaceRole::Reviewer),
+            &["s_review", "s_deploy"],
+        );
+        out.expect("the op POSTs the invite");
+        let body = cap.expect("the op reached the transport");
+        // The op_id is the canonical hyphenated form (the plane's `parse_op_id` requires it).
+        let uuid = uuid::Uuid::parse_str(&body.op_id).expect("op_id is a UUID");
+        assert_eq!(uuid.as_hyphenated().to_string(), body.op_id);
+        // Scope + acting device + role ride the body.
+        assert_eq!(body.workspace_id, WS);
+        assert_eq!(body.device_key_id, rig_device_key_id(&rig));
+        assert_eq!(body.role, Some(WorkspaceRole::Reviewer));
+        let skill_ids: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
+        assert_eq!(skill_ids, vec!["s_review", "s_deploy"]);
     }
 
     #[test]
@@ -505,7 +409,7 @@ mod tests {
             Some(WorkspaceRole::Owner),
             &[],
         );
-        // The op still SIGNED + POSTed (the deny is the plane's authority verdict, surfaced as a typed error).
+        // The op still POSTed (the deny is the plane's authority verdict, surfaced as a typed error).
         assert!(cap.is_some(), "the op reached the transport");
         let err = out.unwrap_err();
         match err {
@@ -587,33 +491,11 @@ mod tests {
         }
     }
 
-    /// Rebuild the plane-side Invite frame from a captured wire body, substituting the given email set —
-    /// the way the FOLDING plane rebuilds its verify preimage (role byte 3 = the omitted-`--role` Member
-    /// default; `expires_at = 0` = the shared no-expiry sentinel).
-    fn rebuild_fields<'a>(
-        body: &'a InviteRequest,
-        op_id: [u8; 16],
-        emails: &'a [&'a str],
-        skills: &'a [&'a str],
-    ) -> GovernanceOpFields<'a> {
-        GovernanceOpFields {
-            workspace_id: &body.workspace_id,
-            op_id,
-            device_key_id: &body.device_key_id,
-            op: GovernanceOpKind::Invite {
-                role: 3,
-                expires_at: 0,
-                emails,
-                skills,
-            },
-        }
-    }
-
     #[test]
-    fn mixed_case_argv_emails_fold_into_the_frame_and_the_wire() {
-        // The op folds argv emails to the kernel canonical (ASCII-lowercase) form ONCE, before signing
-        // AND the wire body — and the kernel ALSO folds email-valued inputs in-frame, so the plane,
-        // whichever form it rebuilds the preimage from, verifies the same bytes the client signed.
+    fn mixed_case_argv_emails_fold_into_the_wire_body() {
+        // The op folds argv emails to the kernel canonical (ASCII-lowercase) form ONCE, before the wire
+        // body — so the roster rows carry one identity per human regardless of how the address was typed.
+        // (The plane re-folds at its parse boundary, so the client fold is a courtesy, not a trust step.)
         let rig = Rig::new("fold-mixed-case");
         rig.seed_enrolled();
         let (out, cap) = run_invite(
@@ -627,50 +509,21 @@ mod tests {
             None,
             &["s_deploy"],
         );
-        out.expect("the op POSTs the signed invite");
-        let (body, sig) = cap.expect("the op reached the transport");
-
-        // (a) The wire body carries the FOLDED forms, argv order preserved.
+        out.expect("the op POSTs the invite");
+        let body = cap.expect("the op reached the transport");
+        // The wire body carries the FOLDED forms, argv order preserved (no client-side dedup — the plane's
+        // set-build dedups server-side).
         assert_eq!(
             body.emails,
             vec!["alice@acme.com".to_owned(), "bob@x.io".to_owned()],
             "the wire body's emails are the folded forms, order preserved"
         );
-
-        let op_id = uuid::Uuid::parse_str(&body.op_id)
-            .expect("op_id is a UUID")
-            .into_bytes();
-        let skill_refs: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
-
-        // (b) The signature verifies over the frame the plane rebuilds — from the folded emails…
-        let folded = rebuild_fields(&body, op_id, &["alice@acme.com", "bob@x.io"], &skill_refs);
-        assert!(
-            verify_governance_op(&folded, &sig, &rig.signer_pubkey()),
-            "the signature must verify over the frame rebuilt from the FOLDED emails"
-        );
-        // …and over a frame rebuilt from the raw mixed-case argv input too — the kernel folds
-        // email-valued inputs IN-FRAME (before the set-build), so the raw and folded rebuilds are
-        // the SAME preimage bytes: signer/verifier casing skew is structurally impossible, not a
-        // per-call-site convention.
-        let raw = rebuild_fields(&body, op_id, &["Alice@Acme.COM", "bob@x.io"], &skill_refs);
-        assert_eq!(
-            governance_op_preimage(&raw).expect("raw preimage"),
-            governance_op_preimage(&folded).expect("folded preimage"),
-            "the in-frame fold makes the raw-cased and folded rebuilds byte-identical"
-        );
-        assert!(
-            verify_governance_op(&raw, &sig, &rig.signer_pubkey()),
-            "the signature must verify over the raw-cased rebuild — preimage(raw) == preimage(folded)"
-        );
     }
 
     #[test]
-    fn case_variant_argv_duplicates_converge_to_one_set_entry() {
-        // Two case-variants of one address fold to the SAME canonical form; the kernel preimage binds
-        // emails as a sorted+deduped SET, so post-fold they are ONE entry — the signed frame is
-        // byte-identical to one built from the single folded email. The wire body, by contrast, is NOT
-        // deduped client-side: it carries both folded entries verbatim (the plane's parse+set-build
-        // dedups server-side).
+    fn case_variant_argv_emails_both_fold_to_one_canonical_form() {
+        // Two case-variants of one address fold to the SAME canonical form; the wire body carries both
+        // folded entries verbatim (the plane's parse+set-build dedups them server-side).
         let rig = Rig::new("fold-dup-variants");
         rig.seed_enrolled();
         let (out, cap) = run_invite(
@@ -684,43 +537,12 @@ mod tests {
             None,
             &["s_deploy"],
         );
-        out.expect("the op POSTs the signed invite");
-        let (body, sig) = cap.expect("the op reached the transport");
-
-        // The wire body: both folded entries, verbatim, no client-side dedup.
+        out.expect("the op POSTs the invite");
+        let body = cap.expect("the op reached the transport");
         assert_eq!(
             body.emails,
             vec!["alice@x.io".to_owned(), "alice@x.io".to_owned()],
-            "the wire body carries both folded entries verbatim (dedup is the plane's set-build)"
+            "both case-variants fold to the SAME canonical form on the wire"
         );
-
-        let op_id = uuid::Uuid::parse_str(&body.op_id)
-            .expect("op_id is a UUID")
-            .into_bytes();
-        let skill_refs: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
-
-        // The signed frame == one built from the single folded email: same preimage BYTES…
-        let duplicated = rebuild_fields(&body, op_id, &["alice@x.io", "alice@x.io"], &skill_refs);
-        let single = rebuild_fields(&body, op_id, &["alice@x.io"], &skill_refs);
-        assert_eq!(
-            governance_op_preimage(&duplicated).expect("preimage"),
-            governance_op_preimage(&single).expect("preimage"),
-            "the kernel set-dedup makes the two case-variants ONE entry post-fold"
-        );
-        // …and the captured signature verifies over the single-email frame.
-        assert!(
-            verify_governance_op(&single, &sig, &rig.signer_pubkey()),
-            "the signature must verify over the frame built from the ONE deduped email"
-        );
-    }
-
-    #[test]
-    fn role_byte_mapping_matches_the_plane() {
-        // Pins the SHARED kernel mapping (`GovernanceRole::signing_byte`: Owner=1, Reviewer=2, Member=3)
-        // plus the omitted-default (Member=3) — the same impl the plane's Role::signing_byte delegates to.
-        assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Owner)), 1);
-        assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Reviewer)), 2);
-        assert_eq!(super::role_signing_byte(Some(WorkspaceRole::Member)), 3);
-        assert_eq!(super::role_signing_byte(None), 3);
     }
 }

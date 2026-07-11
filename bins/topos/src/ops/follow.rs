@@ -1,7 +1,7 @@
 //! `follow` — the device-flow enrollment + first-receive client.
 //!
 //! One verb, dispatched by the single positional (the harness drives it non-interactively):
-//! - **`follow <link>`** (call 1) — read the `/i/` TOFU bootstrap, pin the plane key, start a device
+//! - **`follow <link>`** (call 1) — read the `/i/` bootstrap, guard one-plane-per-install, start a device
 //!   authorization, write a `0600` WAL, and return `ENROLLMENT_PENDING` + the verification URL.
 //! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow` (with
 //!   any target, or none) RESUMES it — the "re-invoking IS the resume" idiom the standup publish uses:
@@ -25,7 +25,6 @@
 use std::collections::HashMap;
 
 use topos_core::digest::{self, ManifestEntry, to_hex};
-use topos_core::sign::EnrollFields;
 use topos_gitstore::Store;
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
@@ -95,8 +94,8 @@ pub(crate) struct FollowOutcome {
 ///
 /// # Errors
 /// [`ClientError::Enrollment`] for a missing target / denied / expired session; [`ClientError::InvalidArgument`]
-/// for an `@`-pinned unknown skill; [`ClientError::KeyRepinRequired`] / [`ClientError::PlacementUnsupported`]
-/// for a TOFU mismatch; otherwise a transport / io / store failure.
+/// for an `@`-pinned unknown skill; [`ClientError::PlacementUnsupported`] for a follow against a different
+/// plane than the one enrolled; otherwise a transport / io / store failure.
 pub(crate) fn follow(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
@@ -172,7 +171,7 @@ fn plain(data: FollowData) -> FollowOutcome {
 }
 
 // =================================================================================================
-// Call 1 — `follow <link>`: bootstrap → TOFU → device-authorize → WAL → ENROLLMENT_PENDING.
+// Call 1 — `follow <link>`: bootstrap → one-plane guard → device-authorize → WAL → ENROLLMENT_PENDING.
 // =================================================================================================
 
 fn begin(
@@ -193,26 +192,20 @@ fn begin(
     // team's share links ride its web origin); the bootstrap declares the plane every later call — the
     // device flow, the redeem, every pull — must dial. The declared base passes the same gate as the
     // link base and may never downgrade the transport. This adds no attacker capability: whoever mints
-    // the link already controls both the bootstrap and the key it pins (the link IS the TOFU channel).
+    // the link already controls the bootstrap (the link IS the channel the human chose to trust).
     let base_url = resolve_api_base(&link_base, &bootstrap.plane.base_url)?;
-    // I-TOFU: pin the plane key over the unauthenticated `/i/` channel (or refuse a cross-plane / re-pin).
-    // Keyed on the RE-ROOTED API base — the base every later verify dials and `instance.json` records —
-    // so a second link from the same plane (whatever host the link string rides) matches the pin.
-    let pinned_plane_key = tofu_decide_key(ctx, &base_url, &bootstrap.plane.signing_key)?;
+    // v0 is one plane per install: refuse a follow that would enroll against a DIFFERENT plane than the one
+    // already on disk (keyed on the RE-ROOTED API base — the base every later call dials and `instance.json`
+    // records). There is no trust root to pin — the `current` pointer is unsigned, its integrity the
+    // content-addressed version id.
+    guard_one_plane(ctx, &base_url)?;
 
     // Branch on the enrollment method the bootstrap disclosed. A method this build does not understand
     // fails CLOSED — proceeding would enroll under a posture the human was never able to review.
     match bootstrap.plane.enrollment_method.as_str() {
         // The one-shot admin-claim door (self-host bearer): no device-auth session, enrolls in one call.
         "admin_claim" => {
-            return claim_follow(
-                ctx,
-                connectors,
-                &base_url,
-                &token,
-                &bootstrap,
-                &pinned_plane_key,
-            );
+            return claim_follow(ctx, connectors, &base_url, &token, &bootstrap);
         }
         // The device-authorization flow (with or without the passcode identity leg on the verify page).
         "device_code" | "passcode" => {}
@@ -232,8 +225,6 @@ fn begin(
 
     let context = enroll::EnrollContext {
         base_url,
-        pinned_plane_key,
-        plane_key_id: bootstrap.plane.signing_key.key_id.clone(),
         deployment_mode: bootstrap.plane.deployment_mode,
         enrollment_method: bootstrap.plane.enrollment_method.clone(),
         workspace_id: bootstrap.workspace.workspace_id.clone(),
@@ -287,43 +278,22 @@ fn begin(
     ))
 }
 
-/// The TOFU decision (I-TOFU), shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
-/// `base_url` is the plane's API base — for a link follow that is the RE-ROOTED base the bootstrap
-/// declared (never the share host the link string rode), so the pin matches what every later verify dials.
-/// Decode the plane signing key (`alg` is the CLOSED `SignatureAlg` enum — a non-Ed25519 alg already
-/// failed the deserialize; the value is raw-32B base64url → 64-hex). Then: ABSENT `instance.json` ⇒
-/// first-ever pin; PRESENT with a different `base_url` ⇒ refuse a cross-plane follow (v0 is one plane per
-/// install); PRESENT, same `base_url`, different key ⇒ `KEY_REPIN_REQUIRED`; same key ⇒ OK. Returns the
-/// pinned key as 64-char lowercase hex.
-pub(super) fn tofu_decide_key(
-    ctx: &Ctx<'_>,
-    base_url: &str,
-    signing_key: &topos_types::bootstrap::BootstrapSigningKey,
-) -> Result<String, ClientError> {
-    use base64::Engine as _;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(signing_key.value.as_bytes())
-        .map_err(|_| ClientError::Corrupt("plane signing key is not base64url".into()))?;
-    let raw: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| ClientError::Corrupt("plane signing key is not 32 bytes".into()))?;
-    let key_hex = to_hex(&raw);
-
-    match enroll::read_instance(ctx.fs, &ctx.layout)? {
-        None => Ok(key_hex),
-        Some(instance) => {
-            if instance.base_url != base_url {
-                return Err(ClientError::PlacementUnsupported {
-                    reason: "v0 is one plane per install; this client is enrolled with a different plane"
-                        .into(),
-                });
-            }
-            if instance.plane_key != key_hex {
-                return Err(ClientError::KeyRepinRequired);
-            }
-            Ok(key_hex)
-        }
+/// The one-plane-per-install guard, shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
+/// `base_url` is the plane's API base — for a link follow that is the RE-ROOTED base the bootstrap declared
+/// (never the share host the link string rode), so it matches what every later call dials. If an
+/// `instance.json` already names a DIFFERENT plane, refuse (v0 is one plane per install); otherwise OK.
+/// There is no trust root to pin — the `current` pointer is unsigned, its integrity the content-addressed
+/// version id re-verified by digest on apply.
+pub(super) fn guard_one_plane(ctx: &Ctx<'_>, base_url: &str) -> Result<(), ClientError> {
+    if let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
+        && instance.base_url != base_url
+    {
+        return Err(ClientError::PlacementUnsupported {
+            reason: "v0 is one plane per install; this client is enrolled with a different plane"
+                .into(),
+        });
     }
+    Ok(())
 }
 
 // =================================================================================================
@@ -419,15 +389,9 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                 }
                 TokenPoll::Granted(granted) => {
                     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-                    // Sign the enroll possession proof over the SERVER-trusted framed fields (the server
-                    // re-derives each from the grant, so they must match) + redeem.
-                    let redeem = redeem_grant(
-                        &*enroll_src,
-                        &context,
-                        &user_code,
-                        granted.grant.as_str(),
-                        &signer,
-                    )?;
+                    // Redeem the grant (the bearer credential) into per-skill read creds; nothing is signed.
+                    let redeem =
+                        redeem_grant(&*enroll_src, &context, granted.grant.as_str(), &signer)?;
                     let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
                         .read_creds
                         .iter()
@@ -485,15 +449,12 @@ fn claim_follow(
     base_url: &str,
     token: &str,
     bootstrap: &topos_types::BootstrapData,
-    pinned_plane_key: &str,
 ) -> Result<FollowData, ClientError> {
     // The pre-send WAL (0600 — the claim token is a bearer secret), BEFORE the first POST.
     let wal = enroll::PendingEnrollment {
         schema_version: PERSISTED_SCHEMA_VERSION,
         state: enroll::EnrollPhase::ClaimPending {
             base_url: base_url.to_owned(),
-            pinned_plane_key: pinned_plane_key.to_owned(),
-            plane_key_id: bootstrap.plane.signing_key.key_id.clone(),
             deployment_mode: bootstrap.plane.deployment_mode,
             enrollment_method: bootstrap.plane.enrollment_method.clone(),
             workspace_id: bootstrap.workspace.workspace_id.clone(),
@@ -515,8 +476,6 @@ fn retry_claim(
 ) -> Result<FollowData, ClientError> {
     let enroll::EnrollPhase::ClaimPending {
         base_url,
-        pinned_plane_key,
-        plane_key_id,
         deployment_mode,
         enrollment_method,
         workspace_id,
@@ -557,8 +516,6 @@ fn retry_claim(
     }
     let context = enroll::EnrollContext {
         base_url: base_url.clone(),
-        pinned_plane_key: pinned_plane_key.clone(),
-        plane_key_id: plane_key_id.clone(),
         deployment_mode: *deployment_mode,
         enrollment_method: enrollment_method.clone(),
         workspace_id: workspace_id.clone(),
@@ -607,32 +564,16 @@ fn retry_claim(
     )
 }
 
-/// Build the enroll possession proof + redeem the grant into a registered device + per-skill read creds.
+/// Redeem the grant into a registered device + per-skill read creds. The grant is the bearer credential and
+/// the body's `device_public_key` registers this device (the server checks it matches the grant's bound
+/// pubkey) — nothing is signed.
 fn redeem_grant(
     enroll_src: &dyn EnrollSource,
     context: &enroll::EnrollContext,
-    user_code: &str,
     grant: &str,
     signer: &DeviceSigner,
 ) -> Result<crate::plane::Redeem, ClientError> {
-    let grant_hash = digest::sha256(grant.as_bytes());
-    // The offered skill ids are bound as a SET; the kernel sorts + dedups them, matching the server.
-    let offered_ids: Vec<&str> = context
-        .offered_skills
-        .iter()
-        .map(|s| s.skill_id.as_str())
-        .collect();
-    let fields = EnrollFields {
-        workspace_id: &context.workspace_id,
-        grant_hash,
-        // `device_auth_id` is the session's `user_code` — what the authority binds.
-        device_auth_id: user_code,
-        device_key_id: signer.device_key_id(),
-        device_public_key: signer.public_key(),
-        offered_skill_ids: &offered_ids,
-    };
-    let sig = signer.sign_enroll(&fields)?;
-    let redeem = enroll_src.redeem(&context.workspace_id, grant, signer.public_key(), sig)?;
+    let redeem = enroll_src.redeem(&context.workspace_id, grant, signer.public_key())?;
     // The redeem echoes the grant's authoritative workspace — it must match the one we enrolled against.
     if redeem.workspace_id != context.workspace_id {
         return Err(ClientError::Enrollment(
@@ -729,16 +670,14 @@ pub(super) fn promote_core(
     // meaningful new internal surface to close a sub-second window whose worst case is already a clean,
     // self-healing error, so this stays a documented residual rather than a lock-widening refactor.
 
-    // 1) instance.json — PUBLIC (the plane key is a public key) → ordinary perms. PLANE-scoped only now;
-    // the per-workspace disclosure moved to the user.json membership written in step 3.
+    // 1) instance.json — PUBLIC (no secret) → ordinary perms. PLANE-scoped only now; the per-workspace
+    // disclosure moved to the user.json membership written in step 3.
     enroll::write_instance(
         ctx.fs,
         &ctx.layout,
         &enroll::Instance {
             schema_version: PERSISTED_SCHEMA_VERSION,
             base_url: context.base_url.clone(),
-            plane_key: context.pinned_plane_key.clone(),
-            plane_key_id: context.plane_key_id.clone(),
             deployment_mode: context.deployment_mode,
             enrollment_method: context.enrollment_method.clone(),
         },
@@ -875,8 +814,8 @@ fn lay_first_receive_baseline(
         &SyncState {
             schema_version: PERSISTED_SCHEMA_VERSION,
             observed: GENESIS,
+            observed_version_id: ZERO_HEX.to_owned(),
             applied: GENESIS,
-            recorded: Vec::new(),
             base_commit: ZERO_HEX.to_owned(),
             work_hash: ZERO_HEX.to_owned(),
             held: false,
@@ -927,9 +866,9 @@ fn lay_first_receive_baseline(
     Ok(())
 }
 
-/// Disclose the batched first-receive offers via a READ-ONLY, authenticated metadata fetch (get the signed
-/// `current`, verify it against the pinned key, fetch the version bytes, recompute the `bundle_digest`). It
-/// writes NOTHING to the sidecar, so the skill stays never-received (an OFFER on the next pull). Best-effort.
+/// Disclose the batched first-receive offers via a READ-ONLY metadata fetch (get the served `current`,
+/// scope-check it, fetch the version bytes, recompute the `bundle_digest`). It writes NOTHING to the
+/// sidecar, so the skill stays never-received (an OFFER on the next pull). Best-effort.
 fn disclose_offers(
     connectors: &FollowConnectors<'_>,
     context: &enroll::EnrollContext,
@@ -938,9 +877,6 @@ fn disclose_offers(
     if read_creds.is_empty() {
         return Vec::new();
     }
-    let Ok(plane_key) = super::parse_hex32(&context.pinned_plane_key) else {
-        return Vec::new();
-    };
     let creds: HashMap<String, SkillCred> = read_creds
         .iter()
         .map(|c| {
@@ -954,9 +890,7 @@ fn disclose_offers(
 
     let mut offers = Vec::new();
     for cred in read_creds {
-        if let Some(offer) =
-            disclose_one(&*plane, &plane_key, &cred.skill_id, &context.workspace_id)
-        {
+        if let Some(offer) = disclose_one(&*plane, &cred.skill_id, &context.workspace_id) {
             offers.push(FollowOffer {
                 skill_id: cred.skill_id.clone(),
                 name: display_name(context, &cred.skill_id),
@@ -967,19 +901,13 @@ fn disclose_offers(
     offers
 }
 
-/// One skill's offer: authenticate its `current` pointer, fetch the version, recompute the digest. `None`
-/// on any read/verify failure (the offer is then simply not disclosed — the subsequent `pull` discloses it).
-fn disclose_one(
-    plane: &dyn PlaneSource,
-    plane_key: &[u8; 32],
-    skill_id: &str,
-    workspace_id: &str,
-) -> Option<Offer> {
+/// One skill's offer: scope-check its `current` pointer, fetch the version, recompute the digest. `None`
+/// on any read/scope failure (the offer is then simply not disclosed — the subsequent `pull` discloses it).
+fn disclose_one(plane: &dyn PlaneSource, skill_id: &str, workspace_id: &str) -> Option<Offer> {
     let PointerFetch::Record(rec) = plane.get_current(skill_id, None).ok()? else {
         return None;
     };
-    let version_id =
-        sync_engine::authenticated_version_id(&rec, skill_id, workspace_id, plane_key)?;
+    let version_id = sync_engine::scoped_version_id(&rec, skill_id, workspace_id)?;
     let fetched = plane.fetch_version(skill_id, version_id).ok()?;
     let entries: Vec<ManifestEntry> = fetched
         .files

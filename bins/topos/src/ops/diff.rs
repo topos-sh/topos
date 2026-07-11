@@ -151,12 +151,12 @@ fn resolve_endpoint(
              unique prefix of at least 8 chars",
         )?;
         resolve_version_ref(
-            &super::recorded_history(ctx, &ctx.layout.published(id))?,
+            &super::local_version_ids(ctx, &ctx.layout.published(id))?,
             &vref,
         )?
         .ok_or_else(|| {
             ClientError::InvalidArgument(format!(
-                "'{}' matches no locally recorded version of this skill; use the full 64-char \
+                "'{}' matches no locally held version of this skill; use the full 64-char \
                      id (an open proposal's id is only known in full — `list <skill>` prints it)",
                 vref.shown()
             ))

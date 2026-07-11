@@ -252,7 +252,6 @@ impl PullHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &inert_plane,
-            plane_key: [0u8; 32],
             follow: &inert_follow,
         };
         let added = ops::add(&ctx, &dir)
@@ -283,15 +282,15 @@ impl PullHarness {
         });
     }
 
-    /// Run the REAL pull engine over a REAL `UreqPlane` at `base_url`, with `plane_key` pinned as the
-    /// signed-pointer trust root. Builds the transport credential map + the follow seam from the enrolled
-    /// skills and a fresh `Ctx`, then dispatches `scope`.
+    /// Run the REAL pull engine over a REAL `UreqPlane` at `base_url`. Builds the transport credential map +
+    /// the follow seam from the enrolled skills and a fresh `Ctx`, then dispatches `scope`. (`pin_key` is a
+    /// vestigial parameter — the `current` pointer is unsigned, so nothing is verified against a key.)
     ///
     /// # Panics
     /// If the pull errors (the bare sweep isolates per-skill failures, so this is a hard wiring fault) or a
     /// `GoBack` hex id is malformed.
     #[must_use]
-    pub fn run_pull(&self, base_url: &str, plane_key: [u8; 32], scope: Scope) -> PullData {
+    pub fn run_pull(&self, base_url: &str, pin_key: [u8; 32], scope: Scope) -> PullData {
         let creds: HashMap<String, SkillCred> = self
             .follows
             .iter()
@@ -328,7 +327,6 @@ impl PullHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &plane,
-            plane_key,
             follow: &follow,
         };
 
@@ -429,7 +427,7 @@ impl HarnessAdapter for WorkHarness {
 /// The real-`follow` rig: a fresh temp `~/.topos/` (NO pre-adopted skill — `follow` enrolls from scratch) + a
 /// temp work root where the first-received skill is placed. Drives the GENUINE `ops::follow` over the GENUINE
 /// `ureq` enroll/read transports, so an EXTERNAL e2e crate can prove the whole loop (bootstrap → enroll →
-/// redeem → TOFU-pin → first-receive placement) without reaching the client's `pub(crate)` internals.
+/// redeem → first-receive placement) without reaching the client's `pub(crate)` internals.
 ///
 /// Three adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
 /// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
@@ -540,7 +538,6 @@ impl FollowHarness {
         &self,
         plane: &dyn PlaneSource,
         follow: &dyn FollowSource,
-        plane_key: [u8; 32],
         link: Option<String>,
         opts: ops::FollowOpts,
     ) -> Result<topos_types::results::FollowData, crate::error::ClientError> {
@@ -567,23 +564,22 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane,
-                plane_key,
                 follow,
             };
             ops::follow(&ctx, &connectors, link, opts).map(|o| o.data)
         })
     }
 
-    /// Call 1: `topos follow <link>` — fetch the bootstrap, TOFU-pin, device-authorize, write the pending WAL.
+    /// Call 1: `topos follow <link>` — fetch the bootstrap, guard one-plane, device-authorize, write the pending WAL.
     ///
     /// # Errors
-    /// The follow op's typed error rendered to a string (a TOFU mismatch / denied / transport failure).
+    /// The follow op's typed error rendered to a string (a different-plane refusal / denied / transport failure).
     pub fn follow(
         &self,
         link: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
     ) -> Result<topos_types::results::FollowData, String> {
-        self.follow_with(link, plane_key, false)
+        self.follow_with(link, pin_key, false)
     }
 
     /// Call 1 with an explicit adopt mode: `manual = true` is `follow <link> --manual` (confirm-each).
@@ -593,7 +589,7 @@ impl FollowHarness {
     pub fn follow_with(
         &self,
         link: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         manual: bool,
     ) -> Result<topos_types::results::FollowData, String> {
         let inert_plane = InertPlane;
@@ -602,28 +598,22 @@ impl FollowHarness {
             manual,
             workspace: None,
         };
-        self.run_follow(
-            &inert_plane,
-            &inert_follow,
-            plane_key,
-            Some(link.to_owned()),
-            opts,
-        )
-        .map_err(|e| e.to_string())
+        self.run_follow(&inert_plane, &inert_follow, Some(link.to_owned()), opts)
+            .map_err(|e| e.to_string())
     }
 
     /// Call 2: re-invoke `topos follow` — poll, redeem (sign the enroll possession proof over the wire), promote.
     ///
     /// # Errors
     /// The follow op's typed error (pending/denied/expired/transport).
-    pub fn resume(&self, plane_key: [u8; 32]) -> Result<topos_types::results::FollowData, String> {
+    pub fn resume(&self, pin_key: [u8; 32]) -> Result<topos_types::results::FollowData, String> {
         let inert_plane = InertPlane;
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
             manual: false,
             workspace: None,
         };
-        self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts)
+        self.run_follow(&inert_plane, &inert_follow, None, opts)
             .map_err(|e| e.to_string())
     }
 
@@ -634,14 +624,14 @@ impl FollowHarness {
     /// # Panics
     /// If the resume unexpectedly succeeds.
     #[must_use]
-    pub fn resume_expect_denied(&self, plane_key: [u8; 32]) -> DeniedSurface {
+    pub fn resume_expect_denied(&self, pin_key: [u8; 32]) -> DeniedSurface {
         let inert_plane = InertPlane;
         let inert_follow = InertFollow;
         let opts = ops::FollowOpts {
             manual: false,
             workspace: None,
         };
-        match self.run_follow(&inert_plane, &inert_follow, plane_key, None, opts) {
+        match self.run_follow(&inert_plane, &inert_follow, None, opts) {
             Ok(_) => panic!("test_support: expected the resume to be denied"),
             Err(e) => {
                 let envelope = crate::render::err_envelope("follow", &e);
@@ -671,7 +661,7 @@ impl FollowHarness {
     pub fn approve(
         &self,
         base_url: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         targets: &[String],
     ) -> Result<topos_types::results::FollowData, String> {
         // Wire ctx.plane from the minted follow-state (the skill path places through ctx.plane).
@@ -687,17 +677,18 @@ impl FollowHarness {
             workspace: None,
         };
         let target = targets.first().cloned();
-        self.run_follow(&plane, &follow, plane_key, target, opts)
+        self.run_follow(&plane, &follow, target, opts)
             .map_err(|e| e.to_string())
     }
 
-    /// The plane public key pinned in `instance.json` (or `None` if not yet enrolled), as raw 32 bytes.
+    /// Whether `instance.json` exists (enrollment writes it). No trust root is stored — the `current`
+    /// pointer is unsigned.
     #[must_use]
-    pub fn instance_pinned_key(&self) -> Option<[u8; 32]> {
-        let instance = crate::enroll::read_instance(&self.fs, &self.layout()).ok()??;
-        let mut out = [0u8; 32];
-        hex::decode_to_slice(&instance.plane_key, &mut out).ok()?;
-        Some(out)
+    pub fn instance_written(&self) -> bool {
+        matches!(
+            crate::enroll::read_instance(&self.fs, &self.layout()),
+            Ok(Some(_))
+        )
     }
 
     /// The number of followed skills in `follows.json` (0 if absent).
@@ -829,7 +820,6 @@ impl FollowHarness {
         let follows = enroll::read_follows(&self.fs, &self.layout())
             .expect("read follows.json")
             .expect("follows.json exists after resume");
-        let plane_key = ops::parse_hex32(&instance.plane_key).expect("pinned key is 32-byte hex");
         let plane = UreqPlane::new(instance.base_url, enroll::skill_creds(&follows));
         let follow = FileFollow::new(enroll::follow_contexts(&follows));
         let internal = match scope {
@@ -860,7 +850,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &plane,
-                plane_key,
                 follow: &follow,
             };
             ops::pull(&ctx, internal)
@@ -894,7 +883,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &inert_plane,
-                plane_key: [0u8; 32],
                 follow: &inert_follow,
             };
             let added = ops::add(&ctx, &dir)
@@ -938,10 +926,10 @@ impl FollowHarness {
     pub fn publish(
         &self,
         standup_base_url: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         approve: &str,
     ) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, plane_key, approve, None)
+        self.publish_impl(standup_base_url, pin_key, approve, None)
     }
 
     /// [`publish`](Self::publish) with an EXPLICIT `--workspace <id>` (the global flag) — disambiguates a
@@ -953,17 +941,17 @@ impl FollowHarness {
     pub fn publish_in_workspace(
         &self,
         standup_base_url: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         approve: &str,
         workspace: &str,
     ) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, plane_key, approve, Some(workspace))
+        self.publish_impl(standup_base_url, pin_key, approve, Some(workspace))
     }
 
     fn publish_impl(
         &self,
         standup_base_url: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         approve: &str,
         workspace: Option<&str>,
     ) -> Result<PublishResult, String> {
@@ -982,10 +970,10 @@ impl FollowHarness {
             base_url: standup_base_url.to_owned(),
         };
         // `publish` never reads ctx.plane (the enrolled write transport is built per-base inside the op),
-        // so THAT read seam stays inert; the pinned `plane_key` verifies the OK receipt's signed pointer.
-        // The FOLLOW seam must be REAL, though: an enrolled publish infers a followed skill's OWN workspace
-        // from its follow entry (the pointer scope — never an ambient guess), which is the only correct
-        // signing scope once this install follows skills across several workspaces. Absent `follows.json`
+        // so THAT read seam stays inert; the OK receipt's pointer is scope-checked, not verified against a
+        // key. The FOLLOW seam must be REAL, though: an enrolled publish infers a followed skill's OWN
+        // workspace from its follow entry (the pointer scope — never an ambient guess), the only correct
+        // op scope once this install follows skills across several workspaces. Absent `follows.json`
         // (the un-enrolled standup branch) yields an empty seam that branch never consults.
         let inert_plane = InertPlane;
         let follows = crate::enroll::read_follows(&self.fs, &self.layout())
@@ -1006,7 +994,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &inert_plane,
-                plane_key,
                 follow: &follow,
             };
             match ops::publish(
@@ -1052,7 +1039,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &inert_plane,
-                plane_key: [0u8; 32],
                 follow: &inert_follow,
             };
             ops::invite(
@@ -1098,7 +1084,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &inert_plane,
-                plane_key: [0u8; 32],
                 follow: &inert_follow,
             };
             ops::invite(
@@ -1136,7 +1121,6 @@ impl FollowHarness {
                 layout: self.layout(),
                 harness,
                 plane: &inert_plane,
-                plane_key: [0u8; 32],
                 follow: &inert_follow,
             };
             // `None` discovery roots = tracked-only: this helper must not scan the runner's real home dirs.
@@ -1338,7 +1322,7 @@ impl ContributeHarness {
     pub fn enroll(
         &mut self,
         base_url: &str,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         workspace_id: &str,
         skill_id: &str,
         read_token: &str,
@@ -1352,8 +1336,6 @@ impl ContributeHarness {
             &Instance {
                 schema_version: 1,
                 base_url: base_url.to_owned(),
-                plane_key: hex::encode(plane_key),
-                plane_key_id: "pk_test".to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "device_code".to_owned(),
             },
@@ -1411,7 +1393,6 @@ impl ContributeHarness {
             layout: layout.clone(),
             harness: &self.harness,
             plane: &inert_plane,
-            plane_key: [0u8; 32],
             follow: &inert_follow,
         };
         let added =
@@ -1451,7 +1432,7 @@ impl ContributeHarness {
 
     /// Run the real pull engine (reach the plane's current). Panics on a hard wiring fault.
     #[must_use]
-    pub fn pull(&self, plane_key: [u8; 32]) -> PullData {
+    pub fn pull(&self, pin_key: [u8; 32]) -> PullData {
         let (plane, follow) = self.read_transport();
         let device_id =
             crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
@@ -1463,7 +1444,6 @@ impl ContributeHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &plane,
-            plane_key,
             follow: &follow,
         };
         ops::pull(&ctx, ops::PullScope::AllFollowed)
@@ -1487,7 +1467,7 @@ impl ContributeHarness {
     /// Build the device-signed-write `Ctx` + connectors and run `op` (a closure over the wired transports).
     fn with_write_ctx<T>(
         &self,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         op: impl FnOnce(
             &Ctx<'_>,
             &dyn Fn(&str) -> Box<dyn ContributeSource>,
@@ -1505,7 +1485,6 @@ impl ContributeHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &plane,
-            plane_key,
             follow: &follow,
         };
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
@@ -1523,11 +1502,11 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn publish(
         &self,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         propose: bool,
         approve: &str,
     ) -> Result<PublishResult, String> {
-        self.with_write_ctx(plane_key, |ctx, contribute, governance| {
+        self.with_write_ctx(pin_key, |ctx, contribute, governance| {
             // The harness is ALWAYS enrolled, so the standup branch never fires; the connector panics
             // if a regression ever routes an enrolled publish into it, and the base is explicit (the
             // compiled-in hosted default is never consulted from tests).
@@ -1558,11 +1537,11 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn review(
         &self,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         target: &str,
         approve: bool,
     ) -> Result<ReviewData, String> {
-        self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
+        self.with_write_ctx(pin_key, |ctx, contribute, _gov| {
             ops::review(ctx, contribute, target, approve, None).map_err(|e| e.to_string())
         })
     }
@@ -1575,13 +1554,13 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn revert(
         &self,
-        plane_key: [u8; 32],
+        pin_key: [u8; 32],
         to: &str,
         approve: &str,
         confirm: bool,
     ) -> Result<RevertData, String> {
         let skill = approve.split_once('@').map(|(s, _)| s).unwrap_or(approve);
-        self.with_write_ctx(plane_key, |ctx, contribute, _gov| {
+        self.with_write_ctx(pin_key, |ctx, contribute, _gov| {
             ops::revert(ctx, contribute, skill, to, confirm, None).map_err(|e| e.to_string())
         })
     }
@@ -1590,9 +1569,9 @@ impl ContributeHarness {
     ///
     /// # Errors
     /// The verb's typed error rendered to a string.
-    pub fn diff(&self, plane_key: [u8; 32], r#ref: Option<&str>) -> Result<DiffData, String> {
+    pub fn diff(&self, pin_key: [u8; 32], r#ref: Option<&str>) -> Result<DiffData, String> {
         let skill = self.skill_id.clone();
-        self.with_write_ctx(plane_key, |ctx, _c, _g| {
+        self.with_write_ctx(pin_key, |ctx, _c, _g| {
             ops::diff(ctx, &skill, r#ref).map_err(|e| e.to_string())
         })
     }
@@ -1600,14 +1579,14 @@ impl ContributeHarness {
     /// Run `pull` and return the `proposals_awaiting` count (the plane proposals route summed over the
     /// followed skills).
     #[must_use]
-    pub fn proposals_awaiting(&self, plane_key: [u8; 32]) -> u32 {
-        self.pull(plane_key).proposals_awaiting
+    pub fn proposals_awaiting(&self, pin_key: [u8; 32]) -> u32 {
+        self.pull(pin_key).proposals_awaiting
     }
 
     /// Run `list <skill>` (narrowed), returning the entry's `pending_proposals` (each `<skill>@<hash>`, from
     /// the plane proposals route).
     #[must_use]
-    pub fn list_pending_proposals(&self, plane_key: [u8; 32]) -> Vec<String> {
+    pub fn list_pending_proposals(&self, pin_key: [u8; 32]) -> Vec<String> {
         let (plane, follow) = self.read_transport();
         let device_id =
             crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
@@ -1619,7 +1598,6 @@ impl ContributeHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &plane,
-            plane_key,
             follow: &follow,
         };
         let data = ops::list(&ctx, Some(&self.skill_id), false, None, None)
@@ -1651,7 +1629,7 @@ impl ContributeHarness {
     /// The RAW device-signed catalog round-trip (`list --remote`'s transport leg): build the REAL
     /// [`UreqDeviceClient`] at `base_url` + this rig's REAL [`DeviceSigner`], sign the catalog read for
     /// `workspace_id`, and `fetch_catalog` over loopback HTTP — proving client-sign → the
-    /// `Topos-Device-Key-Id` + base64url `Topos-Device-Signature` headers → the plane's verify → the
+    /// `Topos-Device-Key-Id` + `Topos-Device-Key-Id` header → the plane's verify → the
     /// confirmed-member gate → the `WireSkillIndex` body (returned verbatim). A **404** — not a member /
     /// bad signature / no such workspace — maps to an EMPTY index (the transport's degradation contract),
     /// so the caller drives the negative case through this same method.
@@ -1666,10 +1644,7 @@ impl ContributeHarness {
         let signer =
             DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
         let client = UreqDeviceClient::new(base_url.to_owned());
-        let signature = signer
-            .sign_catalog_read(workspace_id)
-            .map_err(|e| e.to_string())?;
-        CatalogSource::fetch_catalog(&client, workspace_id, signer.device_key_id(), &signature)
+        CatalogSource::fetch_catalog(&client, workspace_id, signer.device_key_id())
             .map_err(|e| format!("{e:?}"))
     }
 
@@ -1704,7 +1679,6 @@ impl ContributeHarness {
             layout: self.layout(),
             harness: &self.harness,
             plane: &inert_plane,
-            plane_key: [0u8; 32],
             follow: &inert_follow,
         };
         let scope = ops::RemoteScope {

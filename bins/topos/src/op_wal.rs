@@ -6,25 +6,12 @@
 
 use std::io;
 
-use topos_core::sign::DeviceOp;
 use topos_types::persisted::{OpKind, OpRecord};
 
 use crate::doc;
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::sidecar::Layout;
-
-/// Map the persisted [`OpKind`] to the kernel [`DeviceOp`] the device signer binds (1:1; the subtype is an
-/// integrity property — an approve never replays as a reject).
-pub(crate) fn device_op(kind: OpKind) -> DeviceOp {
-    match kind {
-        OpKind::PublishDirect => DeviceOp::PublishDirect,
-        OpKind::PublishPropose => DeviceOp::PublishPropose,
-        OpKind::Revert => DeviceOp::Revert,
-        OpKind::ReviewApprove => DeviceOp::ReviewApprove,
-        OpKind::ReviewReject => DeviceOp::ReviewReject,
-    }
-}
 
 /// Parse a canonical hyphenated `op_id` back to the raw 16 bytes the device-op frame binds. Also the
 /// path boundary for this module: a canonical hyphenated lowercase UUID is trivially a safe
@@ -219,7 +206,6 @@ mod tests {
             expected_generation: None,
             current_generation: None,
             created_at: "2026-06-30T00:00:00Z".to_owned(),
-            key_id: None,
             details: None,
         });
         write(&fs, &layout, &done).unwrap();

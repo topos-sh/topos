@@ -72,11 +72,6 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
-        // A pinned-key change is not self-service in v0 — surface the repin action code.
-        ClientError::KeyRepinRequired => vec![NextAction {
-            code: ActionCode::RepinPlaneKey,
-            argv: vec!["topos".into(), "list".into(), "--json".into()],
-        }],
         // The plane refused a direct publish under review-required — the agent re-runs it as a proposal.
         // The CLIENT fills the executable argv (the plane sends an empty one — it doesn't know the local
         // skill name); the `<skill>@<digest>` positional pin re-binds the same bytes; never an auto-flip.
@@ -962,17 +957,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         }
         PullAction::Held => (
             format!(
-                "held — pinned at ({},{}) by a local go-back; run `topos pull {name}` to resume \
-                 following current",
-                s.applied.epoch, s.applied.seq
-            ),
-            Vec::new(),
-        ),
-        PullAction::Alarm => (
-            String::from(
-                "INTEGRITY ALARM — the plane's record for this skill failed verification or \
-                 reuses a generation for different bytes; nothing was applied and your \
-                 last-known-good copy is kept. Contact your workspace owner before pulling again.",
+                "held — pinned at a local go-back; run `topos pull {name}` to resume following current"
             ),
             Vec::new(),
         ),
@@ -1104,7 +1089,6 @@ mod tests {
                 merged,
                 conflicted,
                 row("pinned", PullAction::Held),
-                row("audit", PullAction::Alarm),
             ],
             proposals_awaiting: 2,
         };
@@ -1134,16 +1118,13 @@ mod tests {
         );
         assert!(out.contains("SKILL.md (content"), "{out}");
         assert!(out.contains("publish is blocked"), "{out}");
-        // Held says what is pinned and how to resume.
-        assert!(out.contains("held — pinned at (1,2)"), "{out}");
+        // Held says it is pinned by a local go-back and how to resume.
+        assert!(out.contains("held — pinned at a local go-back"), "{out}");
         assert!(out.contains("`topos pull pinned`"), "{out}");
-        // The alarm line is LOUD and names the integrity alarm.
-        assert!(out.contains("INTEGRITY ALARM"), "{out}");
-        assert!(out.contains("last-known-good"), "{out}");
         // Up-to-date rows stay compact: counted in the summary, no `style` action row.
         assert!(!out.contains("style  up to date"), "{out}");
         assert!(
-            out.contains("Checked 8 followed skill(s): 1 up to date."),
+            out.contains("Checked 7 followed skill(s): 1 up to date."),
             "{out}"
         );
         // The reviewer-queue trailer.

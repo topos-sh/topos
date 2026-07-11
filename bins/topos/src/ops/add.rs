@@ -9,13 +9,11 @@
 use std::path::Path;
 
 use topos_core::digest::to_hex;
-use topos_core::sign::{self, Commit};
+use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_harness::DiscoveredPlacement;
 use topos_harness::registry::SkillScope;
-use topos_types::persisted::{
-    Lock, LockedFile, PlacementMap, RecordedTuple, SwapCapability, SyncState,
-};
+use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, SyncState};
 use topos_types::results::{AddData, SkillOrigin, UntrackedEntry};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
@@ -99,7 +97,7 @@ pub(crate) fn add_with_name(
 
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
     // fixed fixture pins it while ids stay free.
-    let version_id = sign::commit_id(&Commit {
+    let version_id = identity::commit_id(&Commit {
         parents: &[],
         tree: bundle.bundle_digest,
         author: &ctx.device_id,
@@ -149,11 +147,8 @@ pub(crate) fn add_with_name(
         &SyncState {
             schema_version: PERSISTED_SCHEMA_VERSION,
             observed: genesis,
+            observed_version_id: version_hex.clone(),
             applied: genesis,
-            recorded: vec![RecordedTuple {
-                generation: genesis,
-                commit_id: version_hex.clone(),
-            }],
             base_commit: version_hex.clone(),
             work_hash: digest_hex.clone(),
             held: false,

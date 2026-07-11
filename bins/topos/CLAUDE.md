@@ -52,7 +52,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `list [--footprint] [--tracked] [--remote]` (the tracked bucket + **untracked discovery** — skills sitting
   in any known harness's skill dir, across a baked registry ported from `vercel-labs/skills`, deduped against
   tracked placements by canonical path; `--tracked` suppresses discovery; `--remote` is the **catalog read** —
-  a device-signed `GET /v1/workspaces/{ws}/skills` per followed workspace, merged with local follow-state
+  a `GET /v1/workspaces/{ws}/skills` (naming the acting `device_key_id` in the `Topos-Device-Key-Id` header)
+  per followed workspace, merged with local follow-state
   (Available / Following / FollowingBehind), a per-workspace transport fault degrading to a warning;
   `followed`/`published_by_you` still render empty; footprint = the `~/.topos/` walk plus any harness config
   topos holds an entry in), `diff`
@@ -65,20 +66,21 @@ renderer over the SAME typed outcomes (one value, two presentations).
   everything else), **re-roots onto the bootstrap's declared `plane.base_url`** (a share link may ride the
   team's web origin; the declared API base — normalized, same URL gate, https-may-never-downgrade — is
   what the device flow, the redeem, every pull, and `instance.json` ride; disclosed as
-  `FollowData.plane_base_url`), pins the plane key (I-TOFU, keyed on the RE-ROOTED base: absent → first
-  pin; same base different key → `KEY_REPIN_REQUIRED`; a bootstrap declaring a different plane →
-  refused — one plane per install; the `alg` is a CLOSED enum, so a non-Ed25519 trust root fails the
-  deserialize), starts a device authorization, writes a **`0600` WAL** (`identity/enrollment.json`), and
+  `FollowData.plane_base_url`), guards one-plane-per-install (a bootstrap declaring a DIFFERENT plane than
+  the one already enrolled is refused; there is **no trust root to pin** — the `current` pointer is
+  unsigned, its authority the database row and its integrity the content-addressed version id), starts a
+  device authorization, writes a **`0600` WAL** (`identity/enrollment.json`), and
   returns `ENROLLMENT_PENDING` + the SERVER-built verification URL with the verified-domain provenance
   (the relay-phishing guard; there is no client-side URL reconstruction — a WAL without the persisted
   URL restarts typed). Re-invoking `follow` while a pending WAL exists (with any target, or none) polls
   once — the "re-invoking IS the resume" idiom (the BIN re-invokes it automatically on a cadence for an
   interactive run or a `--wait [<seconds>]` run, so a person never re-runs by hand; a headless `--json` run
-  without `--wait` returns the pending state and never hangs); on a granted poll it signs the **enroll possession
-  proof** (the device signer, binding `device_auth_id = user_code` + the offered-skill set + `grant_hash`),
-  **redeems** the grant into per-skill read creds, records them in the WAL **before promotion** (the lockout
+  without `--wait` returns the pending state and never hangs); on a granted poll it **redeems** the grant
+  (the bearer credential — the redeem body carries `device_public_key`, which the server checks against the
+  grant's bound pubkey; nothing is signed) into per-skill read creds, records them in the WAL **before
+  promotion** (the lockout
   fence — a single-use grant can't be re-redeemed; a re-invoked `follow` over a `Redeemed` WAL re-promotes without
-  re-redeeming), then PROMOTES: `instance.json` (the pinned key + the workspace disclosure), `follows.json`
+  re-redeeming), then PROMOTES: `instance.json` (the plane + the workspace disclosure), `follows.json`
   (read-merge-write under the `identity` lock, **`0600`** — a second follow never clobbers the first), and
   `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
   **first-receive baseline** per skill. The agent only ever holds the opaque grant + the read creds — never a
@@ -95,42 +97,40 @@ renderer over the SAME typed outcomes (one value, two presentations).
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lives in
   `tests/tests/follow_e2e.rs`).
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
-  by signing the governance Invite op and POSTing it. Requires prior enrollment: the pinned plane (`base_url`
-  from `instance.json`), the workspace (`workspace_id` from `identity/user.json`), and the device key all come
-  from what `follow` wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the raw 16 bytes
-  via the ids seam — the canonical hyphenated UUID rides the wire, the plane re-parses it to the SAME bytes),
-  builds the `GovernanceOpKind::Invite` frame, and **wires `sign_governance`** for the 64-byte signature. The
-  **cross-component agreements live once, in the kernel**, and both halves call them: the role byte via
-  `topos_core::sign::GovernanceRole` (`Owner=1, Reviewer=2, Member=3`; an omitted `--role` is the enum's
-  shared Member default, matching the plane's `role.unwrap_or(member)`), the no-expiry sentinel
-  `topos_core::sign::INVITE_NO_EXPIRY` (the plane's invite handler hardcodes no expiry), the emails
-  + skill **ids** bound as SETS (the kernel sorts + dedups in-frame, so order is irrelevant), and the
-  **canonical principal fold** — the emails are folded to `topos_core::sign::canonical_principal`'s
-  ASCII-lowercase form ONCE at op entry, before the signing frame AND the wire body, because the plane
-  folds at its parse boundary and re-derives the preimage from the folded form. The POST rides
-  through the same creds-free `UreqDeviceClient` client behind a `GovernanceSource` seam (the 64-byte signature in
-  the `Topos-Device-Signature` header), mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a
-  role-DENIED `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the client
-  signature **verifies via `topos_core::sign::verify_governance_op`** over the frame the plane rebuilds — the
-  cross-component proof, run over a **fake** with no HTTP.
+  by POSTing the governance Invite op. Requires prior enrollment: the plane (`base_url` from `instance.json`),
+  the workspace (`workspace_id` from `identity/user.json`), and the device key all come from what `follow`
+  wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the canonical hyphenated UUID
+  rides the wire, the plane re-parses it to the SAME 16 bytes for idempotency) and POSTs the body naming the
+  acting **`device_key_id`** — the plane resolves its non-revoked registry row → principal → role matrix (a
+  non-owner is DENIED). **Nothing is signed** (git/GitHub-level trust). The role rides the wire body (an
+  omitted `--role` defaults to member, matching the plane); the emails are folded to
+  `topos_core::identity::canonical_principal`'s ASCII-lowercase form ONCE before the wire body (the plane
+  re-folds at its parse boundary), so the roster rows carry one identity per human; the skill **ids** (never
+  names) are what the invite pre-offers. The POST rides through the `UreqDeviceClient` behind a
+  `GovernanceSource` seam, mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a role-DENIED
+  `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the wire body's
+  shape (workspace / acting device / role / folded emails / skill ids) over a **fake** with no HTTP.
 - **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
   `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
-  the signed `current` pointer through the `PlaneSource` seam, signature + workspace/skill scope
-  authentication, the anti-rollback floor (`observed` rises only on a verified strictly-higher record;
-  never auto-applies a record at or below the floor) and the reused-tuple ALARM, a draft snapshot-on-touch
-  before any decision, fetch + re-verify (digest == tree == `commit_id`) + an ancestor-backfilling durable
+  the **unsigned** `current` pointer through the `PlaneSource` seam, a workspace/skill **scope check** (a
+  mis-scoped record is a wire-validation error, not the target), **the served record IS the sync target** —
+  whenever its `(generation, version_id)` differs from the stored `observed`/`observed_version_id` in ANY
+  direction (a server restore is a legitimate team rollback), the engine adopts it and drives toward it; a
+  draft snapshot-on-touch before any decision, fetch + re-verify (**digest == tree == `commit_id`** — the
+  content-addressed integrity story, a mismatch is a loud integrity ERROR) + an ancestor-backfilling durable
   record into the sidecar store, the post-fetch heal (a crash-after-swap advances `applied` with no second
   swap, never a false divergence), the consent decision (the kernel's one policy), and **crash-safe
   byte-writing materialization** (staging sibling → fsync → atomic dir-swap → fsync parent → `map → lock →
   sync` commit; `applied` advances only post-swap). `pull <skill>` accepts a pending update (the explicit
   command is the consent a confirm-each offer solicited); `pull <skill>@<hash>` goes back to a version
-  locally (sets `held`, never lowers the floor). In tests the plane response + follow-state are
-  **fixture-fed**; in production they now come from the real `ureq` transport + the on-disk follow-state that
-  `follow` writes — so a bare `pull` with nothing followed stays an honest no-op. A **never-received**
-  followed skill (the first-receive baseline `follow` lays: empty `recorded` at the genesis floor) is a
-  state-② offer the engine OFFERS on a bare sweep (never auto-lands — I-TOFU, even for an `auto` follower)
-  and PLACES on an explicit accept / `follow <skill>`; the engine change is minimal + additive (a
-  `known_current`/`first_receive` read of the baseline + a `FirstReceiveFromLink` row in the situation map).
+  locally (resolved against the local store's versions, sets `held`, leaves the served target untouched). In
+  tests the plane response + follow-state are **fixture-fed**; in production they come from the real `ureq`
+  transport + the on-disk follow-state that `follow` writes — so a bare `pull` with nothing followed stays
+  an honest no-op. A **never-received** followed skill (the first-receive baseline `follow` lays: the
+  all-zero `observed_version_id` sentinel) is a state-② offer the engine OFFERS on a bare sweep (never
+  auto-lands — I-TOFU first-receive consent, even for an `auto` follower) and PLACES on an explicit accept /
+  `follow <skill>`. There is **no pointer signing, no client-side verification, no anti-rollback floor, no
+  key pinning** — the trust level is the same a team extends to its git host + CI.
 - **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft (not just detects it).
   Reachable only through a `DivergedWitness` capability token minted in the sync engine's diverged arm (the
   structural author-only gate; followers never reach merge code). The kernel `topos-core::merge` plans +
@@ -150,28 +150,26 @@ renderer over the SAME typed outcomes (one value, two presentations).
   feeds the engine above (no engine change). `get_current` is the commit-sensitive conditional GET
   (`If-None-Match` + `Topos-Known-Version-Id`); `fetch_version` is a version-metadata GET + per-blob
   content-addressed bundle GETs that **re-verify each `sha256 == object_id`**. It is a dumb transport — the
-  engine still verifies the pointer signature against the pinned key. `FileFollow` + the crash-safe
-  `instance.json` (base URL + pinned plane **public** key) and `follows.json` (per-skill workspace + read
-  token + mode) docs supply the transport creds + the consent state; the read token is a **secret** (redacted
-  from `Debug`, never in an error message or URL). `app.rs` (via `load_enrollment`) selects the real transport
-  + pinned key only when enrolled AND following ≥1 skill, else stays inert — and `load_enrollment` is **no
-  longer inert in practice**, because `follow` now writes `instance.json` + `follows.json`. The end-to-end
+  engine scope-checks the served (unsigned) pointer and re-verifies the fetched bytes against the version
+  id. `FileFollow` + the crash-safe `instance.json` (the plane base URL — no trust root) and `follows.json`
+  (per-skill workspace + read token + mode) docs supply the transport creds + the consent state; the read
+  token is a **secret** (redacted from `Debug`, never in an error message or URL). `app.rs` (via
+  `load_enrollment`) selects the real transport only when `instance.json` is present, else stays inert — and
+  `load_enrollment` is **no longer inert in practice**, because `follow` now writes `instance.json` +
+  `follows.json`. The end-to-end
   pull-over-loopback-HTTP proof lives in the `tests/` member; adding `ureq` keeps the client arch-clean (no
   `plane-store`/`sqlx`/`tokio` edge).
-- **The device keypair + signer** (`device_signer`, `identity`) — the client's **only** private-key edge,
-  mirroring the plane's in-process signer. An Ed25519 signing key is **load-or-generated** from a `0600`
-  `identity/device.key` seed (refuse-on-permissive, exactly-32-bytes, a `Zeroizing` seed held only
-  transiently, serialized under the identity lock; the `SigningKey` self-zeroizes on drop and a hand-written
-  `Debug` redacts the key material). The **`device_key_id`** is derived byte-for-byte the way the plane
-  derives it (`dk_` + the first 32 hex of `sha256(pubkey)`) — so the frames the client signs bind the SAME id
-  the plane re-derives and verifies. Three concrete signers over `topos-core`'s frozen preimages —
-  `sign_enroll` / `sign_governance` / `sign_device_op` (the last built now for the contribute verbs that land
-  next) — each unit-proven to round-trip through the kernel's `verify_*` (one shared preimage, so signer +
-  verifier agree by construction). `host.json` now carries a secret-free **`DeviceKeyRef`** (the PUBLIC key +
-  a pointer to the sibling `0600` seed, NEVER the seed) via `set_device_key`. **`sign_enroll` is now wired**
-  — a re-invoked `follow` signs the enroll possession proof + records the device key in `host.json`.
-  **`sign_governance` is now wired** too — `invite` signs the governance Invite op (see the `invite` verb
-  above); `sign_device_op` is wired by the contribute verbs next.
+- **The device keypair** (`device_signer`, `identity`) — the device's presented identity. An Ed25519
+  keypair is **load-or-generated** from a `0600` `identity/device.key` seed (refuse-on-permissive,
+  exactly-32-bytes, a `Zeroizing` seed held only transiently, serialized under the identity lock; the
+  `SigningKey` self-zeroizes on drop and a hand-written `Debug` redacts the key material). The public key
+  REGISTERS the device at enroll; the **`device_key_id`** (`dk_` + the first 32 hex of `sha256(pubkey)`,
+  the ONE kernel derivation `topos_core::identity::device_key_id`) is the device's presented identity on
+  every request — the plane re-derives the SAME id from the registered public key. **Nothing signs with the
+  private key** (git/GitHub-level trust: the client trusts the plane it enrolled with; the private key sits
+  unused pending the next increment's per-workspace credential redesign). `host.json` carries a secret-free
+  **`DeviceKeyRef`** (the PUBLIC key + a pointer to the sibling `0600` seed, NEVER the seed) via
+  `set_device_key`. A KAT pins `device_key_id` against `topos_core::identity::device_key_id`.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
   `write_private` (mode 0600 **from creation** — no world-readable window, no chmod-after-write race) +
   `private_perms_ok` (the refuse-on-permissive read gate), both threaded through the `FaultFs` crash gate;
@@ -186,12 +184,13 @@ message, so injectable id/time sources make `add` deterministic. Golden `--json`
 are asserted byte-equal in tests.
 
 - **The contribute write verbs** (`ops/{publish,review,revert}` + `ops/contribute` + `op_wal` + the plane
-  half of `ops/diff`) — the client device-signed writes that WIRE `sign_device_op`. A new creds-free
-  **`ContributeSource`** transport seam (mirroring `GovernanceSource` on `UreqDeviceClient`) POSTs the four write
-  routes; `map_write_envelope` maps the **all-outcome 200 envelope** to a typed `WriteReceipt` (every
-  protocol outcome — OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`;
-  only a transport/non-200/malformed body is an `Err`; the signed pointer is parsed leniently because an OK
-  `review --reject` carries `data: {}`). **`publish [--propose] <target>[@<digest>]`** first runs the
+  half of `ops/diff`) — the client contribute writes (each body names the acting `device_key_id`; the op
+  kind rides the ROUTE, nothing is signed). A **`ContributeSource`** transport seam (mirroring
+  `GovernanceSource` on `UreqDeviceClient`) POSTs the four write routes; `map_write_envelope` maps the
+  **all-outcome 200 envelope** to a typed `WriteReceipt` (every protocol outcome — OK / NEEDS_REVIEW /
+  CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`; only a transport/non-200/malformed body
+  is an `Err`; the served pointer (`wire_record`) is parsed leniently because an OK `review --reject`
+  carries `data: {}`). **`publish [--propose] <target>[@<digest>]`** first runs the
   **auto-add pre-step** (`ensure_tracked`): an EXACT tracked name wins straight through, else the target is
   an untracked LOCAL source it adopts before publishing — a discovered `<name>` / `<name>@<harness>`
   (reusing `add`'s `resolve_add_target`) or a `<dir>` (adopted in place via `ops::add`); a remote
@@ -211,22 +210,24 @@ are asserted byte-equal in tests.
   the forward commit `{parents:[FRESH current], tree: good.tree}` (a stale local parent would be a DENIED, so
   it reads the live current). An UNCERTAIN send keeps the WAL so the next attempt **replays the SAME `op_id`**
   (no double-advance); a settled op deletes it. **`diff <skill> <ref>`** gained the plane half
-  (`current..<hash>` / `<hash>` / `<a>..<b>` — a plane endpoint fetches + re-verifies). The two-halves
-  I-COMMIT-PARITY wire test + the op_id-replay test are in `ops/contribute`; the full loop is proven e2e over
-  loopback HTTP in `tests/`.
+  (`current..<hash>` / `<hash>` / `<a>..<b>` — a plane endpoint fetches + re-verifies). The commit-id parity
+  (I-COMMIT-PARITY) is proven by `topos-core`'s `commit_id` KAT; the op_id-replay test lives in
+  `ops/contribute`; the full loop is proven e2e over loopback HTTP in `tests/`.
 
 - **The workspace-standup client** (`ops/publish`'s standup branch + `ops/follow`'s claim door) — the two
   self-serve doors onto the server's genesis seat. **The un-enrolled direct `publish`** stands the
   workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the optional
   `@<digest>` gate) runs BEFORE any network, then a standup device authorization against the hosted base
   (`TOPOS_PLANE_URL` override, else the compiled-in `https://api.topos.sh` — consulted ONLY on this
-  branch), TOFU-pin from the response's plane block, a `0600` `AuthorizingStandup` WAL, and an `ok`
+  branch), a one-plane-per-install guard against the response's declared plane base, a `0600`
+  `AuthorizingStandup` WAL, and an `ok`
   PENDING receipt (`PublishData.pending` = `signin_required` + the SERVER-built
   `verification_uri_complete` verbatim + the code + an RFC-3339 expiry) whose `ENROLL_RESUME` next-action
   argv is THE SAME publish command. Re-invoking it polls ONCE (when the target pins a `@<digest>` the
-  consent re-derives from it, so drifted bytes are refused before any poll); granted ⇒ possession proof over the EMPTY offered set →
-  redeem → `Redeemed` WAL BEFORE promotion (the shared crash fence) → promote → the publish CONTINUES in
-  the same invocation (rebuilt around the freshly pinned key), disclosing `workspace <name> — owner
+  consent re-derives from it, so drifted bytes are refused before any poll); granted ⇒ redeem (the grant is
+  the bearer credential; nothing is signed) → `Redeemed` WAL BEFORE promotion (the shared crash fence) →
+  promote → the publish CONTINUES in
+  the same invocation, disclosing `workspace <name> — owner
   <principal>` on both surfaces (hijack visibility). The op is unchanged either way — it polls once and
   returns; the BIN (`app.rs`) is what turns that into ONE command: it re-invokes on a fixed cadence until
   the sign-in settles for an INTERACTIVE run (or a `--wait [<seconds>]` `--json` run), and a headless
@@ -270,7 +271,8 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-Signing-at-rest lands later; **multi-reviewer
+The next increment owns the **per-workspace credential** redesign (the device private key sits unused
+today — the public key is the device's registered identity, nothing signs). **Multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
 setting) + `log --team`'s plane half; harness *selection* in the composition root (v0 constructs Claude
@@ -290,10 +292,11 @@ your skills.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `clap`, `serde`/`serde_json`,
 `uuid`, `rustix` (safe fsync/flock + the atomic dir-swap), `hex` (decode sidecar id fields), `base64`
-(verify-side decode of the signed pointer's `Signature.value`, **and** encode-side for the enrollment wire —
-the device public key + the enroll-possession signature header are base64url; neither is the private-key
-signing edge `check-arch` forbids), `ureq` (the blocking rustls+ring plane + enrollment transport — self-contained, so no
-`tokio`/`plane-store`/`sqlx` edge), `ed25519-dalek` (`std` + `zeroize` — the device-key SIGNER, the client's
-only private-key edge), `getrandom` (first-run seed entropy) + `zeroize` (wipe the transient seed buffer),
-`anyhow`, `thiserror`. None of the crypto crates cross `check-arch`'s line (it bans only
-`plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` stays verify-only `no_std`.
+(encode-side for the enrollment wire — the device public key in the authorize/redeem bodies is base64url —
+and the contribute candidate's `content_base64`; wire encoding only, not a signing edge), `ureq` (the
+blocking rustls+ring plane + enrollment transport — self-contained, so no `tokio`/`plane-store`/`sqlx`
+edge), `ed25519-dalek` (`std` + `zeroize` — the device **keypair** custody: keygen only, NOTHING signs;
+the public key is the device's registered identity), `getrandom` (first-run seed entropy) + `zeroize`
+(wipe the transient seed buffer), `anyhow`, `thiserror`. None of these crates cross `check-arch`'s line
+(it bans only `plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` is
+signature-free `no_std`.

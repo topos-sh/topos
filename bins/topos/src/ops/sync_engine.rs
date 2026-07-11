@@ -1,9 +1,10 @@
-//! The per-skill sync engine: `checkForUpdates → plan → apply`, crash-safe and downgrade-proof.
+//! The per-skill sync engine: `checkForUpdates → plan → apply`, crash-safe.
 //!
 //! For one followed skill, under its writer flock, the engine:
-//! 1. **checkForUpdates** — conditional-GET the signed `current` pointer, authenticate it (signature +
-//!    workspace/skill scope), evaluate it against the durable anti-rollback floor `observed` (raising the
-//!    floor durably ONLY on a verified strictly-higher record), and raise a loud ALARM on a reused tuple.
+//! 1. **checkForUpdates** — conditional-GET the served `current` pointer, scope-check it (workspace/skill),
+//!    and adopt it as the sync target: whenever the served `(generation, version_id)` differs from the
+//!    stored `observed`/`observed_version_id` IN ANY DIRECTION (a team rollback after a server restore is a
+//!    legitimate backward move now), update `observed` + `observed_version_id` and drive toward it.
 //! 2. **plan** — drive toward `observed`: classify the working tree (clean / draft / absent / unscannable),
 //!    snapshot a draft FIRST, fetch the target's bytes, re-verify them (digest == tree == `commit_id`),
 //!    record them durably in the sidecar store, then refine (a crash-after-swap heals, never a false
@@ -11,17 +12,19 @@
 //! 3. **apply** — act on `consent::decide()`: materialize + advance `applied` (auto / explicit accept),
 //!    offer (confirm-each), or snapshot + surface the DIVERGED panel (never clobber).
 //!
-//! `applied` advances only after a successful swap; `observed` is the floor a follower never crosses. The
-//! consent decision is the kernel's one policy — the engine only chooses which row to feed it.
+//! `applied` advances only after a successful swap. The served record IS the sync target; its integrity is
+//! the content-addressed `version_id`, re-verified byte-for-byte by digest on apply — a digest mismatch is
+//! a loud integrity ERROR. The consent decision is the kernel's one policy — the engine only chooses which
+//! row to feed it.
 
 use std::path::Path;
 
 use topos_core::digest::{self, to_hex};
-use topos_core::sign::{self, Commit};
-use topos_core::sync::{self, ApplyClass, Generation as KGen};
+use topos_core::identity::{self, Commit};
+use topos_core::sync::{self, ApplyClass};
 use topos_gitstore::{ImportFile, Store, WriteBatch};
 use topos_types::Generation;
-use topos_types::persisted::{Lock, LockedFile, PlacementMap, RecordedTuple, SyncState};
+use topos_types::persisted::{Lock, LockedFile, PlacementMap, SyncState};
 use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
 
 use crate::ctx::Ctx;
@@ -36,6 +39,11 @@ use crate::{doc, logfile, sidecar};
 const DRAFT_SNAPSHOT_MESSAGE: &str = "topos: draft snapshot";
 /// A bound on ancestor backfill — far beyond any real lineage gap; stops a forged cyclic store.
 const MAX_BACKFILL: usize = 256;
+/// The `applied` generation a go-back leaves behind: the genesis sentinel `(0,0)`, which is strictly below
+/// any real served `observed`, so a later `pull` sees `applied != observed` (behind) and — once the `held`
+/// pin is released by an explicit pull — fast-forwards back to the team's current. (The go-back installs an
+/// OLD version whose true generation is no longer tracked locally; `(0,0)` is the honest "not at current".)
+const GO_BACK_APPLIED: Generation = Generation { epoch: 0, seq: 0 };
 
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
@@ -84,24 +92,22 @@ pub(crate) fn sync_one(
     let mut sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
-    validate_recorded_unique(&sync.recorded)?;
     let name = lock.name.clone();
 
-    // A never-received followed skill (the first-receive baseline `follow` lays: nothing authenticated yet,
-    // no placement). I-TOFU: its first version is an OFFER behind one explicit accept/`--approve`, never
-    // auto-landed — captured BEFORE checkForUpdates mutates `recorded`.
+    // A never-received followed skill (the first-receive baseline `follow` lays: nothing observed yet, no
+    // placement). I-TOFU: its first version is an OFFER behind one explicit accept/`--approve`, never
+    // auto-landed — captured BEFORE checkForUpdates mutates `observed`.
     let first_receive = is_never_received(&sync);
 
-    // The conditional-GET validator: what the client currently holds (its floor generation AND the commit
-    // recorded there) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd.
-    // `None` for the never-received baseline (empty `recorded`) → an unconditional first GET.
+    // The conditional-GET validator: what the client currently holds (its observed generation AND the commit
+    // it names) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd. `None`
+    // for the never-received baseline (no observed commit yet) → an unconditional first GET.
     let known = known_current(&sync)?;
 
     // An unresolved conflict is on record. The escape (`--onto-current`) RESOLVES it (plane-independent, so
     // it runs even when the plane is unreachable — the no-deadlock guarantee). Any OTHER invocation heals a
-    // crashed materialization and re-discloses the block WITHOUT re-merging or advancing the floor — BUT it
-    // still authenticates the served `current`, so a reused-tuple / forged record raises the ALARM even
-    // while blocked (the conflict window must not hide plane compromise).
+    // crashed materialization and re-discloses the block WITHOUT re-merging (the conflict draft already
+    // consumed `current`).
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
         if inv == Invocation::Escape {
@@ -118,50 +124,33 @@ pub(crate) fn sync_one(
                 &cs,
             );
         }
-        if served_current_is_alarm(ctx, skill_id, follow, &sync, known)? {
-            return Ok(alarm(&name, &sync, PullAction::Alarm));
-        }
         super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
         return super::merge_resolve::conflicted_row_from_state(&name, &sync, &cs);
     }
 
-    // Whether THIS pull discovered a strictly-newer version (raised the floor). A confirm-each skill must
-    // re-offer such a version rather than let an explicit accept apply bytes it never disclosed.
+    // Whether THIS pull discovered a new target (moved `observed`). A confirm-each skill must re-offer such
+    // a version rather than let an explicit accept apply bytes it never disclosed.
     let mut raised = false;
 
     // ---- checkForUpdates ----
     match ctx.plane.get_current(skill_id, known) {
         Ok(PointerFetch::NotModified) => {}
         Ok(PointerFetch::Record(rec)) => {
-            let Some(authed) = authenticate(&rec, skill_id, &follow.workspace_id, &ctx.plane_key)
-            else {
-                return Ok(alarm(&name, &sync, PullAction::Alarm));
+            // Scope-check the served record (a mis-scoped record is a malformed response, not the target).
+            let Some(version_id) = scoped_version_id(&rec, skill_id, &follow.workspace_id) else {
+                return Err(ClientError::WireInvalid(format!(
+                    "the current pointer for {skill_id} is scoped to a different workspace/skill"
+                )));
             };
-            match sync::evaluate_floor(
-                kgen(authed.generation),
-                authed.version_id,
-                kgen(sync.observed),
-                &kernel_recorded(&sync)?,
-            ) {
-                v if v.is_alarm() => return Ok(alarm(&name, &sync, PullAction::Alarm)),
-                sync::FloorVerdict::Forward => {
-                    // A verified, strictly-higher record raises the floor — durable NOW (it must survive a
-                    // failed apply as the retry target), independent of whether the apply succeeds.
-                    sync.observed = authed.generation;
-                    sync.recorded.push(RecordedTuple {
-                        generation: authed.generation,
-                        commit_id: to_hex(&authed.version_id),
-                    });
-                    doc::write_doc(ctx.fs, &sp.sync, &sync)?;
-                    raised = true;
-                }
-                sync::FloorVerdict::CorruptNoRecord => {
-                    return Err(ClientError::Corrupt(
-                        "current record at the floor names no recorded commit".into(),
-                    ));
-                }
-                // Replay / StaleReplay / RefuseBelowFloor: no floor change; fall through to drive applied.
-                _ => {}
+            // The served record IS the sync target. Adopt it whenever it differs from what we hold — in ANY
+            // direction (a server restore is a legitimate team rollback). The move is durable NOW (it must
+            // survive a failed apply as the retry target), independent of whether the apply succeeds.
+            let version_hex = to_hex(&version_id);
+            if sync.observed != rec.record.generation || sync.observed_version_id != version_hex {
+                sync.observed = rec.record.generation;
+                sync.observed_version_id = version_hex;
+                doc::write_doc(ctx.fs, &sp.sync, &sync)?;
+                raised = true;
             }
         }
         Err(PlaneError::NotFound) => return Ok(state_row(&name, &sync, PullAction::UpToDate)),
@@ -174,7 +163,9 @@ pub(crate) fn sync_one(
                 return Err(ClientError::Plane(m));
             }
         }
-        Err(PlaneError::Malformed(_)) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
+        // A structurally malformed served response is a wire-validation error (content addressing is the
+        // integrity story; a garbled body cannot be the target).
+        Err(PlaneError::Malformed(m)) => return Err(ClientError::WireInvalid(m)),
     }
 
     // ---- plan: classify via the kernel's four-state transition, driving toward `observed` ----
@@ -189,7 +180,9 @@ pub(crate) fn sync_one(
             if applied_eq_observed {
                 return Ok(state_row(&name, &sync, PullAction::UpToDate));
             }
-            return Ok(alarm(&name, &sync, PullAction::Alarm));
+            return Err(ClientError::PlacementUnsupported {
+                reason: "the placement cannot be read; refusing to fast-forward over it".into(),
+            });
         }
     };
     match sync::decide_state(work_eq_base, applied_eq_observed) {
@@ -203,31 +196,25 @@ pub(crate) fn sync_one(
 
     // A held skill (a deliberate go-back pin) suppresses exactly one auto fast-forward; an explicit
     // `topos pull <skill>` falls through and applies, and the successful apply clears `held` — so a FAILED
-    // explicit resume (an alarm/error before the apply) leaves the hold intact.
+    // explicit resume (an error before the apply) leaves the hold intact.
     if sync.held && !explicit {
         return Ok(state_row(&name, &sync, PullAction::Held));
     }
 
     // Fetch + record the target durably (the integrity gate: write_bundle + commit re-derive the id and
     // refuse a lying ref; render-on-read re-hashes). Backfill any missing ancestors so `commit` has parents.
-    // A failed integrity check is a loud per-skill ALARM, not a silent skip.
-    let target_commit = recorded_commit(&sync, sync.observed)?;
+    // A failed integrity check is a loud per-skill integrity ERROR, not a silent skip.
+    let target_commit = super::parse_hex32(&sync.observed_version_id)?;
     let store = Store::open(&sp.store)?;
     let mut written = WriteBatch::default();
-    let target_digest = match ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written) {
-        Ok(d) => d,
-        Err(e) if is_integrity_error(&e) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
-        Err(e) => return Err(e),
-    };
+    let target_digest = ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written)?;
     // Once, after the whole backfill — exactly the versions THIS op wrote (plus the target's own set when
     // already local), durable before any JSON records the target. Never the whole store: the per-pull
     // fsync cost is bounded by the fetched bytes, not lifetime history.
     fsync_batch(ctx, &written)?;
-    let bundle = match store.render_verified(target_commit, target_digest) {
-        Ok(b) => b,
-        // A digest mismatch on the rendered bytes is an integrity stop, not a transient error.
-        Err(_) => return Ok(alarm(&name, &sync, PullAction::Alarm)),
-    };
+    // A digest mismatch on the rendered bytes is a loud integrity ERROR (content addressing is the integrity
+    // story) — corruption evidence, never a transient skip.
+    let bundle = store.render_verified(target_commit, target_digest)?;
     let target_digest_hex = to_hex(&target_digest);
     let work_eq_target = match &work {
         WorkState::Present { digest_hex, .. } => *digest_hex == target_digest_hex,
@@ -308,11 +295,10 @@ pub(crate) fn sync_one(
 }
 
 /// `topos pull <skill>@<ref>` — install an older version's exact bytes locally (a deliberate go-back),
-/// set `held` to suppress the next auto fast-forward, and **do NOT lower the `observed` floor** (a held
-/// copy still rejects downgrades). The target must be in this skill's recorded history (so its generation
-/// is known — never a fabricated floor); a short prefix resolves against that same recorded history (the
-/// list this function requires anyway), so a no-match prefix reports the same typed go-back error a
-/// full unknown id does.
+/// set `held` to suppress the next auto fast-forward, and **do NOT change the `observed` target** (the
+/// team's `current` is untouched; the go-back is a local pin). The target must be present in this skill's
+/// LOCAL store (the versions this client has fetched/committed); a short prefix resolves against that same
+/// local set, so a no-match prefix reports the same typed go-back error a full unknown id does.
 pub(crate) fn go_back(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
@@ -324,24 +310,18 @@ pub(crate) fn go_back(
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
-    validate_recorded_unique(&sync.recorded)?;
     let name = lock.name.clone();
 
-    let target = super::resolve_version_ref(&sync.recorded, vref)?.ok_or_else(|| {
+    // Resolve the ref against the versions this client holds LOCALLY (the go-back can only install bytes it
+    // already has). A prefix that matches no local version reports the same typed error a full unknown id does.
+    let store = Store::open(&sp.store)?;
+    let known: Vec<String> = store.list_versions()?.iter().map(|v| to_hex(v)).collect();
+    let target = super::resolve_version_ref(&known, vref)?.ok_or_else(|| {
         ClientError::UnknownGoBackVersion {
             version: vref.shown(),
         }
     })?;
     let target_hex = to_hex(&target);
-    // The go-back generation must be a real recorded one — refuse a version with no known generation.
-    let target_gen = sync
-        .recorded
-        .iter()
-        .find(|t| t.commit_id == target_hex)
-        .map(|t| t.generation)
-        .ok_or_else(|| ClientError::UnknownGoBackVersion {
-            version: target_hex.clone(),
-        })?;
 
     // Snapshot-on-touch FIRST. A go-back is an explicit OVERWRITE of the placement, so it must never
     // silently lose an unsaved local draft (the never-clobber rail applies here exactly as in the sweep).
@@ -366,9 +346,8 @@ pub(crate) fn go_back(
     }
 
     // The target's bytes must be readable from the local store (a previously-applied version); a
-    // recorded-but-unreadable version (e.g. a dangling ref) is refused with the typed go-back error
+    // present-but-unreadable version (e.g. a dangling ref) is refused with the typed go-back error
     // rather than surfacing a raw integrity error.
-    let store = Store::open(&sp.store)?;
     let target_digest = store_bundle_digest_opt(&store, target)?.ok_or_else(|| {
         ClientError::UnknownGoBackVersion {
             version: target_hex.clone(),
@@ -383,8 +362,9 @@ pub(crate) fn go_back(
     let target_digest_hex = to_hex(&target_digest);
 
     // `ExplicitLocalPull` → `MaterializeLocal`: a direct local command authorizes installing these bytes;
-    // the digest is re-bound on materialize. The floor `observed` is untouched (no downgrade); `applied`
-    // honestly drops to the installed version's generation so a later bare `pull` sees ② and fast-forwards.
+    // the digest is re-bound on materialize. The `observed` target is untouched (the team's current does
+    // not change); `applied` drops to the genesis sentinel so a later bare `pull` sees `applied != observed`
+    // (② behind), which — while `held` — reports Held and, on an explicit `pull`, fast-forwards to current.
     debug_assert!(
         topos_core::consent::decide(topos_core::consent::Situation::ExplicitLocalPull)
             .applies_bytes()
@@ -392,8 +372,8 @@ pub(crate) fn go_back(
     let next_sync = SyncState {
         schema_version: sync.schema_version,
         observed: sync.observed,
-        applied: target_gen,
-        recorded: sync.recorded.clone(),
+        observed_version_id: sync.observed_version_id.clone(),
+        applied: GO_BACK_APPLIED,
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
@@ -577,6 +557,7 @@ fn heal_forward(
 }
 
 /// The forward target sync state: `applied = observed`, base/work move to the target, `held` cleared.
+/// `observed` + `observed_version_id` are the served target (unchanged by an apply).
 pub(crate) fn forwarded_sync(
     sync: &SyncState,
     target: [u8; 32],
@@ -585,8 +566,8 @@ pub(crate) fn forwarded_sync(
     SyncState {
         schema_version: sync.schema_version,
         observed: sync.observed,
+        observed_version_id: sync.observed_version_id.clone(),
         applied: sync.observed,
-        recorded: sync.recorded.clone(),
         base_commit: to_hex(&target),
         work_hash: target_digest_hex.to_owned(),
         held: false,
@@ -621,7 +602,7 @@ pub(crate) fn snapshot_draft(
     scanned: &ScannedBundle,
 ) -> Result<String, ClientError> {
     let base = super::parse_hex32(&lock.base_commit)?;
-    let draft_id = sign::commit_id(&Commit {
+    let draft_id = identity::commit_id(&Commit {
         parents: &[base],
         tree: scanned.bundle_digest,
         author: &ctx.device_id,
@@ -788,7 +769,7 @@ pub(crate) fn compute_work(
         None => return Ok(WorkState::Absent),
         // A dangling symlink (its target is gone — e.g. a crash in the rename-dance absent window) is
         // effectively ABSENT: the next pull first-installs into the resolved target and recovers, rather
-        // than alarming forever on an "unscannable" placement.
+        // than failing forever on an "unscannable" placement.
         Some(PathKind::Symlink) if std::fs::canonicalize(p).is_err() => {
             return Ok(WorkState::Absent);
         }
@@ -809,98 +790,23 @@ pub(crate) fn compute_work(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Authentication of a served record.
+// Scope-checking a served record.
 // ---------------------------------------------------------------------------------------------
 
-/// Whether the plane's currently-served `current` is an integrity ALARM — a forged / bad-signature /
-/// wrong-scope record, a reused `(epoch,seq)` naming a different commit, or a malformed response. Run while
-/// a conflict is on record (the block must not become a window that hides plane compromise). It mirrors the
-/// ALARM conditions of the main `checkForUpdates` but does NOT raise the floor or apply: a non-alarm verdict
-/// (including a legitimately newer `current`) is deferred until the conflict is resolved.
-fn served_current_is_alarm(
-    ctx: &Ctx<'_>,
-    skill_id: &str,
-    follow: &FollowContext,
-    sync: &SyncState,
-    known: Option<KnownCurrent>,
-) -> Result<bool, ClientError> {
-    match ctx.plane.get_current(skill_id, known) {
-        Ok(PointerFetch::Record(rec)) => {
-            let Some(authed) = authenticate(&rec, skill_id, &follow.workspace_id, &ctx.plane_key)
-            else {
-                return Ok(true); // bad signature / wrong scope
-            };
-            Ok(sync::evaluate_floor(
-                kgen(authed.generation),
-                authed.version_id,
-                kgen(sync.observed),
-                &kernel_recorded(sync)?,
-            )
-            .is_alarm())
-        }
-        Ok(PointerFetch::NotModified) => Ok(false),
-        Err(PlaneError::Malformed(_)) => Ok(true),
-        // Not served / unreachable: no alarm — the conflict stands and is re-disclosed by the caller.
-        Err(PlaneError::NotFound | PlaneError::Unavailable(_) | PlaneError::Unreachable(_)) => {
-            Ok(false)
-        }
-    }
-}
-
-struct Authed {
-    version_id: [u8; 32],
-    generation: Generation,
-}
-
-/// Authenticate a served `current` record and return its `version_id` — the reusable verify the `follow`
-/// offer disclosure shares with the engine. `None` on any signature/scope failure.
-pub(crate) fn authenticated_version_id(
-    rec: &topos_types::SignedCurrentRecord,
+/// Confirm a served `current` record's `(workspace_id, skill_id)` scope is the one we follow and return its
+/// `version_id`. A mis-scoped record (a cross-workspace / cross-skill record served in error) is a
+/// malformed response, NONE — never the sync target. Shared by the engine and the `follow` offer
+/// disclosure. There is no signature: authority is the database row behind the pointer, integrity is the
+/// content-addressed `version_id` re-verified by digest on apply.
+pub(crate) fn scoped_version_id(
+    rec: &topos_types::WireCurrentRecord,
     skill_id: &str,
     workspace_id: &str,
-    plane_key: &[u8; 32],
 ) -> Option<[u8; 32]> {
-    authenticate(rec, skill_id, workspace_id, plane_key).map(|a| a.version_id)
-}
-
-/// Authenticate a served `current` record: decode + verify the signature against the pinned plane key,
-/// and confirm the record's `(workspace_id, skill_id)` scope is the one we follow (defeating a
-/// cross-workspace / cross-skill replay of an otherwise-valid signed pointer). `None` on any failure.
-fn authenticate(
-    rec: &topos_types::SignedCurrentRecord,
-    skill_id: &str,
-    workspace_id: &str,
-    plane_key: &[u8; 32],
-) -> Option<Authed> {
     if rec.scope.skill_id != skill_id || rec.scope.workspace_id != workspace_id {
         return None;
     }
-    let version_id = super::parse_hex32(&rec.record.version_id).ok()?;
-    let sig = decode_sig(&rec.signature.value)?;
-    let pointer = sign::CurrentPointer {
-        workspace_id: &rec.scope.workspace_id,
-        skill_id: &rec.scope.skill_id,
-        version_id,
-        epoch: rec.record.generation.epoch,
-        seq: rec.record.generation.seq,
-    };
-    if sign::verify_pointer(&pointer, &sig, plane_key) {
-        Some(Authed {
-            version_id,
-            generation: rec.record.generation,
-        })
-    } else {
-        None
-    }
-}
-
-/// Decode the base64url-unpadded `Signature.value` (86 chars) into a raw 64-byte Ed25519 signature.
-fn decode_sig(value: &str) -> Option<[u8; 64]> {
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value)
-        .ok()?;
-    bytes.try_into().ok()
+    super::parse_hex32(&rec.record.version_id).ok()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -924,49 +830,6 @@ fn fetch(
         })
 }
 
-fn kgen(g: Generation) -> KGen {
-    KGen {
-        epoch: g.epoch,
-        seq: g.seq,
-    }
-}
-
-fn kernel_recorded(sync: &SyncState) -> Result<Vec<sync::RecordedTuple>, ClientError> {
-    sync.recorded
-        .iter()
-        .map(|t| {
-            Ok(sync::RecordedTuple {
-                generation: kgen(t.generation),
-                commit_id: super::parse_hex32(&t.commit_id)?,
-            })
-        })
-        .collect()
-}
-
-/// Reject a `recorded` list with a duplicate generation naming different commits (local corruption — the
-/// reused-tuple ALARM relies on a unique generation → commit map). Runs per followed skill at the top of
-/// every pull, so it is O(n log n), not all-pairs: sort a copy by `(generation, commit)` — any duplicate
-/// generation naming two commits then has a differing adjacent pair inside its equal-generation run.
-/// Semantics are identical to the quadratic scan (exact-duplicate tuples stay tolerated).
-fn validate_recorded_unique(recorded: &[RecordedTuple]) -> Result<(), ClientError> {
-    let mut sorted: Vec<&RecordedTuple> = recorded.iter().collect();
-    sorted.sort_unstable_by(|a, b| {
-        (a.generation.epoch, a.generation.seq, &a.commit_id).cmp(&(
-            b.generation.epoch,
-            b.generation.seq,
-            &b.commit_id,
-        ))
-    });
-    for pair in sorted.windows(2) {
-        if pair[0].generation == pair[1].generation && pair[0].commit_id != pair[1].commit_id {
-            return Err(ClientError::Corrupt(
-                "recorded history has a duplicate generation naming two commits".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Whether `g` is the genesis sentinel `(0,0)`.
 fn is_zero_gen(g: Generation) -> bool {
     g.epoch == 0 && g.seq == 0
@@ -976,12 +839,12 @@ fn is_zero_gen(g: Generation) -> bool {
 /// applied, on the all-zero base. An `add`-ed skill carries a real local genesis (a non-zero `base_commit`),
 /// and a received skill has applied a version (`applied` > `(0,0)`), so neither is ever mistaken for it.
 ///
-/// DURABLE across sweeps: keyed on `applied` + the zero base, NOT `recorded`/`observed`. A bare sweep that
-/// only OFFERS a first-receive baseline still raises the floor + records the tuple (so the conditional GET and
-/// the anti-rollback floor keep working) — which would make `recorded`/`observed` non-empty after sweep 1, so
-/// keying on those would let a SECOND auto sweep mistake the still-unapproved baseline for a normal followed
-/// skill and AUTO-LAND it (breaking I-TOFU). `applied` stays `(0,0)` and `base_commit` stays all-zero until the
-/// first explicit accept actually MATERIALIZES bytes, so they remain a true "never placed" signal every sweep.
+/// DURABLE across sweeps: keyed on `applied` + the zero base, NOT `observed`. A bare sweep that only OFFERS a
+/// first-receive baseline still moves `observed` to the served target (so the conditional GET keeps working)
+/// — which would make `observed` non-zero after sweep 1, so keying on it would let a SECOND auto sweep
+/// mistake the still-unapproved baseline for a normal followed skill and AUTO-LAND it (breaking I-TOFU).
+/// `applied` stays `(0,0)` and `base_commit` stays all-zero until the first explicit accept actually
+/// MATERIALIZES bytes, so they remain a true "never placed" signal every sweep.
 pub(crate) fn is_never_received(sync: &SyncState) -> bool {
     is_zero_gen(sync.applied) && is_zero_commit(&sync.base_commit)
 }
@@ -992,28 +855,17 @@ fn is_zero_commit(commit_hex: &str) -> bool {
     commit_hex.len() == 64 && commit_hex.bytes().all(|b| b == b'0')
 }
 
-/// What the client holds for the conditional GET: the floor generation + the commit recorded there, or
-/// `None` for the never-received baseline (empty `recorded`) → an unconditional first GET. A non-empty
-/// `recorded` always carries the observed generation (it is recorded the instant the floor rises), so a
-/// real skill resolves to `Some`; an absence there is the existing local-corruption error.
+/// What the client holds for the conditional GET: the observed generation + the commit it names, or `None`
+/// for the never-received baseline (no observed commit yet — the all-zero sentinel) → an unconditional first
+/// GET. A skill that has ever seen a `current` carries a real `observed_version_id`, so it resolves to `Some`.
 fn known_current(sync: &SyncState) -> Result<Option<KnownCurrent>, ClientError> {
-    if sync.recorded.is_empty() {
+    if is_zero_commit(&sync.observed_version_id) {
         return Ok(None);
     }
     Ok(Some(KnownCurrent {
         generation: sync.observed,
-        version_id: recorded_commit(sync, sync.observed)?,
+        version_id: super::parse_hex32(&sync.observed_version_id)?,
     }))
-}
-
-fn recorded_commit(sync: &SyncState, wanted: Generation) -> Result<[u8; 32], ClientError> {
-    let hex = sync
-        .recorded
-        .iter()
-        .find(|t| t.generation == wanted)
-        .map(|t| t.commit_id.clone())
-        .ok_or_else(|| ClientError::Corrupt("observed generation has no recorded commit".into()))?;
-    super::parse_hex32(&hex)
 }
 
 pub(crate) fn lock_from_bundle(
@@ -1045,14 +897,6 @@ pub(crate) fn first_placement(map: &PlacementMap) -> Result<String, ClientError>
         .first()
         .cloned()
         .ok_or_else(|| ClientError::Corrupt("placement map has no placement".into()))
-}
-
-/// Whether an error is an INTEGRITY stop (forged/corrupt fetched bytes — surface a loud per-skill ALARM)
-/// versus a transient failure to propagate. A `commit` id-mismatch (`Corrupt`) or a `render_verified`
-/// digest mismatch (`Verify`) means the served bytes did not authenticate; an `Io`/`Plane`/store error is
-/// transient.
-fn is_integrity_error(e: &ClientError) -> bool {
-    matches!(e, ClientError::Corrupt(_) | ClientError::Verify(_))
 }
 
 /// fsync a named durability batch through the fault-injectable fs seam — files first, then the dirs
@@ -1095,10 +939,6 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         conflict: None,
         merge: None,
     }
-}
-
-fn alarm(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
-    state_row(name, sync, action)
 }
 
 fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {

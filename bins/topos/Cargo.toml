@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The CLIENT app (lib + thin bin): the 12-verb domain ops, the pull state machine, the sidecar, namespace-atomic materialization, the device-flow client + device-key signer. A thin sync tool, never an authority — depends on NO SQL and NO plane-store (architectural layering, asserted by a cargo-tree check)."
+description = "The CLIENT app (lib + thin bin): the 12-verb domain ops, the pull state machine, the sidecar, namespace-atomic materialization, and the device-flow client. A thin sync tool, never an authority — depends on NO SQL and NO plane-store (architectural layering, asserted by a cargo-tree check)."
 
 [features]
 # Exposes the narrow, test-only `test_support` module — a public facade an EXTERNAL integration crate (the
@@ -35,21 +35,19 @@ rustix.workspace = true
 # (its own TLS stack); it carries NO plane-store/sqlx/libsqlite3-sys/tokio edge — check-arch holds the line.
 ureq.workspace = true
 hex.workspace = true
-# base64url: DECODE-side for the signed `current` pointer's Signature.value (86 chars) + the bootstrap's
-# plane signing key (verified against the pinned key); ENCODE-side for the enrollment wire (the device
-# public key in the authorize/redeem bodies + the enroll-possession signature in the `Topos-Device-Signature`
-# header). Wire encoding only, NOT the private-key signing edge (no key, no RNG) — so it does not cross the
-# architectural line check-arch enforces (no plane-store/sqlx).
+# base64: ENCODE-side for the enrollment wire (the device public key, base64url, in the authorize/redeem
+# bodies) + the contribute candidate's `content_base64` (STANDARD). Wire encoding only — it does not cross
+# the architectural line check-arch enforces (no plane-store/sqlx).
 base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-# The device-key SIGNER — the client's ONLY private-key edge: the local device identity signs enroll /
-# governance / device-op frames over topos-core's frozen preimages. Ed25519 over the workspace pin, opting
-# into `std` + `zeroize` (zeroize restores SigningKey's zero-on-drop that the no_std default would strip).
-# `getrandom` is the OS CSPRNG for first-run seed generation; `zeroize` wipes the transient raw seed buffer.
-# NONE of these cross check-arch's line (it bans only plane-store/sqlx/libsqlite3-sys/tokio/reqwest/hyper) —
-# topos-core stays verify-only no_std, and the signing edge is the CLIENT's own, never plane-store's. (These
-# also serve the test that signs a fixture `current` pointer — a normal dep is available to tests too.)
+# The device KEYPAIR — the device's presented identity: the public key registers the device at enroll and
+# derives the `dk_…` id presented on requests. NOTHING signs with the private key (git/GitHub-level trust:
+# the client trusts the plane it enrolled with). Ed25519 over the workspace pin (used for keygen —
+# `SigningKey::from_bytes`), opting into `std` + `zeroize` (zeroize restores SigningKey's zero-on-drop that
+# the no_std default would strip). `getrandom` is the OS CSPRNG for first-run seed generation; `zeroize`
+# wipes the transient raw seed buffer. NONE of these cross check-arch's line (it bans only
+# plane-store/sqlx/libsqlite3-sys/tokio/reqwest/hyper).
 ed25519-dalek = { workspace = true, features = ["std", "zeroize"] }
 getrandom.workspace = true
 zeroize.workspace = true

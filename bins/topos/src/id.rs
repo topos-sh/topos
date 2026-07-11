@@ -2,7 +2,7 @@
 //! path or splices into a URL path.
 //!
 //! A skill id keys `~/.topos/skills/<id>` (and the lock file, and the staging dir) **and** the harness
-//! placement (`~/.claude/skills/<id>`), so under the TOFU model a plane-chosen string reaches a `join`.
+//! placement (`~/.claude/skills/<id>`), so a plane-chosen string reaches a `join`.
 //! [`SkillId`] mirrors the server's parse-don't-validate discipline (`plane-store`'s id newtypes): an id
 //! is parsed ONCE at the boundary it enters the client — the redeem/bootstrap wire responses, the
 //! persisted `follows.json` / enrollment-WAL loads, the local `skills/` directory names — and only the

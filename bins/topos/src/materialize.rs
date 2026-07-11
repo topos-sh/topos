@@ -426,7 +426,7 @@ mod tests {
     use topos_core::digest::{self, FileMode, ManifestEntry};
     use topos_gitstore::RenderedFile;
     use topos_types::Generation;
-    use topos_types::persisted::{LockedFile, RecordedTuple};
+    use topos_types::persisted::LockedFile;
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -543,11 +543,8 @@ mod tests {
         SyncState {
             schema_version: 1,
             observed,
+            observed_version_id: base.to_owned(),
             applied,
-            recorded: vec![RecordedTuple {
-                generation: observed,
-                commit_id: base.to_owned(),
-            }],
             base_commit: base.to_owned(),
             work_hash: work.to_owned(),
             held: false,

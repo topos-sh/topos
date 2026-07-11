@@ -111,7 +111,6 @@ impl Rig {
             layout: Layout::new(&self.home.0),
             harness: &self.harness,
             plane: &self.plane,
-            plane_key: [0u8; 32],
             follow: &self.follow,
         }
     }

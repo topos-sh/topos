@@ -3,8 +3,9 @@
 //!
 //! [`UreqPlane`] is a **dumb transport** — it speaks the B3 wire (`GET /v1/current/{read_token}` with the
 //! commit-sensitive conditional-GET headers; `GET …/versions/{id}` + per-blob `GET …/bundles/{id}` under a
-//! Bearer token) and verifies each blob's `sha256 == object_id`, but it does **not** verify the pointer
-//! signature — the engine does that against `ctx.plane_key`. Status mapping ([`classify`]), version
+//! Bearer token) and verifies each blob's `sha256 == object_id`. The `current` pointer is unsigned; the
+//! engine scope-checks it and re-verifies the fetched bytes against the content-addressed `version_id` on
+//! apply. Status mapping ([`classify`]), version
 //! assembly ([`build_fetched_version`]), and the envelope mappings are factored as pure functions so the
 //! wire logic is unit-tested without a live server; the full loopback round-trips live in the `tests/`
 //! member.
@@ -29,7 +30,7 @@ use topos_types::requests::{
     WireProposalList, WireSkillIndex, WireVersionMeta,
 };
 use topos_types::results::InviteData;
-use topos_types::{BootstrapData, JsonEnvelope, SignedCurrentRecord};
+use topos_types::{BootstrapData, JsonEnvelope, WireCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
@@ -165,8 +166,8 @@ impl PlaneSource for UreqPlane {
             ))),
             HttpClass::Ok => {
                 let bytes = read_body(resp)?;
-                // Transport only deserializes — the engine authenticates the signature against the plane key.
-                let rec = serde_json::from_slice::<SignedCurrentRecord>(&bytes).map_err(|e| {
+                // Transport only deserializes — the engine scope-checks the record + re-verifies the bytes.
+                let rec = serde_json::from_slice::<WireCurrentRecord>(&bytes).map_err(|e| {
                     PlaneError::Malformed(format!("current record for {skill_id}: {e}"))
                 })?;
                 Ok(PointerFetch::Record(rec))
@@ -362,19 +363,20 @@ impl FollowSource for FileFollow {
 }
 
 // =================================================================================================
-// UreqDeviceClient — the real creds-free DEVICE-SIGNED transport (sibling of the read-credentialed
-// `UreqPlane`). One client speaks every route a device key (not a read token) authenticates: the
-// enrollment flow (`GET /i/{token}`, `POST /v1/device/authorize`, `POST /v1/device/token`, the redeem
+// UreqDeviceClient — the real DEVICE transport (sibling of the read-credentialed `UreqPlane`). One client
+// speaks every route a device key (not a read token) authenticates: the enrollment flow
+// (`GET /i/{token}`, `POST /v1/device/authorize`, `POST /v1/device/token`, the redeem
 // `POST /v1/workspaces/{ws}/devices`), the governance Invite POST, and the four contribute writes
-// (publish / propose / revert / review) — the signature rides the `Topos-Device-Signature` header, and
-// every terminal protocol outcome of a write comes back as the all-outcome **200 envelope**. The
-// `/i/{token}` URL, the device code, and the grant are sensitive — never logged or put in an error.
+// (publish / propose / revert / review) — the body (or the `Topos-Device-Key-Id` header on the catalog
+// read) names the acting `device_key_id`, and every terminal protocol outcome of a write comes back as the
+// all-outcome **200 envelope**. The `/i/{token}` URL, the device code, and the grant are sensitive —
+// never logged or put in an error.
 // =================================================================================================
 
-/// The blocking `ureq` device-signed transport (`EnrollSource` + `GovernanceSource` +
-/// `ContributeSource`). Holds the base URL + one configured agent and NO credential map — it is
-/// creds-free: authentication is the per-request device-op signature in the `Topos-Device-Signature`
-/// header (enrollment starts unauthenticated; the redeem mints the read tokens `UreqPlane` then holds).
+/// The blocking `ureq` device transport (`EnrollSource` + `GovernanceSource` + `ContributeSource`). Holds
+/// the base URL + one configured agent and NO credential map — the acting device is named by the request
+/// body (or the `Topos-Device-Key-Id` header); enrollment starts unauthenticated, and the redeem mints the
+/// read tokens `UreqPlane` then holds.
 pub(crate) struct UreqDeviceClient {
     base_url: String,
     agent: ureq::Agent,
@@ -399,13 +401,12 @@ impl UreqDeviceClient {
         }
     }
 
-    /// POST a JSON body (optionally with the device-signature header). Returns `(status, body bytes)`.
-    /// `what` names the step for a transport-fault message; the body is NEVER echoed (it may hold a secret).
+    /// POST a JSON body. Returns `(status, body bytes)`. `what` names the step for a transport-fault
+    /// message; the body is NEVER echoed (it may hold a secret).
     fn post_json(
         &self,
         url: &str,
         body: &serde_json::Value,
-        sig_b64: Option<&str>,
         what: &str,
     ) -> Result<(u16, Vec<u8>), ClientError> {
         // Serialize ourselves + `send` the bytes (the `ureq` `json` feature is not enabled — this keeps the
@@ -414,14 +415,10 @@ impl UreqDeviceClient {
         let payload = serde_json::to_vec(body).map_err(|_| {
             ClientError::Corrupt(format!("{what}: could not serialize the request"))
         })?;
-        let mut req = self
+        let resp = self
             .agent
             .post(url)
-            .header("content-type", "application/json");
-        if let Some(sig) = sig_b64 {
-            req = req.header("topos-device-signature", sig);
-        }
-        let resp = req
+            .header("content-type", "application/json")
             .send(payload.as_slice())
             .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?;
         let status = resp.status().as_u16();
@@ -439,7 +436,7 @@ impl UreqDeviceClient {
         let body = serde_json::to_value(req)
             .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
         let url = format!("{}/v1/device/authorize", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, None, what)?;
+        let (status, bytes) = self.post_json(&url, &body, what)?;
         if classify(status) != HttpClass::Ok {
             return Err(ClientError::Plane(format!("{what}: HTTP {status}")));
         }
@@ -447,21 +444,19 @@ impl UreqDeviceClient {
             .map_err(|e| ClientError::WireInvalid(format!("authorize response is malformed: {e}")))
     }
 
-    /// POST a device-signed contribute write (the 64-byte device-op signature in the
-    /// `Topos-Device-Signature` header) and map the all-outcome **200 envelope** to a [`WriteReceipt`].
-    /// The four verbs differ only by `path` + body type; the signing rode the body's bound identity.
+    /// POST a contribute write (the body names the acting `device_key_id`) and map the all-outcome **200
+    /// envelope** to a [`WriteReceipt`]. The four verbs differ only by `path` + body type; the op kind is
+    /// derived from the route server-side.
     fn post_write<T: serde::Serialize>(
         &self,
         path: &str,
         body: &T,
-        device_sig: [u8; 64],
         what: &str,
     ) -> Result<WriteReceipt, ClientError> {
         let value = serde_json::to_value(body)
             .map_err(|e| ClientError::Corrupt(format!("{what} body: {e}")))?;
         let url = format!("{}{path}", self.base_url);
-        let sig = b64(&device_sig); // 64 bytes → 86 base64url-unpadded chars (the frozen header codec).
-        let (status, bytes) = self.post_json(&url, &value, Some(&sig), what)?;
+        let (status, bytes) = self.post_json(&url, &value, what)?;
         map_write_envelope(status, &bytes)
     }
 }
@@ -525,7 +520,7 @@ impl EnrollSource for UreqDeviceClient {
             },
             "standup authorize",
         )?;
-        // The plane block is what a standup device TOFU-pins; a response without it is unusable.
+        // The plane block declares the API base a standup device dials; a response without it is unusable.
         let plane = resp.plane.clone().ok_or_else(|| {
             ClientError::WireInvalid("a standup authorize carried no plane block".into())
         })?;
@@ -541,7 +536,7 @@ impl EnrollSource for UreqDeviceClient {
         })
         .map_err(|e| ClientError::Corrupt(format!("token body: {e}")))?;
         let url = format!("{}/v1/device/token", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, None, "device token poll")?;
+        let (status, bytes) = self.post_json(&url, &body, "device token poll")?;
         if classify(status) != HttpClass::Ok {
             return Err(ClientError::Plane(format!(
                 "device token poll: HTTP {status}"
@@ -589,7 +584,6 @@ impl EnrollSource for UreqDeviceClient {
         workspace_id: &str,
         grant: &str,
         device_public_key: [u8; 32],
-        enroll_sig: [u8; 64],
     ) -> Result<Redeem, ClientError> {
         // The workspace id is spliced into the URL path below — validate before building the request
         // (it entered via the bootstrap, which already validated; this is the last-line guard).
@@ -601,8 +595,7 @@ impl EnrollSource for UreqDeviceClient {
         })
         .map_err(|e| ClientError::Corrupt(format!("redeem body: {e}")))?;
         let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
-        let sig = b64(&enroll_sig);
-        let (status, bytes) = self.post_json(&url, &body, Some(&sig), "redeem")?;
+        let (status, bytes) = self.post_json(&url, &body, "redeem")?;
         map_redeem_envelope(RedeemKind::Grant, status, &bytes)
     }
 
@@ -612,9 +605,9 @@ impl EnrollSource for UreqDeviceClient {
         device_public_key: [u8; 32],
         display_name: &str,
     ) -> Result<Redeem, ClientError> {
-        // NOT device-signed on the wire (the claim token is the bearer capability); the display name is
-        // disclosure-only (the seated name comes from the mint-time claim row). The token is a SECRET —
-        // it rides the body, never a URL or an error message.
+        // The claim token is the bearer capability; the display name is disclosure-only (the seated name
+        // comes from the mint-time claim row). The token is a SECRET — it rides the body, never a URL or an
+        // error message.
         let body = serde_json::to_value(AdminClaimRequest {
             claim_token: claim_token.to_owned(),
             device_public_key: b64(&device_public_key),
@@ -622,7 +615,7 @@ impl EnrollSource for UreqDeviceClient {
         })
         .map_err(|_| ClientError::Corrupt("claim body: could not serialize".to_owned()))?;
         let url = format!("{}/v1/admin-claim", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, None, "admin claim")?;
+        let (status, bytes) = self.post_json(&url, &body, "admin claim")?;
         map_redeem_envelope(RedeemKind::Claim, status, &bytes)
     }
 }
@@ -703,9 +696,9 @@ fn device_authorize_from_wire(resp: DeviceAuthorizeResponse) -> DeviceAuthorize 
     }
 }
 
-/// Parse + validate the `/i/` bootstrap body: the serde decode (a non-Ed25519 `alg` fails the CLOSED
-/// enum), then the id boundary — the workspace id and every offered skill id must be safe path/URL
-/// segments (they persist into the WAL and later key path joins). **Pure**, unit-tested with canned JSON.
+/// Parse + validate the `/i/` bootstrap body: the serde decode, then the id boundary — the workspace id
+/// and every offered skill id must be safe path/URL segments (they persist into the WAL and later key path
+/// joins). **Pure**, unit-tested with canned JSON.
 fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
     let bootstrap: BootstrapData = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("invite bootstrap is malformed: {e}")))?;
@@ -718,22 +711,16 @@ fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
 }
 
 // =================================================================================================
-// The governance-write side of `UreqDeviceClient` — the owner's signed Invite POST. Creds-free (the 64-byte
-// governance signature is the auth, riding the `Topos-Device-Signature` header); mirrors `redeem`'s
-// all-outcome 200 envelope mapping.
+// The governance-write side of `UreqDeviceClient` — the owner's Invite POST (the body names the acting
+// `device_key_id`); mirrors `redeem`'s all-outcome 200 envelope mapping.
 // =================================================================================================
 
 impl GovernanceSource for UreqDeviceClient {
-    fn create_invite(
-        &self,
-        body: InviteRequest,
-        governance_sig: [u8; 64],
-    ) -> Result<InviteData, ClientError> {
+    fn create_invite(&self, body: InviteRequest) -> Result<InviteData, ClientError> {
         let value = serde_json::to_value(&body)
             .map_err(|e| ClientError::Corrupt(format!("invite body: {e}")))?;
         let url = format!("{}/v1/invites", self.base_url);
-        let sig = b64(&governance_sig);
-        let (status, bytes) = self.post_json(&url, &value, Some(&sig), "create invite")?;
+        let (status, bytes) = self.post_json(&url, &value, "create invite")?;
         map_invite_envelope(status, &bytes)
     }
 }
@@ -761,49 +748,32 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
 }
 
 // =================================================================================================
-// The contribute-write side of `UreqDeviceClient` — the device-signed publish / propose / revert / review
-// POSTs. Creds-free (the 64-byte device-op signature rides the `Topos-Device-Signature` header). UNLIKE
-// `map_invite_envelope`, a `!ok` body is NOT an error: CONFLICT / APPROVAL_REQUIRED / DENIED are terminal
-// protocol outcomes the verb branches on (carrying `current_generation` + `next_actions`).
+// The contribute-write side of `UreqDeviceClient` — the publish / propose / revert / review POSTs (each
+// body names the acting `device_key_id`). UNLIKE `map_invite_envelope`, a `!ok` body is NOT an error:
+// CONFLICT / APPROVAL_REQUIRED / DENIED are terminal protocol outcomes the verb branches on (carrying
+// `current_generation` + `next_actions`).
 // =================================================================================================
 
 impl ContributeSource for UreqDeviceClient {
-    fn publish(
-        &self,
-        body: PublishRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError> {
-        self.post_write("/v1/publish", &body, device_sig, "publish")
+    fn publish(&self, body: PublishRequest) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/publish", &body, "publish")
     }
-    fn propose(
-        &self,
-        body: ProposeRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError> {
-        self.post_write("/v1/proposals", &body, device_sig, "propose")
+    fn propose(&self, body: ProposeRequest) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/proposals", &body, "propose")
     }
-    fn revert(
-        &self,
-        body: RevertRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError> {
-        self.post_write("/v1/reverts", &body, device_sig, "revert")
+    fn revert(&self, body: RevertRequest) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/reverts", &body, "revert")
     }
-    fn review(
-        &self,
-        body: ReviewRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError> {
-        self.post_write("/v1/reviews", &body, device_sig, "review")
+    fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError> {
+        self.post_write("/v1/reviews", &body, "review")
     }
 }
 
 // =================================================================================================
-// The catalog-read side of `UreqDeviceClient` — the device-signed workspace-catalog GET (`list --remote`).
-// Creds-free (the 64-byte catalog-read signature rides `Topos-Device-Signature`, the `device_key_id`
-// selector rides `Topos-Device-Key-Id`); metadata only, no bytes. A 404 (not a member / no such
-// workspace) is the indistinguishable "no catalog" ⇒ mapped to an EMPTY index, so a caller sweeping
-// several workspaces degrades cleanly rather than erroring.
+// The catalog-read side of `UreqDeviceClient` — the workspace-catalog GET (`list --remote`). The acting
+// device is named by the `Topos-Device-Key-Id` header (catalog visibility == workspace membership); metadata
+// only, no bytes. A 404 (not a member / no such workspace) is the indistinguishable "no catalog" ⇒ mapped
+// to an EMPTY index, so a caller sweeping several workspaces degrades cleanly rather than erroring.
 // =================================================================================================
 
 impl CatalogSource for UreqDeviceClient {
@@ -811,7 +781,6 @@ impl CatalogSource for UreqDeviceClient {
         &self,
         workspace_id: &str,
         device_key_id: &str,
-        signature: &[u8; 64],
     ) -> Result<WireSkillIndex, PlaneError> {
         // The workspace id is spliced into the URL path — refuse anything outside the validated charset
         // (defense in depth; the enrollment loaders already validated what they persisted). The fixed
@@ -822,14 +791,12 @@ impl CatalogSource for UreqDeviceClient {
             ));
         }
         let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
-        // The read is authorized by the device signature (over `catalog_read_preimage`), not a token, so
-        // the URL carries no secret — it is safe in an error message.
-        let sig = b64(signature);
+        // The read is authorized by the named device key (resolved to a confirmed-member row), not a token,
+        // so the URL carries no secret — it is safe in an error message.
         let resp = self
             .agent
             .get(&url)
             .header("topos-device-key-id", device_key_id)
-            .header("topos-device-signature", &sig)
             .call()
             // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
             // unreachable — surfaced distinctly (the caller degrades it to a per-workspace warning).
@@ -874,14 +841,14 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
     let receipt = env
         .receipt
         .ok_or_else(|| ClientError::WireInvalid("a write 200 carried no receipt".to_owned()))?;
-    // The signed pointer is present ONLY when a pointer actually moved. NEEDS_REVIEW, an OK `review
-    // --reject` (the plane returns OK with no signed record → data `{}`), and every failure carry `{}`;
-    // parse leniently so a valid reject is never wrongly rejected as Corrupt.
-    let signed_record = serde_json::from_value::<SignedCurrentRecord>(env.data).ok();
+    // The pointer record is present ONLY when a pointer actually moved. NEEDS_REVIEW, an OK `review
+    // --reject` (the plane returns OK with no record → data `{}`), and every failure carry `{}`; parse
+    // leniently so a valid reject is never wrongly rejected as Corrupt.
+    let wire_record = serde_json::from_value::<WireCurrentRecord>(env.data).ok();
     Ok(WriteReceipt {
         receipt,
         error: env.error,
-        signed_record,
+        wire_record,
     })
 }
 
@@ -1236,13 +1203,12 @@ mod tests {
             expected_generation: Some(topos_types::Generation { epoch: 1, seq: 1 }),
             current_generation: Some(topos_types::Generation { epoch: 1, seq: 2 }),
             created_at: "2026-06-30T00:00:00Z".to_owned(),
-            key_id: Some("pk_plane".to_owned()),
             details: None,
         }
     }
 
-    fn signed_record_value() -> serde_json::Value {
-        serde_json::to_value(SignedCurrentRecord {
+    fn wire_record_value() -> serde_json::Value {
+        serde_json::to_value(WireCurrentRecord {
             schema_version: 1,
             scope: topos_types::PointerScope {
                 workspace_id: "w_demo".to_owned(),
@@ -1251,11 +1217,6 @@ mod tests {
             record: topos_types::CurrentRecord {
                 version_id: "a".repeat(64),
                 generation: topos_types::Generation { epoch: 1, seq: 2 },
-            },
-            signature: topos_types::Signature {
-                alg: topos_types::SignatureAlg::Ed25519,
-                key_id: "pk_plane".to_owned(),
-                value: "A".repeat(86),
             },
         })
         .unwrap()
@@ -1280,18 +1241,18 @@ mod tests {
     }
 
     #[test]
-    fn map_write_envelope_ok_carries_the_signed_record_and_digest() {
+    fn map_write_envelope_ok_carries_the_wire_record_and_digest() {
         let bytes = write_env(
             true,
-            signed_record_value(),
+            wire_record_value(),
             receipt(TerminalOutcome::Ok),
             None,
         );
         let wr = map_write_envelope(200, &bytes).expect("ok maps to a receipt");
         assert_eq!(wr.outcome(), TerminalOutcome::Ok);
         assert!(
-            wr.signed_record.is_some(),
-            "an OK move carries the signed pointer"
+            wr.wire_record.is_some(),
+            "an OK move carries the current pointer"
         );
         assert_eq!(
             wr.receipt.bundle_digest.as_deref(),
@@ -1302,7 +1263,7 @@ mod tests {
 
     #[test]
     fn map_write_envelope_needs_review_is_ok_with_no_record() {
-        // NEEDS_REVIEW: the proposal opened, nothing moved → data `{}`, no signed record, no error.
+        // NEEDS_REVIEW: the proposal opened, nothing moved → data `{}`, no record, no error.
         let bytes = write_env(
             true,
             serde_json::json!({}),
@@ -1311,13 +1272,13 @@ mod tests {
         );
         let wr = map_write_envelope(200, &bytes).expect("needs_review is a 200 receipt");
         assert_eq!(wr.outcome(), TerminalOutcome::NeedsReview);
-        assert!(wr.signed_record.is_none());
+        assert!(wr.wire_record.is_none());
         assert!(wr.error.is_none());
     }
 
     #[test]
     fn map_write_envelope_reject_ok_with_empty_data_is_not_corrupt() {
-        // THE regression guard: an OK `review --reject` returns outcome Ok with data `{}` (it signs
+        // THE regression guard: an OK `review --reject` returns outcome Ok with data `{}` (it moves
         // nothing). A strict `from_value` would wrongly fail it; the lenient `.ok()` keeps it valid.
         let bytes = write_env(
             true,
@@ -1327,7 +1288,7 @@ mod tests {
         );
         let wr = map_write_envelope(200, &bytes).expect("an OK reject is not Corrupt");
         assert_eq!(wr.outcome(), TerminalOutcome::Ok);
-        assert!(wr.signed_record.is_none(), "no pointer moved on a reject");
+        assert!(wr.wire_record.is_none(), "no pointer moved on a reject");
     }
 
     #[test]
@@ -1494,8 +1455,7 @@ mod tests {
             "plane": {
                 "base_url": "https://acme.topos.test",
                 "deployment_mode": "self_host",
-                "enrollment_method": "device_code",
-                "signing_key": { "alg": "Ed25519", "key_id": "pk_1", "value": "A".repeat(43) }
+                "enrollment_method": "device_code"
             },
             "workspace": {
                 "workspace_id": workspace_id,

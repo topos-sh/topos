@@ -58,9 +58,9 @@ pub(crate) struct ListOutcome {
 /// device signer + the memberships from `user.json`) and by the test (a fake transport). Present only
 /// under `--remote`; `None` is the local-only path.
 pub(crate) struct RemoteScope<'a> {
-    /// The device-signed catalog transport (`GET /v1/workspaces/{ws}/skills`).
+    /// The catalog transport (`GET /v1/workspaces/{ws}/skills`, naming the acting `device_key_id`).
     pub catalog: &'a dyn CatalogSource,
-    /// The device signer — signs each per-workspace catalog read and carries the `device_key_id` selector.
+    /// The device — carries the `device_key_id` the catalog read names (its registry row → confirmed member).
     pub signer: &'a DeviceSigner,
     /// Every workspace this install has joined, as `(workspace_id, display_label)` (from `user.json`) — the
     /// catalog targets.
@@ -86,7 +86,7 @@ pub(crate) struct ListEnrollment {
     /// The joined workspaces as `(workspace_id, display_label)` in membership order — the TTY groups the
     /// tracked rows by their `workspace_id` and names each group by its label (falling back to the raw id).
     pub workspace_labels: Vec<(String, String)>,
-    /// The pinned plane's base URL.
+    /// The enrolled plane's base URL.
     pub base_url: String,
     /// Whether the harness session-start currency hook is currently installed (read from the adapter's
     /// managed-entry disclosure — it names its config path only while the managed entry is present).
@@ -291,7 +291,7 @@ pub(crate) fn list(
         _ => Vec::new(),
     };
 
-    // The `--remote` catalog: for each followed workspace, a device-signed catalog read merged with the
+    // The `--remote` catalog: for each followed workspace, a catalog read merged with the
     // local follow-state. A per-workspace transport fault degrades to a warning (never fails the `list`).
     let mut warnings: Vec<String> = Vec::new();
     let remote_available = match (remote, skill) {
@@ -323,7 +323,7 @@ pub(crate) fn list(
     })
 }
 
-/// Read each target workspace's catalog (device-signed) and merge every entry with the local follow-state.
+/// Read each target workspace's catalog and merge every entry with the local follow-state.
 /// A per-workspace signing or transport fault DEGRADES: the workspace is skipped with a stable-shape
 /// warning line (the same isolation `pull`'s sweep uses), and the successfully-read workspaces still land.
 /// The result is sorted deterministically by `(workspace_id, skill_id)`.
@@ -335,30 +335,21 @@ fn build_remote(
 ) -> Vec<RemoteSkillEntry> {
     let mut out: Vec<RemoteSkillEntry> = Vec::new();
     for (ws_id, ws_label) in scope.target_workspaces() {
-        // Sign the catalog read for THIS workspace (the signature binds the workspace id + device key id).
-        let signature = match scope.signer.sign_catalog_read(ws_id) {
-            Ok(sig) => sig,
-            Err(_) => {
+        // Read THIS workspace's catalog — the acting device is named by the `Topos-Device-Key-Id` header
+        // (catalog visibility == workspace membership, resolved from the registry row).
+        let index = match scope
+            .catalog
+            .fetch_catalog(ws_id, scope.signer.device_key_id())
+        {
+            Ok(index) => index,
+            Err(e) => {
                 warnings.push(format!(
-                    "could not sign the catalog read for workspace {ws_label} — skipped"
+                    "could not read the catalog for workspace {ws_label} ({}) — skipped",
+                    catalog_err_label(&e)
                 ));
                 continue;
             }
         };
-        let index =
-            match scope
-                .catalog
-                .fetch_catalog(ws_id, scope.signer.device_key_id(), &signature)
-            {
-                Ok(index) => index,
-                Err(e) => {
-                    warnings.push(format!(
-                        "could not read the catalog for workspace {ws_label} ({}) — skipped",
-                        catalog_err_label(&e)
-                    ));
-                    continue;
-                }
-            };
         for entry in &index.skills {
             out.push(RemoteSkillEntry {
                 skill_id: entry.skill_id.clone(),
@@ -513,7 +504,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_core::sign::{CatalogReadFields, verify_catalog_read};
     use topos_harness::ClaudeCode;
     use topos_types::persisted::Lock;
     use topos_types::requests::{WireSkillIndex, WireSkillIndexEntry};
@@ -547,26 +537,23 @@ mod tests {
         dir
     }
 
-    /// A fake device-signed catalog transport: canned per-workspace responses (`Ok` index or a transport
-    /// fault), capturing every `(workspace_id, device_key_id, signature)` so the test can prove the caller
-    /// signed the correct per-workspace frame.
+    /// A fake catalog transport: canned per-workspace responses (`Ok` index or a transport fault),
+    /// capturing every `(workspace_id, device_key_id)` so the test can prove the caller named the correct
+    /// per-workspace + this device's key id.
     struct FakeCatalog {
         ok: HashMap<String, WireSkillIndex>,
         fail: HashSet<String>,
-        calls: RefCell<Vec<(String, String, [u8; 64])>>,
+        calls: RefCell<Vec<(String, String)>>,
     }
     impl CatalogSource for FakeCatalog {
         fn fetch_catalog(
             &self,
             workspace_id: &str,
             device_key_id: &str,
-            signature: &[u8; 64],
         ) -> Result<WireSkillIndex, PlaneError> {
-            self.calls.borrow_mut().push((
-                workspace_id.to_owned(),
-                device_key_id.to_owned(),
-                *signature,
-            ));
+            self.calls
+                .borrow_mut()
+                .push((workspace_id.to_owned(), device_key_id.to_owned()));
             if self.fail.contains(workspace_id) {
                 return Err(PlaneError::Unavailable("boom".into()));
             }
@@ -673,7 +660,6 @@ mod tests {
             layout: layout.clone(),
             harness: &harness,
             plane: &plane,
-            plane_key: [0u8; 32],
             follow: &follow,
         };
 
@@ -703,20 +689,11 @@ mod tests {
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
         assert!(out.warnings[0].contains("Beta"), "{:?}", out.warnings);
 
-        // Both workspaces were signed + read; each captured signature verifies over the per-workspace
-        // frame the plane rebuilds (the caller signed the correct workspace, with this device's key id).
+        // Both workspaces were read; each call named this device's key id (the catalog-visibility selector).
         let calls = fake.calls.borrow();
         assert_eq!(calls.len(), 2);
-        for (ws, key_id, sig) in calls.iter() {
+        for (_ws, key_id) in calls.iter() {
             assert_eq!(key_id, signer.device_key_id());
-            let fields = CatalogReadFields {
-                workspace_id: ws,
-                device_key_id: signer.device_key_id(),
-            };
-            assert!(
-                verify_catalog_read(&fields, sig, &signer.public_key()),
-                "signature must verify for workspace {ws}"
-            );
         }
     }
 
@@ -759,7 +736,6 @@ mod tests {
             layout: layout.clone(),
             harness: &harness,
             plane: &plane,
-            plane_key: [0u8; 32],
             follow: &follow,
         };
 
@@ -817,7 +793,6 @@ mod tests {
             layout: layout.clone(),
             harness: &harness,
             plane: &plane,
-            plane_key: [0u8; 32],
             follow: &follow,
         };
         let scope = RemoteScope {

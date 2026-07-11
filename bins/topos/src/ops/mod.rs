@@ -57,7 +57,9 @@ pub(crate) use unfollow::unfollow;
 pub(crate) use uninstall::{UninstallOutcome, uninstall};
 pub(crate) use upgrade::{UpgradeAction, UpgradeOpts, UpgradeOutcome, upgrade};
 
-use topos_types::persisted::{Lock, RecordedTuple, SyncState};
+use topos_core::digest::to_hex;
+use topos_gitstore::Store;
+use topos_types::persisted::Lock;
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -296,29 +298,25 @@ impl VersionRef {
     }
 }
 
-/// Resolve a [`VersionRef`] against `recorded` — the skill's locally recorded `(generation → commit)`
-/// pointer history from `sync.json`. That list is THE resolution source for every prefix surface, and it
-/// is always present for their flows: a go-back target must be recorded (its generation must be known),
-/// and a revert/plane-diff target is a version that was `current` at some point this client verified.
-/// (The gitstore's version refs are deliberately NOT consulted: they also hold draft snapshots and merge
-/// intermediates, which are never valid targets here.)
+/// Resolve a [`VersionRef`] against `known` — the 64-hex ids of the versions this client holds LOCALLY (the
+/// skill's gitstore). That set is THE resolution source for every prefix surface: a go-back can only install
+/// bytes it already has, and a revert/plane-diff target is a version this client has previously fetched.
 ///
 /// A full id passes through untouched (it needs no local history). A prefix resolves iff it matches
-/// exactly one distinct recorded commit; zero matches → `Ok(None)` (each caller maps its own flow's
+/// exactly one distinct local version; zero matches → `Ok(None)` (each caller maps its own flow's
 /// not-found error), two or more → `INVALID_ARGUMENT` naming the candidates' short forms.
 pub(crate) fn resolve_version_ref(
-    recorded: &[RecordedTuple],
+    known: &[String],
     vref: &VersionRef,
 ) -> Result<Option<[u8; 32]>, ClientError> {
     let prefix = match vref {
         VersionRef::Full(h) => return Ok(Some(*h)),
         VersionRef::Prefix(p) => p,
     };
-    // Distinct commits only: one commit can be recorded at several generations (e.g. an epoch restore),
-    // and matching it twice must not read as ambiguity.
-    let mut matches: Vec<&str> = recorded
+    // Distinct commits only (a version id appearing twice must not read as ambiguity).
+    let mut matches: Vec<&str> = known
         .iter()
-        .map(|t| t.commit_id.as_str())
+        .map(String::as_str)
         .filter(|c| c.starts_with(prefix.as_str()))
         .collect();
     matches.sort_unstable();
@@ -337,36 +335,25 @@ pub(crate) fn resolve_version_ref(
     }
 }
 
-/// The skill's locally recorded pointer history (`sync.json` `recorded`), or empty when no sync doc
-/// exists yet — the candidate set [`resolve_version_ref`] resolves a prefix against.
-pub(crate) fn recorded_history(
-    ctx: &Ctx<'_>,
+/// The 64-hex ids of the versions this skill holds in its local gitstore, or empty when no store exists yet
+/// — the candidate set [`resolve_version_ref`] resolves a prefix against.
+pub(crate) fn local_version_ids(
+    _ctx: &Ctx<'_>,
     sp: &SkillPaths,
-) -> Result<Vec<RecordedTuple>, ClientError> {
-    Ok(doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?
-        .map(|s| s.recorded)
-        .unwrap_or_default())
+) -> Result<Vec<String>, ClientError> {
+    if !sp.store.exists() {
+        return Ok(Vec::new());
+    }
+    let store = Store::open(&sp.store)?;
+    Ok(store.list_versions()?.iter().map(|v| to_hex(v)).collect())
 }
 
 #[cfg(test)]
 mod tests {
-    use topos_types::Generation;
-    use topos_types::persisted::RecordedTuple;
-
     use super::{VersionRef, parse_hex32, parse_hex32_arg, resolve_version_ref};
 
-    fn recorded(commits: &[&str]) -> Vec<RecordedTuple> {
-        commits
-            .iter()
-            .enumerate()
-            .map(|(i, c)| RecordedTuple {
-                generation: Generation {
-                    epoch: 1,
-                    seq: i as u64,
-                },
-                commit_id: (*c).to_owned(),
-            })
-            .collect()
+    fn recorded(commits: &[&str]) -> Vec<String> {
+        commits.iter().map(|c| (*c).to_owned()).collect()
     }
 
     #[test]
@@ -423,8 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn prefix_resolution_dedupes_one_commit_recorded_at_two_generations() {
-        // The same commit at two generations (an epoch restore) is ONE candidate, not an ambiguity.
+    fn prefix_resolution_dedupes_a_repeated_version_id() {
+        // A version id appearing twice in the local set is ONE candidate, not an ambiguity.
         let c = format!("ab12cd34{}", "0".repeat(56));
         let recs = recorded(&[&c, &c]);
         let hit = resolve_version_ref(&recs, &VersionRef::Prefix("ab12cd34".into()))
@@ -547,7 +534,6 @@ mod tests {
                 layout: home.clone(),
                 harness: &harness,
                 plane: &plane,
-                plane_key: [0u8; 32],
                 follow,
             };
             f(&ctx)

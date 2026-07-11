@@ -8,7 +8,7 @@
 //! Team-only — the local go-back is `pull <skill>@<hash>`.
 
 use topos_core::digest::to_hex;
-use topos_core::sign::{self, Commit};
+use topos_core::identity::{self, Commit};
 use topos_types::persisted::{OpKind, OpRecord};
 use topos_types::results::RevertData;
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
@@ -59,12 +59,12 @@ pub(crate) fn revert(
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
-    // Resolve both refs against the skill's recorded pointer history (a revert target is a version that
-    // was `current` at some point this client verified — exactly what `recorded` holds). The resolved
-    // FULL hex is what every downstream surface carries (`good`, the WAL, `reverted_to` — whose schema
-    // pins 64 hex), so a prefix never leaks into a document or the wire.
-    let recorded = super::recorded_history(ctx, &sp)?;
-    let good_commit = resolve_version_ref(&recorded, &to_ref)?.ok_or_else(|| {
+    // Resolve the ref against the versions this client holds locally (a revert target is a version this
+    // client has previously fetched). The resolved FULL hex is what every downstream surface carries
+    // (`good`, the WAL, `reverted_to` — whose schema pins 64 hex), so a prefix never leaks into a document
+    // or the wire.
+    let known = super::local_version_ids(ctx, &sp)?;
+    let good_commit = resolve_version_ref(&known, &to_ref)?.ok_or_else(|| {
         ClientError::InvalidArgument(format!(
             "--to '{}' matches no locally recorded version of '{skill_name}'; use the full \
              64-char version id",
@@ -110,7 +110,7 @@ pub(crate) fn revert(
             }
             // The good version's tree digest = the forward commit's tree (re-derived from bytes + verified).
             let good_digest = contribute::verified_version_digest(ctx, id.as_str(), good_commit)?;
-            let forward = sign::commit_id(&Commit {
+            let forward = identity::commit_id(&Commit {
                 parents: &[current_commit],
                 tree: good_digest,
                 author: &ctx.device_id,
@@ -148,10 +148,10 @@ fn map_outcome(
 ) -> Result<RevertData, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {
-            let signed = receipt.signed_record.as_ref().ok_or_else(|| {
-                ClientError::Corrupt("an OK revert carried no signed pointer".into())
+            let record = receipt.wire_record.as_ref().ok_or_else(|| {
+                ClientError::Corrupt("an OK revert carried no current pointer".into())
             })?;
-            let new_gen = contribute::apply_light_advance(ctx, sp, rec, signed)?;
+            let new_gen = contribute::apply_light_advance(ctx, sp, rec, record)?;
             Ok(RevertData {
                 skill_id: rec.skill_id.clone(),
                 reverted_to: good_hex.to_owned(),

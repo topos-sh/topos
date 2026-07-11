@@ -151,19 +151,13 @@ pub(crate) enum ClientError {
     #[error("plane read failed: {0}")]
     Plane(String),
     /// A go-back (`pull <skill>@<hash>`) named a version this client cannot anchor — it is absent from
-    /// the local history, so its generation is unknown and it cannot be installed without a fabricated
-    /// floor. Refused.
+    /// the local store, so its bytes are unavailable and it cannot be installed. Refused.
     #[error("cannot go back to version '{version}': not in this skill's local history")]
     UnknownGoBackVersion { version: String },
     /// An enrollment step could not complete (a missing/expired session, a denied verification, a
     /// malformed link). The message is fixed text or a user-supplied token-free description.
     #[error("enrollment failed: {0}")]
     Enrollment(String),
-    /// The plane at the already-pinned base URL presented a DIFFERENT signing key than the one this client
-    /// TOFU-pinned. A continuity-signed rotation is not yet supported, so the follow is refused rather than
-    /// silently trusting a new key — the human must re-pin out of band.
-    #[error("the plane's signing key differs from the pinned key; re-pin required")]
-    KeyRepinRequired,
     /// The optional `@<digest>` consent pin did not match the digest recomputed over the bytes being
     /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
     /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
@@ -336,7 +330,6 @@ impl ClientError {
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
-            ClientError::KeyRepinRequired => "KEY_REPIN_REQUIRED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::ApprovalRequired { .. } => "APPROVAL_REQUIRED",
             ClientError::Conflict { .. } => "CONFLICT",

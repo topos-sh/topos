@@ -12,7 +12,8 @@
 //! workspace up: after the FULL normal pre-flight (skill resolution, scan, digest computation, the
 //! optional `@<digest>` consent gate — so consent binds BEFORE any network), the client starts a standup device
 //! authorization against the hosted plane (`TOPOS_PLANE_URL` override, else the compiled-in default),
-//! TOFU-pins the plane key from the response, writes an `AuthorizingStandup` WAL, and returns a PENDING
+//! guards one-plane-per-install (no key to pin — the pointer is unsigned), writes an `AuthorizingStandup`
+//! WAL, and returns a PENDING
 //! receipt whose `ENROLL_RESUME` next-action is the SAME publish command. Re-invoking it polls once;
 //! once a signed-in human approves (creating the workspace and seating them as owner), the same
 //! invocation redeems, promotes the enrollment, and CONTINUES into the ordinary publish — disclosing
@@ -21,8 +22,8 @@
 //! network. `--propose` never stands up (a proposal against a workspace that does not exist yet is
 //! meaningless) and keeps the typed not-enrolled error.
 
-use topos_core::digest::{self, to_hex};
-use topos_core::sign::{self, Commit, EnrollFields};
+use topos_core::digest::to_hex;
+use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
@@ -33,8 +34,8 @@ use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::follow::{
-    EnrollConnect, complete_uri, device_fingerprint, machine_name, promote_core, resolve_api_base,
-    tofu_decide_key,
+    EnrollConnect, complete_uri, device_fingerprint, guard_one_plane, machine_name, promote_core,
+    resolve_api_base,
 };
 use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
@@ -468,7 +469,7 @@ fn enrolled_publish(
 
 // =================================================================================================
 // The workspace-standup branch — the un-enrolled direct publish. Two calls share one WAL: call 1 runs
-// the full consent pre-flight, starts the standup device authorization, TOFU-pins the plane key, and
+// the full consent pre-flight, starts the standup device authorization, guards one-plane-per-install, and
 // returns PENDING; call 2 (the SAME command re-invoked) re-runs the pre-flight (consent re-binds — bytes
 // that drifted since call 1 are refused, never silently shipped), polls ONCE, and on a granted poll
 // redeems, promotes the enrollment, and continues into the ordinary publish above.
@@ -493,8 +494,6 @@ fn standup_publish(
         None => standup_begin(ctx, standup, skill_name, pin, &computed_digest),
         Some(enroll::EnrollPhase::AuthorizingStandup {
             base_url,
-            pinned_plane_key,
-            plane_key_id,
             deployment_mode,
             enrollment_method,
             device_code,
@@ -511,8 +510,6 @@ fn standup_publish(
             &computed_digest,
             StandupWal {
                 base_url,
-                pinned_plane_key,
-                plane_key_id,
                 deployment_mode,
                 enrollment_method,
                 device_code,
@@ -547,15 +544,7 @@ fn standup_publish(
                     workspace_display_name: context.workspace_display_name.clone(),
                     owner_principal: principal.clone(),
                 });
-            continue_enrolled(
-                ctx,
-                connect,
-                gov_connect,
-                &context.pinned_plane_key,
-                skill_name,
-                pin,
-                receipt,
-            )
+            continue_enrolled(ctx, connect, gov_connect, skill_name, pin, receipt)
         }
         Some(enroll::EnrollPhase::Authorizing { .. }) => Err(ClientError::Enrollment(
             "an invite enrollment is in progress; re-run `topos follow` to finish it first".into(),
@@ -601,8 +590,8 @@ fn standup_preflight(
     Ok(digest_hex)
 }
 
-/// Call 1: start the standup device authorization, TOFU-pin the plane key from the response's plane
-/// block, write the `AuthorizingStandup` WAL, and return the PENDING receipt.
+/// Call 1: start the standup device authorization, guard one-plane-per-install against the response's
+/// declared plane base, write the `AuthorizingStandup` WAL, and return the PENDING receipt.
 fn standup_begin(
     ctx: &Ctx<'_>,
     standup: &StandupConnectors<'_>,
@@ -614,12 +603,12 @@ fn standup_begin(
     let enroll_src = (standup.enroll)(&standup.base_url);
     let start = enroll_src.device_authorize_standup(signer.public_key(), &machine_name(&signer))?;
 
-    // RE-ROOT + TOFU, exactly as a link follow does: the response's plane block declares the API base
-    // this device pins and every later call dials (normally the dialed base itself — the compiled-in
-    // hosted default IS the API base). Pinning the declared base keeps the standup pin and a later
-    // `/i/`-link pin string-identical, so neither door ever refuses the other as cross-plane.
+    // RE-ROOT, exactly as a link follow does: the response's plane block declares the API base every later
+    // call dials (normally the dialed base itself — the compiled-in hosted default IS the API base). Guard
+    // one-plane-per-install against that declared base, so the standup door and a later `/i/`-link door
+    // never refuse each other as cross-plane.
     let base_url = resolve_api_base(&standup.base_url, &start.plane.base_url)?;
-    let pinned_plane_key = tofu_decide_key(ctx, &base_url, &start.plane.signing_key)?;
+    guard_one_plane(ctx, &base_url)?;
 
     let expires_at_millis = i64::try_from(ctx.clock.now_unix_millis())
         .unwrap_or(i64::MAX)
@@ -641,8 +630,6 @@ fn standup_begin(
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: enroll::EnrollPhase::AuthorizingStandup {
                 base_url,
-                pinned_plane_key,
-                plane_key_id: start.plane.signing_key.key_id.clone(),
                 deployment_mode: start.plane.deployment_mode,
                 enrollment_method: start.plane.enrollment_method.clone(),
                 device_code: start.auth.device_code.clone(),
@@ -668,8 +655,6 @@ fn standup_begin(
 /// The persisted `AuthorizingStandup` facts (destructured out of the WAL for the resume path).
 struct StandupWal {
     base_url: String,
-    pinned_plane_key: String,
-    plane_key_id: String,
     deployment_mode: topos_types::bootstrap::DeploymentMode,
     enrollment_method: String,
     device_code: String,
@@ -730,23 +715,11 @@ fn standup_resume(
                 ClientError::WireInvalid("a granted standup poll carried no workspace".into())
             })?;
             let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            // The possession proof over the SERVER-trusted framed fields: the standup session offered NO
-            // skills (there was no invite), so the bound offered-set is empty.
-            let grant_hash = digest::sha256(granted.grant.as_str().as_bytes());
-            let fields = EnrollFields {
-                workspace_id: &workspace.workspace_id,
-                grant_hash,
-                device_auth_id: &wal.user_code,
-                device_key_id: signer.device_key_id(),
-                device_public_key: signer.public_key(),
-                offered_skill_ids: &[],
-            };
-            let sig = signer.sign_enroll(&fields)?;
+            // Redeem the grant (the bearer credential) into per-skill read creds; nothing is signed.
             let redeem = enroll_src.redeem(
                 &workspace.workspace_id,
                 granted.grant.as_str(),
                 signer.public_key(),
-                sig,
             )?;
             if redeem.workspace_id != workspace.workspace_id {
                 return Err(ClientError::Enrollment(
@@ -755,8 +728,6 @@ fn standup_resume(
             }
             let context = enroll::EnrollContext {
                 base_url: wal.base_url,
-                pinned_plane_key: wal.pinned_plane_key,
-                plane_key_id: wal.plane_key_id,
                 deployment_mode: wal.deployment_mode,
                 enrollment_method: wal.enrollment_method,
                 workspace_id: workspace.workspace_id,
@@ -809,7 +780,6 @@ fn standup_resume(
                 ctx,
                 connect,
                 gov_connect,
-                &context.pinned_plane_key,
                 skill_name,
                 pin,
                 Some(StandupReceipt {
@@ -821,33 +791,19 @@ fn standup_resume(
     }
 }
 
-/// Continue a just-promoted standup invocation into the ordinary enrolled publish. The AMBIENT `ctx` was
-/// composed while un-enrolled (its `plane_key` is the inert all-zero placeholder), so the continuation
-/// rebuilds the context with the key THIS flow TOFU-pinned — the OK receipt's signed pointer is verified
-/// against the real pin, never the placeholder.
+/// Continue a just-promoted standup invocation into the ordinary enrolled publish. Nothing needs the
+/// pinned plane key any more (the `current` pointer is unsigned; the OK receipt's pointer is scope-checked
+/// and confirmed to name the moved-to version), so the ambient `ctx` flows straight through.
 fn continue_enrolled(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     gov_connect: &GovernanceConnect<'_>,
-    pinned_plane_key: &str,
     skill_name: &str,
     pin: Option<&str>,
     standup_receipt: Option<StandupReceipt>,
 ) -> Result<PublishOutcome, ClientError> {
-    let plane_key = parse_hex32(pinned_plane_key)?;
-    let continuation = Ctx {
-        fs: ctx.fs,
-        ids: ctx.ids,
-        clock: ctx.clock,
-        device_id: ctx.device_id.clone(),
-        layout: ctx.layout.clone(),
-        harness: ctx.harness,
-        plane: ctx.plane,
-        plane_key,
-        follow: ctx.follow,
-    };
     enrolled_publish(
-        &continuation,
+        ctx,
         connect,
         gov_connect,
         skill_name,
@@ -981,9 +937,9 @@ fn build_publish_op(
         (vec![parse_hex32(&lock.base_commit)?], sync.observed)
     };
 
-    // The byte-identical id the plane re-derives (I-COMMIT-PARITY): author = the device id (NOT the signing
-    // key id), message = the fixed publish message — both folded into `commit_id`.
-    let commit_id = sign::commit_id(&Commit {
+    // The byte-identical id the plane re-derives (I-COMMIT-PARITY): author = the device id, message = the
+    // fixed publish message — both folded into `commit_id`.
+    let commit_id = identity::commit_id(&Commit {
         parents: &parents,
         tree: digest,
         author: &ctx.device_id,
@@ -1048,10 +1004,10 @@ fn map_outcome(
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // A direct publish moved `current` — advance the local state (read-your-writes).
-            let signed = receipt.signed_record.as_ref().ok_or_else(|| {
-                ClientError::Corrupt("an OK publish carried no signed pointer".to_owned())
+            let record = receipt.wire_record.as_ref().ok_or_else(|| {
+                ClientError::Corrupt("an OK publish carried no current pointer".to_owned())
             })?;
-            let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, signed)?;
+            let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, record)?;
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
                 version_id: Some(rec.candidate_commit.clone()),

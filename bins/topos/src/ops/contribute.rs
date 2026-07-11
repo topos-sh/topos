@@ -3,23 +3,23 @@
 //! The per-verb modules (`publish`/`review`/`revert`) build a [`OpRecord`] (the durable bound identity) and
 //! hand it here. [`run_write`] persists the WAL (`0600`, before the first send), sends, and reconciles; on an
 //! UNCERTAIN send it leaves the WAL so the next attempt replays the SAME `op_id` and the plane returns the
-//! byte-identical receipt (I-OPID-DURABLE). [`send_op`] re-derives the signature + rebuilds the wire request
-//! from the `OpRecord` (publish/propose: re-rendering the candidate from the local store; revert/review: from
-//! the record's fields), so the fresh send and a crash replay are byte-identical by construction. The
-//! local-state advances ([`apply_publish_ok`] / [`apply_light_advance`]) verify the signed pointer against the
-//! pinned plane key before raising the anti-rollback floor.
+//! byte-identical receipt (I-OPID-DURABLE). [`send_op`] rebuilds the wire request from the `OpRecord`
+//! (publish/propose: re-rendering the candidate from the local store; revert/review: from the record's
+//! fields), so the fresh send and a crash replay are byte-identical by construction (the op kind rides the
+//! ROUTE — the body names only the acting `device_key_id`). The local-state advances ([`apply_publish_ok`] /
+//! [`apply_light_advance`]) scope-check the served pointer and confirm it names the version the op moved to.
 
 use base64::Engine as _;
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
-use topos_core::sign::{self, Commit, DeviceOpFields};
+use topos_core::identity::{self, Commit};
 use topos_gitstore::{Store, VerifyError};
-use topos_types::persisted::{Lock, OpKind, OpRecord, PlacementMap, RecordedTuple, SyncState};
+use topos_types::persisted::{Lock, OpKind, OpRecord, PlacementMap, SyncState};
 use topos_types::requests::{
     ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireCandidate, WireFile,
     WireFileMode,
 };
 use topos_types::results::ReviewDecision;
-use topos_types::{Generation, SignedCurrentRecord, TerminalOutcome};
+use topos_types::{Generation, TerminalOutcome, WireCurrentRecord};
 
 use core::cmp::Ordering;
 
@@ -76,14 +76,14 @@ fn plane_err(e: PlaneError) -> ClientError {
     }
 }
 
-/// Fetch + authenticate the LIVE `current` pointer (signature + scope, against the pinned plane key),
-/// returning its `(version_id, generation)`. A revert binds the forward commit's parent + CAS target to
-/// this fresh current (NOT a stale local view — the server builds the forward commit from its live parent
-/// and verifies the signature against it BEFORE the CAS, so a stale parent would be a DENIED, not a clean
-/// CONFLICT); a review uses the generation as `expected` (== a reviewable proposal's base).
+/// Fetch the LIVE `current` pointer and scope-check it (workspace/skill), returning its
+/// `(version_id, generation)`. A revert binds the forward commit's parent + CAS target to this fresh current
+/// (NOT a stale local view — the server builds the forward commit from its live parent and re-derives it
+/// BEFORE the CAS, so a stale parent would be a DENIED, not a clean CONFLICT); a review uses the generation
+/// as `expected` (== a reviewable proposal's base).
 ///
 /// # Errors
-/// [`ClientError::Corrupt`] if the pointer fails verification; [`ClientError::Plane`] on a transport fault.
+/// [`ClientError::WireInvalid`] if the pointer is mis-scoped; [`ClientError::Plane`] on a transport fault.
 pub(crate) fn fresh_current(
     ctx: &Ctx<'_>,
     skill_id: &str,
@@ -92,12 +92,11 @@ pub(crate) fn fresh_current(
     match ctx.plane.get_current(skill_id, None) {
         Ok(PointerFetch::Record(rec)) => {
             let vid =
-                sync_engine::authenticated_version_id(&rec, skill_id, workspace_id, &ctx.plane_key)
-                    .ok_or_else(|| {
-                        ClientError::Corrupt(
-                            "the current pointer failed signature/scope verification".to_owned(),
-                        )
-                    })?;
+                sync_engine::scoped_version_id(&rec, skill_id, workspace_id).ok_or_else(|| {
+                    ClientError::WireInvalid(
+                        "the current pointer is scoped to a different workspace/skill".to_owned(),
+                    )
+                })?;
             Ok((vid, rec.record.generation))
         }
         Ok(PointerFetch::NotModified) => Err(ClientError::Corrupt(
@@ -136,7 +135,7 @@ pub(crate) fn fetch_verified_bundle(
         .collect();
     let bundle_digest =
         digest::bundle_digest(&manifest).map_err(|r| ClientError::Scan(format!("{r:?}")))?;
-    let recomputed = sign::commit_id(&Commit {
+    let recomputed = identity::commit_id(&Commit {
         parents: &v.parents,
         tree: bundle_digest,
         author: &v.author,
@@ -219,8 +218,9 @@ pub(crate) fn plane_terminal(receipt: &WriteReceipt) -> ClientError {
     }
 }
 
-/// Re-sign the device-op frame the [`OpRecord`] binds, rebuild the wire request, and POST it. BOTH the fresh
-/// path and a crash replay call this with the SAME record, so a replayed send is byte-identical.
+/// Rebuild the wire request the [`OpRecord`] binds and POST it (the body names the acting `device_key_id`;
+/// the op kind rides the ROUTE). BOTH the fresh path and a crash replay call this with the SAME record, so a
+/// replayed send is byte-identical.
 fn send_op(
     transport: &dyn ContributeSource,
     signer: &DeviceSigner,
@@ -228,73 +228,50 @@ fn send_op(
     sp: &SkillPaths,
     rec: &OpRecord,
 ) -> Result<WriteReceipt, ClientError> {
-    let op = op_wal::device_op(rec.op);
-    let op_id_bytes = op_wal::op_id_bytes(&rec.op_id)?;
     let commit_id = parse_hex32(&rec.candidate_commit)?;
     let bundle_digest = parse_hex32(&rec.bundle_digest)?;
-    let fields = DeviceOpFields {
-        workspace_id: &rec.workspace_id,
-        skill_id: &rec.skill_id,
-        op,
-        op_id: op_id_bytes,
-        device_key_id: signer.device_key_id(),
-        expected_epoch: rec.expected_generation.epoch,
-        expected_seq: rec.expected_generation.seq,
-        commit_id,
-        bundle_digest,
-    };
-    let sig = signer.sign_device_op(&fields)?;
     let device_key_id = signer.device_key_id().to_owned();
     match rec.op {
         OpKind::PublishDirect | OpKind::PublishPropose => {
             let candidate = render_candidate(sp, commit_id, bundle_digest)?;
             if matches!(rec.op, OpKind::PublishDirect) {
-                transport.publish(
-                    PublishRequest {
-                        workspace_id: rec.workspace_id.clone(),
-                        skill_id: rec.skill_id.clone(),
-                        op_id: rec.op_id.clone(),
-                        device_key_id,
-                        expected: rec.expected_generation,
-                        candidate,
-                        // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
-                        display_name: rec.display_name.clone(),
-                    },
-                    sig,
-                )
+                transport.publish(PublishRequest {
+                    workspace_id: rec.workspace_id.clone(),
+                    skill_id: rec.skill_id.clone(),
+                    op_id: rec.op_id.clone(),
+                    device_key_id,
+                    expected: rec.expected_generation,
+                    candidate,
+                    // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
+                    display_name: rec.display_name.clone(),
+                })
             } else {
-                transport.propose(
-                    ProposeRequest {
-                        workspace_id: rec.workspace_id.clone(),
-                        skill_id: rec.skill_id.clone(),
-                        op_id: rec.op_id.clone(),
-                        device_key_id,
-                        expected: rec.expected_generation,
-                        candidate,
-                        // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
-                        display_name: rec.display_name.clone(),
-                    },
-                    sig,
-                )
+                transport.propose(ProposeRequest {
+                    workspace_id: rec.workspace_id.clone(),
+                    skill_id: rec.skill_id.clone(),
+                    op_id: rec.op_id.clone(),
+                    device_key_id,
+                    expected: rec.expected_generation,
+                    candidate,
+                    // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
+                    display_name: rec.display_name.clone(),
+                })
             }
         }
         OpKind::Revert => {
             let good = rec.good.clone().ok_or_else(|| {
                 ClientError::Corrupt("revert op record missing `good`".to_owned())
             })?;
-            transport.revert(
-                RevertRequest {
-                    workspace_id: rec.workspace_id.clone(),
-                    skill_id: rec.skill_id.clone(),
-                    op_id: rec.op_id.clone(),
-                    device_key_id,
-                    expected: rec.expected_generation,
-                    good,
-                    author: ctx.device_id.clone(),
-                    message: REVERT_MESSAGE.to_owned(),
-                },
-                sig,
-            )
+            transport.revert(RevertRequest {
+                workspace_id: rec.workspace_id.clone(),
+                skill_id: rec.skill_id.clone(),
+                op_id: rec.op_id.clone(),
+                device_key_id,
+                expected: rec.expected_generation,
+                good,
+                author: ctx.device_id.clone(),
+                message: REVERT_MESSAGE.to_owned(),
+            })
         }
         OpKind::ReviewApprove | OpKind::ReviewReject => {
             let decision = if matches!(rec.op, OpKind::ReviewApprove) {
@@ -302,18 +279,15 @@ fn send_op(
             } else {
                 ReviewDecision::Reject
             };
-            transport.review(
-                ReviewRequest {
-                    workspace_id: rec.workspace_id.clone(),
-                    skill_id: rec.skill_id.clone(),
-                    op_id: rec.op_id.clone(),
-                    device_key_id,
-                    expected: rec.expected_generation,
-                    proposal: rec.candidate_commit.clone(),
-                    decision,
-                },
-                sig,
-            )
+            transport.review(ReviewRequest {
+                workspace_id: rec.workspace_id.clone(),
+                skill_id: rec.skill_id.clone(),
+                op_id: rec.op_id.clone(),
+                device_key_id,
+                expected: rec.expected_generation,
+                proposal: rec.candidate_commit.clone(),
+                decision,
+            })
         }
     }
 }
@@ -347,74 +321,59 @@ fn render_candidate(
     })
 }
 
-/// Verify the signed `current` pointer the plane returned (signature + scope, against the pinned plane key)
-/// and confirm it names the version this op moved to. Returns the verified new generation.
+/// Scope-check the `current` pointer the plane returned (workspace/skill) and confirm it names the version
+/// this op moved to. Returns the new generation.
 fn verified_new_generation(
-    ctx: &Ctx<'_>,
     rec: &OpRecord,
-    signed_record: &SignedCurrentRecord,
+    wire_record: &WireCurrentRecord,
 ) -> Result<Generation, ClientError> {
     let moved_to = parse_hex32(&rec.candidate_commit)?;
-    let authed = sync_engine::authenticated_version_id(
-        signed_record,
-        &rec.skill_id,
-        &rec.workspace_id,
-        &ctx.plane_key,
-    )
-    .ok_or_else(|| {
-        ClientError::Corrupt("the OK pointer failed signature/scope verification".to_owned())
-    })?;
-    if authed != moved_to {
-        return Err(ClientError::Corrupt(
+    let vid = sync_engine::scoped_version_id(wire_record, &rec.skill_id, &rec.workspace_id)
+        .ok_or_else(|| {
+            ClientError::WireInvalid(
+                "the OK pointer is scoped to a different workspace/skill".to_owned(),
+            )
+        })?;
+    if vid != moved_to {
+        return Err(ClientError::WireInvalid(
             "the OK pointer names a different version than the op moved".to_owned(),
         ));
     }
-    Ok(signed_record.record.generation)
-}
-
-/// Append a `(generation → commit)` record if absent (idempotent).
-fn record_tuple(recorded: &mut Vec<RecordedTuple>, generation: Generation, commit_hex: &str) {
-    if !recorded.iter().any(|t| t.generation == generation) {
-        recorded.push(RecordedTuple {
-            generation,
-            commit_id: commit_hex.to_owned(),
-        });
-    }
+    Ok(wire_record.record.generation)
 }
 
 /// The publish-OK read-your-writes advance (I-RESPECT-DIVERGENCE). On a CLEAN publish (the working tree still
 /// equals the bytes just published) the author's own write fast-forwards the local state to `current` (state
 /// ① — `applied = observed = new_gen`, no dir-swap: the bytes are already placed). If the working tree
-/// changed during the round-trip (DIRTY), the anti-rollback floor still rises to the published generation
-/// (read-your-writes — the author's write is in the floor, T4), but `applied` is RETAINED and the working
-/// draft is left untouched, so the next `pull` resolves the divergence rather than this path silently
+/// changed during the round-trip (DIRTY), `observed`/`observed_version_id` still advance to the published
+/// version (read-your-writes — the author's write is the new target), but `applied` is RETAINED and the
+/// working draft is left untouched, so the next `pull` resolves the divergence rather than this path silently
 /// clobbering it. Returns the new generation.
 ///
 /// # Errors
-/// [`ClientError::Corrupt`] if the OK pointer fails verification; a store/fs/scan failure.
+/// [`ClientError::WireInvalid`] if the OK pointer is mis-scoped; a store/fs/scan failure.
 pub(crate) fn apply_publish_ok(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
     lock: &Lock,
     map: &PlacementMap,
     rec: &OpRecord,
-    signed_record: &SignedCurrentRecord,
+    wire_record: &WireCurrentRecord,
 ) -> Result<Generation, ClientError> {
-    let new_gen = verified_new_generation(ctx, rec, signed_record)?;
+    let new_gen = verified_new_generation(rec, wire_record)?;
     let commit_id = parse_hex32(&rec.candidate_commit)?;
     let published_digest = parse_hex32(&rec.bundle_digest)?;
     let published_digest_hex = rec.bundle_digest.clone();
 
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
-    // The anti-rollback floor only ever RISES: if a later move (e.g. a cross-family revert that advanced
-    // `observed` while this op's ack was lost) already carried the floor past this publish, a replay of the
-    // settled receipt is a no-op locally — never regress `observed`/`applied` (the next pull reconciles).
+    // Read-your-writes only advances local state FORWARD: if a later move (e.g. a cross-family revert that
+    // advanced `observed` while this op's ack was lost) already carried the target past this publish, a
+    // replay of the settled receipt is a no-op locally — never regress `observed`/`applied` (the next pull
+    // reconciles the actual served current).
     if gen_cmp(new_gen, sync.observed) != Ordering::Greater {
         return Ok(new_gen);
     }
-    let mut recorded = sync.recorded.clone();
-    record_tuple(&mut recorded, new_gen, &rec.candidate_commit);
 
     // Re-scan the placement: did the working tree change during the round-trip?
     let placement = sync_engine::first_placement(map)?;
@@ -439,23 +398,23 @@ pub(crate) fn apply_publish_ok(
         let next_sync = SyncState {
             schema_version: sync.schema_version,
             observed: new_gen,
+            observed_version_id: rec.candidate_commit.clone(),
             applied: new_gen,
-            recorded,
             base_commit: rec.candidate_commit.clone(),
             work_hash: published_digest_hex,
             held: false,
         };
         materialize::commit_docs(ctx.fs, sp, &next_map, &next_lock, &next_sync)?;
     } else {
-        // DIRTY (edited during the round-trip): raise the floor to the published generation (read-your-
-        // writes) + record the tuple, but RETAIN `applied` and leave the working draft. The next `pull`
-        // derives ④ DIVERGED and merges — never a silent clobber here. The published version is in the
-        // store (committed before send), so the merge/render can reach it.
+        // DIRTY (edited during the round-trip): advance the target to the published version (read-your-
+        // writes), but RETAIN `applied` and leave the working draft. The next `pull` derives ④ DIVERGED and
+        // merges — never a silent clobber here. The published version is in the store (committed before
+        // send), so the merge/render can reach it.
         let next_sync = SyncState {
             schema_version: sync.schema_version,
             observed: new_gen,
+            observed_version_id: rec.candidate_commit.clone(),
             applied: sync.applied,
-            recorded,
             base_commit: sync.base_commit.clone(),
             work_hash: sync.work_hash.clone(),
             held: sync.held,
@@ -466,33 +425,31 @@ pub(crate) fn apply_publish_ok(
 }
 
 /// The revert / review-approve local advance: the new `current` bytes land on the actor's own copy at its
-/// NEXT `pull` (which fast-forwards or surfaces a divergence). Here we only raise the anti-rollback floor +
-/// record the `(generation → commit)` tuple, so the actor's next pull recognizes the move (rather than
-/// re-alarming on it). Returns the new generation.
+/// NEXT `pull` (which fast-forwards or surfaces a divergence). Here we only advance the target
+/// (`observed`/`observed_version_id`), so the actor's next pull recognizes the move. Returns the new
+/// generation.
 ///
 /// # Errors
-/// [`ClientError::Corrupt`] if the OK pointer fails verification; an fs failure writing the sync doc.
+/// [`ClientError::WireInvalid`] if the OK pointer is mis-scoped; an fs failure writing the sync doc.
 pub(crate) fn apply_light_advance(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
     rec: &OpRecord,
-    signed_record: &SignedCurrentRecord,
+    wire_record: &WireCurrentRecord,
 ) -> Result<Generation, ClientError> {
-    let new_gen = verified_new_generation(ctx, rec, signed_record)?;
+    let new_gen = verified_new_generation(rec, wire_record)?;
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
-    // The floor only ever rises — a replay of a move already superseded locally is a no-op (see
+    // Read-your-writes only advances FORWARD — a replay of a move already superseded locally is a no-op (see
     // [`apply_publish_ok`]).
     if gen_cmp(new_gen, sync.observed) != Ordering::Greater {
         return Ok(new_gen);
     }
-    let mut recorded = sync.recorded.clone();
-    record_tuple(&mut recorded, new_gen, &rec.candidate_commit);
     let next_sync = SyncState {
         schema_version: sync.schema_version,
         observed: new_gen,
+        observed_version_id: rec.candidate_commit.clone(),
         applied: sync.applied,
-        recorded,
         base_commit: sync.base_commit,
         work_hash: sync.work_hash,
         held: sync.held,
@@ -508,8 +465,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_core::digest::{self, FileMode, ManifestEntry};
-    use topos_core::sign::{self, Commit, DeviceOp, DeviceOpFields, verify_device_op};
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
     use topos_types::{
@@ -581,180 +536,6 @@ mod tests {
         }
     }
 
-    // ── I-COMMIT-PARITY two-halves wire test ──
-    //
-    // The CLIENT computes (commit_id, bundle_digest) over a candidate + signs a `DeviceOpFields` binding
-    // them. The SERVER half rehashes the SAME bytes through the SAME kernel to reconstruct the identity and
-    // `verify_device_op`. The positive must pass; tweaking ANY bound input AFTER signing must FAIL.
-
-    fn manifest_digest(files: &[(&str, FileMode, &[u8])]) -> [u8; 32] {
-        let m: Vec<ManifestEntry> = files
-            .iter()
-            .map(|(p, mode, b)| ManifestEntry {
-                path: (*p).to_owned(),
-                mode: *mode,
-                content_sha256: digest::sha256(b),
-            })
-            .collect();
-        digest::bundle_digest(&m).expect("bundle digest")
-    }
-
-    #[test]
-    fn two_halves_parity_passes_and_fails_on_any_post_sign_tweak() {
-        let scratch = Scratch::new();
-        let fs = RealFs;
-        let layout = crate::sidecar::Layout::new(&scratch.0);
-        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
-        let pubkey = signer.public_key();
-
-        let author = "d_author";
-        let message = PUBLISH_MESSAGE;
-        let parent = [0x11u8; 32];
-        let files: &[(&str, FileMode, &[u8])] = &[
-            ("SKILL.md", FileMode::Regular, b"hello\n"),
-            ("run.sh", FileMode::Executable, b"#!/bin/sh\n"),
-        ];
-
-        // CLIENT: compute the bound identity + sign.
-        let digest = manifest_digest(files);
-        let commit_id = sign::commit_id(&Commit {
-            parents: &[parent],
-            tree: digest,
-            author,
-            message,
-        })
-        .unwrap();
-        let op_id = [3u8; 16];
-        let expected = Generation { epoch: 1, seq: 1 };
-        let fields = DeviceOpFields {
-            workspace_id: "w_acme",
-            skill_id: "s_deploy",
-            op: DeviceOp::PublishDirect,
-            op_id,
-            device_key_id: signer.device_key_id(),
-            expected_epoch: expected.epoch,
-            expected_seq: expected.seq,
-            commit_id,
-            bundle_digest: digest,
-        };
-        let sig = signer.sign_device_op(&fields).unwrap();
-
-        // SERVER half: rehash the SAME bytes → SAME commit_id + digest → reconstruct + verify. PASSES.
-        let server_digest = manifest_digest(files);
-        let server_commit = sign::commit_id(&Commit {
-            parents: &[parent],
-            tree: server_digest,
-            author,
-            message,
-        })
-        .unwrap();
-        let server_fields = DeviceOpFields {
-            commit_id: server_commit,
-            bundle_digest: server_digest,
-            ..fields
-        };
-        assert!(
-            verify_device_op(&server_fields, &sig, &pubkey),
-            "byte-identical reconstruction must verify (I-COMMIT-PARITY)"
-        );
-
-        // NEGATIVES — each tweak changes a bound value, so the SAME signature must NOT verify.
-        // (a) a content byte flipped (→ different digest → different commit_id):
-        let tweaked_files: &[(&str, FileMode, &[u8])] = &[
-            ("SKILL.md", FileMode::Regular, b"HELLO\n"),
-            ("run.sh", FileMode::Executable, b"#!/bin/sh\n"),
-        ];
-        let d2 = manifest_digest(tweaked_files);
-        let c2 = sign::commit_id(&Commit {
-            parents: &[parent],
-            tree: d2,
-            author,
-            message,
-        })
-        .unwrap();
-        assert!(
-            !verify_device_op(
-                &DeviceOpFields {
-                    commit_id: c2,
-                    bundle_digest: d2,
-                    ..fields
-                },
-                &sig,
-                &pubkey
-            ),
-            "a flipped content byte must fail to verify"
-        );
-        // (b) author changed:
-        let c_auth = sign::commit_id(&Commit {
-            parents: &[parent],
-            tree: digest,
-            author: "d_other",
-            message,
-        })
-        .unwrap();
-        assert!(
-            !verify_device_op(
-                &DeviceOpFields {
-                    commit_id: c_auth,
-                    ..fields
-                },
-                &sig,
-                &pubkey
-            ),
-            "a changed author must fail"
-        );
-        // (c) message changed:
-        let c_msg = sign::commit_id(&Commit {
-            parents: &[parent],
-            tree: digest,
-            author,
-            message: "topos: other",
-        })
-        .unwrap();
-        assert!(
-            !verify_device_op(
-                &DeviceOpFields {
-                    commit_id: c_msg,
-                    ..fields
-                },
-                &sig,
-                &pubkey
-            ),
-            "a changed message must fail"
-        );
-        // (d) a parent changed:
-        let c_par = sign::commit_id(&Commit {
-            parents: &[[0x22u8; 32]],
-            tree: digest,
-            author,
-            message,
-        })
-        .unwrap();
-        assert!(
-            !verify_device_op(
-                &DeviceOpFields {
-                    commit_id: c_par,
-                    ..fields
-                },
-                &sig,
-                &pubkey
-            ),
-            "a changed parent must fail"
-        );
-        // (e) expected (the CAS target) off by one:
-        assert!(
-            !verify_device_op(
-                &DeviceOpFields {
-                    expected_seq: 2,
-                    ..fields
-                },
-                &sig,
-                &pubkey
-            ),
-            "a changed expected generation must fail"
-        );
-    }
-
     // ── op_id idempotent replay: an UNCERTAIN send keeps the WAL + replays the SAME op_id ──
 
     struct FakeContribute {
@@ -775,11 +556,10 @@ mod tests {
                 expected_generation: None,
                 current_generation: Some(Generation { epoch: 1, seq: 2 }),
                 created_at: "2026-06-30T00:00:00Z".to_owned(),
-                key_id: None,
                 details: None,
             },
             error: None,
-            signed_record: None,
+            wire_record: None,
         }
     }
     impl FakeContribute {
@@ -794,16 +574,16 @@ mod tests {
         }
     }
     impl ContributeSource for FakeContribute {
-        fn publish(&self, b: PublishRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+        fn publish(&self, b: PublishRequest) -> Result<WriteReceipt, ClientError> {
             self.step(&b.op_id)
         }
-        fn propose(&self, b: ProposeRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+        fn propose(&self, b: ProposeRequest) -> Result<WriteReceipt, ClientError> {
             self.step(&b.op_id)
         }
-        fn revert(&self, b: RevertRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+        fn revert(&self, b: RevertRequest) -> Result<WriteReceipt, ClientError> {
             self.step(&b.op_id)
         }
-        fn review(&self, b: ReviewRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+        fn review(&self, b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
             self.step(&b.op_id)
         }
     }
@@ -827,7 +607,6 @@ mod tests {
             layout: layout.clone(),
             harness: &harness,
             plane: &inert_p,
-            plane_key: [0u8; 32],
             follow: &inert_f,
         };
         let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());

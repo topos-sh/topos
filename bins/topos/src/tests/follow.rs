@@ -1,5 +1,5 @@
 //! End-to-end tests of the `follow` device-flow over a FAKE `EnrollSource` + a fixture plane (no HTTP):
-//! the two-call resume (pending → granted → promote), the TOFU rules, the 0600 sidecar writers + secret
+//! the two-call resume (pending → granted → promote), the first-receive consent rules, the 0600 sidecar writers + secret
 //! redaction, the merge-on-second-follow, the Redeemed-WAL recovery, and the first-receive baseline that
 //! the existing pull engine offers (bare sweep) then places (explicit accept).
 
@@ -8,21 +8,18 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use base64::Engine as _;
-use ed25519_dalek::{Signer, SigningKey};
-
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
-use topos_core::sign::{self, Commit, CurrentPointer, EnrollFields, verify_enroll};
+use topos_core::identity::Commit;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapSkill,
-    BootstrapWorkspace, ConsentMode, DeploymentMode, VerifiedDomainStatus,
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
+    ConsentMode, DeploymentMode, VerifiedDomainStatus,
 };
 use topos_types::persisted::SyncState;
 use topos_types::results::PullAction;
 use topos_types::{
-    CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, Signature, SignatureAlg,
-    SignedCurrentRecord, TriggerReport, TriggerState,
+    CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, TriggerReport, TriggerState,
+    WireCurrentRecord,
 };
 
 use crate::ctx::Ctx;
@@ -40,7 +37,6 @@ use crate::{doc, enroll, identity, ops};
 
 const WS: &str = "w_acme";
 const BASE_URL: &str = "https://acme.topos.test";
-const PLANE_SEED: [u8; 32] = [9u8; 32];
 
 /// Parse a fixture skill id through the validated newtype (always charset-clean here).
 fn sid(id: &str) -> crate::id::SkillId {
@@ -56,7 +52,7 @@ fn pull_data(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Scratch + the plane key.
+// Scratch.
 // ---------------------------------------------------------------------------------------------
 
 struct Scratch(PathBuf);
@@ -76,15 +72,6 @@ impl Drop for Scratch {
     }
 }
 
-fn plane_key() -> SigningKey {
-    SigningKey::from_bytes(&PLANE_SEED)
-}
-fn plane_pubkey() -> [u8; 32] {
-    plane_key().verifying_key().to_bytes()
-}
-fn plane_pubkey_b64() -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plane_pubkey())
-}
 /// `dk_<first 32 hex of sha256(pubkey)>` — the server-side derivation the device signer mirrors.
 fn device_key_id_for(pubkey: &[u8; 32]) -> String {
     let hex = to_hex(&digest::sha256(pubkey));
@@ -144,9 +131,8 @@ fn no_trigger() -> TriggerReport {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The fake EnrollSource — canned bootstrap / authorize / poll / redeem (the redeem VERIFIES the op's
-// enroll signature, proving the client signs the right frame: device_auth_id = user_code, the offered
-// set, grant_hash binding).
+// The fake EnrollSource — canned bootstrap / authorize / poll / redeem (nothing is signed or verified; the
+// grant is an opaque bearer credential the redeem exchanges for per-skill read creds).
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,31 +190,12 @@ impl EnrollSource for FakeEnroll {
     fn redeem(
         &self,
         workspace_id: &str,
-        grant: &str,
+        _grant: &str,
         device_public_key: [u8; 32],
-        enroll_sig: [u8; 64],
     ) -> Result<Redeem, ClientError> {
-        // Reconstruct + verify the enroll possession proof exactly as the authority would.
-        let dk = device_key_id_for(&device_public_key);
-        let grant_hash = digest::sha256(grant.as_bytes());
-        let offered: Vec<&str> = self
-            .bootstrap
-            .offered_skills
-            .iter()
-            .map(|s| s.skill_id.as_str())
-            .collect();
-        let fields = EnrollFields {
-            workspace_id,
-            grant_hash,
-            device_auth_id: &self.user_code,
-            device_key_id: &dk,
-            device_public_key,
-            offered_skill_ids: &offered,
-        };
-        assert!(
-            verify_enroll(&fields, &enroll_sig, &device_public_key),
-            "the client's enroll possession signature must verify on the framed fields"
-        );
+        // The device pubkey is the identity anchor; the server derives the key id from it, and the client
+        // mirrors that derivation. Nothing is signed or verified.
+        let dk = topos_core::identity::device_key_id(&device_public_key);
         Ok(Redeem {
             workspace_id: workspace_id.to_owned(),
             device_key_id: dk,
@@ -268,11 +235,6 @@ fn bootstrap(offered: &[(&str, &str)]) -> BootstrapData {
             base_url: BASE_URL.into(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".into(),
-            signing_key: BootstrapSigningKey {
-                alg: SignatureAlg::Ed25519,
-                key_id: "pk_acme".into(),
-                value: plane_pubkey_b64(),
-            },
         },
         workspace: BootstrapWorkspace {
             workspace_id: WS.into(),
@@ -306,7 +268,7 @@ fn fake(offered: &[(&str, &str)], poll: Poll) -> FakeEnroll {
 
 #[derive(Default, Clone)]
 struct FixturePlane {
-    records: HashMap<String, SignedCurrentRecord>,
+    records: HashMap<String, WireCurrentRecord>,
     versions: HashMap<(String, String), FetchedVersion>,
 }
 impl FixturePlane {
@@ -315,7 +277,7 @@ impl FixturePlane {
         self.versions
             .insert((skill.to_owned(), to_hex(&v.id)), v.fetched);
         self.records
-            .insert(skill.to_owned(), signed(skill, v.id, 1, 1));
+            .insert(skill.to_owned(), served(skill, v.id, 1, 1));
     }
 }
 impl PlaneSource for FixturePlane {
@@ -371,7 +333,7 @@ fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
         })
         .collect();
     let tree = digest::bundle_digest(&entries).unwrap();
-    let id = sign::commit_id(&Commit {
+    let id = topos_core::identity::commit_id(&Commit {
         parents: &[],
         tree,
         author: "d_pub",
@@ -395,18 +357,10 @@ fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
         },
     }
 }
-fn signed(skill: &str, version_id: [u8; 32], epoch: u64, seq: u64) -> SignedCurrentRecord {
-    let pointer = CurrentPointer {
-        workspace_id: WS,
-        skill_id: skill,
-        version_id,
-        epoch,
-        seq,
-    };
-    let msg = sign::pointer_preimage(&pointer).unwrap();
-    let value = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(plane_key().sign(msg.as_bytes()).to_bytes());
-    SignedCurrentRecord {
+/// An UNSIGNED `current` record for the given skill + version + generation (the plane serves these; the
+/// engine scope-checks them and re-verifies the fetched bytes against the content-addressed version id).
+fn served(skill: &str, version_id: [u8; 32], epoch: u64, seq: u64) -> WireCurrentRecord {
+    WireCurrentRecord {
         schema_version: 1,
         scope: PointerScope {
             workspace_id: WS.into(),
@@ -415,11 +369,6 @@ fn signed(skill: &str, version_id: [u8; 32], epoch: u64, seq: u64) -> SignedCurr
         record: CurrentRecord {
             version_id: to_hex(&version_id),
             generation: Generation { epoch, seq },
-        },
-        signature: Signature {
-            alg: SignatureAlg::Ed25519,
-            key_id: "pk_acme".into(),
-            value,
         },
     }
 }
@@ -474,7 +423,6 @@ impl Rig {
             layout: self.layout(),
             harness: &self.harness,
             plane,
-            plane_key: plane_pubkey(),
             follow,
         }
     }
@@ -605,15 +553,15 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
     assert_eq!(data.skills[0].offer.bundle_digest.len(), 64);
 
     let layout = rig.layout();
-    // instance.json — TOFU-pinned to the bootstrap key; the PLANE record only now (the per-workspace
-    // disclosure moved to the user.json membership asserted below).
+    // instance.json — the plane the device enrolled with (base URL + posture). No trust root is stored:
+    // the `current` pointer is unsigned, its authority the database row. The per-workspace disclosure
+    // lives on the user.json membership asserted below.
     let instance = enroll::read_instance(&rig.fs, &layout)
         .unwrap()
         .expect("instance.json");
     assert_eq!(instance.base_url, BASE_URL);
-    assert_eq!(instance.plane_key, to_hex(&plane_pubkey()));
     assert_eq!(instance.deployment_mode, DeploymentMode::Cloud);
-    // instance.json is PUBLIC (ordinary perms — the plane key is a public key).
+    // instance.json is PUBLIC (ordinary perms — plane metadata, no secret).
     assert_eq!(mode_of(&layout.instance_path()), 0o644);
 
     // follows.json — 0600, the skill following=true.
@@ -727,8 +675,6 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
     rig.mint_identity();
     let context = enroll::EnrollContext {
         base_url: BASE_URL.into(),
-        pinned_plane_key: to_hex(&plane_pubkey()),
-        plane_key_id: "pk_acme".into(),
         deployment_mode: DeploymentMode::Cloud,
         enrollment_method: "device_code".into(),
         workspace_id: WS.into(),
@@ -815,13 +761,7 @@ impl EnrollSource for PanicEnroll {
     fn poll_token(&self, _d: &str) -> Result<TokenPoll, ClientError> {
         panic!("a Redeemed-WAL resume must not re-poll")
     }
-    fn redeem(
-        &self,
-        _w: &str,
-        _g: &str,
-        _k: [u8; 32],
-        _s: [u8; 64],
-    ) -> Result<Redeem, ClientError> {
+    fn redeem(&self, _w: &str, _g: &str, _k: [u8; 32]) -> Result<Redeem, ClientError> {
         panic!("a Redeemed-WAL resume must NOT re-redeem the single-use grant")
     }
     fn admin_claim(&self, _c: &str, _k: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
@@ -968,64 +908,6 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
 }
 
 #[test]
-fn same_url_different_key_is_key_repin_required() {
-    let rig = Rig::new("repin");
-    let mut plane = FixturePlane::default();
-    plane.serve_genesis("s_deploy", GENESIS_FILES);
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/t")),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Granted),
-        &plane,
-        None,
-        opts(false),
-    )
-    .unwrap();
-
-    // The SAME base URL but a DIFFERENT signing key → a typed re-pin error (never a silent trust).
-    let mut bad = fake(&[("s_deploy", "deploy")], Poll::Pending);
-    bad.bootstrap.plane.signing_key.value =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x55u8; 32]);
-    let err = run_follow(
-        &rig,
-        &bad,
-        &plane,
-        Some(&format!("{BASE_URL}/i/t2")),
-        opts(false),
-    )
-    .unwrap_err();
-    assert!(matches!(err, ClientError::KeyRepinRequired), "got {err:?}");
-}
-
-#[test]
-fn a_non_ed25519_alg_fails_closed_at_the_bootstrap_boundary() {
-    // The bootstrap's `alg` is the CLOSED `SignatureAlg` enum — a non-Ed25519 value never deserializes
-    // (so a downgrade/confusion attack on the trust root is refused at the edge).
-    let json = serde_json::json!({
-        "schema_version": 1,
-        "invite": { "token_id": "t", "consent": "direct_human_first_receive", "first_receive_auto_land": false },
-        "plane": {
-            "base_url": BASE_URL,
-            "deployment_mode": "cloud",
-            "enrollment_method": "device_code",
-            "signing_key": { "alg": "RSA", "key_id": "k", "value": "AAAA" }
-        },
-        "workspace": { "workspace_id": WS, "display_name": "Acme", "verified_domain_status": "verified" }
-    });
-    assert!(
-        serde_json::from_value::<BootstrapData>(json).is_err(),
-        "a non-Ed25519 alg must fail to deserialize"
-    );
-}
-
-#[test]
 fn the_read_token_never_leaks_in_debug() {
     // The secret read tokens are redacted everywhere they could surface (follows.json's entry, the
     // transport credential, the WAL's redeemed creds).
@@ -1067,8 +949,6 @@ fn the_read_token_never_leaks_in_debug() {
 fn tiny_context() -> enroll::EnrollContext {
     enroll::EnrollContext {
         base_url: BASE_URL.into(),
-        pinned_plane_key: to_hex(&plane_pubkey()),
-        plane_key_id: "pk".into(),
         deployment_mode: DeploymentMode::Cloud,
         enrollment_method: "device_code".into(),
         workspace_id: WS.into(),
@@ -1113,7 +993,11 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
     let sync: SyncState = doc::read_doc(&rig.fs, &sp.sync)
         .unwrap()
         .expect("baseline sync.json");
-    assert!(sync.recorded.is_empty(), "never-received: empty recorded");
+    assert_eq!(
+        sync.observed_version_id,
+        "0".repeat(64),
+        "never-received: the all-zero version-id sentinel"
+    );
     assert_eq!(sync.observed, Generation { epoch: 0, seq: 0 });
     assert_eq!(sync.applied, Generation { epoch: 0, seq: 0 });
     assert!(
@@ -1146,8 +1030,8 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         "nothing placed by the offer"
     );
 
-    // A SECOND bare sweep (the I-TOFU regression guard): the first sweep raised the floor + recorded the
-    // tuple, but the still-unapproved first-receive baseline is STILL offered, NEVER auto-landed — even for
+    // A SECOND bare sweep (the first-receive-consent regression guard): the first sweep moved `observed` to
+    // the served target, but the still-unapproved first-receive baseline is STILL offered, NEVER auto-landed — even for
     // the default Auto follower.
     let swept2 = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert_eq!(
@@ -1410,7 +1294,7 @@ const WS_B: &str = "w_beta";
 const B_SKILL: &str = "s_report";
 
 /// Fully enroll workspace A (skill `s_deploy`) through the real two-call device flow, so instance.json is
-/// TOFU-pinned, follows.json + user.json carry A, host.json holds the device key, and A's first-receive
+/// written, follows.json + user.json carry A, host.json holds the device key, and A's first-receive
 /// baseline is laid. Leaves no WAL (A's own promote deleted it).
 fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
     let link = format!("{BASE_URL}/i/tok_a");
@@ -1438,8 +1322,6 @@ fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
 fn write_workspace_b_redeemed_wal(rig: &Rig) {
     let context = enroll::EnrollContext {
         base_url: BASE_URL.into(),
-        pinned_plane_key: to_hex(&plane_pubkey()),
-        plane_key_id: "pk_acme".into(),
         deployment_mode: DeploymentMode::Cloud,
         enrollment_method: "device_code".into(),
         workspace_id: WS_B.into(),

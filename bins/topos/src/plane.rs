@@ -11,22 +11,22 @@
 //! **no `Transport` trait** — that abstraction would be premature.
 
 use topos_core::digest::FileMode;
-use topos_core::sync::Generation as KernelGen;
 use topos_types::requests::{
     ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireSkillIndex,
 };
-use topos_types::{Generation, Receipt, SignedCurrentRecord, TerminalOutcome, WireError};
+use topos_types::{Generation, Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
 use crate::error::ClientError;
 
-/// The response to a conditional `get_current`: either the pointer is unchanged (a 304), or the signed
-/// record (which the caller authenticates before trusting).
+/// The response to a conditional `get_current`: either the pointer is unchanged (a 304), or the served
+/// unsigned `current` record (the engine scope-checks it, then drives toward it).
 pub(crate) enum PointerFetch {
     /// The pointer has not moved past the client's known generation. The engine still drives `applied`
     /// toward `observed` (a prior apply may be pending).
     NotModified,
-    /// The signed `current` record. NOT yet trusted — the engine verifies the signature + scope first.
-    Record(SignedCurrentRecord),
+    /// The served unsigned `current` record. The engine checks its (workspace, skill) scope, then treats
+    /// it as the sync target; integrity is the content-addressed `version_id` re-verified on apply.
+    Record(WireCurrentRecord),
 }
 
 /// A version's bytes + the commit metadata needed to **re-derive its `version_id`** locally (the
@@ -53,7 +53,7 @@ pub(crate) struct FetchedFile {
 }
 
 /// Why a plane read could not be satisfied. The engine maps each to a per-skill outcome (skip / retry /
-/// alarm) so one skill's failure never aborts the whole pull.
+/// surface) so one skill's failure never aborts the whole pull.
 #[derive(Debug)]
 pub(crate) enum PlaneError {
     /// The skill or version is not served here (not followed, or unknown) — skip the skill.
@@ -72,8 +72,8 @@ pub(crate) enum PlaneError {
 
 /// What the client already holds as `current` — the conditional-GET validator. The source returns
 /// [`PointerFetch::NotModified`] ONLY when its current matches BOTH the generation AND the commit, so a
-/// record that reuses the same `(epoch,seq)` for a DIFFERENT `version_id` is always returned (and caught
-/// as a reused-tuple ALARM) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
+/// record that reuses the same `(epoch,seq)` for a DIFFERENT `version_id` is always returned (and applied
+/// as the new target) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
 /// commit-sensitive, not just `<epoch>.<seq>`.)
 #[derive(Clone, Copy)]
 pub(crate) struct KnownCurrent {
@@ -82,19 +82,20 @@ pub(crate) struct KnownCurrent {
 }
 
 /// The client's read side of `current` + the version bytes. No write side (a pointer move rides the
-/// device-signed [`ContributeSource`], never this read seam). The production impl is the `ureq`
+/// [`ContributeSource`], never this read seam). The production impl is the `ureq`
 /// [`crate::plane_http::UreqPlane`]; the engine tests feed fixtures.
 pub(crate) trait PlaneSource {
-    /// Conditional GET of a skill's signed `current` pointer. `known` is what the client already holds
-    /// (its `observed` generation AND the commit recorded there): the source returns
-    /// [`PointerFetch::NotModified`] only when its current matches both, else the signed record.
+    /// Conditional GET of a skill's `current` pointer. `known` is what the client already holds (its
+    /// `observed` generation AND the commit it names): the source returns [`PointerFetch::NotModified`]
+    /// only when its current matches both, else the served record.
     fn get_current(
         &self,
         skill_id: &str,
         known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError>;
 
-    /// Fetch a specific version's bytes + commit frame (for the durable write + the re-verify gate).
+    /// Fetch a specific version's bytes + commit frame (for the durable write + the re-verify gate). The
+    /// engine re-derives the `version_id` from the bytes, so a lying response fails the digest check.
     fn fetch_version(
         &self,
         skill_id: &str,
@@ -102,8 +103,8 @@ pub(crate) trait PlaneSource {
     ) -> Result<FetchedVersion, PlaneError>;
 
     /// The OPEN proposals' version ids (the `@hash` handles) for a followed skill — the count feeds
-    /// `pull --json`'s `proposals_awaiting`, and the handles drive `list <skill>`. A read (no signature):
-    /// the per-skill read token authorizes it. The default is empty (fixtures / the inert source see no
+    /// `pull --json`'s `proposals_awaiting`, and the handles drive `list <skill>`. A read: the per-skill
+    /// read token authorizes it. The default is empty (fixtures / the inert source see no
     /// proposals); the real `UreqPlane` overrides it with the GET, mapping a 404 (no/unknown token or scope
     /// mismatch — indistinguishable) to an empty list rather than an error, so the count is best-effort.
     fn list_open_proposals(&self, _skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
@@ -121,9 +122,9 @@ pub(crate) enum FollowMode {
     ConfirmEach,
 }
 
-/// The per-skill follow-state the engine needs. The `workspace_id` is the EXPECTED scope — a signed
-/// pointer whose scope names a different workspace (even with the same skill id and plane key) is a
-/// cross-workspace replay and is refused. (The read credential lives with the TRANSPORT — a
+/// The per-skill follow-state the engine needs. The `workspace_id` is the EXPECTED scope — a served
+/// pointer whose scope names a different workspace (even with the same skill id) is a mis-scoped response
+/// and is rejected. (The read credential lives with the TRANSPORT — a
 /// [`crate::plane_http::SkillCred`] — never here: creds in the transport, consent in the follow seam.)
 #[derive(Debug, Clone)]
 pub(crate) struct FollowContext {
@@ -156,7 +157,7 @@ pub(crate) trait FollowSource {
 pub(crate) struct DeviceAuthorize {
     /// **SECRET** — the device code the client polls with. Redacted in `Debug`, never logged / in a URL.
     pub device_code: String,
-    /// The short user code (also the `device_auth_id` the enroll possession frame binds).
+    /// The short user code (also the `device_auth_id` the enroll flow presents).
     pub user_code: String,
     /// The verification URL a human visits to approve the session.
     pub verification_uri: String,
@@ -184,11 +185,11 @@ impl std::fmt::Debug for DeviceAuthorize {
 }
 
 /// A STANDUP device-authorization start: the RFC-8628 grant PLUS the plane block a standup device has no
-/// `/i/` bootstrap to learn — the base URL / posture / enrollment method / signing key to TOFU-pin.
+/// `/i/` bootstrap to learn — the base URL / posture / enrollment method.
 #[derive(Debug, Clone)]
 pub(crate) struct StandupAuthorize {
     pub auth: DeviceAuthorize,
-    /// The plane's self-description, including the signing key to pin (the TOFU root).
+    /// The plane's self-description (its API base to dial, posture, enrollment method).
     pub plane: topos_types::bootstrap::BootstrapPlane,
 }
 
@@ -214,7 +215,7 @@ impl std::fmt::Debug for Grant {
 }
 
 /// The workspace context a granted poll carries — the id + display name a STANDUP client (which never read
-/// an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined. `None` on an
+/// an `/i/` bootstrap) needs to build its redeem body and disclose what it joined. `None` on an
 /// older plane's response (the enroll flow already knows its workspace from the bootstrap).
 #[derive(Debug, Clone)]
 pub(crate) struct GrantedWorkspace {
@@ -277,16 +278,16 @@ pub(crate) struct Redeem {
     pub read_creds: Vec<RedeemedCred>,
 }
 
-/// The creds-free enrollment transport (device-flow). The follow op drives it: read the TOFU bootstrap,
+/// The creds-free enrollment transport (device-flow). The follow op drives it: read the bootstrap,
 /// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
-/// redeem the grant (the enroll possession signature rides a header) into per-skill read creds. The real
-/// impl is `UreqDeviceClient`; the fake is the follow tests'.
+/// redeem the grant into per-skill read creds. The real impl is `UreqDeviceClient`; the fake is the
+/// follow tests'.
 pub(crate) trait EnrollSource {
-    /// `GET /i/{token}` — the unauthenticated TOFU bootstrap (the workspace + the plane signing root).
+    /// `GET /i/{token}` — the unauthenticated invite bootstrap (the workspace + the plane API base to dial).
     ///
     /// # Errors
     /// [`ClientError::Plane`] for a dead/unknown invite (404) or a transport fault; [`ClientError::Corrupt`]
-    /// for a malformed body (incl. a non-Ed25519 `alg`, which fails the closed-enum deserialize).
+    /// for a malformed body.
     fn fetch_bootstrap(&self, token: &str) -> Result<topos_types::BootstrapData, ClientError>;
 
     /// `POST /v1/device/authorize` — begin a device-authorization against the invite.
@@ -301,8 +302,8 @@ pub(crate) trait EnrollSource {
     ) -> Result<DeviceAuthorize, ClientError>;
 
     /// `POST /v1/device/authorize` with `intent = "standup"` and NO invite token — begin the workspace
-    /// STANDUP device flow (hosted planes only). The response additionally carries the plane block to
-    /// TOFU-pin (a standup device has no `/i/` bootstrap to learn it from).
+    /// STANDUP device flow (hosted planes only). The response additionally carries the plane block (its API
+    /// base to dial), which a standup device has no `/i/` bootstrap to learn from.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status (a plane that does not offer standup is
@@ -321,7 +322,8 @@ pub(crate) trait EnrollSource {
     fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError>;
 
     /// `POST /v1/workspaces/{ws}/devices` — redeem the grant into a registered device + read creds. The
-    /// 64-byte enroll possession signature rides the `Topos-Device-Signature` header.
+    /// grant is the bearer credential; the body's `device_public_key` registers this device (the server
+    /// checks it matches the grant's bound pubkey). Nothing is signed.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault or a 200+DENIED redeem (e.g. a device-key mismatch);
@@ -331,7 +333,6 @@ pub(crate) trait EnrollSource {
         workspace_id: &str,
         grant: &str,
         device_public_key: [u8; 32],
-        enroll_sig: [u8; 64],
     ) -> Result<Redeem, ClientError>;
 
     /// `POST /v1/admin-claim` — consume a one-time claim token to stand up the workspace + seat this device
@@ -353,37 +354,37 @@ pub(crate) trait EnrollSource {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The governance-write seam — the OWNER's signed-op write side (invite today), behind a port so the
-// `invite` tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte governance signature rides a
-// header, not a read token; the base URL is baked in when the connector builds it from `instance.json`.
-// The real impl is `crate::plane_http::UreqDeviceClient` (the same client that speaks enrollment); the fake
-// lives in the invite tests.
+// The governance-write seam — the OWNER's write side (invite today), behind a port so the `invite`
+// tests run against a fake WITHOUT HTTP. The body names the `device_key_id`; the in-txn authz resolves
+// the non-revoked registry row for (ws, device_key_id) → its principal → the role matrix. The base URL is
+// baked in when the connector builds it from `instance.json`. The real impl is
+// `crate::plane_http::UreqDeviceClient` (the same client that speaks enrollment); the fake lives in the
+// invite tests.
 // ---------------------------------------------------------------------------------------------
 
-/// The owner's governance-write transport. The `invite` op drives it: POST the owner-signed governance
-/// Invite op to `/v1/invites`, the 64-byte signature in the `Topos-Device-Signature` header.
+/// The owner's governance-write transport. The `invite` op drives it: POST the governance Invite op to
+/// `/v1/invites` (the body names the acting `device_key_id`).
 pub(crate) trait GovernanceSource {
-    /// `POST /v1/invites` — submit the owner-signed governance Invite op (the body is the
-    /// [`InviteRequest`](topos_types::requests::InviteRequest); the signature rides the header). Maps the
+    /// `POST /v1/invites` — submit the governance Invite op (the body is the
+    /// [`InviteRequest`](topos_types::requests::InviteRequest), naming the acting `device_key_id`). Maps the
     /// all-outcome **200 envelope**: `ok` ⇒ the [`InviteData`](topos_types::results::InviteData); `!ok` ⇒ a
     /// typed error carrying the wire error's code (a role-DENIED surfaces as a clear "not authorized").
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault, a non-200 status, or a 200+DENIED envelope (e.g. the
-    /// signer is not an owner); [`ClientError::Corrupt`] on a malformed body.
+    /// acting device is not an owner); [`ClientError::Corrupt`] on a malformed body.
     fn create_invite(
         &self,
         body: topos_types::requests::InviteRequest,
-        governance_sig: [u8; 64],
     ) -> Result<topos_types::results::InviteData, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
-// The contribute-write seam — the device-signed write side (publish / propose / revert / review),
-// behind a port so the contribute tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte
-// device-op signature is the auth, riding a header, not a read token; the base URL is baked in when
-// the connector builds it from `instance.json`. The real impl is `crate::plane_http::UreqDeviceClient` (the
-// same creds-free client that speaks enrollment + governance); the fake lives in the contribute tests.
+// The contribute-write seam — the write side (publish / propose / revert / review), behind a port so the
+// contribute tests run against a fake WITHOUT HTTP. The body names the acting `device_key_id`; the base
+// URL is baked in when the connector builds it from `instance.json`. The op kind is derived from the ROUTE
+// server-side. The real impl is `crate::plane_http::UreqDeviceClient` (the same client that speaks
+// enrollment + governance); the fake lives in the contribute tests.
 // ---------------------------------------------------------------------------------------------
 
 /// The typed result of a contribute write. Carries the three parts of the all-outcome **200 envelope**
@@ -399,11 +400,10 @@ pub(crate) struct WriteReceipt {
     /// the live `current_generation` (the CONFLICT rebase target), and the typed `next_actions`. `None` on
     /// OK / NEEDS_REVIEW.
     pub error: Option<WireError>,
-    /// The signed `current` pointer — `Some` ONLY when a pointer actually moved (publish / revert /
-    /// review-approve OK). `None` for NEEDS_REVIEW, an OK `review --reject` (signs nothing → data `{}`), and
-    /// every failure. NOT trusted here: the caller verifies it against the pinned plane key before advancing
-    /// the anti-rollback floor.
-    pub signed_record: Option<SignedCurrentRecord>,
+    /// The served `current` pointer — `Some` ONLY when a pointer actually moved (publish / revert /
+    /// review-approve OK). `None` for NEEDS_REVIEW, an OK `review --reject` (moves nothing → data `{}`), and
+    /// every failure. The caller scope-checks it and confirms it names the version this op moved to.
+    pub wire_record: Option<WireCurrentRecord>,
 }
 
 impl WriteReceipt {
@@ -413,69 +413,49 @@ impl WriteReceipt {
     }
 }
 
-/// The device-signed contribute-write transport — the four POST verbs that move (or propose to move)
-/// `current`. Creds-free: the 64-byte device-op signature is the auth, riding the `Topos-Device-Signature`
-/// header (NOT a read token); the body carries only the `device_key_id` that names the signing key. The op
-/// kind is derived from the route server-side, so the transport ships only the body + the signature and is
-/// op-agnostic. EVERY terminal protocol outcome (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED)
-/// is an `Ok(WriteReceipt)`; only a transport / non-200 / malformed-body fault is an `Err`. The real impl is
-/// [`crate::plane_http::UreqDeviceClient`].
+/// The contribute-write transport — the four POST verbs that move (or propose to move) `current`. The body
+/// names the acting `device_key_id`; the op kind is derived from the route server-side, so the transport
+/// ships only the body and is op-agnostic. EVERY terminal protocol outcome (OK / NEEDS_REVIEW / CONFLICT /
+/// APPROVAL_REQUIRED / DENIED) is an `Ok(WriteReceipt)`; only a transport / non-200 / malformed-body fault
+/// is an `Err`. The real impl is [`crate::plane_http::UreqDeviceClient`].
 pub(crate) trait ContributeSource {
     /// `POST /v1/publish` — a direct publish that moves `current` (or genesis).
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-200 status; [`ClientError::Corrupt`] on a malformed
     /// envelope (a body that carries no receipt is corrupt).
-    fn publish(
-        &self,
-        body: PublishRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError>;
+    fn publish(&self, body: PublishRequest) -> Result<WriteReceipt, ClientError>;
 
     /// `POST /v1/proposals` — open a proposal (ingest a candidate WITHOUT moving `current`).
     ///
     /// # Errors
     /// As [`publish`](Self::publish).
-    fn propose(
-        &self,
-        body: ProposeRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError>;
+    fn propose(&self, body: ProposeRequest) -> Result<WriteReceipt, ClientError>;
 
     /// `POST /v1/reverts` — a forward revert (the server builds the forward commit from `good`'s tree).
     ///
     /// # Errors
     /// As [`publish`](Self::publish).
-    fn revert(
-        &self,
-        body: RevertRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError>;
+    fn revert(&self, body: RevertRequest) -> Result<WriteReceipt, ClientError>;
 
     /// `POST /v1/reviews` — approve or reject a proposal (the verdict rides `ReviewRequest.decision`).
     ///
     /// # Errors
     /// As [`publish`](Self::publish).
-    fn review(
-        &self,
-        body: ReviewRequest,
-        device_sig: [u8; 64],
-    ) -> Result<WriteReceipt, ClientError>;
+    fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
-// The catalog-read seam — the device-signed WORKSPACE-CATALOG read side (`list --remote`), behind a
-// port so the list tests run against a fake WITHOUT HTTP. Creds-free: the 64-byte catalog-read signature
-// is the auth, riding the `Topos-Device-Signature` header (with the `Topos-Device-Key-Id` selector), not
-// a per-skill read token — catalog visibility == workspace membership. Metadata only (no bytes). The real
-// impl is `crate::plane_http::UreqDeviceClient` (the same creds-free client that speaks enrollment /
-// governance / contribute); the fake lives in the `list` tests.
+// The catalog-read seam — the WORKSPACE-CATALOG read side (`list --remote`), behind a port so the list
+// tests run against a fake WITHOUT HTTP. The `Topos-Device-Key-Id` header names the acting device (catalog
+// visibility == workspace membership, resolved from the registry row), not a per-skill read token.
+// Metadata only (no bytes). The real impl is `crate::plane_http::UreqDeviceClient` (the same client that
+// speaks enrollment / governance / contribute); the fake lives in the `list` tests.
 // ---------------------------------------------------------------------------------------------
 
-/// The device-signed catalog-read transport: `GET /v1/workspaces/{ws}/skills` returns the workspace's
-/// discovery metadata (every skill holding a `current`), so a member can see what to follow next. The
-/// signature (over the kernel's `catalog_read_preimage`, binding `workspace_id` + `device_key_id`) rides
-/// the `Topos-Device-Signature` header; the `device_key_id` selects the registered key server-side.
+/// The catalog-read transport: `GET /v1/workspaces/{ws}/skills` returns the workspace's discovery metadata
+/// (every skill holding a `current`), so a member can see what to follow next. The `device_key_id` rides
+/// the `Topos-Device-Key-Id` header and selects the registered device server-side.
 pub(crate) trait CatalogSource {
     /// Read a workspace's skill catalog (metadata only). The real impl maps a **404** (not a member / no
     /// such workspace — the indistinguishable "no catalog") to an EMPTY index rather than an error, so a
@@ -489,20 +469,13 @@ pub(crate) trait CatalogSource {
         &self,
         workspace_id: &str,
         device_key_id: &str,
-        signature: &[u8; 64],
     ) -> Result<WireSkillIndex, PlaneError>;
 }
 
-/// Compare two wire generations with the kernel's epoch-dominant order (the wire type derives none).
+/// Compare two wire generations with the epoch-dominant order (epoch first, then seq; the wire type
+/// derives no `Ord`).
 pub(crate) fn gen_cmp(a: Generation, b: Generation) -> core::cmp::Ordering {
-    KernelGen {
-        epoch: a.epoch,
-        seq: a.seq,
-    }
-    .cmp(&KernelGen {
-        epoch: b.epoch,
-        seq: b.seq,
-    })
+    (a.epoch, a.seq).cmp(&(b.epoch, b.seq))
 }
 
 // ---------------------------------------------------------------------------------------------

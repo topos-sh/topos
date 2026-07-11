@@ -9,9 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use topos_types::persisted::{
-    Lock, LockedFile, OpRecord, PlacementMap, RecordedTuple, SwapCapability, SyncState,
-};
+use topos_types::persisted::{Lock, LockedFile, OpRecord, PlacementMap, SwapCapability, SyncState};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::atomic::{atomic_write, load_versioned, temp_path};
@@ -85,14 +83,11 @@ fn sample_sync(tag: u8) -> SyncState {
             epoch: 0,
             seq: u64::from(tag),
         },
+        observed_version_id: hex(tag),
         applied: Generation {
             epoch: 0,
             seq: u64::from(tag),
         },
-        recorded: vec![RecordedTuple {
-            generation: Generation { epoch: 0, seq: 1 },
-            commit_id: hex(tag),
-        }],
         base_commit: hex(tag),
         work_hash: hex(tag),
         held: false,

@@ -11,20 +11,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
-use topos_core::sign::{self, Commit, CurrentPointer, EnrollFields, verify_enroll};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSigningKey, BootstrapWorkspace,
-    ConsentMode, DeploymentMode, VerifiedDomainStatus,
+    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapWorkspace, ConsentMode,
+    DeploymentMode, VerifiedDomainStatus,
 };
 use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
 use topos_types::results::{PublishPendingStatus, PullAction};
 use topos_types::{
     ActionCode, CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, Receipt,
-    Signature, SignatureAlg, SignedCurrentRecord, TerminalOutcome, TriggerReport, TriggerState,
+    TerminalOutcome, TriggerReport, TriggerState, WireCurrentRecord,
 };
 
 use crate::ctx::Ctx;
@@ -43,21 +41,6 @@ const HOSTED: &str = "https://api.topos.test";
 const CLAIM_BASE: &str = "https://plane.acme.test";
 const STANDUP_WS: &str = "w_standup";
 const USER_CODE: &str = "abcdefgh23456789";
-const PLANE_SEED: [u8; 32] = [7u8; 32];
-
-fn plane_key() -> SigningKey {
-    SigningKey::from_bytes(&PLANE_SEED)
-}
-fn plane_pubkey() -> [u8; 32] {
-    plane_key().verifying_key().to_bytes()
-}
-fn plane_pubkey_b64() -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plane_pubkey())
-}
-fn device_key_id_for(pubkey: &[u8; 32]) -> String {
-    let hex = to_hex(&digest::sha256(pubkey));
-    format!("dk_{}", &hex[..32])
-}
 
 // ---------------------------------------------------------------------------------------------
 // Scratch + rig (mirrors the follow suite's shape).
@@ -156,7 +139,6 @@ impl Rig {
             layout: self.layout(),
             harness: &self.harness,
             plane: &INERT_PLANE,
-            plane_key: [0u8; 32],
             follow: &INERT_FOLLOW,
         }
     }
@@ -236,11 +218,6 @@ impl EnrollSource for FakeStandup {
                 base_url: HOSTED.to_owned(),
                 deployment_mode: DeploymentMode::Cloud,
                 enrollment_method: "device_code".to_owned(),
-                signing_key: BootstrapSigningKey {
-                    alg: SignatureAlg::Ed25519,
-                    key_id: "pk_hosted".to_owned(),
-                    value: plane_pubkey_b64(),
-                },
             },
         })
     }
@@ -263,25 +240,12 @@ impl EnrollSource for FakeStandup {
     fn redeem(
         &self,
         workspace_id: &str,
-        grant: &str,
+        _grant: &str,
         device_public_key: [u8; 32],
-        enroll_sig: [u8; 64],
     ) -> Result<Redeem, ClientError> {
-        // Reconstruct + verify the possession proof exactly as the authority would: a STANDUP session
-        // offered NO skills, so the frame binds the EMPTY set.
-        let dk = device_key_id_for(&device_public_key);
-        let fields = EnrollFields {
-            workspace_id,
-            grant_hash: digest::sha256(grant.as_bytes()),
-            device_auth_id: USER_CODE,
-            device_key_id: &dk,
-            device_public_key,
-            offered_skill_ids: &[],
-        };
-        assert!(
-            verify_enroll(&fields, &enroll_sig, &device_public_key),
-            "the standup possession signature must verify over the EMPTY offered set"
-        );
+        // The client no longer signs the redeem — the body's public key is the identity anchor and the
+        // plane derives the device key id the same way.
+        let dk = topos_core::identity::device_key_id(&device_public_key);
         assert_eq!(workspace_id, STANDUP_WS);
         Ok(Redeem {
             workspace_id: workspace_id.to_owned(),
@@ -301,8 +265,8 @@ fn panicking_standup_connect(_b: &str) -> Box<dyn EnrollSource> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The contribute-side fakes: a "signing plane" that rehashes the candidate like the real server and
-// answers OK with a properly signed pointer, and a governance stub whose invite fold-in fails (the
+// The contribute-side fakes: a plane that rehashes the candidate like the real server and answers OK
+// with the moved (UNSIGNED) `current` pointer, and a governance stub whose invite fold-in fails (the
 // publish must still succeed — the fold is best-effort).
 // ---------------------------------------------------------------------------------------------
 
@@ -317,7 +281,7 @@ impl SigningPlane {
     }
 }
 impl ContributeSource for SigningPlane {
-    fn publish(&self, body: PublishRequest, _sig: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+    fn publish(&self, body: PublishRequest) -> Result<WriteReceipt, ClientError> {
         // Rehash the candidate the way the server does: decode every file, digest, commit id.
         let entries: Vec<ManifestEntry> = body
             .candidate
@@ -345,7 +309,7 @@ impl ContributeSource for SigningPlane {
                 out
             })
             .collect();
-        let commit_id = sign::commit_id(&Commit {
+        let commit_id = topos_core::identity::commit_id(&topos_core::identity::Commit {
             parents: &parents,
             tree,
             author: &body.candidate.author,
@@ -353,17 +317,7 @@ impl ContributeSource for SigningPlane {
         })
         .unwrap();
         self.publishes.borrow_mut().push(body.op_id.clone());
-        // The signed pointer at (1,1) — the genesis move — over the REAL standup plane key.
-        let pointer = CurrentPointer {
-            workspace_id: &body.workspace_id,
-            skill_id: &body.skill_id,
-            version_id: commit_id,
-            epoch: 1,
-            seq: 1,
-        };
-        let msg = sign::pointer_preimage(&pointer).unwrap();
-        let sig_value = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(plane_key().sign(msg.as_bytes()).to_bytes());
+        // The UNSIGNED pointer at (1,1) — the genesis move; authority is the row, integrity the version id.
         Ok(WriteReceipt {
             receipt: Receipt {
                 schema_version: 1,
@@ -377,11 +331,10 @@ impl ContributeSource for SigningPlane {
                 expected_generation: Some(body.expected),
                 current_generation: Some(Generation { epoch: 1, seq: 1 }),
                 created_at: "2026-07-03T00:00:00Z".to_owned(),
-                key_id: Some("pk_hosted".to_owned()),
                 details: None,
             },
             error: None,
-            signed_record: Some(SignedCurrentRecord {
+            wire_record: Some(WireCurrentRecord {
                 schema_version: 1,
                 scope: PointerScope {
                     workspace_id: body.workspace_id,
@@ -391,21 +344,16 @@ impl ContributeSource for SigningPlane {
                     version_id: to_hex(&commit_id),
                     generation: Generation { epoch: 1, seq: 1 },
                 },
-                signature: Signature {
-                    alg: SignatureAlg::Ed25519,
-                    key_id: "pk_hosted".to_owned(),
-                    value: sig_value,
-                },
             }),
         })
     }
-    fn propose(&self, _b: ProposeRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+    fn propose(&self, _b: ProposeRequest) -> Result<WriteReceipt, ClientError> {
         panic!("the standup continuation is a direct publish, never a proposal")
     }
-    fn revert(&self, _b: RevertRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+    fn revert(&self, _b: RevertRequest) -> Result<WriteReceipt, ClientError> {
         panic!("not a revert")
     }
-    fn review(&self, _b: ReviewRequest, _s: [u8; 64]) -> Result<WriteReceipt, ClientError> {
+    fn review(&self, _b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
         panic!("not a review")
     }
 }
@@ -415,7 +363,6 @@ impl GovernanceSource for NoInvite {
     fn create_invite(
         &self,
         _body: topos_types::requests::InviteRequest,
-        _sig: [u8; 64],
     ) -> Result<topos_types::results::InviteData, ClientError> {
         // The genesis invite fold-in is best-effort — a failure must never fail the publish.
         Err(ClientError::Plane("invite mint unavailable".into()))
@@ -494,7 +441,7 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
         ]
     );
 
-    // The WAL: 0600, AuthorizingStandup, carrying the pinned key + the verbatim complete URI.
+    // The WAL: 0600, AuthorizingStandup, carrying the verbatim complete URI.
     let layout = rig.layout();
     let mode = std::fs::metadata(layout.enrollment_path())
         .unwrap()
@@ -505,7 +452,6 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
     let wal = enroll::read_wal(&rig.fs, &layout).unwrap().expect("a WAL");
     let enroll::EnrollPhase::AuthorizingStandup {
         base_url,
-        pinned_plane_key,
         verification_uri_complete,
         ..
     } = &wal.state
@@ -513,7 +459,6 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
         panic!("the WAL is the standup phase");
     };
     assert_eq!(base_url, HOSTED);
-    assert_eq!(*pinned_plane_key, to_hex(&plane_pubkey()));
     assert_eq!(
         *verification_uri_complete,
         format!("https://topos.sh/verify/{USER_CODE}")
@@ -646,12 +591,11 @@ fn reinvoke_granted_redeems_promotes_and_publishes_in_one_invocation() {
     // The invite fold-in failed (best-effort) — the publish still succeeded.
     assert!(data.invite_link.is_none());
 
-    // The enrollment was promoted: instance.json pinned to the standup plane, user.json carries the
+    // The enrollment was promoted: instance.json at the standup plane, user.json carries the
     // principal + the NON-invite root, the WAL is gone.
     let layout = rig.layout();
     let instance = enroll::read_instance(&rig.fs, &layout).unwrap().unwrap();
     assert_eq!(instance.base_url, HOSTED);
-    assert_eq!(instance.plane_key, to_hex(&plane_pubkey()));
     let user = enroll::read_user(&rig.fs, &layout).unwrap().unwrap();
     let m = user
         .membership(STANDUP_WS)
@@ -745,8 +689,6 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
         &enroll::Instance {
             schema_version: 1,
             base_url: "https://acme.topos.test".to_owned(),
-            plane_key: "a".repeat(64),
-            plane_key_id: "pk".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
         },
@@ -793,11 +735,6 @@ fn claim_bootstrap() -> BootstrapData {
             base_url: CLAIM_BASE.into(),
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "admin_claim".into(),
-            signing_key: BootstrapSigningKey {
-                alg: SignatureAlg::Ed25519,
-                key_id: "pk_selfhost".into(),
-                value: plane_pubkey_b64(),
-            },
         },
         workspace: BootstrapWorkspace {
             workspace_id: "w_acme".into(),
@@ -864,13 +801,7 @@ impl EnrollSource for FakeClaim {
     fn poll_token(&self, _d: &str) -> Result<TokenPoll, ClientError> {
         panic!("a claim follow never polls")
     }
-    fn redeem(
-        &self,
-        _w: &str,
-        _g: &str,
-        _k: [u8; 32],
-        _s: [u8; 64],
-    ) -> Result<Redeem, ClientError> {
+    fn redeem(&self, _w: &str, _g: &str, _k: [u8; 32]) -> Result<Redeem, ClientError> {
         panic!("a claim follow never redeems a grant")
     }
     fn admin_claim(
@@ -894,7 +825,7 @@ impl EnrollSource for FakeClaim {
                     .into(),
             ));
         }
-        let dk = device_key_id_for(&device_public_key);
+        let dk = topos_core::identity::device_key_id(&device_public_key);
         Ok(Redeem {
             workspace_id: "w_acme".to_owned(),
             device_key_id: dk.clone(),
@@ -943,7 +874,6 @@ fn a_claim_link_enrolls_in_one_invocation() {
     let layout = rig.layout();
     let instance = enroll::read_instance(&rig.fs, &layout).unwrap().unwrap();
     assert_eq!(instance.base_url, CLAIM_BASE);
-    assert_eq!(instance.plane_key, to_hex(&plane_pubkey()));
     assert_eq!(instance.enrollment_method, "admin_claim");
     let user = enroll::read_user(&rig.fs, &layout).unwrap().unwrap();
     assert!(user.principal.as_deref().unwrap().starts_with("dev.dk_"));
@@ -1113,8 +1043,6 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
         &enroll::Instance {
             schema_version: 1,
             base_url: HOSTED.to_owned(),
-            plane_key: to_hex(&plane_pubkey()),
-            plane_key_id: "pk_hosted".to_owned(),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "device_code".to_owned(),
         },
@@ -1128,8 +1056,6 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
             state: enroll::EnrollPhase::Redeemed {
                 context: enroll::EnrollContext {
                     base_url: HOSTED.to_owned(),
-                    pinned_plane_key: to_hex(&plane_pubkey()),
-                    plane_key_id: "pk_hosted".to_owned(),
                     deployment_mode: DeploymentMode::Cloud,
                     enrollment_method: "device_code".to_owned(),
                     workspace_id: STANDUP_WS.to_owned(),

@@ -367,7 +367,6 @@ mod tests {
             layout: Layout::new(&scratch("home")),
             harness: &harness,
             plane: &plane,
-            plane_key: [0u8; 32],
             follow: &follow,
         };
         f(&ctx)
