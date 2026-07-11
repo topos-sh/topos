@@ -1068,6 +1068,7 @@ fn check_arch() -> Result<()> {
 /// 1. no `directory` MODULE PATH reference (`crate::directory`, `db::directory`, `super::directory`);
 /// 2. no directory TABLE named after FROM / JOIN / INTO / UPDATE in any SQL string (word-boundary match,
 ///    so custody's ubiquitous `workspace_id` columns never trip the bare `workspace` ban).
+///
 /// The reverse direction is deliberately unchecked: the directory MAY call custody (a review approve
 /// terminates in the shared pointer-move transaction — that is the row/byte rule, not a violation).
 fn check_seam() -> Result<()> {
@@ -1111,8 +1112,8 @@ fn check_seam() -> Result<()> {
     let mut violations = Vec::new();
     for dir in &custody_dirs {
         for file in rust_files_under(dir)? {
-            let text = fs::read_to_string(&file)
-                .with_context(|| format!("reading {}", file.display()))?;
+            let text =
+                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let shown = file.strip_prefix(&root).unwrap_or(&file).display();
             for (n, line) in text.lines().enumerate() {
                 for needle in DIRECTORY_PATHS {
