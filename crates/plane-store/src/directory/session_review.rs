@@ -3,8 +3,8 @@
 //! The hosted cloud's "Approve / Reject in the browser" surface: a composing plane whose WEB layer has
 //! verified a session email calls these PRIVILEGED lib-level ops (there is no OSS HTTP route) to
 //! approve or reject an open proposal. The write terminates in the SAME serializable transaction the
-//! device-signed lane runs ([`crate::db`]'s `run` / `reject_run`) — one approve predicate, one CAS, one
-//! plane-signed pointer, one four-eyes gate — with the lane branching ONLY at the authorization step:
+//! device lane runs ([`crate::db`]'s `run` / `reject_run`) — one approve predicate, one CAS, one
+//! pointer advance, one four-eyes gate — with the lane branching ONLY at the authorization step:
 //! the session gate is a confirmed **owner or reviewer** workspace seat (the first enforcement of the
 //! reviewer role), checked in-transaction; the composing caller's session verification is the
 //! authentication. Mirrors [`crate::session_roster`]'s trust shape (no signature; request_id-idempotent
@@ -12,10 +12,10 @@
 //! gate-before-reach posture: a pool-level membership pre-gate runs BEFORE any proposal/digest/render
 //! work, so an unproven caller never reaches workspace data — the in-txn gate stays the authority.
 //!
-//! CONSENT POSTURE (deliberate, decided): a session approve carries no reviewer device signature over
-//! the candidate commit + digest — the plane still signs the moved pointer, followers still re-verify
-//! bytes against the approved digest before applying, and the receipt records `method = web_session` +
-//! the acting principal (with a reserved step-up-attestation slot) as the compensating audit.
+//! CONSENT POSTURE (deliberate, decided): a session approve carries no reviewer attestation over the
+//! candidate commit + digest — followers re-verify bytes against the approved content-addressed digest
+//! before applying, and the receipt records `method = web_session` + the acting principal (with a
+//! reserved step-up-attestation slot) as the compensating audit.
 
 use topos_types::{Generation, TerminalOutcome};
 

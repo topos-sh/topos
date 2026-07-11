@@ -501,7 +501,7 @@ impl Authority {
     /// **Approve** an open proposal — promote it to `current` (the sideways move; the contribute motion's
     /// second half). Uploads/leases/migrates nothing (the candidate is already in the main store, rooted by
     /// its proposal); runs only the one pointer-move transaction, which compare-and-sets on the proposal's
-    /// base, performs the `proposal_object → commit_object` handoff, signs the advanced pointer, and flips the
+    /// base, performs the `proposal_object → commit_object` handoff, advances the pointer, and flips the
     /// proposal to `accepted`. A stale base ⇒ `CONFLICT` (rebase + re-propose); approving an already-resolved
     /// proposal ⇒ a typed `CONFLICT`/`DENIED`, never a second promote. Under `review_required`, an approve
     /// whose principal is the proposer's is rejected (four-eyes).
@@ -679,8 +679,8 @@ impl Authority {
     /// `CONFLICT`). Revert bypasses the review gate + four-eyes by design (it restores already-consented
     /// bytes — the safety net); the session gate is the SAME confirmed **owner|reviewer** seat the approve
     /// lane enforces, checked in-transaction (with a cheap pre-stage fence so a plain member never triggers
-    /// the forward-commit staging). The plane signs the moved pointer; followers re-verify the restored
-    /// bytes against the target's digest — consent stays end-to-end, and the receipt records
+    /// the forward-commit staging). Followers re-verify the restored bytes against the target's
+    /// content-addressed digest — consent stays end-to-end, and the receipt records
     /// `method = web_session` + the acting principal. Idempotent per `request_id` (a canonical UUID).
     ///
     /// # Errors

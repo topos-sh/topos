@@ -16,7 +16,7 @@
 //! FRESH domain-tagged request identity (the kernel governance preimage needs a signature frame no
 //! session op has), so a device op id and a session request id can never replay each other — a
 //! cross-leg id collision always fails closed as a key reuse. All four ops (the read included) are
-//! uniformly denied on a self-host plane: self-host membership stays the device-signed invite
+//! uniformly denied on a self-host plane: self-host membership stays the device invite
 //! chain.
 
 use crate::authority::Authority;
@@ -40,7 +40,7 @@ const MAX_SESSION_INVITE_EMAILS: usize = 20;
 pub(crate) const SESSION_ACTING_DENIED: &str = "session roster ops require a confirmed owner";
 
 /// The role a session invite may seat — owner is unrepresentable by construction (an owner-role
-/// grant stays device-signed).
+/// grant stays the device invite chain).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionInviteRole {
     /// An ordinary member.

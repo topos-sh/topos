@@ -1115,28 +1115,32 @@ fn check_seam() -> Result<()> {
             let text =
                 fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let shown = file.strip_prefix(&root).unwrap_or(&file).display();
+            // The module-path check is per-line (a `use`/path reference is always one line), so it can
+            // report a line number.
             for (n, line) in text.lines().enumerate() {
                 for needle in DIRECTORY_PATHS {
                     if line.contains(needle) {
                         violations.push(format!("{shown}:{}: `{needle}`", n + 1));
                     }
                 }
-                let tokens: Vec<&str> = line
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .filter(|t| !t.is_empty())
-                    .collect();
-                for pair in tokens.windows(2) {
-                    let introducer = pair[0].to_ascii_lowercase();
-                    if SQL_INTRODUCERS.contains(&introducer.as_str())
-                        && DIRECTORY_TABLES.contains(&pair[1])
-                    {
-                        violations.push(format!(
-                            "{shown}:{}: SQL `{} {}` names a directory table",
-                            n + 1,
-                            pair[0],
-                            pair[1]
-                        ));
-                    }
+            }
+            // The SQL-table check tokenizes the WHOLE file as one whitespace-normalized stream, so an
+            // introducer and its table split across lines (`FROM\n  workspace_member`) can NEVER evade
+            // the gate that enforces the row/byte boundary — comment-stripping is unnecessary since a
+            // directory table named in a comment is itself a seam smell worth failing on.
+            let tokens: Vec<&str> = text
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|t| !t.is_empty())
+                .collect();
+            for pair in tokens.windows(2) {
+                let introducer = pair[0].to_ascii_lowercase();
+                if SQL_INTRODUCERS.contains(&introducer.as_str())
+                    && DIRECTORY_TABLES.contains(&pair[1])
+                {
+                    violations.push(format!(
+                        "{shown}: SQL `{} {}` names a directory table",
+                        pair[0], pair[1]
+                    ));
                 }
             }
         }

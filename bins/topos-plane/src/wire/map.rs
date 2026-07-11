@@ -172,7 +172,7 @@ pub(crate) fn open_proposals_to_wire(v: Vec<OpenProposalSummary>) -> WireProposa
 }
 
 /// Map the authority's workspace skill index (`Vec<SkillIndexRow>`) to the wire [`WireSkillIndex`] — the
-/// device-signed catalog read's body. Hex-encode each 32-byte `version_id` + `bundle_digest` (the same
+/// device-credential catalog read's body. Hex-encode each 32-byte `version_id` + `bundle_digest` (the same
 /// `hex::encode` [`version_meta_to_wire`] uses), carrying the generation / display name / update time /
 /// open-proposal count through. NO bytes — the catalog is metadata only.
 pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {

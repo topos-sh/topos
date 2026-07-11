@@ -7,7 +7,7 @@
 //! `&str`, outcomes are owned enums/structs, faults are stringified — so a composing plane never
 //! names a `plane-store` type. Each wrapper parses the plane's deployment mode STRICTLY (fail
 //! closed) and threads it into the authority op; the ops themselves uniformly deny a self-host
-//! plane (self-host membership stays the device-signed invite chain).
+//! plane (self-host membership stays the device invite chain).
 
 use plane_store::{
     AuthorityError, GovernanceOutcome, SessionInviteOutcome, SessionInviteRole,

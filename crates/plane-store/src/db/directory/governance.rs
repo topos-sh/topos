@@ -1,4 +1,4 @@
-//! The governance + admin-claim SQL — the raw-`sqlx` half (owner-signed create-invite, the roster/revoke
+//! The governance + admin-claim SQL — the raw-`sqlx` half (owner-driven create-invite, the roster/revoke
 //! mutations, and the self-host first-boot admin claim).
 //!
 //! Split from [`super::enroll`] (the enrollment issuance SQL) so the role-gated governance surface — the
@@ -47,14 +47,25 @@ const GOVERNANCE_TAG: &[u8] = b"TOPOS_DEVICE_GOVERNANCE_V1";
 
 /// The governance request identity: sha256 over [`GOVERNANCE_TAG`] + u64-be length-prefixed parts of the
 /// FULL request — workspace, op id, the acting device key id, the op's kind byte, and every parameter
-/// (list parameters ride as their count then per-element parts, emails/skills each pre-sorted by the
-/// orchestration's canonical order). The `workspace_events` idempotency slot binds it: a same-op_id retry
+/// (list parameters ride as their count then per-element parts). The `emails`/`skills` lists are SETS —
+/// canonicalized here (sorted + deduped) so the identity is order-independent, matching the seating
+/// effect (order-independent UPSERTs): a lost-ack retry that reorders the list replays rather than
+/// tripping the key-reuse guard. The `workspace_events` idempotency slot binds it: a same-op_id retry
 /// must byte-match to replay; any divergent payload is a denied key-reuse. Deterministic, built from
 /// server-trusted values.
 fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
     fn put(buf: &mut Vec<u8>, part: &[u8]) {
         buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
         buf.extend_from_slice(part);
+    }
+    /// Canonicalize a set-valued parameter: sorted + deduped, so its bytes are order-independent.
+    fn put_set(buf: &mut Vec<u8>, mut parts: Vec<&str>) {
+        parts.sort_unstable();
+        parts.dedup();
+        put(buf, &(parts.len() as u64).to_be_bytes());
+        for part in parts {
+            put(buf, part.as_bytes());
+        }
     }
     let mut buf = Vec::new();
     buf.extend_from_slice(GOVERNANCE_TAG);
@@ -70,15 +81,9 @@ fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
         } => {
             put(&mut buf, &[1, role.derivation_byte()]);
             put(&mut buf, &expires_to_u64(*expires_at).to_be_bytes());
-            put(&mut buf, &(emails.len() as u64).to_be_bytes());
-            for email in emails {
-                put(&mut buf, email.as_str().as_bytes());
-            }
-            put(&mut buf, &(skills.len() as u64).to_be_bytes());
-            for (id, _name) in skills {
-                // Display names are advisory (never identity): only the skill ids bind.
-                put(&mut buf, id.as_str().as_bytes());
-            }
+            // Display names are advisory (never identity): only the skill ids bind.
+            put_set(&mut buf, emails.iter().map(Principal::as_str).collect());
+            put_set(&mut buf, skills.iter().map(|(id, _)| id.as_str()).collect());
         }
         GovernanceOp::RosterSet { role, target } => {
             put(&mut buf, &[2, role.derivation_byte()]);
@@ -154,7 +159,7 @@ async fn govern_preamble(
 }
 
 impl Db {
-    /// `create_invite`: the owner-signed invite mint. One `SERIALIZABLE` (`run_serializable!`) txn: governance authz (owner-only) →
+    /// `create_invite`: the owner-driven invite mint. One `SERIALIZABLE` (`run_serializable!`) txn: governance authz (owner-only) →
     /// store the (orchestration-derived) invite + its skills → UPSERT the invited members → record the audit
     /// receipt. `invite_token_sha256` is the deterministic token's sha256 (the plaintext never reaches here).
     pub(crate) async fn create_invite_txn(
@@ -196,7 +201,7 @@ async fn create_invite_run(
     };
     let actor = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
-        // A PRE-AUTHENTICATION failure (an unknown/revoked signing device or an invalid signature) is NOT
+        // A PRE-AUTHENTICATION failure (an unknown or revoked acting device) is NOT
         // attributable to any verified actor, so it must NOT write a durable workspace_events row: recording it
         // would let an UNAUTHENTICATED network client forge audit entries (attacker-chosen actor/target for an
         // arbitrary workspace) and grow storage without bound. The authenticated-but-unauthorized denials below
@@ -227,11 +232,11 @@ async fn create_invite_run(
     Ok(GovernanceOutcome::Ok)
 }
 
-/// The signature-free invite ROW-WRITER: store the (hash-only) invite + its offered skills and UPSERT the
-/// invited members. Shared by the owner-signed [`create_invite_run`] (which authorizes FIRST — its
-/// governance-signature check stays exactly where it was), the create-workspace genesis (which mints the
-/// owner's self-invite inside the same transaction that seats that owner — no device signature exists yet;
-/// the caller's own gate is the authorization), and the web-session roster ops in
+/// The credential-free invite ROW-WRITER: store the (hash-only) invite + its offered skills and UPSERT the
+/// invited members. Shared by the owner-driven [`create_invite_run`] (which authorizes FIRST — its
+/// in-transaction device-credential + owner-role check runs before this writer), the create-workspace
+/// genesis (which mints the owner's self-invite inside the same transaction that seats that owner — no
+/// acting device is presented; the caller's own gate is the authorization), and the web-session roster ops in
 /// [`super::session_roster`] (same rule: the session acting gate is the authorization). Idempotent per row.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn mint_invite_row(
@@ -307,7 +312,7 @@ async fn governance_mutation_run(
 ) -> Result<GovernanceOutcome> {
     let actor = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
-        // Pre-authentication failure (unknown/revoked device or invalid signature): NOT attributable to a
+        // Pre-authentication failure (an unknown or revoked acting device): NOT attributable to a
         // verified actor, so record NOTHING (see create_invite_run) — an unauthenticated request can't forge
         // an audit row. Post-auth denials below (role / last-owner) are recorded against the verified device.
         Preamble::Fail(reason, _req) => return Ok(GovernanceOutcome::Denied(reason)),
@@ -1058,7 +1063,7 @@ async fn create_workspace_run(
 
 /// The deterministic self-invite token for a created workspace: the create-invite derivation shape with the
 /// REQUEST identity (its sha256) in the op-id slot — so a lost-ack replay re-derives the identical link.
-/// Binds the member role byte, an empty skill set, and the no-expiry sentinel, exactly as an owner-signed
+/// Binds the member role byte, an empty skill set, and the no-expiry sentinel, exactly as an owner-driven
 /// invite with those parameters would. Shared with [`super::session_roster`]'s door resolution (a
 /// create-page-born workspace's standing door IS this token until the first rotation revokes it).
 pub(super) fn self_invite_token(
@@ -1308,7 +1313,7 @@ pub(super) async fn record_event_raw(
     Ok(())
 }
 
-/// The DEVICE lane's receipt: actor = the SIGNING device key id (the confirmed principal is resolved per
+/// The DEVICE lane's receipt: actor = the acting device key id (the confirmed principal is resolved per
 /// row; the audit "who" is the acting device — the request identity is bound to it), method `device`.
 async fn record_event(
     tx: &mut Transaction<'_, Postgres>,

@@ -75,7 +75,7 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<String, PlaneHttpError
 }
 
 /// Parse the reading device's key id — the `Topos-Device-Key-Id` header. A missing/blank/non-ASCII value is
-/// the single indistinguishable `MissingReadCredential` (→ 404, never 400/401/403): a device-signed READ
+/// the single indistinguishable `MissingReadCredential` (→ 404, never 400/401/403): a device-credential READ
 /// never reveals whether a device, workspace, or membership exists (the same posture as [`bearer_token`]).
 pub(crate) fn device_key_id_header(headers: &HeaderMap) -> Result<String, PlaneHttpError> {
     let raw = headers

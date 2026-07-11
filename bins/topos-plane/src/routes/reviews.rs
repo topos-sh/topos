@@ -1,6 +1,6 @@
 //! `POST /v1/reviews` — a governance decision on an open proposal. `approve` runs the shared `(epoch,seq)`
 //! CAS on the proposal's base (stale ⇒ CONFLICT) and, under `review_required`, four-eyes, then promotes
-//! (signed); `reject` is a standalone status flip (nothing signed). The op is derived from the decision.
+//! (an approve promotes the pointer); `reject` is a standalone status flip. The op is derived from the decision.
 
 use axum::Json;
 use axum::extract::State;

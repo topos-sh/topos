@@ -1,13 +1,13 @@
 //! The enrollment issuance core — the orchestration half (outside the transaction).
 //!
-//! This is where a device proves possession of the key it registers, and where the plane mints the only
+//! This is where a device registers its key and redeems the bearer grant bound to it, and where the plane mints the only
 //! credentials it ever issues: **workspace-scoped** invites, enrollment grants, and per-skill read tokens —
 //! **never** a user OAuth token. Every issuance / roster / device decision is made INSIDE these ops against
 //! a server-trusted row; a client-asserted id is never parsed into authority. Every opaque credential is
 //! **deterministically HMAC-derived** from a `0600` enrollment secret (so a lost-ack retry re-derives the
 //! IDENTICAL credential) and stored ONLY as its sha256 (so a database read can never recover a live
 //! credential and a revoke is an instant row flip). This module does the work OUTSIDE the one write
-//! transaction (derive the credentials, build the kernel possession frames); the raw SQL — and the
+//! transaction (derive the credentials); the raw SQL — and the
 //! `SERIALIZABLE` (`run_serializable!`) redeem transactions — live in [`crate::db`]. The governance +
 //! admin-claim orchestration (which reuses this module's credential derivations) is split into
 //! [`crate::governance`].
@@ -99,7 +99,7 @@ pub struct DeviceAuthStart {
     pub interval_secs: i64,
 }
 
-/// An issued single-use enrollment grant + the binding fields the device needs to build its possession proof.
+/// An issued single-use enrollment grant + the binding fields the redeem checks the presented device against.
 #[derive(Debug, Clone)]
 pub struct GrantIssued {
     /// The SECRET grant token to redeem (the plaintext appears ONLY here; only its sha256 is stored).
