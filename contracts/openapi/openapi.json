@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Topos OSS plane",
-    "description": "The self-hostable Topos plane — device-signed writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "description": "The self-hostable Topos plane — device-credential writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
@@ -28,7 +28,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The bootstrap (workspace + plane signing root; no bytes, no role). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.",
+            "description": "The bootstrap (workspace + plane API base; no bytes, no role, no trust root). A claim link carries enrollment_method \"admin_claim\" and no skills. Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -173,11 +173,11 @@
         ],
         "responses": {
           "200": {
-            "description": "The signed current record (application/json) + a commit-sensitive ETag.",
+            "description": "The current record (application/json) + a commit-sensitive ETag.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SignedCurrentRecord"
+                  "$ref": "#/components/schemas/WireCurrentRecord"
                 }
               }
             }
@@ -236,7 +236,7 @@
         },
         "responses": {
           "200": {
-            "description": "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block to TOFU-pin).",
+            "description": "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block: API base + posture + method, no trust root).",
             "content": {
               "application/json": {
                 "schema": {
@@ -565,17 +565,6 @@
           "governance"
         ],
         "operationId": "create_invite",
-        "parameters": [
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 governance-op signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -598,7 +587,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or signature header.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -636,17 +625,6 @@
           "writes"
         ],
         "operationId": "propose",
-        "parameters": [
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -669,7 +647,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or device signature.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -707,17 +685,6 @@
           "writes"
         ],
         "operationId": "publish",
-        "parameters": [
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -740,7 +707,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or device signature.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -778,17 +745,6 @@
           "writes"
         ],
         "operationId": "revert",
-        "parameters": [
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -811,7 +767,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or device signature.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -849,17 +805,6 @@
           "writes"
         ],
         "operationId": "review",
-        "parameters": [
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 device-op signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -882,7 +827,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or device signature.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -929,15 +874,6 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 enrollment-possession signature), 86 chars",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
           }
         ],
         "requestBody": {
@@ -962,7 +898,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, key, or signature header.",
+            "description": "Malformed body or key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1002,16 +938,7 @@
           {
             "name": "ws",
             "in": "path",
-            "description": "Workspace id (REST sugar; the signed workspace_id rides the body).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 governance-op signature), 86 chars",
+            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
             "required": true,
             "schema": {
               "type": "string"
@@ -1040,7 +967,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or signature header.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1175,7 +1102,7 @@
           {
             "name": "ws",
             "in": "path",
-            "description": "Workspace id (REST sugar; the signed workspace_id rides the body).",
+            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
             "required": true,
             "schema": {
               "type": "string"
@@ -1185,15 +1112,6 @@
             "name": "email",
             "in": "path",
             "description": "The target principal whose role is set.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 governance-op signature), 86 chars",
             "required": true,
             "schema": {
               "type": "string"
@@ -1222,7 +1140,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or signature header.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1262,7 +1180,7 @@
           {
             "name": "ws",
             "in": "path",
-            "description": "Workspace id (REST sugar; the signed workspace_id rides the body).",
+            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
             "required": true,
             "schema": {
               "type": "string"
@@ -1272,15 +1190,6 @@
             "name": "email",
             "in": "path",
             "description": "The target principal to remove from the roster.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 governance-op signature), 86 chars",
             "required": true,
             "schema": {
               "type": "string"
@@ -1309,7 +1218,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, identifier, or signature header.",
+            "description": "Malformed body or identifier.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1365,15 +1274,6 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "Topos-Device-Signature",
-            "in": "header",
-            "description": "base64url(64-byte Ed25519 catalog-read signature over (ws, device_key_id)), 86 chars.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
           }
         ],
         "responses": {
@@ -1388,7 +1288,7 @@
             }
           },
           "404": {
-            "description": "Missing/malformed header, unknown/revoked device, bad signature, or non-member (indistinguishable).",
+            "description": "Missing/malformed header, unknown/revoked device, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1688,7 +1588,6 @@
           "RESOLVE_DIVERGED_DRAFT",
           "APPLY_WAITING_UPDATE",
           "DISAMBIGUATE_NAME",
-          "REPIN_PLANE_KEY",
           "REQUEST_ACCESS",
           "RETRY",
           "CONTACT_ADMIN"
@@ -1729,7 +1628,7 @@
           },
           "device_public_key": {
             "type": "string",
-            "description": "The claiming device's raw 32-byte Ed25519 public key, base64url-unpadded."
+            "description": "The claiming device's raw 32-byte public key, base64url-unpadded."
           },
           "display_name": {
             "type": "string",
@@ -1770,7 +1669,7 @@
       },
       "BootstrapData": {
         "type": "object",
-        "description": "The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the\nworkspace + the plane signing root to pin. No bytes, no role.",
+        "description": "The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the\nworkspace + the plane API base to dial. No bytes, no role.",
         "required": [
           "schema_version",
           "invite",
@@ -1791,7 +1690,7 @@
           },
           "plane": {
             "$ref": "#/components/schemas/BootstrapPlane",
-            "description": "The plane the workspace lives on, including the signing key to TOFU-pin."
+            "description": "The plane the workspace lives on — its API base and enrollment method."
           },
           "schema_version": {
             "type": "integer",
@@ -1837,12 +1736,11 @@
       },
       "BootstrapPlane": {
         "type": "object",
-        "description": "The plane a workspace lives on — its public base URL, deployment posture, offered enrollment method, and\nthe signing key a device pins as its trust root.",
+        "description": "The plane a workspace lives on — its public base URL, deployment posture, and offered enrollment method.",
         "required": [
           "base_url",
           "deployment_mode",
-          "enrollment_method",
-          "signing_key"
+          "enrollment_method"
         ],
         "properties": {
           "base_url": {
@@ -1856,33 +1754,6 @@
           "enrollment_method": {
             "type": "string",
             "description": "The enrollment method advertised to a bootstrapping device (e.g. `\"device_code\"` / `\"passcode\"`)."
-          },
-          "signing_key": {
-            "$ref": "#/components/schemas/BootstrapSigningKey",
-            "description": "The plane's Ed25519 signing key — the trust root a device pins (TOFU) and every later signed\n`current` pointer verifies against."
-          }
-        }
-      },
-      "BootstrapSigningKey": {
-        "type": "object",
-        "description": "The plane's signing key as a device pins it — the algorithm, the key id, and the raw public key.",
-        "required": [
-          "alg",
-          "key_id",
-          "value"
-        ],
-        "properties": {
-          "alg": {
-            "$ref": "#/components/schemas/SignatureAlg",
-            "description": "The signature algorithm — Ed25519 only (the CLOSED kernel enum; an unknown alg fails to deserialize)."
-          },
-          "key_id": {
-            "type": "string",
-            "description": "The plane signing key id (the `key_id` carried in every signed `current` pointer)."
-          },
-          "value": {
-            "type": "string",
-            "description": "The raw 32-byte Ed25519 public key, base64url-unpadded — the trust root the device pins."
           }
         }
       },
@@ -1977,7 +1848,7 @@
         "properties": {
           "device_public_key": {
             "type": "string",
-            "description": "The device's raw 32-byte Ed25519 public key, base64url-unpadded. The server derives the device key id\nfrom it (never a client-asserted id) and binds it into the enrollment possession frame."
+            "description": "The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from\nit (never a client-asserted id) and binds it to the enrollment session."
           },
           "intent": {
             "oneOf": [
@@ -2037,7 +1908,7 @@
               },
               {
                 "$ref": "#/components/schemas/BootstrapPlane",
-                "description": "The plane block a STANDUP start carries (base URL, deployment posture, and the signing key to\nTOFU-pin) — a standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start."
+                "description": "The plane block a STANDUP start carries (base URL, deployment posture, enrollment method) — a\nstandup device has no `/i/` bootstrap to learn these from. Absent on an enroll start."
               }
             ]
           },
@@ -2070,7 +1941,7 @@
         "properties": {
           "device_key_id": {
             "type": "string",
-            "description": "The id of the SIGNING device key (the actor; not the target)."
+            "description": "The id of the ACTING device (the actor; not the target)."
           },
           "op_id": {
             "type": "string",
@@ -2082,7 +1953,7 @@
           },
           "workspace_id": {
             "type": "string",
-            "description": "The target workspace id (bound into the governance signing frame)."
+            "description": "The target workspace id (scopes the op to one workspace)."
           }
         }
       },
@@ -2207,7 +2078,7 @@
       },
       "InviteRequest": {
         "type": "object",
-        "description": "`POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster\n(omitted `role` defaults to `member`; the client must sign the same role byte). Returns\n[`InviteData`](crate::results::InviteData) on success.",
+        "description": "`POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster\n(omitted `role` defaults to `member`). Returns [`InviteData`](crate::results::InviteData) on success.",
         "required": [
           "workspace_id",
           "op_id",
@@ -2217,14 +2088,14 @@
         "properties": {
           "device_key_id": {
             "type": "string",
-            "description": "The id of the signing OWNER's device key (the registry selects the verifying key by this)."
+            "description": "The id of the acting OWNER's device (the registry resolves its principal + role by this)."
           },
           "emails": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "The emails to invite (seeded onto the roster as `invited`), bound as a set in the signing frame."
+            "description": "The emails to invite (seeded onto the roster as `invited`)."
           },
           "op_id": {
             "type": "string",
@@ -2250,13 +2121,13 @@
           },
           "workspace_id": {
             "type": "string",
-            "description": "The target workspace id (bound into the governance signing frame)."
+            "description": "The target workspace id (scopes the op to one workspace)."
           }
         }
       },
       "InviteSkill": {
         "type": "object",
-        "description": "One skill an invite pre-offers, with an optional display name (the name is NOT bound into the invite\nsigning frame — only the skill id is — so a rename never forks the deterministic invite link).",
+        "description": "One skill an invite pre-offers, with an optional display name (the name is NOT part of the invite's\nidentity — only the skill id is — so a rename never forks the deterministic invite link).",
         "required": [
           "skill_id"
         ],
@@ -2457,7 +2328,7 @@
       },
       "PolicyReviewRequiredRequest": {
         "type": "object",
-        "description": "`PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the\n`review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a\npath-shape change). Authenticated by the plane's admin token, not a device-op signature; the route is\ninvisible (404) on a plane with no admin token configured.",
+        "description": "`PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the\n`review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a\npath-shape change). Authenticated by the plane's admin token, not a device credential; the route is\ninvisible (404) on a plane with no admin token configured.",
         "required": [
           "review_required"
         ],
@@ -2508,7 +2379,7 @@
       },
       "ProposeRequest": {
         "type": "object",
-        "description": "`POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving\n`current` or signing** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as\n`publish` (candidate + device + `op_id` + `expected`); there is **no** separate title/body on the op (a\ntitle/body, if ever surfaced, would be composed into the candidate's commit message).",
+        "description": "`POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving\n`current`** (`NEEDS_REVIEW`). The authority's `propose` op takes the **same** input shape as\n`publish` (candidate + device + `op_id` + `expected`); there is **no** separate title/body on the op (a\ntitle/body, if ever surfaced, would be composed into the candidate's commit message).",
         "required": [
           "workspace_id",
           "skill_id",
@@ -2524,14 +2395,14 @@
           },
           "device_key_id": {
             "type": "string",
-            "description": "The id of the device key whose signature (in the header) authorizes this op."
+            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "display_name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata, carried\nfor symmetry with [`PublishRequest`]. It rides the proposal but is never signed, digested, or part of\nthe candidate; the plane records a name only when the pointer actually moves (a later approve/publish)."
+            "description": "The skill's human display name (the author's skill-folder name) — ADVISORY metadata, carried for\nsymmetry with [`PublishRequest`]. It rides the proposal but is never digested or part of the\ncandidate; the plane records a name only when the pointer actually moves (a later approve/publish)."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -2670,7 +2541,7 @@
       },
       "PublishRequest": {
         "type": "object",
-        "description": "`POST /v1/publish` body — a direct publish that moves `current`. The device signature is the\n`Topos-Device-Signature` header (not a body field); the server stamps `created_at`. Under\n`review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.",
+        "description": "`POST /v1/publish` body — a direct publish that moves `current`. The body names the acting device by\n`device_key_id` (authority is the in-transaction registry + roster gate); the server stamps `created_at`.\nUnder `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.",
         "required": [
           "workspace_id",
           "skill_id",
@@ -2686,14 +2557,14 @@
           },
           "device_key_id": {
             "type": "string",
-            "description": "The id of the device key whose signature (in the header) authorizes this op."
+            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "display_name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The skill's human display name (the author's skill-folder name) — UNSIGNED ADVISORY metadata the\nplane stores last-writer-wins and serves for display only (a follower names its folder by it; the\ndashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the device-op\nsigning preimage — a rename never changes a version id, digest, or signature. Absent ⇒ the plane\nkeeps any existing name (never clobbered to NULL)."
+            "description": "The skill's human display name (the author's skill-folder name) — ADVISORY metadata the plane\nstores last-writer-wins and serves for display only (a follower names its folder by it; the\ndashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the commit\nid — a rename never changes a version id or digest. Absent ⇒ the plane keeps any existing name\n(never clobbered to NULL)."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -2715,7 +2586,7 @@
       },
       "Receipt": {
         "type": "object",
-        "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
+        "description": "The ONE canonical receipt across all outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
         "required": [
           "schema_version",
           "op_id",
@@ -2762,13 +2633,6 @@
               }
             ]
           },
-          "key_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The signing key id that covered this op."
-          },
           "op_id": {
             "type": "string",
             "description": "Client-minted UUIDv4, persisted before the first send."
@@ -2802,7 +2666,7 @@
       },
       "RedeemRequest": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted\nper-skill read tokens. The enrollment possession signature rides the `Topos-Device-Signature` header\n(NOT a body field); the server re-derives the device key id from `device_public_key`.",
+        "description": "`POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted\nper-skill read tokens. The server checks `device_public_key` equals the grant's bound key (a binding\ncheck) and re-derives the device key id from it.",
         "required": [
           "workspace_id",
           "grant",
@@ -2811,7 +2675,7 @@
         "properties": {
           "device_public_key": {
             "type": "string",
-            "description": "The device's raw 32-byte Ed25519 public key, base64url-unpadded (must equal the grant's bound key)."
+            "description": "The device's raw 32-byte public key, base64url-unpadded (must equal the grant's bound key)."
           },
           "grant": {
             "type": "string",
@@ -2927,7 +2791,7 @@
           },
           "device_key_id": {
             "type": "string",
-            "description": "The id of the device key whose signature (in the header) authorizes this op."
+            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -2993,7 +2857,7 @@
       },
       "ReviewRequest": {
         "type": "object",
-        "description": "`POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared\n`(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under\n`review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`\nis a standalone status flip (nothing signed).",
+        "description": "`POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared\n`(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under\n`review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`\nis a standalone status flip (no pointer move).",
         "required": [
           "workspace_id",
           "skill_id",
@@ -3010,7 +2874,7 @@
           },
           "device_key_id": {
             "type": "string",
-            "description": "The id of the device key whose signature (in the header) authorizes this op."
+            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -3045,7 +2909,7 @@
         "properties": {
           "device_key_id": {
             "type": "string",
-            "description": "The id of the signing owner's device key."
+            "description": "The id of the acting owner's device (the registry resolves its principal + role by this)."
           },
           "op_id": {
             "type": "string",
@@ -3053,13 +2917,13 @@
           },
           "workspace_id": {
             "type": "string",
-            "description": "The target workspace id (bound into the governance signing frame)."
+            "description": "The target workspace id (scopes the op to one workspace)."
           }
         }
       },
       "RosterSetRequest": {
         "type": "object",
-        "description": "`PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target\nprincipal is the `{email}` path segment; the role rides the body (bound into the signing frame).",
+        "description": "`PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target\nprincipal is the `{email}` path segment; the role rides the body.",
         "required": [
           "workspace_id",
           "op_id",
@@ -3069,7 +2933,7 @@
         "properties": {
           "device_key_id": {
             "type": "string",
-            "description": "The id of the signing owner's device key."
+            "description": "The id of the acting owner's device (the registry resolves its principal + role by this)."
           },
           "op_id": {
             "type": "string",
@@ -3081,7 +2945,7 @@
           },
           "workspace_id": {
             "type": "string",
-            "description": "The target workspace id (bound into the governance signing frame)."
+            "description": "The target workspace id (scopes the op to one workspace)."
           }
         }
       },
@@ -3092,60 +2956,6 @@
           "enroll",
           "standup"
         ]
-      },
-      "Signature": {
-        "type": "object",
-        "required": [
-          "alg",
-          "key_id",
-          "value"
-        ],
-        "properties": {
-          "alg": {
-            "$ref": "#/components/schemas/SignatureAlg"
-          },
-          "key_id": {
-            "type": "string"
-          },
-          "value": {
-            "type": "string",
-            "description": "base64url (unpadded) of the raw 64-byte Ed25519 signature — exactly 86 chars."
-          }
-        }
-      },
-      "SignatureAlg": {
-        "type": "string",
-        "description": "The signature algorithm — a CLOSED set. v0 is Ed25519 only; an unknown or `none` algorithm must\nfail to deserialize (fail closed), foreclosing algorithm-confusion / downgrade on the trust-root\npointer. (Contrast [`ActionCode`], deliberately OPEN for forward-compat — an algorithm id is the\nexact opposite of a next-action code and must never silently pass through.)",
-        "enum": [
-          "Ed25519"
-        ]
-      },
-      "SignedCurrentRecord": {
-        "type": "object",
-        "description": "The signed `current` pointer — a versioned envelope; `ETag = \"<epoch>.<seq>\"`.",
-        "required": [
-          "schema_version",
-          "scope",
-          "record",
-          "signature"
-        ],
-        "properties": {
-          "record": {
-            "$ref": "#/components/schemas/CurrentRecord"
-          },
-          "schema_version": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Always `1` for this contract version (the schema pins it `const`).",
-            "minimum": 0
-          },
-          "scope": {
-            "$ref": "#/components/schemas/PointerScope"
-          },
-          "signature": {
-            "$ref": "#/components/schemas/Signature"
-          }
-        }
       },
       "StandupReceipt": {
         "type": "object",
@@ -3179,7 +2989,6 @@
           "DENIED",
           "UNAVAILABLE",
           "AMBIGUOUS_NAME",
-          "KEY_REPIN_REQUIRED",
           "RETRYABLE_FAILURE",
           "PERMANENT_FAILURE"
         ]
@@ -3277,6 +3086,29 @@
               "type": "string"
             },
             "description": "The candidate commit's declared parents, each a 64-char lowercase-hex `version_id` (`0` parents for a\ngenesis publish, `1` for a normal publish / propose, `2` for an author merge). Each must already be\npresent in the workspace; a lie changes the recomputed commit id, so the server need not trust it."
+          }
+        }
+      },
+      "WireCurrentRecord": {
+        "type": "object",
+        "description": "The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,\nembeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,\nand integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned\nenvelope; `ETag = \"<epoch>.<seq>\"`.",
+        "required": [
+          "schema_version",
+          "scope",
+          "record"
+        ],
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/CurrentRecord"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/PointerScope"
           }
         }
       },
@@ -3405,7 +3237,7 @@
       },
       "WireSkillIndex": {
         "type": "object",
-        "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership via a device-signed read (catalog visibility == membership, on both\ncloud and self-host). Metadata only, no bytes; a possibly-empty list ordered by `skill_id`.",
+        "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership (the `Topos-Device-Key-Id` header names the device; catalog\nvisibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list\nordered by `skill_id`.",
         "required": [
           "skills"
         ],
@@ -3548,7 +3380,7 @@
   "tags": [
     {
       "name": "writes",
-      "description": "Device-signed writes (publish / propose / revert / review)."
+      "description": "Device-credential writes (publish / propose / revert / review)."
     },
     {
       "name": "reads",
@@ -3560,7 +3392,7 @@
     },
     {
       "name": "governance",
-      "description": "Owner/admin device-op-signed mutations (invite / roster / revoke)."
+      "description": "Owner/admin device-credential mutations (invite / roster / revoke)."
     }
   ]
 }

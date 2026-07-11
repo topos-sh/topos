@@ -152,7 +152,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "workspace_id": {
-          "description": "The workspace this skill is followed in (its signed-pointer scope), or `None` for a purely local,\nnever-followed `add`'d skill. Provenance so two same-named skills from different workspaces are\ndistinguishable; `--json` carries it flat, the TTY groups by it.",
+          "description": "The workspace this skill is followed in (its pointer scope), or `None` for a purely local,\nnever-followed `add`'d skill. Provenance so two same-named skills from different workspaces are\ndistinguishable; `--json` carries it flat, the TTY groups by it.",
           "type": [
             "string",
             "null"

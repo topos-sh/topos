@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Receipt",
-  "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
+  "description": "The ONE canonical receipt across all outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
   "type": "object",
   "properties": {
     "bundle_digest": {
@@ -41,13 +41,6 @@
         {
           "type": "null"
         }
-      ]
-    },
-    "key_id": {
-      "description": "The signing key id that covered this op.",
-      "type": [
-        "string",
-        "null"
       ]
     },
     "op_id": {
@@ -124,7 +117,6 @@
             "DENIED",
             "UNAVAILABLE",
             "AMBIGUOUS_NAME",
-            "KEY_REPIN_REQUIRED",
             "RETRYABLE_FAILURE",
             "PERMANENT_FAILURE"
           ]

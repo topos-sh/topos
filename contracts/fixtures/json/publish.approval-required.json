@@ -26,8 +26,7 @@
       "epoch": 1,
       "seq": 42
     },
-    "created_at": "2026-06-25T00:00:00Z",
-    "key_id": "pk_demo"
+    "created_at": "2026-06-25T00:00:00Z"
   },
   "error": {
     "code": "REVIEW_REQUIRED",

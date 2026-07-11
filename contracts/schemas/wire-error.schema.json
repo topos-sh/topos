@@ -66,7 +66,6 @@
         "RESOLVE_DIVERGED_DRAFT",
         "APPLY_WAITING_UPDATE",
         "DISAMBIGUATE_NAME",
-        "REPIN_PLANE_KEY",
         "REQUEST_ACCESS",
         "RETRY",
         "CONTACT_ADMIN"
@@ -156,7 +155,6 @@
             "DENIED",
             "UNAVAILABLE",
             "AMBIGUOUS_NAME",
-            "KEY_REPIN_REQUIRED",
             "RETRYABLE_FAILURE",
             "PERMANENT_FAILURE"
           ]

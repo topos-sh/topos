@@ -225,11 +225,6 @@
           "description": "A transient local hold (e.g. a local go-back is pinned).",
           "type": "string",
           "const": "held"
-        },
-        {
-          "description": "A reused/replayed generation tuple was seen — a loud integrity alarm.",
-          "type": "string",
-          "const": "alarm"
         }
       ]
     },
@@ -266,7 +261,7 @@
           ]
         },
         "observed": {
-          "description": "Highest authenticated `(epoch,seq)` seen — the anti-rollback floor.",
+          "description": "The generation the plane most recently served — the sync target.",
           "$ref": "#/$defs/Generation"
         },
         "offer": {

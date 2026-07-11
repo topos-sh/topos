@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SyncState",
-  "description": "`skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).\n**Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from these\nfields, never stored.",
+  "description": "`skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).\n**Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from\n`observed`/`applied` vs the working tree, never stored.",
   "type": "object",
   "properties": {
     "applied": {
-      "description": "Highest generation actually MATERIALIZED — advances only after a successful swap (`≤ observed`).",
+      "description": "Highest generation actually MATERIALIZED — advances only after a successful swap. After a server\nrestore the served target may sit below this; that is a legitimate state the engine simply\napplies toward.",
       "$ref": "#/$defs/Generation"
     },
     "base_commit": {
@@ -18,16 +18,13 @@
       "type": "boolean"
     },
     "observed": {
-      "description": "Highest AUTHENTICATED (signature-verified) generation ever seen — the anti-rollback floor and\nthe retry target. Only a signed record raises it.",
+      "description": "The generation the plane most recently served — the sync target the engine drives `applied`\ntoward.",
       "$ref": "#/$defs/Generation"
     },
-    "recorded": {
-      "description": "Per observed generation, the commit it carried — a reused tuple with a *different* commit is a\nloud ALARM; same tuple + same commit is a no-op.",
-      "type": "array",
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/RecordedTuple"
-      }
+    "observed_version_id": {
+      "description": "The `version_id` (the 64-hex commit) the served `observed` generation named — the target bytes\nthe engine materializes and re-verifies by digest on apply.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "schema_version": {
       "type": "integer",
@@ -44,6 +41,7 @@
   "required": [
     "schema_version",
     "observed",
+    "observed_version_id",
     "applied",
     "base_commit",
     "work_hash",
@@ -68,24 +66,6 @@
       "required": [
         "epoch",
         "seq"
-      ]
-    },
-    "RecordedTuple": {
-      "description": "One `(generation → commit)` record in [`SyncState::recorded`]. (A list, not a JSON-object map,\nbecause the key is the `(epoch,seq)` pair.)",
-      "type": "object",
-      "properties": {
-        "commit_id": {
-          "description": "The commit (`version_id`) seen at this generation.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "generation": {
-          "$ref": "#/$defs/Generation"
-        }
-      },
-      "required": [
-        "generation",
-        "commit_id"
       ]
     }
   }

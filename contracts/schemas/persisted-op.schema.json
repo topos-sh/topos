@@ -1,28 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OpRecord",
-  "description": "`ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so\nan uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no\ndouble-advance, no duplicate commit). It carries the full bound identity the device-op signature binds,\nso a replay re-signs the identical frame. **Field-set pinned.**",
+  "description": "`ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so\nan uncertain write replays the SAME `op_id` (the server returns the byte-identical receipt — no\ndouble-advance, no duplicate commit). It carries the full bound identity of the op — the workspace,\nskill, kind, candidate commit, digest, and expected generation — so an idempotent replay re-sends the\nidentical request. **Field-set pinned.**",
   "type": "object",
   "properties": {
     "bundle_digest": {
-      "description": "The candidate's byte-exact bundle digest (the consent hash) — bound by the signature.",
+      "description": "The candidate's byte-exact bundle digest (the consent hash) — part of the op's bound identity.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "candidate_commit": {
-      "description": "The built commit (`version_id`) this op publishes / reverts / reviews — bound by the signature.",
+      "description": "The built commit (`version_id`) this op publishes / reverts / reviews — part of the op's bound identity.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "display_name": {
-      "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. UNSIGNED — it names the follower's folder + the dashboard entry,\nnever the digest or the signed frame. `None` for a revert/review and for pre-existing WALs.",
+      "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard\nentry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.",
       "type": [
         "string",
         "null"
       ]
     },
     "expected_generation": {
-      "description": "The `(epoch,seq)` this op's compare-and-set targets — bound by the signature.",
+      "description": "The `(epoch,seq)` this op's compare-and-set targets — part of the op's bound identity.",
       "$ref": "#/$defs/Generation"
     },
     "good": {
@@ -45,7 +45,7 @@
       ]
     },
     "op": {
-      "description": "The operation kind (the device-op subtype is an integrity property — an approve never replays as a\nreject).",
+      "description": "The operation kind (the kind is part of the op's identity — an approve never replays as a\nreject).",
       "$ref": "#/$defs/OpKind"
     },
     "op_id": {
@@ -100,7 +100,7 @@
       ]
     },
     "OpKind": {
-      "description": "The device-signed operation an [`OpRecord`] carries — a serde mirror of the kernel's `DeviceOp` (which\nlives in `topos-core`, not a dependency of this crate). The client maps it 1:1 to `DeviceOp` when\nre-signing a replayed op. snake_case on the wire/disk.",
+      "description": "The device operation an [`OpRecord`] carries — the durable record of a replayed write's kind (the op\nkind an idempotent retry re-sends; the kind otherwise rides the route). snake_case on the wire/disk.",
       "oneOf": [
         {
           "description": "`publish` that moves `current` directly (or genesis).",
@@ -130,7 +130,7 @@
       ]
     },
     "Receipt": {
-      "description": "The ONE canonical receipt across all 11 outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
+      "description": "The ONE canonical receipt across all outcomes — the durable idempotency record (present even\non failures): one stable receipt per op, identical on retry.",
       "type": "object",
       "properties": {
         "bundle_digest": {
@@ -170,13 +170,6 @@
             {
               "type": "null"
             }
-          ]
-        },
-        "key_id": {
-          "description": "The signing key id that covered this op.",
-          "type": [
-            "string",
-            "null"
           ]
         },
         "op_id": {
@@ -233,7 +226,6 @@
             "DENIED",
             "UNAVAILABLE",
             "AMBIGUOUS_NAME",
-            "KEY_REPIN_REQUIRED",
             "RETRYABLE_FAILURE",
             "PERMANENT_FAILURE"
           ]

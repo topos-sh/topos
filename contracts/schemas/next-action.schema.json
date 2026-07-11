@@ -30,7 +30,6 @@
         "RESOLVE_DIVERGED_DRAFT",
         "APPLY_WAITING_UPDATE",
         "DISAMBIGUATE_NAME",
-        "REPIN_PLANE_KEY",
         "REQUEST_ACCESS",
         "RETRY",
         "CONTACT_ADMIN"

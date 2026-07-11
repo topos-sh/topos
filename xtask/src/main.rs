@@ -38,8 +38,8 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::WireError)),
         ),
         (
-            "signed-current-record",
-            emit(schemars::schema_for!(topos_types::SignedCurrentRecord)),
+            "wire-current-record",
+            emit(schemars::schema_for!(topos_types::WireCurrentRecord)),
         ),
         (
             "next-action",
@@ -512,7 +512,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             expected_generation: None,
             current_generation: Some(Generation { epoch: 1, seq: 42 }),
             created_at: "2026-06-25T00:00:00Z".to_owned(),
-            key_id: Some("pk_demo".to_owned()),
             details: None,
         }),
         error: Some(WireError {
@@ -553,7 +552,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             expected_generation: Some(Generation { epoch: 1, seq: 42 }),
             current_generation: Some(Generation { epoch: 1, seq: 43 }),
             created_at: "2026-06-25T00:00:00Z".to_owned(),
-            key_id: Some("pk_demo".to_owned()),
             details: None,
         }),
         error: Some(WireError {
