@@ -4552,14 +4552,12 @@ name = "topos-e2e"
 version = "0.1.0"
 dependencies = [
  "axum",
- "ed25519-dalek",
  "hex",
  "plane-store",
  "serde_json",
  "sqlx",
  "tokio",
  "topos",
- "topos-core",
  "topos-plane",
  "topos-types",
 ]

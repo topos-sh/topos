@@ -8,7 +8,7 @@ The source of truth for the wire boundary, GENERATED from the Rust types and com
   (stale / missing / orphan all fail).
 - **`fixtures/json/`** — golden `--json` envelopes (success + failure), **generated from the typed shapes**
   by `cargo xtask gen-fixtures` (so they cannot drift from the contract); `gen-fixtures --check` is the
-  drift gate. The digest golden vector, the consent truth-table, and the signing/commit byte vectors live
+  drift gate. The digest golden vector, the consent truth-table, and the commit/identity byte vectors live
   as `topos-core` known-answer tests (the kernel is their source of truth).
 - **`openapi/openapi.json`** — the plane's HTTP contract, generated from `topos_plane::openapi()` (the
   annotated routes + the `topos-types` wire DTOs). It rides the SAME `gen-schema` run and the same

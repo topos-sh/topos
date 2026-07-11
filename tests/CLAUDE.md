@@ -15,13 +15,15 @@ directory is for what only a cross-crate loopback run can prove.
   scaffold every suite stands on — `Scratch` / `Plane` / `start_plane` (bind-first, optional enrollment
   config, then serve `router(state)`; `start_plane_mode` picks the deployment posture, and the `Plane`
   keeps its per-test pool for row-level witnesses), the shared seeding helpers (`seed_genesis_plane`, the
-  governance-signed `mint_invite`), and the placement-expectation builders. Each suite keeps only its
+  owner-credential `mint_invite` — the acting device key id the plane authenticates by registry lookup, no
+  signature), and the placement-expectation builders. Each suite keeps only its
   scenario-specific seeding (a seed closure handed to `start_plane`). Each e2e runs a blocking
   `ureq` client on a plain thread beside a live `axum` server on a self-owned **multi-thread** runtime —
   which is why these tests cannot use `#[sqlx::test]` (its current-thread runtime would deadlock).
 - **`tests/hero.rs`** — the distribute HERO: the real pull engine over loopback HTTP. First pull
-  fast-forwards byte-exact (incl. the executable bit); a second is a commit-sensitive 304 no-op; a
-  tampered signed pointer is refused with last-known-good retained.
+  fast-forwards byte-exact (incl. the executable bit); a second is a commit-sensitive 304 no-op; a forward
+  move to v2 (an ordinary UNSIGNED advanced record) applies byte-exact on the next pull — no signature, no
+  client-side verification, only the served record + the content-addressed digest re-check on apply.
 - **`tests/hero_claude.rs`** — the HERO on the REAL Claude Code adapter, on real client verbs: an author
   genesis-publishes over the wire; a follower's real two-call `follow` arms the actual `settings.json`
   SessionStart hook (asserted byte-exact) into a temp stand-in `$CLAUDE_CONFIG_DIR` and lands the bundle;
@@ -29,20 +31,36 @@ directory is for what only a cross-crate loopback run can prove.
   clobbered. Table-driven so a sibling harness adapter is one case row + one test. Its module doc states
   the honest ceiling: hook-installed + bytes-materialized is asserted; that a live session's hook output
   reaches model context is a documented manual MUST-VERIFY.
-- **`tests/follow_e2e.rs`** — the real `topos follow` enrollment loop: invite mint → bootstrap fetch +
-  TOFU key pin → device authorize → confirm → resume signs the enroll possession proof → redeem over the
-  wire → the first-received bundle lands byte-exact. Plus the hosted main-domain-link shape on one
-  listener (`start_plane_split`: links ride `http://localhost:<port>`, the API stays
-  `http://127.0.0.1:<port>`): the minted link rides the public link base, a non-JSON fetch of the link
-  serves the markdown agent-instruction document over the real socket, and the client re-roots — only
-  the bootstrap GET touches the link host; the pin, the device flow, and the placing pull ride the
-  declared API base.
-- **`tests/contribute_e2e.rs`** — the client device-signed write verbs (`publish` / `review` / `revert` /
-  the plane-sourced `diff`) over loopback HTTP, with a separate follower receiving the shipped bytes
-  byte-exact.
-- **`tests/restore_e2e.rs`** — the backup/restore rehearsal: a SQL-rewind "restore" over the real
-  loopback plane, the operator `restore-bump-epoch` helper re-signing `current` one epoch forward, and
-  the real pull engine rolling forward instead of alarming on a reused generation.
+- **`tests/follow_e2e.rs`** — the real `topos follow` enrollment loop: invite mint → bootstrap fetch (no
+  trust root to pin — the pointer is unsigned) → device authorize → confirm → resume redeems over the wire
+  (the grant is the bearer credential; the server checks the redeem body's device public key against the
+  grant's bound key — a binding check, nothing signed) → the first-received bundle lands byte-exact; a
+  leaked invite on an off-roster identity is denied. Plus the hosted main-domain-link shape on one listener
+  (`start_plane_split`: links ride `http://localhost:<port>`, the API stays `http://127.0.0.1:<port>`): the
+  minted link rides the public link base, a non-JSON fetch of the link serves the markdown
+  agent-instruction document over the real socket, and the client re-roots — only the bootstrap GET touches
+  the link host; the device flow and the placing pull ride the declared API base.
+- **`tests/contribute_e2e.rs`** — the client write verbs (`publish` / `review` / `revert` / the
+  plane-sourced `diff`) over loopback HTTP — each body names the acting `device_key_id` (the op kind rides
+  the route, nothing is signed; the plane authenticates by registry-row lookup), with a separate follower
+  receiving the shipped bytes byte-exact; covers op-id idempotent retry and the four-eyes / review flow.
+- **`tests/catalog_e2e.rs`** — `list --remote` end to end: the client's device-credential catalog transport
+  (the acting `device_key_id` in the `Topos-Device-Key-Id` header, no signature) against the plane's
+  `GET /v1/workspaces/{ws}/skills` route — the happy-path round-trip (both skills' exact ids/digests), the
+  real `list --remote` merge (Following / Available), the confirmed-member gate (a non-member AND a revoked
+  device 404 → empty, where a bad signature used to be the denial vector), and the self-host lane (catalog
+  visibility == membership on both cloud and self-host).
+- **`tests/multi_workspace_e2e.rs`** — one install, one plane, TWO workspaces: a single `follow` twice into
+  the same sidecar, both memberships retained, every verb scoped to the right workspace (an authoring
+  `publish` moves only its skill's OWN workspace; `invite --workspace` mints into the named one), and
+  same-name disambiguation via `--workspace`.
+- **`tests/restore_e2e.rs`** — the backup/restore rehearsal: a SQL-rewind "restore" over the real loopback
+  plane. With the operator `restore-bump-epoch` helper (which REWRITES `current` one epoch forward —
+  nothing re-signed; the bump report carries no key id), the follower silently rolls forward onto the
+  restored older bytes with NO error and a subsequent publish proceeds at the bumped epoch; without the
+  helper, the plane serves the restored pointer at its original LOWER generation and the follower silently
+  rolls BACKWARD onto it — there is no anti-rollback ALARM anymore, a server restore is a team rollback the
+  client applies toward whatever is served, backward included.
 - **`tests/standup_e2e.rs`** — the workspace-standup full chain (the self-serve genesis release-blocker
   proof): **door 1** (an un-enrolled `publish` goes PENDING → the authority's `approve_standup` web leg →
   the SAME re-invoked publish enrolls + lands the genesis in one invocation, with ZERO operator ops —

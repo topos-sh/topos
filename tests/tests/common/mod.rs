@@ -21,14 +21,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ed25519_dalek::{Signer as _, SigningKey};
 use plane_store::{
     Authority, CommitId, CreateInviteOutcome, DeploymentMode, EnrollmentConfig, FileMode,
-    GovernanceOp, GovernanceSignedOp, OpId, Principal, Role, SkillId, UploadedFile, WorkspaceId,
+    GovernanceOp, GovernanceRequest, OpId, Principal, Role, SkillId, UploadedFile, WorkspaceId,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
-use topos_core::sign::{GovernanceOpFields, GovernanceOpKind, governance_op_preimage};
 use topos_plane::{PlaneState, router};
 use topos_types::{Generation, TerminalOutcome};
 
@@ -125,7 +123,6 @@ pub(crate) struct Plane {
     /// The base the minted `/i/` links ride — `base_url` unless the plane was started split
     /// ([`start_plane_split`]), the hosted links-on-the-web-origin shape.
     pub(crate) link_base_url: String,
-    pub(crate) plane_key: [u8; 32],
     seeded: Seeded,
     _dir: Scratch,
 }
@@ -217,13 +214,11 @@ fn start_plane_impl(
         base_url.clone()
     };
 
-    let (authority, seeded, plane_key, pool) = rt.block_on(async {
+    let (authority, seeded, pool) = rt.block_on(async {
         let pool = provision_pg().await;
         let mut authority =
             Authority::from_pool(pool.clone(), &dir.0.join("git"), &dir.0.join("large"))
-                .expect("open authority")
-                .with_plane_key(&dir.0.join("plane.key"))
-                .expect("load plane key");
+                .expect("open authority");
         if enrollment {
             authority = authority
                 .with_enrollment_config(EnrollmentConfig {
@@ -237,8 +232,7 @@ fn start_plane_impl(
                 .expect("load enrollment secret");
         }
         let seeded = seed(&authority).await;
-        let plane_key = authority.plane_public_key().expect("plane public key");
-        (authority, seeded, plane_key, pool)
+        (authority, seeded, pool)
     });
 
     let authority = Arc::new(authority);
@@ -257,7 +251,6 @@ fn start_plane_impl(
         pool,
         base_url,
         link_base_url,
-        plane_key,
         seeded,
         _dir: dir,
     }
@@ -269,7 +262,9 @@ fn start_plane_impl(
 /// device, roster its principal, publish a signed genesis at `(1,1)`, and mint the follower read token.
 pub(crate) struct GenesisSpec<'a> {
     pub(crate) dkid: &'a str,
-    pub(crate) device_seed: &'a [u8; 32],
+    /// The device's registered 32-byte public key — the write authz resolves the registry row by `dkid`;
+    /// nothing verifies against this key (git/GitHub-level trust).
+    pub(crate) device_pubkey: &'a [u8; 32],
     pub(crate) op_id: &'a str,
     pub(crate) files: Vec<UploadedFile>,
     pub(crate) principal: &'a str,
@@ -284,12 +279,9 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
     let ws = WorkspaceId::parse(WS).unwrap();
     let skill = SkillId::parse(SKILL).unwrap();
     let principal = Principal::parse(spec.principal).unwrap();
-    let device_pubkey = SigningKey::from_bytes(spec.device_seed)
-        .verifying_key()
-        .to_bytes();
 
     authority
-        .seed_device(&ws, spec.dkid, &device_pubkey, &principal, false)
+        .seed_device(&ws, spec.dkid, spec.device_pubkey, &principal, false)
         .await
         .expect("seed device");
     authority
@@ -301,7 +293,6 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
             &ws,
             &skill,
             spec.dkid,
-            spec.device_seed,
             &OpId::parse(spec.op_id).unwrap(),
             spec.files,
             spec.author,
@@ -321,14 +312,14 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
     genesis
 }
 
-/// Mint a governance-signed `/i/` invite pre-offering `skill` to `email` at the `Member` role. The
-/// `signer` (device key id + signing seed) signs the SAME `topos-core` frame the plane re-derives +
-/// verifies, so this in-process mint cannot drift from production. See [`mint_invite_with_role`] for the
-/// role-selectable form (the multi-workspace e2e mints owner-role invites so the joiner can itself invite).
+/// Mint an owner-driven `/i/` invite pre-offering `skill` to `email` at the `Member` role. The acting
+/// `owner_dkid` is the presented credential the plane authenticates by registry-row lookup (nothing is
+/// signed — git/GitHub-level trust). See [`mint_invite_with_role`] for the role-selectable form (the
+/// multi-workspace e2e mints owner-role invites so the joiner can itself invite).
 pub(crate) async fn mint_invite(
     authority: &Authority,
     ws: &WorkspaceId,
-    signer: (&str, &[u8; 32]),
+    owner_dkid: &str,
     op_id: &str,
     email: &str,
     skill: &str,
@@ -337,7 +328,7 @@ pub(crate) async fn mint_invite(
     mint_invite_with_role(
         authority,
         ws,
-        signer,
+        owner_dkid,
         op_id,
         email,
         skill,
@@ -348,18 +339,17 @@ pub(crate) async fn mint_invite(
     .await
 }
 
-/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The signing frame
-/// binds `ws.as_str()` (the ACTUAL workspace — so a plane with several workspaces mints each invite under
-/// its own scope, never a hard-coded one), the role's [`Role::signing_byte`], `expires_at = 0`, the
-/// invited-email set, and the offered-skill-**id** set — exactly what the plane's `create_invite`
-/// re-derives + verifies. The offered `name` is advisory (NOT in the preimage — the frame binds ids only),
-/// so it becomes the follower's local skill name without touching the signature; the multi-workspace e2e
-/// uses it to give a skill the SAME name in two workspaces and prove `--workspace` disambiguation.
+/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The request names
+/// the acting `owner_dkid`; the plane resolves its non-revoked registry row → principal → OWNER role gate
+/// (no signature — authority is the directory rows). The offered `name` is advisory (it becomes the
+/// follower's local skill name, never part of the request identity — the deterministic link binds skill
+/// ids only), so the multi-workspace e2e uses it to give a skill the SAME name in two workspaces and prove
+/// `--workspace` disambiguation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn mint_invite_with_role(
     authority: &Authority,
     ws: &WorkspaceId,
-    signer: (&str, &[u8; 32]),
+    owner_dkid: &str,
     op_id: &str,
     email: &str,
     skill: &str,
@@ -367,39 +357,17 @@ pub(crate) async fn mint_invite_with_role(
     role: Role,
     at: &str,
 ) -> String {
-    let (signer_dkid, signer_seed) = signer;
-    let hyphenless: String = op_id.chars().filter(|c| *c != '-').collect();
-    let mut op_id_bytes = [0u8; 16];
-    hex::decode_to_slice(&hyphenless, &mut op_id_bytes).expect("op_id is 16 hex bytes");
-
-    let role_byte = role.signing_byte();
-    let fields = GovernanceOpFields {
-        workspace_id: ws.as_str(),
-        op_id: op_id_bytes,
-        device_key_id: signer_dkid,
-        op: GovernanceOpKind::Invite {
-            role: role_byte,
-            expires_at: 0,
-            emails: &[email],
-            skills: &[skill],
-        },
-    };
-    let preimage = governance_op_preimage(&fields).expect("governance preimage");
-    let signature = SigningKey::from_bytes(signer_seed)
-        .sign(&preimage)
-        .to_bytes();
-    let signed = GovernanceSignedOp {
-        device_key_id: signer_dkid.to_owned(),
+    let request = GovernanceRequest {
+        device_key_id: owner_dkid.to_owned(),
         op: GovernanceOp::Invite {
             role,
             expires_at: None,
             emails: vec![Principal::parse(email).unwrap()],
             skills: vec![(SkillId::parse(skill).unwrap(), name.map(str::to_owned))],
         },
-        signature,
     };
     match authority
-        .create_invite(ws, op_id, signed, at)
+        .create_invite(ws, op_id, request, at)
         .await
         .expect("create_invite")
     {

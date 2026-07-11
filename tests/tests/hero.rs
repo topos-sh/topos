@@ -9,8 +9,8 @@
 //! Three scenarios, each on its own freshly-seeded plane + client home:
 //! 1. first pull fast-forwards onto the plane's genesis, byte-exact incl. the executable bit;
 //! 2. an immediate second pull is a commit-sensitive **304 no-op** (nothing re-materialized);
-//! 3. a v2 whose served signed record has a tampered signature is **refused** — the placement + floor retain
-//!    last-known-good (the v1 genesis).
+//! 3. a forward move to a v2 (an ordinary UNSIGNED advanced record) applies byte-exact on the next pull —
+//!    no signature, no verification, just the served record + the content-addressed digest re-check on apply.
 
 mod common;
 
@@ -27,12 +27,12 @@ const READ_TOKEN: &str = "rt_hero_secret_value";
 const AUTHOR: &str = "d_test";
 const MESSAGE: &str = "topos publish";
 const CREATED_AT: &str = "2026-06-29T00:00:00Z";
-/// The deterministic device signing seed; its public key is registered via `seed_device`.
-const DEVICE_SEED: [u8; 32] = [7u8; 32];
+/// The device's registered 32-byte public key (a fixed test value; nothing verifies against it).
+const DEVICE_PUBKEY: [u8; 32] = [7u8; 32];
 const GENESIS_OP: &str = "a0000000-0000-4000-8000-000000000001";
 const CHILD_OP: &str = "a0000000-0000-4000-8000-000000000002";
 
-/// A v2 bundle (a forward child of genesis) — the move scenario 3 then tampers.
+/// A v2 bundle (a forward child of genesis) — the forward-move scenario 3 applies it byte-exact.
 fn v2_files() -> Vec<UploadedFile> {
     vec![
         UploadedFile {
@@ -64,7 +64,7 @@ fn start_plane(tag: &str) -> Plane {
                 authority,
                 common::GenesisSpec {
                     dkid: DKID,
-                    device_seed: &DEVICE_SEED,
+                    device_pubkey: &DEVICE_PUBKEY,
                     op_id: GENESIS_OP,
                     files: genesis_files(),
                     principal: PRINCIPAL,
@@ -91,7 +91,7 @@ fn first_pull_fast_forwards_byte_exact() {
     let mut client = PullHarness::new("ff");
     client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
 
-    let data = client.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    let data = client.run_pull(&plane.base_url, Scope::AllFollowed);
 
     // The engine fast-forwarded onto the plane's genesis at (1,1).
     assert_eq!(data.skills.len(), 1, "exactly one followed skill");
@@ -132,14 +132,14 @@ fn second_pull_is_a_304_no_op() {
     client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
 
     // First pull fast-forwards to (1,1).
-    let first = client.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    let first = client.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(first.skills[0].action, PullAction::FastForwarded);
     let placement_after_ff = client.placement_files(SKILL);
     let sync_after_ff = client.sync_state(SKILL);
 
     // Second pull: the client sends If-None-Match: "1.1" + Topos-Known-Version-Id: <genesis>; the plane,
     // unchanged at (1,1)/<genesis>, answers 304. The engine maps that to UpToDate and re-materializes nothing.
-    let second = client.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    let second = client.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(
         second.skills[0].action,
         PullAction::UpToDate,
@@ -159,22 +159,23 @@ fn second_pull_is_a_304_no_op() {
     assert_eq!(sync_now.applied, Generation { epoch: 1, seq: 1 });
 }
 
-// ── scenario 3: a tampered v2 signature ⇒ refuse + retain last-known-good ──────────────────────────────
+// ── scenario 3: a forward move to v2 applies byte-exact (an unsigned advanced record, no ceremony) ─────
 
 #[test]
-fn tampered_signature_is_refused_and_retains_last_known_good() {
-    let plane = start_plane("tamper");
-    let mut client = PullHarness::new("tamper");
+fn a_forward_move_to_v2_applies_byte_exact() {
+    let plane = start_plane("v2");
+    let mut client = PullHarness::new("v2");
     client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
 
-    // Reach a clean last-known-good state at the genesis (1,1).
-    let ff = client.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    // Reach the genesis (1,1).
+    let ff = client.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(ff.skills[0].action, PullAction::FastForwarded);
-    let good_placement = client.placement_files(SKILL);
-    assert_eq!(good_placement, expected_placement(&genesis_files()));
+    assert_eq!(
+        client.placement_files(SKILL),
+        expected_placement(&genesis_files())
+    );
 
-    // Move `current` FORWARD to a v2 (a 1-parent publish on genesis), then corrupt its served signed record
-    // so the signature no longer verifies — generation (1,2) + version_id stay intact.
+    // Move `current` FORWARD to a v2 (a 1-parent publish on genesis) — an ordinary UNSIGNED advanced record.
     let authority = plane.authority.clone();
     let ws = plane.ws();
     let skill = plane.skill();
@@ -185,7 +186,6 @@ fn tampered_signature_is_refused_and_retains_last_known_good() {
                 &ws,
                 &skill,
                 DKID,
-                &DEVICE_SEED,
                 &OpId::parse(CHILD_OP).unwrap(),
                 genesis,
                 v2_files(),
@@ -198,38 +198,25 @@ fn tampered_signature_is_refused_and_retains_last_known_good() {
             .expect("publish v2");
         assert_eq!(receipt.outcome, TerminalOutcome::Ok);
         assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 2 }));
-        authority
-            .tamper_current_signature(&ws, &skill)
-            .await
-            .expect("tamper current signature");
     });
 
-    // The third pull fetches the advanced-but-forged record; the engine authenticates it against the pinned
-    // plane key, the signature fails, and it REFUSES (an alarm) — applying nothing.
-    let refused = client.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    // The next pull fetches the advanced record and fast-forwards onto v2 byte-exact — there is no
+    // signature and no client-side verification, only the served record plus the content-addressed digest
+    // re-check on apply (a mismatch would be a loud integrity error; a clean move just lands).
+    let applied = client.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(
-        refused.skills[0].action,
-        PullAction::Alarm,
-        "a tampered signature must refuse, not apply: {:?}",
-        refused.skills[0]
+        applied.skills[0].action,
+        PullAction::FastForwarded,
+        "an unsigned advanced record applies with no ceremony: {:?}",
+        applied.skills[0]
     );
-
-    // Last-known-good retained: the placement still holds the v1 genesis bytes, and the floor never advanced.
+    assert_eq!(applied.skills[0].applied, Generation { epoch: 1, seq: 2 });
     assert_eq!(
         client.placement_files(SKILL),
-        good_placement,
-        "the refused v2 must never clobber the v1 placement"
+        expected_placement(&v2_files()),
+        "the v2 bundle materializes byte-exact"
     );
     let sync = client.sync_state(SKILL);
-    assert_eq!(
-        sync.applied,
-        Generation { epoch: 1, seq: 1 },
-        "applied stays at the last-known-good genesis"
-    );
-    assert_eq!(
-        sync.observed,
-        Generation { epoch: 1, seq: 1 },
-        "the floor is never raised by an unverifiable record"
-    );
-    assert_eq!(sync.base_commit, hex::encode(genesis.0));
+    assert_eq!(sync.applied, Generation { epoch: 1, seq: 2 });
+    assert_eq!(sync.observed, Generation { epoch: 1, seq: 2 });
 }

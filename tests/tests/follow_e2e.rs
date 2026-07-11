@@ -1,17 +1,17 @@
 //! E2E — the real `topos follow` over loopback HTTP against the real plane.
 //!
 //! Proves the whole enrollment loop end to end, replacing the fixture-seeded follow: an owner mints an `/i/`
-//! invite (a governance-signed op the plane re-derives + verifies), then a fresh client `follow`s the link —
-//! fetching the bootstrap, TOFU-pinning the plane key, minting a `0600` device seed, device-authorizing,
-//! confirming the identity (the human's verification, driven in-process via the authority's external-confirm
-//! op so the flow is headless), resuming to sign the **enroll possession proof** + redeem OVER THE WIRE (the
-//! server `verify_enroll`s it — the two-halves wire proof), and finally placing the first-received bundle
+//! invite (an owner-credential op the plane authenticates by registry lookup), then a fresh client `follow`s
+//! the link — fetching the bootstrap (no trust root to pin — the `current` pointer is unsigned), minting a
+//! `0600` device keypair, device-authorizing, confirming the identity (the human's verification, driven
+//! in-process via the authority's external-confirm op so the flow is headless), resuming to redeem OVER THE
+//! WIRE (the grant is the bearer credential; the server checks the redeem body's device public key against
+//! the grant's bound key — a binding check, nothing signed), and finally placing the first-received bundle
 //! byte-exact (incl. the executable bit).
 
 mod common;
 
 use common::{NOW, Plane, SKILL, WS, expected_placement, genesis_files};
-use ed25519_dalek::SigningKey;
 use plane_store::{Authority, ConfirmOutcome, OpId, Principal, SkillId, WorkspaceId};
 use topos::test_support::FollowHarness;
 use topos_types::{Generation, TerminalOutcome};
@@ -19,11 +19,12 @@ use topos_types::{Generation, TerminalOutcome};
 // ── shared constants ──────────────────────────────────────────────────────────────────────────────
 const OWNER: &str = "p_owner";
 const OWNER_DKID: &str = "dk_owner";
-const OWNER_SEED: [u8; 32] = [9u8; 32];
+/// The owner device's registered 32-byte public key (a fixed test value; nothing verifies against it).
+const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
 /// The invitee is identified by an email — the cloud confirms it, and it becomes the rostered principal.
 const INVITEE: &str = "alice@acme.test";
 /// The publisher of the offered skill (a distinct principal — the invitee reads it through the granted roster).
-const PUB_SEED: [u8; 32] = [7u8; 32];
+const PUB_PUBKEY: [u8; 32] = [7u8; 32];
 const PUB_DKID: &str = "dk_pub";
 const PUB_PRINCIPAL: &str = "p_pub";
 const AUTHOR: &str = "d_test";
@@ -53,7 +54,7 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
         let publisher = Principal::parse(PUB_PRINCIPAL).unwrap();
         let invitee = Principal::parse(INVITEE).unwrap();
 
-        // The workspace + the owner (with a registered device so the owner can sign the invite).
+        // The workspace + the owner (with a registered device so the owner can mint the invite).
         authority
             .seed_workspace(&ws, "Acme", "verified", "cloud")
             .await
@@ -62,18 +63,14 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
             .seed_workspace_member(&ws, &owner, "owner", "confirmed")
             .await
             .expect("seed owner");
-        let owner_pk = SigningKey::from_bytes(&OWNER_SEED)
-            .verifying_key()
-            .to_bytes();
         authority
-            .seed_device(&ws, OWNER_DKID, &owner_pk, &owner, false)
+            .seed_device(&ws, OWNER_DKID, &OWNER_PUBKEY, &owner, false)
             .await
             .expect("seed owner device");
 
         // The published skill the invite offers.
-        let pub_pk = SigningKey::from_bytes(&PUB_SEED).verifying_key().to_bytes();
         authority
-            .seed_device(&ws, PUB_DKID, &pub_pk, &publisher, false)
+            .seed_device(&ws, PUB_DKID, &PUB_PUBKEY, &publisher, false)
             .await
             .expect("seed publisher device");
         authority
@@ -85,7 +82,6 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
                 &ws,
                 &skill,
                 PUB_DKID,
-                &PUB_SEED,
                 &OpId::parse(GENESIS_OP).unwrap(),
                 genesis_files(),
                 AUTHOR,
@@ -106,16 +102,8 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
             .await
             .expect("pre-roster invitee");
 
-        let invite_link = common::mint_invite(
-            authority,
-            &ws,
-            (OWNER_DKID, &OWNER_SEED),
-            INVITE_OP,
-            INVITEE,
-            SKILL,
-            AT,
-        )
-        .await;
+        let invite_link =
+            common::mint_invite(authority, &ws, OWNER_DKID, INVITE_OP, INVITEE, SKILL, AT).await;
         common::Seeded {
             genesis: Some(genesis),
             invites: vec![invite_link],
@@ -130,10 +118,8 @@ fn e2e_real_follow_enrolls_and_lands_the_first_skill() {
     let plane = start_plane("follow");
     let client = FollowHarness::new("follow");
 
-    // Call 1: `topos follow <link>` — fetch the bootstrap, TOFU-pin, mint the device seed, device-authorize.
-    let pending = client
-        .follow(plane.invite(0), plane.plane_key)
-        .expect("follow call 1");
+    // Call 1: `topos follow <link>` — fetch the bootstrap, mint the device keypair, device-authorize.
+    let pending = client.follow(plane.invite(0)).expect("follow call 1");
     assert!(!pending.enrolled, "call 1 only begins enrollment");
     let user_code = pending
         .pending
@@ -163,18 +149,17 @@ fn e2e_real_follow_enrolls_and_lands_the_first_skill() {
         .expect("confirm the session identity");
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
 
-    // Call 2: `topos follow --resume` — poll (granted), sign the enroll possession proof, redeem OVER THE WIRE.
-    // The server `verify_enroll`s the proof against the grant's bound device key — the two-halves wire proof.
-    let done = client.resume(plane.plane_key).expect("follow --resume");
+    // Call 2: `topos follow --resume` — poll (granted), redeem OVER THE WIRE. The grant is the bearer
+    // credential; the server checks the redeem body's device public key against the grant's bound key.
+    let done = client.resume().expect("follow --resume");
     assert!(done.enrolled, "enrolled after the resume redeem");
     assert!(
         !client.wal_exists(),
         "the WAL is consumed once promotion completes"
     );
-    assert_eq!(
-        client.instance_pinned_key(),
-        Some(plane.plane_key),
-        "the plane key (TOFU-pinned from the unauthenticated bootstrap) is committed at promote"
+    assert!(
+        client.instance_written(),
+        "instance.json is committed at promote (no trust root — the pointer is unsigned)"
     );
     assert!(
         client.follows_count() >= 1,
@@ -188,7 +173,7 @@ fn e2e_real_follow_enrolls_and_lands_the_first_skill() {
     // `topos follow --approve` — place the first-received bytes (a never-received skill is an OFFER until this).
     let target = format!("{SKILL}@{}", hex::encode(plane.genesis().0));
     client
-        .approve(&plane.base_url, plane.plane_key, &[target])
+        .approve(&plane.base_url, &[target])
         .expect("follow --approve");
 
     // The placement holds the EXACT genesis bytes — path/mode/content byte-for-byte, incl. the exec bit.
@@ -215,9 +200,7 @@ fn e2e_off_roster_identity_cannot_redeem_a_leaked_invite() {
     let client = FollowHarness::new("offroster");
 
     // The agent fetches the bootstrap + device-authorizes fine (the /i/ link is a public enrollment START).
-    let pending = client
-        .follow(plane.invite(0), plane.plane_key)
-        .expect("follow call 1");
+    let pending = client.follow(plane.invite(0)).expect("follow call 1");
     let user_code = pending.pending.expect("pending arm").user_code;
 
     // But the confirmed identity is NOT on the workspace roster — the cloud gate makes redemption inert.
@@ -233,7 +216,7 @@ fn e2e_off_roster_identity_cannot_redeem_a_leaked_invite() {
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
 
     // The resume polls + attempts the redeem; the off-roster identity is DENIED — a leaked link enrolls no one.
-    let outcome = client.resume(plane.plane_key);
+    let outcome = client.resume();
     assert!(
         outcome.is_err(),
         "an off-roster identity must be denied at redeem: {outcome:?}"
@@ -274,9 +257,7 @@ fn e2e_a_share_host_link_re_roots_and_serves_the_agent_doc() {
     assert!(doc.contains(&format!("topos follow '{link}' --json")));
 
     // (3) The real two-call follow: bootstrap on the link host, then re-root.
-    let pending = client
-        .follow(&link, plane.plane_key)
-        .expect("follow call 1");
+    let pending = client.follow(&link).expect("follow call 1");
     assert!(!pending.enrolled);
     assert_eq!(
         pending.plane_base_url.as_deref(),
@@ -293,22 +274,21 @@ fn e2e_a_share_host_link_re_roots_and_serves_the_agent_doc() {
         )
         .expect("confirm the session identity");
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
-    let done = client.resume(plane.plane_key).expect("follow --resume");
+    let done = client.resume().expect("follow --resume");
     assert!(done.enrolled);
     assert_eq!(
         done.plane_base_url.as_deref(),
         Some(plane.base_url.as_str())
     );
-    assert_eq!(
-        client.instance_pinned_key(),
-        Some(plane.plane_key),
-        "the TOFU pin committed under the API base"
+    assert!(
+        client.instance_written(),
+        "instance.json committed under the API base"
     );
 
     // (4) The placing pull rides the API base and lands the genesis byte-exact.
     let target = format!("{SKILL}@{}", hex::encode(plane.genesis().0));
     client
-        .approve(&plane.base_url, plane.plane_key, &[target])
+        .approve(&plane.base_url, &[target])
         .expect("follow --approve");
     let got = client.placement_files(SKILL);
     assert_eq!(got, expected_placement(&genesis_files()));

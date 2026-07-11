@@ -10,7 +10,7 @@ description = "Workspace-level end-to-end integration tests — the loopback-HTT
 
 # The HERO drives BOTH sides through their feature-gated test-fixtures surfaces: the client's `test_support`
 # (set up `~/.topos/` + run the real pull engine over the real `ureq` transport) and plane-store's seed
-# shims (stage an authority + move/tamper `current`). `topos`'s `test-fixtures` adds NO server edge to the
+# shims (stage an authority + move `current`). `topos`'s `test-fixtures` adds NO server edge to the
 # client (check-arch asserts it). These are dev-deps of a test-only crate, so the feature never reaches a
 # production artifact (the production build is `cargo build -p topos-plane`, which excludes this member).
 [dev-dependencies]
@@ -23,16 +23,11 @@ plane-store = { workspace = true, features = ["test-fixtures"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 topos-plane.workspace = true
 topos-types.workspace = true
-# Build the governance-op signing preimage for the in-process invite mint (the owner signs the SAME frame the
-# plane re-derives + verifies) — the one shared kernel encoder, so the e2e cannot drift from production.
-topos-core.workspace = true
 # A multi-threaded runtime so the plane's async handlers make progress while the SYNC client (blocking
 # `ureq`) runs on a plain thread; `net` for the loopback listener.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 # Serve the composed `router(state)` over a real loopback socket (with peer ConnectInfo).
 axum.workspace = true
-# Derive the device public key from the deterministic signing seed for `seed_device`.
-ed25519-dalek = { workspace = true, features = ["std"] }
 # Parse the follower's real settings.json to assert the EXACT installed SessionStart hook command.
 serde_json.workspace = true
 # Compare the client's `sync.json` base_commit (hex) to the plane's genesis version id.

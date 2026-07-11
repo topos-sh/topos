@@ -28,7 +28,6 @@
 mod common;
 
 use common::{Plane, SKILL, WS, expected, start_plane_mode};
-use ed25519_dalek::SigningKey;
 use plane_store::{
     ApproveStandupOutcome, Authority, AuthorityError, ConfirmOutcome, CreateWorkspaceOutcome,
     DeploymentMode, MintClaimOutcome, Principal, RedeemOutcome, SkillId, WorkspaceId,
@@ -127,7 +126,7 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
 
     // Call 1 — the un-enrolled direct publish does not fail: it goes PENDING the human sign-in.
     let call1 = client
-        .publish(&plane.base_url, plane.plane_key, &approve)
+        .publish(&plane.base_url, &approve)
         .expect("publish call 1");
     let PublishResult::Pending { data, resume_argv } = call1 else {
         panic!("an un-enrolled publish must go PENDING, got {call1:?}");
@@ -194,7 +193,7 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
 
     // Call 2 — the SAME command re-invoked: poll → redeem → promote → the publish lands in ONE invocation.
     let call2 = client
-        .publish(&plane.base_url, plane.plane_key, &approve)
+        .publish(&plane.base_url, &approve)
         .expect("publish call 2 (the resume)");
     let PublishResult::Published(done) = call2 else {
         panic!("the resumed publish must land, got {call2:?}");
@@ -221,8 +220,8 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     );
     assert!(!client.wal_exists(), "the WAL is consumed at promote");
 
-    // The enrolled state the standup wrote: pinned key, seated principal, workspace.
-    assert_eq!(client.instance_pinned_key(), Some(plane.plane_key));
+    // The enrolled state the standup wrote: instance.json committed, seated principal, workspace.
+    assert!(client.instance_written());
     assert_eq!(client.user_principal().as_deref(), Some(FOUNDER));
     assert_eq!(client.user_workspace().as_deref(), Some(ws));
 
@@ -258,7 +257,7 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
         .expect("mint the witness read token");
     let mut follower = PullHarness::new("standup-door1-f");
     follower.adopt_followed(SKILL, ws, "rt_standup_witness", Follow::Auto, PLACEHOLDER);
-    let pulled = follower.run_pull(&plane.base_url, plane.plane_key, Scope::AllFollowed);
+    let pulled = follower.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(pulled.skills[0].action, PullAction::FastForwarded);
     assert_eq!(pulled.skills[0].applied, Generation { epoch: 1, seq: 1 });
     assert_eq!(
@@ -285,7 +284,7 @@ fn e2e_door1_first_publish_of_an_untracked_dir_auto_adds_and_stands_up() {
 
     // Call 1 — auto-adopts the dir (offline, before any network) THEN goes PENDING the human sign-in.
     let call1 = client
-        .publish(&plane.base_url, plane.plane_key, dir_arg)
+        .publish(&plane.base_url, dir_arg)
         .expect("publish call 1");
     let PublishResult::Pending { data, resume_argv } = call1 else {
         panic!("an un-enrolled publish of an untracked dir must go PENDING, got {call1:?}");
@@ -324,7 +323,7 @@ fn e2e_door1_first_publish_of_an_untracked_dir_auto_adds_and_stands_up() {
     // Call 2 — the resume target (already tracked from call 1): enroll + land the genesis in one
     // invocation, WITHOUT re-adopting.
     let call2 = client
-        .publish(&plane.base_url, plane.plane_key, &resume_target)
+        .publish(&plane.base_url, &resume_target)
         .expect("publish call 2 (the resume)");
     let PublishResult::Published(done) = call2 else {
         panic!("the resumed publish must land, got {call2:?}");
@@ -406,9 +405,7 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     // The owner's agent follows the self-invite: call 1 pending → the web-approve leg → resume redeems
     // (the confirmed-owner roster row admits it).
     let owner = FollowHarness::new("standup-door2-owner");
-    let pending = owner
-        .follow(&self_invite, plane.plane_key)
-        .expect("owner follow call 1");
+    let pending = owner.follow(&self_invite).expect("owner follow call 1");
     assert!(!pending.enrolled);
     let user_code = pending.pending.expect("the pending handle").user_code;
     let confirmed = plane
@@ -420,23 +417,17 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
         )
         .expect("the web-approve leg (owner)");
     assert!(matches!(confirmed, ConfirmOutcome::Confirmed));
-    let done = owner
-        .resume(plane.plane_key)
-        .expect("owner follow --resume");
+    let done = owner.resume().expect("owner follow --resume");
     assert!(done.enrolled, "the confirmed owner's redeem is admitted");
     assert_eq!(done.workspace_id, ws);
-    assert_eq!(owner.instance_pinned_key(), Some(plane.plane_key));
+    assert!(owner.instance_written());
     assert_eq!(owner.user_principal().as_deref(), Some(OWNER_EMAIL));
 
     // The owner adopts + genesis-publishes over the wire.
     owner.adopt(SKILL, DRAFT);
     let digest = owner.draft_digest(SKILL);
     let published = owner
-        .publish(
-            &plane.base_url,
-            plane.plane_key,
-            &format!("{SKILL}@{digest}"),
-        )
+        .publish(&plane.base_url, &format!("{SKILL}@{digest}"))
         .expect("the owner's genesis publish");
     let PublishResult::Published(genesis) = published else {
         panic!("expected a direct publish, got {published:?}");
@@ -451,7 +442,8 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     );
     let version_id = genesis.version_id.expect("the genesis version id");
 
-    // The owner invites a member (the REAL signed governance verb), pre-offering the skill.
+    // The owner invites a member (the REAL governance verb — the owner's device credential authenticates
+    // it, nothing signed), pre-offering the skill.
     let member_link = owner.invite(MEMBER_EMAIL, &[SKILL]).expect("invite");
     assert_eq!(
         member_row(&plane, &ws, MEMBER_EMAIL),
@@ -462,9 +454,7 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     // The member's two-call follow: pending → the web-approve leg (member) → redeem flips
     // invited → confirmed.
     let member = FollowHarness::new("standup-door2-member");
-    let mp = member
-        .follow(&member_link, plane.plane_key)
-        .expect("member follow call 1");
+    let mp = member.follow(&member_link).expect("member follow call 1");
     let member_code = mp.pending.expect("the pending handle").user_code;
     plane
         .rt
@@ -474,7 +464,7 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
                 .confirm_external_identity(&member_code, MEMBER_EMAIL, wall_ms()),
         )
         .expect("the web-approve leg (member)");
-    let mdone = member.resume(plane.plane_key).expect("member resume");
+    let mdone = member.resume().expect("member resume");
     assert!(mdone.enrolled);
     assert_eq!(
         member_row(&plane, &ws, MEMBER_EMAIL),
@@ -485,11 +475,7 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     // The pull engine lands the genesis byte-exact on the second client (first-receive is an OFFER; the
     // explicit approve places it through the same engine).
     member
-        .approve(
-            &plane.base_url,
-            plane.plane_key,
-            &[format!("{SKILL}@{version_id}")],
-        )
+        .approve(&plane.base_url, &[format!("{SKILL}@{version_id}")])
         .expect("first-receive approve");
     assert_eq!(
         member.placement_files(SKILL),
@@ -521,9 +507,7 @@ fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
 
     // The leak: a stranger's agent starts fine (the /i/ link is a public enrollment START)…
     let stranger = FollowHarness::new("standup-leak");
-    let pending = stranger
-        .follow(&self_invite, plane.plane_key)
-        .expect("call 1 starts");
+    let pending = stranger.follow(&self_invite).expect("call 1 starts");
     let code = pending.pending.expect("pending").user_code;
     // …and signs in as an identity NOT on the roster.
     plane
@@ -537,7 +521,7 @@ fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
 
     // The redeem is DENIED — and the client surfaces the REQUEST_ACCESS ask-an-owner guidance, exactly as
     // the production error envelope carries it.
-    let denial = stranger.resume_expect_denied(plane.plane_key);
+    let denial = stranger.resume_expect_denied();
     assert_eq!(denial.code, "DENIED");
     assert_eq!(
         denial.next_action_codes,
@@ -550,10 +534,7 @@ fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
         denial.message
     );
     assert!(!stranger.enrolled(), "no enrollment state lands");
-    assert!(
-        stranger.instance_pinned_key().is_none(),
-        "nothing was promoted"
-    );
+    assert!(!stranger.instance_written(), "nothing was promoted");
 
     // The workspace is untouched: the owner seat stands, the stranger holds no membership.
     assert_eq!(
@@ -580,7 +561,7 @@ fn e2e_approve_standup_misses_are_uniform_and_double_approve_is_idempotent() {
     client.adopt(SKILL, DRAFT);
     let approve = format!("{SKILL}@{}", client.draft_digest(SKILL));
     let call1 = client
-        .publish(&plane.base_url, plane.plane_key, &approve)
+        .publish(&plane.base_url, &approve)
         .expect("publish call 1");
     let PublishResult::Pending { data, .. } = call1 else {
         panic!("expected Pending, got {call1:?}");
@@ -702,7 +683,7 @@ fn e2e_a_standup_session_refuses_every_enroll_identity_leg_yet_stays_live() {
     client.adopt(SKILL, DRAFT);
     let approve = format!("{SKILL}@{}", client.draft_digest(SKILL));
     let call1 = client
-        .publish(&plane.base_url, plane.plane_key, &approve)
+        .publish(&plane.base_url, &approve)
         .expect("publish call 1");
     let PublishResult::Pending { data, .. } = call1 else {
         panic!("expected Pending, got {call1:?}");
@@ -755,7 +736,7 @@ fn e2e_a_standup_session_refuses_every_enroll_identity_leg_yet_stays_live() {
         .expect("approve");
     assert!(matches!(approved, ApproveStandupOutcome::Approved { .. }));
     let call2 = client
-        .publish(&plane.base_url, plane.plane_key, &approve)
+        .publish(&plane.base_url, &approve)
         .expect("the resume still lands");
     assert!(
         matches!(call2, PublishResult::Published(_)),
@@ -791,12 +772,12 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
     // `follow <claim-link>` — ONE invocation, no web leg, no --resume.
     let owner = FollowHarness::new("standup-claim-owner");
     let done = owner
-        .follow(&claim_link, plane.plane_key)
+        .follow(&claim_link)
         .expect("the one-shot claim follow");
     assert!(done.enrolled, "enrolled in one invocation");
     assert_eq!(done.workspace_id, WS);
     assert!(!owner.wal_exists(), "the claim WAL is consumed at promote");
-    assert_eq!(owner.instance_pinned_key(), Some(plane.plane_key));
+    assert!(owner.instance_written());
     let owner_principal = owner.user_principal().expect("the seated principal");
     assert!(
         owner_principal.starts_with("dev."),
@@ -816,11 +797,7 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
     owner.adopt(SKILL, DRAFT);
     let digest = owner.draft_digest(SKILL);
     let published = owner
-        .publish(
-            &plane.base_url,
-            plane.plane_key,
-            &format!("{SKILL}@{digest}"),
-        )
+        .publish(&plane.base_url, &format!("{SKILL}@{digest}"))
         .expect("the owner's genesis publish");
     let PublishResult::Published(genesis) = published else {
         panic!("expected a direct publish, got {published:?}");
@@ -837,23 +814,17 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
         .invite("anyone@else.test", &[SKILL])
         .expect("the owner's invite");
     let member = FollowHarness::new("standup-claim-member");
-    let mp = member
-        .follow(&member_link, plane.plane_key)
-        .expect("member call 1");
+    let mp = member.follow(&member_link).expect("member call 1");
     assert!(!mp.enrolled);
     let mdone = member
-        .resume(plane.plane_key)
+        .resume()
         .expect("the bearer resume needs no identity leg");
     assert!(
         mdone.enrolled,
         "self-host grants membership from the bearer"
     );
     member
-        .approve(
-            &plane.base_url,
-            plane.plane_key,
-            &[format!("{SKILL}@{version_id}")],
-        )
+        .approve(&plane.base_url, &[format!("{SKILL}@{version_id}")])
         .expect("first-receive approve");
     assert_eq!(
         member.placement_files(SKILL),
@@ -884,15 +855,12 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
 
     // The owner consumes the claim (the real one-shot follow).
     let owner = FollowHarness::new("standup-claimwit-owner");
-    let done = owner
-        .follow(&claim_link, plane.plane_key)
-        .expect("claim follow");
+    let done = owner.follow(&claim_link).expect("claim follow");
     assert!(done.enrolled);
 
-    // A DIFFERENT device redeeming the consumed claim is Denied.
-    let other_device = SigningKey::from_bytes(&[42u8; 32])
-        .verifying_key()
-        .to_bytes();
+    // A DIFFERENT device redeeming the consumed claim is Denied (a distinct 32-byte public key ⇒ a
+    // distinct server-derived device key id).
+    let other_device = [42u8; 32];
     let denied = plane
         .rt
         .block_on(
@@ -922,8 +890,7 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
 
     // A consumed claim's /i/ refetch is the uniform NotFound (which is why the client's retry POSTs from
     // its WAL instead of refetching — proven in-crate; the wire-visible half is asserted here).
-    let refetch =
-        FollowHarness::new("standup-claimwit-refetch").follow(&claim_link, plane.plane_key);
+    let refetch = FollowHarness::new("standup-claimwit-refetch").follow(&claim_link);
     assert!(
         refetch
             .as_ref()
@@ -948,9 +915,7 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
     let MintClaimOutcome::Minted(expired) = expired else {
         panic!("expected Minted, got {expired:?}");
     };
-    let fresh_device = SigningKey::from_bytes(&[43u8; 32])
-        .verifying_key()
-        .to_bytes();
+    let fresh_device = [43u8; 32];
     let dead = plane
         .rt
         .block_on(
@@ -964,8 +929,7 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
         "an expired claim's first consumption is Denied: {dead:?}"
     );
     let dead_link = format!("{}/i/{}", plane.base_url, expired.token);
-    let dead_follow =
-        FollowHarness::new("standup-claimwit-expired").follow(&dead_link, plane.plane_key);
+    let dead_follow = FollowHarness::new("standup-claimwit-expired").follow(&dead_link);
     assert!(
         dead_follow
             .as_ref()
@@ -978,10 +942,10 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
 
 #[test]
 fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
-    // A cloud plane with BOTH species live: a governance-signed invite (seeded owner) and a minted claim.
+    // A cloud plane with BOTH species live: a credential-authenticated invite (seeded owner) and a claim.
     const P_OWNER: &str = "p_owner";
     const OWNER_DKID: &str = "dk_owner";
-    const OWNER_SEED: [u8; 32] = [9u8; 32];
+    const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
     let plane = start_plane_mode(
         "topos-standup",
         "cross",
@@ -998,17 +962,14 @@ fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
                 .seed_workspace_member(&ws, &owner, "owner", "confirmed")
                 .await
                 .expect("seed owner");
-            let owner_pk = SigningKey::from_bytes(&OWNER_SEED)
-                .verifying_key()
-                .to_bytes();
             authority
-                .seed_device(&ws, OWNER_DKID, &owner_pk, &owner, false)
+                .seed_device(&ws, OWNER_DKID, &OWNER_PUBKEY, &owner, false)
                 .await
                 .expect("seed owner device");
             let invite_link = common::mint_invite(
                 authority,
                 &ws,
-                (OWNER_DKID, &OWNER_SEED),
+                OWNER_DKID,
                 "b0000000-0000-4000-8000-000000000001",
                 "alice@acme.test",
                 SKILL,
@@ -1078,10 +1039,7 @@ fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
     assert!(!live_invite.is_empty(), "a real session user code");
     let claim_owner = FollowHarness::new("standup-cross-claim");
     let claimed = claim_owner
-        .follow(
-            &format!("{}/i/{}", plane.base_url, claim.token),
-            plane.plane_key,
-        )
+        .follow(&format!("{}/i/{}", plane.base_url, claim.token))
         .expect("the claim survived the cross-species attempts");
     assert!(claimed.enrolled);
     assert_eq!(claimed.workspace_id, "w_newco");

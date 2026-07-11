@@ -40,18 +40,18 @@
 mod common;
 
 use common::{NOW, Plane, SKILL, WS, expected};
-use ed25519_dalek::SigningKey;
 use plane_store::{Authority, ConfirmOutcome, Principal, SkillId, WorkspaceId};
 use topos::test_support::{ContributeHarness, FollowHarness, PublishResult, Scope};
 use topos_types::results::PullAction;
 use topos_types::{CurrencyKind, Generation, TriggerReport, TriggerState};
 
 // ── shared constants ──────────────────────────────────────────────────────────────────────────────
-/// The workspace admin — an OWNER with a fixed-seed device, who mints the follower invites. Deliberately
+/// The workspace admin — an OWNER with a fixed-key device, who mints the follower invites. Deliberately
 /// NOT the author: the genesis standup must work for a plain member.
 const ADMIN: &str = "p_admin";
 const ADMIN_DKID: &str = "dk_admin";
-const ADMIN_SEED: [u8; 32] = [9u8; 32];
+/// The admin device's registered 32-byte public key (a fixed test value; nothing verifies against it).
+const ADMIN_PUBKEY: [u8; 32] = [9u8; 32];
 /// The author — a plain confirmed MEMBER (not an owner); their device key is the client rig's own.
 const AUTHOR: &str = "p_author";
 const AUTHOR_RT: &str = "rt_author_secret";
@@ -237,11 +237,8 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
                 .seed_workspace_member(&ws, &admin, "owner", "confirmed")
                 .await
                 .expect("seed admin");
-            let admin_pk = SigningKey::from_bytes(&ADMIN_SEED)
-                .verifying_key()
-                .to_bytes();
             authority
-                .seed_device(&ws, ADMIN_DKID, &admin_pk, &admin, false)
+                .seed_device(&ws, ADMIN_DKID, &ADMIN_PUBKEY, &admin, false)
                 .await
                 .expect("seed admin device");
 
@@ -276,7 +273,7 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
             let invite1 = common::mint_invite(
                 authority,
                 &ws,
-                (ADMIN_DKID, &ADMIN_SEED),
+                ADMIN_DKID,
                 INVITE_OP_1,
                 FOLLOWER1,
                 SKILL,
@@ -286,7 +283,7 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
             let invite2 = common::mint_invite(
                 authority,
                 &ws,
-                (ADMIN_DKID, &ADMIN_SEED),
+                ADMIN_DKID,
                 INVITE_OP_2,
                 FOLLOWER2,
                 SKILL,
@@ -312,9 +309,7 @@ fn enroll_follower(
     manual: bool,
 ) -> FollowHarness {
     let follower = (case.follower)(tag);
-    let pending = follower
-        .follow_with(invite, plane.plane_key, manual)
-        .expect("follow call 1");
+    let pending = follower.follow_with(invite, manual).expect("follow call 1");
     let user_code = pending
         .pending
         .as_ref()
@@ -330,7 +325,7 @@ fn enroll_follower(
         )
         .expect("confirm identity");
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
-    let done = follower.resume(plane.plane_key).expect("follow --resume");
+    let done = follower.resume().expect("follow --resume");
     assert!(done.enrolled);
     // The promote armed the REAL adapter's currency trigger and disclosed it — assert both the config
     // bytes and the report's honesty per adapter.
@@ -353,21 +348,9 @@ fn run_distribute_hero(case: &AdapterCase) {
 
     // ── 1 · The author's FIRST publish of a brand-new skill: the genesis standup over the wire. ──
     let mut author = author;
-    author.enroll(
-        &plane.base_url,
-        plane.plane_key,
-        WS,
-        SKILL,
-        AUTHOR_RT,
-        false,
-        V1,
-    );
+    author.enroll(&plane.base_url, WS, SKILL, AUTHOR_RT, false, V1);
     let published = author
-        .publish(
-            plane.plane_key,
-            false,
-            &format!("{SKILL}@{}", author.draft_digest()),
-        )
+        .publish(false, &format!("{SKILL}@{}", author.draft_digest()))
         .expect("the genesis publish must succeed for a confirmed member (the roster standup)");
     let PublishResult::Published(genesis) = published else {
         panic!("a direct publish moves current, never opens a proposal");
@@ -395,11 +378,7 @@ fn run_distribute_hero(case: &AdapterCase) {
         false,
     );
     follower
-        .approve(
-            &plane.base_url,
-            plane.plane_key,
-            &[format!("{SKILL}@{genesis_id}")],
-        )
+        .approve(&plane.base_url, &[format!("{SKILL}@{genesis_id}")])
         .expect("first-receive approve");
     assert_eq!(
         follower.placement_files(SKILL),
@@ -417,22 +396,14 @@ fn run_distribute_hero(case: &AdapterCase) {
         true,
     );
     drafter
-        .approve(
-            &plane.base_url,
-            plane.plane_key,
-            &[format!("{SKILL}@{genesis_id}")],
-        )
+        .approve(&plane.base_url, &[format!("{SKILL}@{genesis_id}")])
         .expect("drafter first-receive approve");
     drafter.edit_placement(SKILL, DRAFT);
 
     // ── 4 · The author ships an update; the follower's next bare sweep self-updates byte-exact. ──
     author.edit_placement(V2);
     let updated = author
-        .publish(
-            plane.plane_key,
-            false,
-            &format!("{SKILL}@{}", author.draft_digest()),
-        )
+        .publish(false, &format!("{SKILL}@{}", author.draft_digest()))
         .expect("the v2 publish");
     let PublishResult::Published(v2) = updated else {
         panic!("a direct publish moves current");
@@ -471,12 +442,7 @@ fn run_distribute_hero(case: &AdapterCase) {
 
     // ── 5 · The team revert: the REAL client verb — a FORWARD move restoring the good bytes. ──
     let reverted = author
-        .revert(
-            plane.plane_key,
-            &genesis_id,
-            &format!("{SKILL}@{genesis_id}"),
-            false,
-        )
+        .revert(&genesis_id, &format!("{SKILL}@{genesis_id}"), false)
         .expect("revert --to <good>");
     assert_eq!(
         reverted.current_generation,
@@ -507,7 +473,7 @@ fn run_distribute_hero(case: &AdapterCase) {
     assert_eq!(
         drafter.sync_state(SKILL).observed,
         Generation { epoch: 1, seq: 3 },
-        "the drafting follower's floor still advances on the signed revert record"
+        "the drafting follower's floor still advances on the revert record"
     );
     assert_eq!(drafter.placement_files(SKILL), expected(DRAFT));
 }

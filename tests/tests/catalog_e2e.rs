@@ -2,29 +2,29 @@
 //! (device-signed) against the REAL composed plane route, on a real `127.0.0.1:0` socket.
 //!
 //! The one thing only a cross-crate loopback run can prove for the catalog read: that the client's
-//! `UreqDeviceClient::fetch_catalog` — signing the kernel's `catalog_read_preimage` with the install's
-//! genuine `DeviceSigner`, riding the `Topos-Device-Key-Id` + base64url `Topos-Device-Signature` headers —
-//! is accepted by the plane's `GET /v1/workspaces/{ws}/skills` route, whose `list_skills_device` authority
-//! resolves the device, verifies the signature, gates on confirmed workspace membership, and returns the
-//! `WireSkillIndex`. Everything below drives the GENUINE transport (via the client's `test-fixtures`
-//! facade) against a GENUINE `plane-store::Authority` seeded through its own `test-fixtures` shims.
+//! `UreqDeviceClient::fetch_catalog` — naming the install's genuine device credential (the `device_key_id`
+//! its `DeviceSigner` derives) in the `Topos-Device-Key-Id` header, no signature — is accepted by the
+//! plane's `GET /v1/workspaces/{ws}/skills` route, whose `list_skills_device` authority resolves the
+//! non-revoked registered device, gates on confirmed workspace membership, and returns the `WireSkillIndex`.
+//! Everything below drives the GENUINE transport (via the client's `test-fixtures` facade) against a
+//! GENUINE `plane-store::Authority` seeded through its own `test-fixtures` shims.
 //!
 //! 1. **Happy path** — a confirmed-member device reads the catalog: both published skills come back with
 //!    their exact `version_id`/`bundle_digest` (hex) and genesis generation, proving the whole
-//!    client-sign → HTTP headers → plane-verify → confirmed-member → catalog round-trip, including the
-//!    base64url signature and the header names.
+//!    presented-credential → `Topos-Device-Key-Id` header → registry lookup → confirmed-member → catalog
+//!    round-trip.
 //! 2. **Merge** — driving the real `topos::ops::list(.., Some(RemoteScope))` over the same live transport,
 //!    a followed skill (local == catalog current, after a real pull) annotates `Following` and an
 //!    unfollowed catalog skill annotates `Available`.
-//! 3. **Negative** — a registered-but-non-member device is gated: the plane's 404 maps to an EMPTY index,
-//!    while a confirmed member on the SAME plane still sees the full catalog (the gate actually gates).
+//! 3. **Negative** — a registered-but-non-member device AND a REVOKED device are gated: the plane's 404
+//!    maps to an EMPTY index, while a confirmed member on the SAME plane still sees the full catalog (the
+//!    gate actually gates; an unknown/revoked device 404s where a bad signature used to).
 //! 4. **Self-host** — the device catalog lane consults NO deployment mode, so a member reads a self-host
 //!    workspace's catalog exactly as on cloud.
 
 mod common;
 
 use common::{NOW, Seeded};
-use ed25519_dalek::SigningKey;
 use plane_store::{
     Authority, DeploymentMode, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
 };
@@ -42,7 +42,8 @@ const SB: &str = "s_beacon";
 /// need not be a workspace member; the READING device is the one that must be a confirmed member).
 const PUBLISHER: &str = "p_author";
 const PUB_DKID: &str = "dk_pub";
-const PUB_SEED: [u8; 32] = [41u8; 32];
+/// The publisher device's registered 32-byte public key (a fixed test value; nothing verifies against it).
+const PUB_PUBKEY: [u8; 32] = [41u8; 32];
 
 /// The reading principal (email-shaped — canonical-folded to lowercase), seated as a confirmed member.
 const READER: &str = "reader@acme.test";
@@ -106,14 +107,13 @@ async fn seed_two_published_skills(
     let sa = SkillId::parse(SA).unwrap();
     let sb = SkillId::parse(SB).unwrap();
     let publisher = Principal::parse(PUBLISHER).unwrap();
-    let pub_pk = SigningKey::from_bytes(&PUB_SEED).verifying_key().to_bytes();
 
     authority
         .seed_workspace(&ws, "Acme", "verified", deployment_mode)
         .await
         .expect("seed workspace");
     authority
-        .seed_device(&ws, PUB_DKID, &pub_pk, &publisher, false)
+        .seed_device(&ws, PUB_DKID, &PUB_PUBKEY, &publisher, false)
         .await
         .expect("seed publisher device");
     authority
@@ -143,7 +143,6 @@ async fn publish_genesis(
             ws,
             skill,
             PUB_DKID,
-            &PUB_SEED,
             &OpId::parse(op_id).unwrap(),
             files,
             AUTHOR,
@@ -182,7 +181,7 @@ async fn seat_member_device(
 }
 
 /// Register a non-revoked device with a valid principal but NO workspace-member seat — a resolvable device
-/// with a good signature that must still be gated out of the catalog.
+/// with a valid credential that must still be gated out of the catalog.
 async fn register_non_member_device(
     authority: &Authority,
     device_key_id: &str,
@@ -197,7 +196,7 @@ async fn register_non_member_device(
         .expect("seed non-member device");
 }
 
-// ── 1. the happy path: the REAL device-signed catalog round-trip over loopback HTTP ──────────────────
+// ── 1. the happy path: the REAL device-credential catalog round-trip over loopback HTTP ──────────────
 
 #[test]
 fn a_member_device_reads_the_workspace_catalog_over_loopback() {
@@ -214,7 +213,7 @@ fn a_member_device_reads_the_workspace_catalog_over_loopback() {
         facts
     });
 
-    // client-sign → Topos-Device-Key-Id + base64url Topos-Device-Signature → plane verify → member gate.
+    // presented credential → Topos-Device-Key-Id header → registry lookup → confirmed-member gate.
     let idx = rig
         .fetch_catalog(&plane.base_url, WS)
         .expect("the real catalog round-trip succeeds");
@@ -274,14 +273,13 @@ fn list_remote_merges_the_catalog_with_local_follow_state() {
     // Enroll following ONLY skill A (a placeholder bundle), then pull so local A == the plane's current.
     rig.enroll(
         &plane.base_url,
-        plane.plane_key,
         WS,
         SA,
         RT_A,
         false,
         &[("SKILL.md", false, b"placeholder\n")],
     );
-    let pulled = rig.pull(plane.plane_key);
+    let pulled = rig.pull();
     assert_eq!(
         pulled.skills.len(),
         1,
@@ -333,17 +331,32 @@ fn a_non_member_device_is_gated_to_an_empty_catalog() {
     let plane = common::start_plane("topos-catalog-e2e", "gate", false, empty_seed);
     let member = ContributeHarness::new("cat-gate-member");
     let stranger = ContributeHarness::new("cat-gate-stranger");
+    let revoked = ContributeHarness::new("cat-gate-revoked");
     let member_pk = member.device_pubkey();
     let member_dkid = member.device_key_id();
     let stranger_pk = stranger.device_pubkey();
     let stranger_dkid = stranger.device_key_id();
+    let revoked_pk = revoked.device_pubkey();
+    let revoked_dkid = revoked.device_key_id();
 
     plane.rt.block_on(async {
         let authority: &Authority = &plane.authority;
         seed_two_published_skills(authority, "cloud").await;
         seat_member_device(authority, &member_dkid, member_pk, READER).await;
-        // A resolvable, non-revoked device with a VALID signature — but no confirmed workspace seat.
+        // A resolvable, non-revoked device with a valid credential — but no confirmed workspace seat.
         register_non_member_device(authority, &stranger_dkid, stranger_pk, STRANGER).await;
+        // A REVOKED device bound to the confirmed member READER — revocation short-circuits the resolve, so
+        // even a member's revoked device reads nothing (the 404-shaped denial that replaced bad-signature).
+        authority
+            .seed_device(
+                &WorkspaceId::parse(WS).unwrap(),
+                &revoked_dkid,
+                &revoked_pk,
+                &Principal::parse(READER).unwrap(),
+                true,
+            )
+            .await
+            .expect("seed revoked member device");
     });
 
     // The confirmed member sees the full catalog...
@@ -361,6 +374,16 @@ fn a_non_member_device_is_gated_to_an_empty_catalog() {
         stranger_idx.skills.is_empty(),
         "a non-member gets nothing: {:?}",
         stranger_idx.skills
+    );
+
+    // ...and a REVOKED device (even one bound to a confirmed member) is likewise gated to an empty catalog.
+    let revoked_idx = revoked
+        .fetch_catalog(&plane.base_url, WS)
+        .expect("the 404→empty mapping is not an error");
+    assert!(
+        revoked_idx.skills.is_empty(),
+        "a revoked device gets nothing: {:?}",
+        revoked_idx.skills
     );
 }
 

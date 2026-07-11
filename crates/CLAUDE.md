@@ -4,14 +4,18 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
 
 - **`topos-types/`** — the wire DTOs (the serde boundary; the JSON-Schema source). The shared leaf.
 - **`topos-core/`** — the PURE trust kernel: digest, consent, the sync transition, diff3,
-  Ed25519 sign-preimage + verify. No I/O. Depends on nothing else in the workspace (not even `topos-types`).
+  the content-addressed identity derivations (`commit_id` / `device_key_id` / `canonical_principal` — no
+  keys, nothing signs). No I/O. Depends on nothing else in the workspace (not even `topos-types`).
 - **`topos-gitstore/`** — the `gix` object mechanics + the content-addressed large-object store
   (verify-on-read). Depends on `topos-core` only.
 - **`topos-harness/`** — the `HarnessAdapter` port + its three impls, all built (Claude Code the
   reference; OpenClaw's concrete config bytes and Hermes's per-turn-injection claim stay provisional
   behind their pilot readiness probes). The one client-side port. Depends on `topos-core` + `topos-types`.
 - **`plane-store/`** — the server authority boundary: private SQL + skill-scoped authorization + the atomic
-  publish transaction. Depends on `topos-core` + `topos-types` + `topos-gitstore`.
+  publish transaction, split into **custody** (bytes/versions/pointers/GC) and **directory**
+  (identity/policy) — custody consults access ONLY through the in-transaction **access-witness** trait the
+  directory implements (a one-way seam `check-arch` enforces). Depends on `topos-core` + `topos-types` +
+  `topos-gitstore`.
 
 **The rule that keeps the graph legible:** a trust decision is written once, in `topos-core`. Everything
 links it; nothing re-implements digest / consent / sync. (The `(epoch,seq)` CAS *decision* is the named

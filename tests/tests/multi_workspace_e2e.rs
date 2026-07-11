@@ -5,7 +5,7 @@
 //! independent workspaces — **A** ("Acme", skill `s_alpha`) and **B** ("Beacon", skill `s_beacon`) — each
 //! with the same invitee rostered (as an owner, so the joiner can itself invite) and its own `/i/` link.
 //! A single [`FollowHarness`] then drives the GENUINE `topos follow` twice into the same sidecar (same
-//! `base_url`, same TOFU-pinned plane key) and asserts, end to end:
+//! `base_url`, one plane — no trust root to pin, the `current` pointer is unsigned) and asserts, end to end:
 //!
 //! 1. after B, `user.json` carries BOTH memberships (A never dropped) and `follows.json` tags each skill
 //!    with its OWN workspace; both bundles land byte-exact.
@@ -20,7 +20,6 @@
 mod common;
 
 use common::{NOW, Plane, Seeded, expected_placement};
-use ed25519_dalek::SigningKey;
 use plane_store::{
     Authority, ConfirmOutcome, FileMode, OpId, Principal, Role, SkillId, UploadedFile, WorkspaceId,
 };
@@ -43,10 +42,10 @@ const AUTHOR: &str = "d_seed";
 const MSG: &str = "topos publish";
 const AT: &str = "2026-07-07T00:00:00Z";
 
-// Per-workspace bootstrap owner (mints the invite + publishes the genesis; distinct device seeds so the
-// two workspaces never share a signing key). Distinct op ids everywhere — an op id is plane-unique.
-const OWNER_SEED_A: [u8; 32] = [21u8; 32];
-const OWNER_SEED_B: [u8; 32] = [22u8; 32];
+// Per-workspace bootstrap owner (mints the invite + publishes the genesis; distinct device public keys so
+// the two workspaces never share an owner device). Distinct op ids everywhere — an op id is plane-unique.
+const OWNER_PUBKEY_A: [u8; 32] = [21u8; 32];
+const OWNER_PUBKEY_B: [u8; 32] = [22u8; 32];
 const OWNER_DKID_A: &str = "dk_owner_a";
 const OWNER_DKID_B: &str = "dk_owner_b";
 const OWNER_A: &str = "p_owner_a";
@@ -103,7 +102,7 @@ struct WsSeed<'a> {
     display: &'a str,
     owner: &'a str,
     owner_dkid: &'a str,
-    owner_seed: &'a [u8; 32],
+    owner_pubkey: &'a [u8; 32],
     genesis_op: &'a str,
     invite_op: &'a str,
     files: Vec<UploadedFile>,
@@ -121,9 +120,6 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
     let skill = SkillId::parse(s.skill).unwrap();
     let owner = Principal::parse(s.owner).unwrap();
     let invitee = Principal::parse(INVITEE).unwrap();
-    let owner_pk = SigningKey::from_bytes(s.owner_seed)
-        .verifying_key()
-        .to_bytes();
 
     authority
         .seed_workspace(&ws, s.display, "verified", "cloud")
@@ -134,7 +130,7 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
         .await
         .expect("seed bootstrap owner");
     authority
-        .seed_device(&ws, s.owner_dkid, &owner_pk, &owner, false)
+        .seed_device(&ws, s.owner_dkid, s.owner_pubkey, &owner, false)
         .await
         .expect("seed owner device");
     authority
@@ -146,7 +142,6 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
             &ws,
             &skill,
             s.owner_dkid,
-            s.owner_seed,
             &OpId::parse(s.genesis_op).unwrap(),
             s.files,
             AUTHOR,
@@ -169,7 +164,7 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
     common::mint_invite_with_role(
         authority,
         &ws,
-        (s.owner_dkid, s.owner_seed),
+        s.owner_dkid,
         s.invite_op,
         INVITEE,
         s.skill,
@@ -190,7 +185,7 @@ async fn seed_two_workspaces(authority: &Authority) -> Seeded {
             display: DISPLAY_A,
             owner: OWNER_A,
             owner_dkid: OWNER_DKID_A,
-            owner_seed: &OWNER_SEED_A,
+            owner_pubkey: &OWNER_PUBKEY_A,
             genesis_op: GENESIS_OP_A,
             invite_op: INVITE_OP_A,
             files: files_a(),
@@ -206,7 +201,7 @@ async fn seed_two_workspaces(authority: &Authority) -> Seeded {
             display: DISPLAY_B,
             owner: OWNER_B,
             owner_dkid: OWNER_DKID_B,
-            owner_seed: &OWNER_SEED_B,
+            owner_pubkey: &OWNER_PUBKEY_B,
             genesis_op: GENESIS_OP_B,
             invite_op: INVITE_OP_B,
             files: files_b(),
@@ -252,11 +247,11 @@ fn invite_count(plane: &Plane, ws: &str) -> i64 {
     })
 }
 
-/// The real two-call `follow`: begin (bootstrap → TOFU-pin → device-authorize), confirm the invitee's
-/// identity headless, resume (redeem + promote). Leaves the offered skill as a never-received baseline.
+/// The real two-call `follow`: begin (bootstrap → device-authorize), confirm the invitee's identity
+/// headless, resume (redeem + promote). Leaves the offered skill as a never-received baseline.
 fn follow_workspace(plane: &Plane, client: &FollowHarness, invite_idx: usize) {
     let pending = client
-        .follow(plane.invite(invite_idx), plane.plane_key)
+        .follow(plane.invite(invite_idx))
         .expect("follow call 1");
     assert!(!pending.enrolled, "call 1 only begins enrollment");
     let user_code = pending
@@ -274,7 +269,7 @@ fn follow_workspace(plane: &Plane, client: &FollowHarness, invite_idx: usize) {
         )
         .expect("confirm the session identity");
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
-    let done = client.resume(plane.plane_key).expect("follow --resume");
+    let done = client.resume().expect("follow --resume");
     assert!(done.enrolled, "enrolled after the resume redeem");
 }
 
@@ -282,7 +277,7 @@ fn follow_workspace(plane: &Plane, client: &FollowHarness, invite_idx: usize) {
 fn follow_and_approve(plane: &Plane, client: &FollowHarness, invite_idx: usize, skill_name: &str) {
     follow_workspace(plane, client, invite_idx);
     client
-        .approve(&plane.base_url, plane.plane_key, &[skill_name.to_owned()])
+        .approve(&plane.base_url, &[skill_name.to_owned()])
         .expect("follow --approve places the first-received bytes");
 }
 
@@ -397,7 +392,7 @@ fn one_client_follows_two_workspaces_and_every_verb_targets_the_right_one() {
     client.edit_placement(SB, B_DRAFT);
     let digest = client.draft_digest(SB);
     let published = client
-        .publish(&plane.base_url, plane.plane_key, &format!("{SB}@{digest}"))
+        .publish(&plane.base_url, &format!("{SB}@{digest}"))
         .expect("publish the sB draft");
     match published {
         PublishResult::Published(d) => assert_eq!(
@@ -408,7 +403,7 @@ fn one_client_follows_two_workspaces_and_every_verb_targets_the_right_one() {
         other => panic!("expected a direct publish, got {other:?}"),
     }
 
-    // The signing-scope proof: B's current advanced, A's did NOT — the op was scoped to sB's OWN workspace.
+    // The op-scope proof: B's current advanced, A's did NOT — the op was scoped to sB's OWN workspace.
     assert_eq!(
         current_gen(&plane, WS_B, SB),
         Some((1, 2)),
@@ -490,7 +485,7 @@ async fn seed_two_shared_name_workspaces(authority: &Authority) -> Seeded {
             display: DISPLAY_A,
             owner: OWNER_A,
             owner_dkid: OWNER_DKID_A,
-            owner_seed: &OWNER_SEED_A,
+            owner_pubkey: &OWNER_PUBKEY_A,
             genesis_op: GENESIS_OP_A,
             invite_op: INVITE_OP_A,
             files: files_a(),
@@ -506,7 +501,7 @@ async fn seed_two_shared_name_workspaces(authority: &Authority) -> Seeded {
             display: DISPLAY_B,
             owner: OWNER_B,
             owner_dkid: OWNER_DKID_B,
-            owner_seed: &OWNER_SEED_B,
+            owner_pubkey: &OWNER_PUBKEY_B,
             genesis_op: GENESIS_OP_B,
             invite_op: INVITE_OP_B,
             files: files_b(),
@@ -565,7 +560,7 @@ fn publish_disambiguates_a_shared_skill_name_by_workspace() {
 
     // `publish <name>` with NO `--workspace` ⇒ AMBIGUOUS across the two workspaces — refused before any send.
     let err = client
-        .publish(&plane.base_url, plane.plane_key, &token)
+        .publish(&plane.base_url, &token)
         .expect_err("a shared name with no --workspace must be ambiguous");
     assert!(
         err.to_lowercase().contains("ambiguous"),
@@ -584,7 +579,7 @@ fn publish_disambiguates_a_shared_skill_name_by_workspace() {
 
     // `publish <name> --workspace A` ⇒ resolves to A's copy and ships it; B's identically-named copy is untouched.
     let published = client
-        .publish_in_workspace(&plane.base_url, plane.plane_key, &token, WS_A)
+        .publish_in_workspace(&plane.base_url, &token, WS_A)
         .expect("--workspace A resolves the shared name to A");
     match published {
         PublishResult::Published(d) => assert_eq!(
