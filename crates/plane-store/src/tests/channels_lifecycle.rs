@@ -213,7 +213,7 @@ async fn owner_archive_renames_frees_the_name_closes_proposals_and_notifies(pool
 
     let out = fx
         .authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(&w, ALICE, "s_deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     let LifecycleOutcome::Archived { archived_name } = out else {
@@ -289,7 +289,7 @@ async fn same_day_archive_repeats_get_a_numeric_suffix(pool: PgPool) {
     )
     .await;
     fx.authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(&w, ALICE, "s_one", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     // skill 2 claims the freed "deploy", then archives SAME day → the "-2" suffix.
@@ -305,7 +305,7 @@ async fn same_day_archive_repeats_get_a_numeric_suffix(pool: PgPool) {
     .await;
     let out = fx
         .authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(&w, ALICE, "s_two", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     assert_eq!(
@@ -318,7 +318,7 @@ async fn same_day_archive_repeats_get_a_numeric_suffix(pool: PgPool) {
 }
 
 /// The archive refusals: a non-owner is `OwnerRoleRequired`, archiving an already-archived skill is
-/// `NotActive`, an unknown name is the uniform `NotFound`, and a self-host plane ANSWERS the op exactly
+/// `NotActive`, an unknown skill id is the uniform `NotFound`, and a self-host plane ANSWERS the op exactly
 /// like a hosted one (the owner gate runs identically — a non-owner still gets `OwnerRoleRequired`, not a
 /// blanket posture denial) — the typed reasons a confirmed member is entitled to, and the uniform misses
 /// that leak nothing.

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use topos_gitstore::{LocalLargeStore, Store};
 
-use crate::catalog::{LifecycleOutcome, PurgeOutcome};
+use crate::catalog::{LifecycleOutcome, PurgeOutcome, RenameOutcome};
 use crate::channels::{
     ChannelMembershipOutcome, CurationOutcome, ProtectKind, ProtectLevel, ProtectOutcome,
     SubscriptionOutcome,
@@ -1611,6 +1611,11 @@ impl Authority {
     /// name, removes it from every channel, closes open proposals with author notices, and drops it
     /// out of delivery. Unfollowed/detached copies are never touched.
     ///
+    /// Keyed on the IMMUTABLE skill id, never the mutable catalog name: the composing surface
+    /// resolves the name to the id in its own loader, so a concurrent rename makes a stale
+    /// reference a harmless miss instead of a wrong-target act. (So are the unarchive / rename /
+    /// delete / purge session ops below.)
+    ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on the uniform pre-gate miss; [`AuthorityError::Internal`] on a
     /// fault.
@@ -1618,7 +1623,7 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         acting_email: &str,
-        skill_name: &str,
+        skill_id: &str,
         plane_mode: DeploymentMode,
         created_at: &str,
         now: i64,
@@ -1627,7 +1632,7 @@ impl Authority {
             self,
             ws,
             acting_email,
-            skill_name,
+            skill_id,
             plane_mode,
             created_at,
             now,
@@ -1644,11 +1649,37 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         acting_email: &str,
-        skill_name: &str,
+        skill_id: &str,
         plane_mode: DeploymentMode,
     ) -> Result<LifecycleOutcome> {
-        crate::catalog::unarchive_skill_session(self, ws, acting_email, skill_name, plane_mode)
-            .await
+        crate::catalog::unarchive_skill_session(self, ws, acting_email, skill_id, plane_mode).await
+    }
+
+    /// **Rename an ACTIVE skill from a verified OWNER session**: the identity (and every id-keyed
+    /// reference, placement, and follow) is untouched — only the user-facing catalog name moves.
+    /// The old name keeps resolving as a redirect until a new identity claims it.
+    ///
+    /// # Errors
+    /// As [`archive_skill_session`](Self::archive_skill_session).
+    pub async fn rename_skill_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        skill_id: &str,
+        new_name: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+    ) -> Result<RenameOutcome> {
+        crate::catalog::rename_skill_session(
+            self,
+            ws,
+            acting_email,
+            skill_id,
+            new_name,
+            plane_mode,
+            created_at,
+        )
+        .await
     }
 
     /// **Delete an archived skill** (archive-first; the catalog row is the tombstone under its
@@ -1661,11 +1692,11 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         acting_email: &str,
-        skill_name: &str,
+        skill_id: &str,
         plane_mode: DeploymentMode,
         now: i64,
     ) -> Result<LifecycleOutcome> {
-        crate::catalog::delete_skill_session(self, ws, acting_email, skill_name, plane_mode, now)
+        crate::catalog::delete_skill_session(self, ws, acting_email, skill_id, plane_mode, now)
             .await
     }
 
@@ -1681,7 +1712,7 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         acting_email: &str,
-        skill_name: &str,
+        skill_id: &str,
         version: CommitId,
         plane_mode: DeploymentMode,
         created_at: &str,
@@ -1691,7 +1722,7 @@ impl Authority {
             self,
             ws,
             acting_email,
-            skill_name,
+            skill_id,
             version,
             plane_mode,
             created_at,

@@ -1,0 +1,26 @@
+import type { LoaderFunctionArgs } from "react-router";
+import { useLoaderData } from "react-router";
+import { PageHeader } from "@/components/ui";
+import { notFound, requireMember } from "@/lib/auth/guards.server";
+
+export function meta({ params }: { params: { ws?: string } }) {
+  return [{ title: `Fleet · ${params.ws ?? "Workspace"}` }];
+}
+
+export async function loader({ request, params }: LoaderFunctionArgs) {
+  const ws = params.ws;
+  if (!ws) {
+    notFound();
+  }
+  await requireMember(request, ws);
+  return { ws };
+}
+
+export default function Fleet() {
+  const { ws } = useLoaderData<typeof loader>();
+  return (
+    <div className="space-y-8">
+      <PageHeader title="Fleet" meta={<code className="font-mono">{ws}</code>} />
+    </div>
+  );
+}

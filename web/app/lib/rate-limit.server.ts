@@ -66,6 +66,13 @@ export const allowCommentWrite = bucketLimiter({ burst: 5, refillPerSec: 0.1, ma
 export const allowRevertWrite = bucketLimiter({ burst: 5, refillPerSec: 0.1, maxKeys: 10_000 });
 
 /**
+ * The STEP-UP password re-entry belt, keyed per acting USER ID: a step-up prompt must never
+ * become a free password oracle for a hijacked session. Deliberately the tightest belt here —
+ * burst 5, one token back every ~20 s; a human confirming a ceremony never notices.
+ */
+export const allowStepUpAttempt = bucketLimiter({ burst: 5, refillPerSec: 0.05, maxKeys: 10_000 });
+
+/**
  * The per-client limiter key from an `x-forwarded-for` value: the LAST hop — the one address the
  * trusted edge itself appended from the socket peer. Earlier hops are client-supplied bytes (an
  * attacker rotating forged prefixes must not mint fresh buckets or poison a victim's). No header

@@ -28,6 +28,14 @@ export const ALLOWED_ROUTES = [
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/approve",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/reject",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/reverts",
+  // The skill lifecycle ceremonies — {skill} is the immutable skill_id on every one (the page
+  // resolves the catalog name in its own loader; keying the wire on the id makes a concurrent
+  // rename a harmless miss, never a wrong-target act).
+  "POST /internal/v1/workspaces/{ws}/skills/{skill}/archive",
+  "POST /internal/v1/workspaces/{ws}/skills/{skill}/unarchive",
+  "POST /internal/v1/workspaces/{ws}/skills/{skill}/delete",
+  "POST /internal/v1/workspaces/{ws}/skills/{skill}/purge",
+  "POST /internal/v1/workspaces/{ws}/skills/{skill}/rename",
 ] as const;
 
 export type AllowedRoute = (typeof ALLOWED_ROUTES)[number];

@@ -3,7 +3,8 @@
 //!
 //! Every policy decision lives in the guarded `topos_*` SQL functions migration 0015 created (role
 //! gates, the structural-`everyone` refusals, the lapse-detach/re-attach reconciles); these methods
-//! only resolve the user-facing NAMES to internal ids, run ONE function call per op inside a
+//! only validate the immutable skill id against the catalog (channel NAMES go straight to the
+//! functions), run ONE function call per op inside a
 //! `SERIALIZABLE` transaction, and map the outcome codes to the orchestration's typed vocabulary.
 //! Curation/membership audit rows are TRIGGER-emitted on the underlying table writes — no code here
 //! (or anywhere) can skip them.
@@ -347,33 +348,13 @@ impl Db {
     }
 }
 
-/// Resolve a user-facing skill NAME to its immutable skill id through the catalog — the SESSION
-/// lifecycle ops (archive / unarchive / delete / purge) run this, because a web user selects a skill
-/// by its name. An unknown name is the uniform miss. (The DEVICE lane keys on the id instead — see
-/// [`resolve_device_skill`].)
-pub(super) async fn resolve_skill_name(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-    name: &str,
-) -> Result<String> {
-    let ws_s = ws.as_str();
-    let row = sqlx::query!(
-        r#"SELECT skill_id AS "skill_id!" FROM catalog WHERE workspace_id = $1 AND name = $2"#,
-        ws_s,
-        name,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    row.map(|r| r.skill_id).ok_or(AuthorityError::NotFound)
-}
-
 /// Validate a DEVICE-lane skill id against the catalog and return it. Subscriptions and channel
 /// references are id-keyed (the immutable custody key — a rename never breaks a pending op), and the
 /// client always holds the id it resolved a resource address to, so the device-lane routes carry the
 /// id, not the mutable name. An unknown id is the same uniform miss an unknown name is. (The
-/// guarded functions re-check existence too; this keeps the miss uniform and BEFORE the policy call,
-/// mirroring [`resolve_skill_name`].)
+/// guarded functions re-check existence too; this keeps the miss uniform and BEFORE the policy call.
+/// Name→id resolution itself lives in SQL — `topos_resolve_skill`, live catalog first, rename hints
+/// second — for the surfaces that accept a user-facing name.)
 pub(super) async fn resolve_device_skill(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,

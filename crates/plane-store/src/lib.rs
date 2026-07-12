@@ -102,7 +102,7 @@ pub(crate) use directory::{
 };
 
 pub use authority::{Authority, PoolConfig};
-pub use catalog::{LifecycleOutcome, PurgeOutcome};
+pub use catalog::{LifecycleOutcome, PurgeOutcome, RenameOutcome};
 pub use channels::{
     ChannelIndexEntry, ChannelMembershipOutcome, ChannelSkillRef, CurationOutcome, ProtectKind,
     ProtectLevel, ProtectOutcome, SubscriptionOutcome,

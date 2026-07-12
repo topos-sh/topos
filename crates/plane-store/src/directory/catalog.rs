@@ -1,5 +1,5 @@
-//! The skill lifecycle — archive / unarchive / delete / purge (the orchestration half; the SQL +
-//! the custody un-rooting live in `db/directory/catalog.rs`).
+//! The skill lifecycle — archive / unarchive / delete / purge / rename (the orchestration half; the
+//! SQL + the custody un-rooting live in `db/directory/catalog.rs`).
 //!
 //! These are OWNER acts of the web-surface class, exposed as PRIVILEGED lib-level session ops a hosted
 //! composition's authenticated pages call — the same posture as the session roster/review legs (the
@@ -11,6 +11,10 @@
 //! to the real reason). Naturally idempotent state machines — no
 //! op-id receipt ceremony (re-archiving an archived skill answers `NotActive`, not a duplicate);
 //! the step-up/type-the-name confirm is the calling page's ceremony, not this layer's.
+//!
+//! Every op keys on the IMMUTABLE skill id, never the mutable catalog name: the composing surface
+//! resolves the name to the id in its own loader, so a concurrent rename makes a stale reference a
+//! harmless miss instead of a wrong-target act.
 
 use crate::Authority;
 use crate::db::custody::witness::AccessWitness;
@@ -54,6 +58,23 @@ pub enum PurgeOutcome {
     OwnerRoleRequired,
 }
 
+/// A skill-rename outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// Renamed — the old name stays a resolving redirect until a new identity claims it; renaming
+    /// to the current name is the idempotent same answer.
+    Renamed { name: String },
+    /// Refused: another identity holds the requested name (two identities cannot share one name).
+    NameTaken,
+    /// Refused: the requested name breaks the catalog-name rules (charset, length, the reserved
+    /// archive-rename pattern).
+    BadName,
+    /// Refused: only an ACTIVE skill renames (unarchive first).
+    NotActive,
+    /// The acting member is not an owner (the typed role refusal).
+    OwnerRoleRequired,
+}
+
 /// The shared session front door: canonical principal, CONFIRMED membership — every miss the uniform
 /// `NotFound`. The acting gate is the confirmed-seat check, identical on a self-host plane and a hosted
 /// one. (The OWNER gate stays inside the guarded function.)
@@ -84,7 +105,7 @@ pub(crate) async fn archive_skill_session(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    skill_name: &str,
+    skill_id: &str,
     plane_mode: DeploymentMode,
     created_at: &str,
     now: i64,
@@ -93,7 +114,7 @@ pub(crate) async fn archive_skill_session(
     let date = date_label(created_at)?;
     authority
         .db()
-        .archive_skill_txn(ws, skill_name, &acting, date, now, created_at)
+        .archive_skill_txn(ws, skill_id, &acting, date, now, created_at)
         .await
 }
 
@@ -101,13 +122,29 @@ pub(crate) async fn unarchive_skill_session(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    skill_name: &str,
+    skill_id: &str,
     plane_mode: DeploymentMode,
 ) -> Result<LifecycleOutcome> {
     let acting = session_member(authority, ws, acting_email, plane_mode).await?;
     authority
         .db()
-        .unarchive_skill_txn(ws, skill_name, &acting)
+        .unarchive_skill_txn(ws, skill_id, &acting)
+        .await
+}
+
+pub(crate) async fn rename_skill_session(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    acting_email: &str,
+    skill_id: &str,
+    new_name: &str,
+    plane_mode: DeploymentMode,
+    created_at: &str,
+) -> Result<RenameOutcome> {
+    let acting = session_member(authority, ws, acting_email, plane_mode).await?;
+    authority
+        .db()
+        .rename_skill_txn(ws, skill_id, new_name, &acting, created_at)
         .await
 }
 
@@ -115,14 +152,14 @@ pub(crate) async fn delete_skill_session(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    skill_name: &str,
+    skill_id: &str,
     plane_mode: DeploymentMode,
     now: i64,
 ) -> Result<LifecycleOutcome> {
     let acting = session_member(authority, ws, acting_email, plane_mode).await?;
     authority
         .db()
-        .delete_skill_txn(ws, skill_name, &acting, now)
+        .delete_skill_txn(ws, skill_id, &acting, now)
         .await
 }
 
@@ -131,7 +168,7 @@ pub(crate) async fn purge_version_session(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    skill_name: &str,
+    skill_id: &str,
     version: CommitId,
     plane_mode: DeploymentMode,
     created_at: &str,
@@ -140,7 +177,7 @@ pub(crate) async fn purge_version_session(
     let acting = session_member(authority, ws, acting_email, plane_mode).await?;
     authority
         .db()
-        .purge_version_txn(ws, skill_name, version, &acting, now, created_at)
+        .purge_version_txn(ws, skill_id, version, &acting, now, created_at)
         .await
 }
 

@@ -109,6 +109,56 @@ export const planeChannels = plane.table("channels", {
   createdAt: text("created_at").notNull(),
 });
 
+/** The skill references a channel holds (labels, not folders — one skill, delivered once). */
+export const planeChannelSkills = plane.table("channel_skills", {
+  workspaceId: text("workspace_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  skillId: text("skill_id").notNull(),
+  addedBy: text("added_by").notNull(),
+  addedAt: text("added_at").notNull(),
+});
+
+/** Person-scoped channel membership (`everyone` is structural — it has NO rows here). */
+export const planeChannelMembers = plane.table("channel_members", {
+  workspaceId: text("workspace_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  principal: text("principal").notNull(),
+  addedBy: text("added_by"),
+  addedAt: text("added_at").notNull(),
+});
+
+/** The append-only, trigger-emitted channel audit — the history page's read (SELECT only). */
+export const planeChannelEvents = plane.table("channel_events", {
+  id: bigint("id", { mode: "number" }).primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  event: text("event").notNull(),
+  skillId: text("skill_id"),
+  principal: text("principal"),
+  actor: text("actor").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+/** The fleet's applied-state rows; `detached = 1` is a FINAL detach record, frozen as written. */
+export const planeDeviceSkillState = plane.table("device_skill_state", {
+  workspaceId: text("workspace_id").notNull(),
+  deviceKeyId: text("device_key_id").notNull(),
+  skillId: text("skill_id").notNull(),
+  appliedCommit: hexBytea("applied_commit"),
+  reportedAt: bigint("reported_at", { mode: "number" }).notNull(),
+  detached: bigint("detached", { mode: "number" }).notNull(),
+  detachedAt: bigint("detached_at", { mode: "number" }),
+});
+
+/** Rename redirects: an old catalog name that keeps resolving (and the rename's audit record). */
+export const planeCatalogNameHints = plane.table("catalog_name_hints", {
+  workspaceId: text("workspace_id").notNull(),
+  name: text("name").notNull(),
+  skillId: text("skill_id").notNull(),
+  renamedBy: text("renamed_by").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const planeDeviceRegistry = plane.table("device_registry", {
   workspaceId: text("workspace_id").notNull(),
   deviceKeyId: text("device_key_id").notNull(),

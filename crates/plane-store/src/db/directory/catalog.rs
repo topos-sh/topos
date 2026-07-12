@@ -1,21 +1,21 @@
-//! The skill-lifecycle SQL — the raw-`sqlx` half of archive / unarchive / delete / purge. A child
-//! of `mod db`; no `sqlx` type crosses the boundary.
+//! The skill-lifecycle SQL — the raw-`sqlx` half of archive / unarchive / delete / purge / rename. A
+//! child of `mod db`; no `sqlx` type crosses the boundary.
 //!
-//! The POLICY (owner gate, state machine, rename-on-archive with the counter, proposal auto-close +
-//! author notices) lives in the guarded `topos_*` functions from migration 0015 — one implementation
-//! for every tier. What lives HERE is each op's transaction shape plus the CUSTODY halves the
+//! The POLICY (owner gate, state machine, rename-on-archive with the counter, the rename hint write,
+//! proposal auto-close + author notices) lives in the guarded `topos_*` functions — one implementation
+//! for every tier. Every twin keys on the IMMUTABLE skill id (the guarded functions answer
+//! `unknown_skill` for a miss, mapped to the uniform not-found here). What lives HERE is each op's
+//! transaction shape plus the CUSTODY halves the
 //! functions cannot own: `delete` un-roots every one of the skill's `commit_object` edges and drops
 //! its `current` pointer; `purge` un-roots ONE version's edges — in the SAME transaction as the row
 //! policy, so the shipped GC's keep-set (any `commit_object` edge ∪ live lease ∪ open proposal root)
 //! reclaims exactly the newly-unrooted bytes on its next pass, and a racing GC claim serializes
 //! against the un-root instead of glimpsing a half-purged skill.
 
-use crate::catalog::{LifecycleOutcome, PurgeOutcome};
+use crate::catalog::{LifecycleOutcome, PurgeOutcome, RenameOutcome};
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, Principal, WorkspaceId};
-
-use super::channels::resolve_skill_name;
 
 impl Db {
     /// Archive: rename + free the base name + unplace everywhere + auto-close proposals (all in the
@@ -23,7 +23,7 @@ impl Db {
     pub(crate) async fn archive_skill_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         actor: &Principal,
         date_label: &str,
         now: i64,
@@ -31,11 +31,10 @@ impl Db {
     ) -> Result<LifecycleOutcome> {
         let ws_s = ws.as_str();
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
             let code = sqlx::query_scalar!(
                 r#"SELECT topos_archive_skill($1, $2, $3, $4, $5, $6) AS "outcome!""#,
                 ws_s,
-                &skill_id,
+                skill_id,
                 actor.as_str(),
                 date_label,
                 now,
@@ -46,7 +45,7 @@ impl Db {
             .map_err(AuthorityError::internal)?;
             Ok(match code.as_str() {
                 "archived" => LifecycleOutcome::Archived {
-                    archived_name: read_catalog_name(&mut tx, ws, &skill_id).await?,
+                    archived_name: read_catalog_name(&mut tx, ws, skill_id).await?,
                 },
                 "not_active" => LifecycleOutcome::NotActive,
                 "owner_role_required" => LifecycleOutcome::OwnerRoleRequired,
@@ -60,16 +59,15 @@ impl Db {
     pub(crate) async fn unarchive_skill_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         actor: &Principal,
     ) -> Result<LifecycleOutcome> {
         let ws_s = ws.as_str();
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
             let code = sqlx::query_scalar!(
                 r#"SELECT topos_unarchive_skill($1, $2, $3) AS "outcome!""#,
                 ws_s,
-                &skill_id,
+                skill_id,
                 actor.as_str(),
             )
             .fetch_one(&mut *tx)
@@ -77,13 +75,54 @@ impl Db {
             .map_err(AuthorityError::internal)?;
             Ok(match code.as_str() {
                 "unarchived" => LifecycleOutcome::Unarchived {
-                    name: read_catalog_name(&mut tx, ws, &skill_id).await?,
+                    name: read_catalog_name(&mut tx, ws, skill_id).await?,
                 },
                 "name_taken" => LifecycleOutcome::NameTaken,
                 "not_archived" => LifecycleOutcome::NotArchived,
                 "owner_role_required" => LifecycleOutcome::OwnerRoleRequired,
                 "unknown_skill" => return Err(AuthorityError::NotFound),
                 other => return Err(unexpected("topos_unarchive_skill", other)),
+            })
+        })
+    }
+
+    /// Rename an ACTIVE skill: the guarded function runs the owner gate, the name rules, and the
+    /// hint bookkeeping (the OLD name becomes a resolving redirect; a hint squatting the NEW name is
+    /// cleared) — one row write, naturally idempotent (renaming to the current name answers
+    /// `renamed`).
+    pub(crate) async fn rename_skill_txn(
+        &self,
+        ws: &WorkspaceId,
+        skill_id: &str,
+        new_name: &str,
+        actor: &Principal,
+        created_at: &str,
+    ) -> Result<RenameOutcome> {
+        let ws_s = ws.as_str();
+        run_serializable!(self, tx, {
+            let code = sqlx::query_scalar!(
+                r#"SELECT topos_rename_skill($1, $2, $3, $4, $5) AS "outcome!""#,
+                ws_s,
+                skill_id,
+                new_name,
+                actor.as_str(),
+                created_at,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AuthorityError::internal)?;
+            Ok(match code.as_str() {
+                "renamed" => RenameOutcome::Renamed {
+                    name: new_name.to_owned(),
+                },
+                "name_taken" => RenameOutcome::NameTaken,
+                "bad_name" => RenameOutcome::BadName,
+                "not_active" => RenameOutcome::NotActive,
+                "owner_role_required" => RenameOutcome::OwnerRoleRequired,
+                // The session pre-gate already proved membership and the id came from a resolved
+                // loader — these two are the same uniform miss every pre-gate failure is.
+                "member_required" | "unknown_skill" => return Err(AuthorityError::NotFound),
+                other => return Err(unexpected("topos_rename_skill", other)),
             })
         })
     }
@@ -95,17 +134,16 @@ impl Db {
     pub(crate) async fn delete_skill_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         actor: &Principal,
         now: i64,
     ) -> Result<LifecycleOutcome> {
         let ws_s = ws.as_str();
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
             let code = sqlx::query_scalar!(
                 r#"SELECT topos_delete_skill($1, $2, $3, $4) AS "outcome!""#,
                 ws_s,
-                &skill_id,
+                skill_id,
                 actor.as_str(),
                 now,
             )
@@ -118,7 +156,7 @@ impl Db {
                         "DELETE FROM commit_object WHERE workspace_id = $1 AND commit_id IN \
                          (SELECT commit_id FROM skill_commit WHERE workspace_id = $1 AND skill_id = $2)",
                         ws_s,
-                        &skill_id,
+                        skill_id,
                     )
                     .execute(&mut *tx)
                     .await
@@ -126,7 +164,7 @@ impl Db {
                     sqlx::query!(
                         "DELETE FROM current WHERE workspace_id = $1 AND skill_id = $2",
                         ws_s,
-                        &skill_id,
+                        skill_id,
                     )
                     .execute(&mut *tx)
                     .await
@@ -148,7 +186,7 @@ impl Db {
     pub(crate) async fn purge_version_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         commit: CommitId,
         actor: &Principal,
         now: i64,
@@ -157,11 +195,10 @@ impl Db {
         let ws_s = ws.as_str();
         let cid = commit.0.as_slice();
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
             let code = sqlx::query_scalar!(
                 r#"SELECT topos_purge_version_rows($1, $2, $3, $4, $5, $6) AS "outcome!""#,
                 ws_s,
-                &skill_id,
+                skill_id,
                 cid,
                 actor.as_str(),
                 now,

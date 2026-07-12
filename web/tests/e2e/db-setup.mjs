@@ -50,6 +50,12 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA plane TO topos_web;
 GRANT INSERT ON plane.channel_events, plane.channel_members, plane.workspace_member, plane.workspace_policy TO topos_web;
 GRANT UPDATE ON plane.notices, plane.workspace_member, plane.workspace_policy TO topos_web;
 GRANT DELETE ON plane.channel_members TO topos_web;
+GRANT UPDATE, DELETE ON plane.channels TO topos_web;
+GRANT DELETE ON plane.channel_skills TO topos_web;
+GRANT DELETE ON plane.workspace_member TO topos_web;
+GRANT INSERT ON plane.skill_detachments TO topos_web;
+GRANT UPDATE ON plane.device_skill_state TO topos_web;
+GRANT UPDATE ON plane.device_registry TO topos_web;
 ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane GRANT SELECT ON TABLES TO topos_web;
 `;
 

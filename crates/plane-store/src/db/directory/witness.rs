@@ -117,7 +117,16 @@ impl AccessWitness for Db {
         created_at: &str,
     ) -> Result<GenesisRegistration> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
-        let minted = mint_catalog_name(display_name, skill);
+        // The birth-name mint is the guarded SQL fold (`topos_mint_catalog_name`) — the ONE
+        // implementation every tier derives a catalog name from; collision handling stays here.
+        let minted = sqlx::query_scalar!(
+            r#"SELECT topos_mint_catalog_name($1, $2) AS "name!""#,
+            display_name,
+            skill_s,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
         // Probe both uniqueness axes at once: an existing row for THIS skill (already registered —
         // idempotent; keep ITS name) vs. the minted name taken by ANOTHER skill (a typed refusal:
         // two identities cannot share one name).
@@ -322,39 +331,6 @@ where
     .await
     .map_err(AuthorityError::internal)?;
     Ok(())
-}
-
-/// Mint a catalog name from the advisory display name (folded to the agent-skills charset:
-/// lowercase letters, digits, hyphens), else from the skill id (`_` → `-`). Mirrors the 0015
-/// backfill's derivation. Never empty; capped at the birth length.
-pub(crate) fn mint_catalog_name(display_name: Option<&str>, skill: &SkillId) -> String {
-    const MAX_BIRTH_NAME: usize = 64;
-    let fold = |s: &str| -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut last_hyphen = true; // suppress a leading hyphen
-        for c in s.chars() {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                out.push(c);
-                last_hyphen = false;
-            } else if !last_hyphen {
-                out.push('-');
-                last_hyphen = true;
-            }
-        }
-        while out.ends_with('-') {
-            out.pop();
-        }
-        out.truncate(MAX_BIRTH_NAME);
-        while out.ends_with('-') {
-            out.pop();
-        }
-        out
-    };
-    let from_display = display_name.map(fold).filter(|s| !s.is_empty());
-    from_display
-        .or_else(|| Some(fold(skill.as_str())).filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "skill".to_owned())
 }
 
 /// Map a stored role string to the witness vocabulary; an unknown spelling is store corruption
@@ -563,28 +539,40 @@ struct PolicyFunctionInvariant {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn mint_catalog_name_folds_display_names_and_falls_back_to_the_skill_id() {
-        let sid = SkillId::parse("topos_0af3c9d2").unwrap();
+    /// The catalog-name mint is the guarded SQL fold (`topos_mint_catalog_name`) — the ONE
+    /// implementation of the birth-name derivation. This pins its answers on the same cases the
+    /// retired Rust fold was pinned on (raw `sqlx`, off the committed `.sqlx` drift surface).
+    #[sqlx::test]
+    async fn the_sql_catalog_name_mint_folds_collapses_falls_back_and_caps(pool: sqlx::PgPool) {
+        let mint = |display_name: Option<&str>, skill_id: &str| {
+            let pool = pool.clone();
+            let display_name = display_name.map(str::to_owned);
+            let skill_id = skill_id.to_owned();
+            async move {
+                sqlx::query_scalar::<_, String>("SELECT topos_mint_catalog_name($1, $2)")
+                    .bind(display_name)
+                    .bind(skill_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("the mint answers")
+            }
+        };
+        let sid = "topos_0af3c9d2";
         // Display names fold to the agent-skills charset (lowercase letters, digits, hyphens).
-        assert_eq!(
-            mint_catalog_name(Some("Deploy Guide"), &sid),
-            "deploy-guide"
-        );
-        assert_eq!(
-            mint_catalog_name(Some("deploy_guide"), &sid),
-            "deploy-guide"
-        );
-        assert_eq!(mint_catalog_name(Some("deploy"), &sid), "deploy");
+        assert_eq!(mint(Some("Deploy Guide"), sid).await, "deploy-guide");
+        assert_eq!(mint(Some("deploy_guide"), sid).await, "deploy-guide");
+        assert_eq!(mint(Some("deploy"), sid).await, "deploy");
         // Punctuation collapses to single hyphens; leading/trailing hyphens are trimmed.
-        assert_eq!(mint_catalog_name(Some("--A  (b)!C--"), &sid), "a-b-c");
+        assert_eq!(mint(Some("--A  (b)!C--"), sid).await, "a-b-c");
         // An unusable display name falls back to the skill id fold.
-        assert_eq!(mint_catalog_name(Some("!!!"), &sid), "topos-0af3c9d2");
-        assert_eq!(mint_catalog_name(None, &sid), "topos-0af3c9d2");
-        // The birth cap holds.
+        assert_eq!(mint(Some("!!!"), sid).await, "topos-0af3c9d2");
+        assert_eq!(mint(None, sid).await, "topos-0af3c9d2");
+        // Both empty ⇒ the literal fallback.
+        assert_eq!(mint(Some("!!!"), "???").await, "skill");
+        // The birth cap holds, and a cap-cut trailing hyphen is trimmed, never served.
         let long = "x".repeat(100);
-        assert_eq!(mint_catalog_name(Some(&long), &sid).len(), 64);
+        assert_eq!(mint(Some(&long), sid).await.len(), 64);
+        let hyphen_at_cap = format!("{}_tail", "x".repeat(63));
+        assert_eq!(mint(Some(&hyphen_at_cap), sid).await, "x".repeat(63));
     }
 }

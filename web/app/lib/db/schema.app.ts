@@ -28,6 +28,33 @@ export const policyEvent = pgTable(
 );
 
 /**
+ * Audit trail for the step-up admin ceremonies — one row per ATTEMPT, whatever the outcome
+ * (a refused step-up is as much a fact as a landed act). `kind` names the ceremony
+ * (role_change, member_removed, leave, archive, unarchive, delete, purge, rename,
+ * channel_rename, channel_delete, invite_policy, staleness_window, review_default,
+ * device_revoke — an open vocabulary); `subject` names its target (an email, a skill or
+ * channel name, a device key id); `detail` carries the new value where one exists.
+ */
+export const adminEvent = pgTable(
+  "admin_event",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The PLANE workspace id — a plain text join key (no FK into schema `plane`). */
+    workspaceId: text("workspace_id").notNull(),
+    kind: text("kind").notNull(),
+    subject: text("subject").notNull(),
+    detail: text("detail"),
+    setBy: text("set_by").notNull(),
+    setAt: timestamp("set_at", { withTimezone: true }).defaultNow().notNull(),
+    outcome: text("outcome").notNull(),
+  },
+  (table) => [
+    index("admin_event_workspace_idx").on(table.workspaceId, table.setAt),
+    check("admin_event_outcome_check", sql`${table.outcome} in ('ok', 'denied', 'error')`),
+  ],
+);
+
+/**
  * Review-thread comments on a proposal — WEB-ONLY state (the plane never sees a comment; the
  * device lane has no comment surface). Append-only by design: no edit/delete surface exists, so
  * a thread reads as an honest record. The id is CLIENT-minted (a page-render UUID riding a

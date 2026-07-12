@@ -34,17 +34,27 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("api/memberships", file("api.memberships.ts")),
     route("app", file("app-entry.tsx")),
     layout(file("shell.tsx"), [
+      route("settings/devices", file("your-devices.tsx")),
       ...prefix("workspaces", [
         index(file("workspaces-index.tsx")),
         route("new", file("workspaces-new.tsx")),
         ...prefix(":ws", [
           index(file("workspace-dashboard.tsx")),
           route("settings", file("workspace-settings.tsx")),
+          route("members", file("workspace-members.tsx")),
+          route("archive", file("workspace-archive.tsx")),
+          route("fleet", file("fleet.tsx")),
+          ...prefix("channels", [
+            index(file("channels-index.tsx")),
+            route(":channel", file("channel-detail.tsx")),
+            route(":channel/history", file("channel-history.tsx")),
+          ]),
           ...prefix("skills/:skill", [
             index(file("skill-current.tsx")),
             route("history", file("skill-history.tsx")),
             route("proposals", file("skill-proposals.tsx")),
             route("proposals/:versionId", file("proposal-review.tsx")),
+            route("settings", file("skill-settings.tsx")),
             route("versions/:versionId", file("version-files.tsx")),
             route("versions/:versionId/files/*", file("file-view.tsx")),
           ]),
@@ -54,5 +64,14 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // Historical URL shapes kept honest: permanent redirects to the resource routes.
     route("create", file("redirect-create.ts")),
     route("link", file("redirect-link.ts")),
+    // RESOURCE ADDRESSES — `<origin>/<workspace>[...]` is what sharing and joining speak. The
+    // browser face is a page; every other fetcher gets the CONSTANT protocol card (no path
+    // echo, no existence oracle). Static routes above always outrank these dynamic segments.
+    route(":ws", file("resource-workspace.tsx")),
+    route(":ws/channels/:name", file("resource-channel.tsx")),
+    route(":ws/skills/:name", file("resource-skill.tsx")),
+    // Any unmatched path: the same constant card for a non-browser fetcher, the house 404 for
+    // a browser — path SHAPE decides the response, never existence.
+    route("*", file("catch-all.tsx")),
   ];
 }

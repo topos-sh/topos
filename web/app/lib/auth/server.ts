@@ -1,9 +1,12 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { verifyPassword } from "better-auth/crypto";
 import { magicLink } from "better-auth/plugins/magic-link";
+import { and, eq } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { getDb } from "@/lib/db/index.server";
+import { account } from "@/lib/db/schema.auth";
 
 /**
  * The auth construction, parameterized by the composition's AuthProviderConfig (the fourth
@@ -70,4 +73,28 @@ let auth: Auth | undefined;
 export function getAuth(): Auth {
   auth ??= buildAuth();
   return auth;
+}
+
+/**
+ * Verify a signed-in user's password AGAIN — the step-up re-authentication the admin
+ * ceremonies run immediately before acting. Reads the better-auth credential account row for
+ * the session's user and checks the presented password with better-auth's own verifier (the
+ * same hasher sign-in uses — no second implementation). `false` for a wrong password AND for
+ * an account with no password rung (a magic-link/social-only deployment has no password to
+ * re-enter; the v1 step-up is the password rung, stated honestly in the ceremony copy).
+ */
+export async function verifySessionPassword(userId: string, password: string): Promise<boolean> {
+  if (password.length === 0) {
+    return false;
+  }
+  const rows = await getDb()
+    .select({ password: account.password })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, "credential")))
+    .limit(1);
+  const hash = rows[0]?.password;
+  if (hash == null || hash.length === 0) {
+    return false;
+  }
+  return verifyPassword({ hash, password });
 }

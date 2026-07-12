@@ -191,6 +191,13 @@ const SESSIONLESS_ROUTES = new Set([
   "redirect-create",
   "redirect-link",
   "api.memberships",
+  // The resource addresses + the fallback: anonymous is a VALID state there (the constant
+  // protocol card / teaser — no existence oracle), so the guard family cannot front them;
+  // their signed-in arm resolves the session itself and keeps the house 404 posture.
+  "resource-workspace",
+  "resource-channel",
+  "resource-skill",
+  "catch-all",
 ]);
 const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;

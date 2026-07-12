@@ -33,10 +33,38 @@ export const ossNav: NavEntry[] = [
     section: "workspace",
   },
   {
+    id: "workspace-channels",
+    label: "Channels",
+    href: (ctx) => (ctx.workspaceId ? `/workspaces/${ctx.workspaceId}/channels` : null),
+    icon: "hash",
+    section: "workspace",
+  },
+  {
+    id: "workspace-members",
+    label: "Members",
+    href: (ctx) => (ctx.workspaceId ? `/workspaces/${ctx.workspaceId}/members` : null),
+    icon: "users",
+    section: "workspace",
+  },
+  {
+    id: "workspace-fleet",
+    label: "Fleet",
+    href: (ctx) => (ctx.workspaceId ? `/workspaces/${ctx.workspaceId}/fleet` : null),
+    icon: "monitor",
+    section: "workspace",
+  },
+  {
     id: "workspace-settings",
     label: "Settings",
     href: (ctx) => (ctx.workspaceId ? `/workspaces/${ctx.workspaceId}/settings` : null),
     icon: "settings",
     section: "workspace",
+  },
+  {
+    id: "your-devices",
+    label: "Your devices",
+    href: () => "/settings/devices",
+    icon: "laptop",
+    section: "account",
   },
 ];
