@@ -25,8 +25,9 @@ async fn review_approve_promotes_an_open_proposal(pool: PgPool) {
 
     // Approve it (review_required is off by default, so the proposer may approve) → (1,2).
     let op_a = "50000000-0000-4000-8000-000000000002";
+    // No credential in the body — the workspace credential rides the `post` helper's Authorization header.
     let body = serde_json::to_vec(&serde_json::json!({
-        "workspace_id": WS, "skill_id": SKILL, "op_id": op_a, "device_key_id": DKID,
+        "workspace_id": WS, "skill_id": SKILL, "op_id": op_a,
         "expected": { "epoch": 1, "seq": 1 },
         "proposal": hex::encode(prop_vid), "decision": "approve",
     }))

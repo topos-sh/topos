@@ -15,9 +15,9 @@ use topos_types::bootstrap::{
 };
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
-    PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, RedeemedSkillCred,
-    SessionIntent, VerificationContextResponse, WireCandidate, WireOpenProposal, WireProposalList,
-    WireSkillIndex, WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
+    PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, SessionIntent,
+    VerificationContextResponse, WireCandidate, WireOpenProposal, WireProposalList, WireSkillIndex,
+    WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{
@@ -383,7 +383,8 @@ pub(crate) fn passcode_complete_to_wire(c: PasscodeComplete) -> PasscodeConfirmR
 }
 
 /// The all-outcome envelope for a redeem / admin-claim ([`RedeemOutcome`]): `Redeemed` → a 200 carrying the
-/// [`RedeemResponse`] (the registered device + the minted read creds, NEVER a user token); `Denied` → a 200
+/// [`RedeemResponse`] (the registered device + its ONE workspace credential, NEVER a user token, never a
+/// per-skill token); `Denied` → a 200
 /// carrying the uniform flat DENIED error (no static reason — never an oracle).
 pub(crate) fn redeem_envelope(command: &str, outcome: RedeemOutcome) -> JsonEnvelope {
     match outcome {
@@ -392,15 +393,7 @@ pub(crate) fn redeem_envelope(command: &str, outcome: RedeemOutcome) -> JsonEnve
                 workspace_id: r.workspace_id.as_str().to_owned(),
                 device_key_id: r.device_key_id,
                 principal: Some(r.principal.as_str().to_owned()),
-                read_creds: r
-                    .read_tokens
-                    .into_iter()
-                    .map(|t| RedeemedSkillCred {
-                        skill_id: t.skill_id.as_str().to_owned(),
-                        read_token: t.token,
-                        expires_at: t.expires_at,
-                    })
-                    .collect(),
+                credential: r.credential,
             };
             ok_envelope(command, to_data(&resp))
         }

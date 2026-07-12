@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Topos OSS plane",
-    "description": "The self-hostable Topos plane — device-credential writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "description": "The self-hostable Topos plane — workspace-credential writes AND reads (one Bearer credential per enrolled device; membership is the authorization), plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
@@ -119,94 +119,6 @@
           },
           "500": {
             "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/current/{read_token}": {
-      "get": {
-        "tags": [
-          "reads"
-        ],
-        "operationId": "get_current",
-        "parameters": [
-          {
-            "name": "read_token",
-            "in": "path",
-            "description": "The per-follower read token (resolves to an opaque scope).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "If-None-Match",
-            "in": "header",
-            "description": "The cached ETag \"<epoch>.<seq>\".",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "Topos-Known-Version-Id",
-            "in": "header",
-            "description": "The client's known current commit id (hex64) — the commit-sensitive half of the 304.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The current record (application/json) + a commit-sensitive ETag.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WireCurrentRecord"
-                }
-              }
-            }
-          },
-          "304": {
-            "description": "Pointer unchanged (the ETag AND the known version both match)."
-          },
-          "404": {
-            "description": "No such token, or no current pointer yet.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -565,6 +477,17 @@
           "governance"
         ],
         "operationId": "create_invite",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting owner device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -625,6 +548,17 @@
           "writes"
         ],
         "operationId": "propose",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -648,6 +582,16 @@
           },
           "400": {
             "description": "Malformed body or identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -685,6 +629,17 @@
           "writes"
         ],
         "operationId": "publish",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -708,6 +663,16 @@
           },
           "400": {
             "description": "Malformed body or identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -745,6 +710,17 @@
           "writes"
         ],
         "operationId": "revert",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -768,6 +744,16 @@
           },
           "400": {
             "description": "Malformed body or identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -805,6 +791,17 @@
           "writes"
         ],
         "operationId": "review",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -828,6 +825,16 @@
           },
           "400": {
             "description": "Malformed body or identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential.",
             "content": {
               "application/json": {
                 "schema": {
@@ -939,6 +946,15 @@
             "name": "ws",
             "in": "path",
             "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting device's credential (owner, or the target's own principal).",
             "required": true,
             "schema": {
               "type": "string"
@@ -1116,6 +1132,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting owner device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1194,6 +1219,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the acting owner device's credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1267,9 +1301,9 @@
             }
           },
           {
-            "name": "Topos-Device-Key-Id",
+            "name": "Authorization",
             "in": "header",
-            "description": "The reading device's key id.",
+            "description": "`Bearer <workspace credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1288,7 +1322,7 @@
             }
           },
           "404": {
-            "description": "Missing/malformed header, unknown/revoked device, or non-member (indistinguishable).",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1339,7 +1373,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id (must match the read token's scope).",
+            "description": "Skill id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1357,7 +1391,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "Bearer <read_token>.",
+            "description": "`Bearer <workspace credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1408,6 +1442,112 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/skills/{skill}/current": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_current",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "The skill id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>` — the device's one workspace credential.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The cached ETag \"<epoch>.<seq>\".",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Topos-Known-Version-Id",
+            "in": "header",
+            "description": "The client's known current commit id (hex64) — the commit-sensitive half of the 304.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current record (application/json) + a commit-sensitive ETag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireCurrentRecord"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Pointer unchanged (the ETag AND the known version both match)."
+          },
+          "404": {
+            "description": "No such credential/membership/skill, or no current pointer yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/skills/{skill}/proposals": {
       "get": {
         "tags": [
@@ -1427,7 +1567,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id (must match the read token's scope).",
+            "description": "Skill id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1436,7 +1576,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "Bearer <read_token>.",
+            "description": "`Bearer <workspace credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1455,7 +1595,7 @@
             }
           },
           "404": {
-            "description": "No/blank credential, or scope/path mismatch (indistinguishable).",
+            "description": "No/blank credential, non-member, or scope/path mismatch (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1506,7 +1646,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id (must match the read token's scope).",
+            "description": "Skill id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1524,7 +1664,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "Bearer <read_token>.",
+            "description": "`Bearer <workspace credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1931,25 +2071,20 @@
       },
       "DeviceRevokeRequest": {
         "type": "object",
-        "description": "`DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own\nprincipal). The revoke is INSTANT (flip `revoked` + drop the device's read tokens in one transaction).",
+        "description": "`DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own\nprincipal). The revoke is INSTANT (flip `revoked` in one transaction — the row's credential stops\nauthorizing fresh work the moment it commits).",
         "required": [
           "workspace_id",
           "op_id",
-          "device_key_id",
           "target_device_key_id"
         ],
         "properties": {
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the ACTING device (the actor; not the target)."
-          },
           "op_id": {
             "type": "string",
             "description": "The client-minted UUIDv4 idempotency key."
           },
           "target_device_key_id": {
             "type": "string",
-            "description": "The id of the device key to revoke."
+            "description": "The id of the device key to revoke (the TARGET, named by its non-secret id; the actor rides the\nBearer credential)."
           },
           "workspace_id": {
             "type": "string",
@@ -2082,14 +2217,9 @@
         "required": [
           "workspace_id",
           "op_id",
-          "device_key_id",
           "emails"
         ],
         "properties": {
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the acting OWNER's device (the registry resolves its principal + role by this)."
-          },
           "emails": {
             "type": "array",
             "items": {
@@ -2384,7 +2514,6 @@
           "workspace_id",
           "skill_id",
           "op_id",
-          "device_key_id",
           "expected",
           "candidate"
         ],
@@ -2392,10 +2521,6 @@
           "candidate": {
             "$ref": "#/components/schemas/WireCandidate",
             "description": "The full candidate bundle to ingest as the proposal's content."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "display_name": {
             "type": [
@@ -2541,12 +2666,11 @@
       },
       "PublishRequest": {
         "type": "object",
-        "description": "`POST /v1/publish` body — a direct publish that moves `current`. The body names the acting device by\n`device_key_id` (authority is the in-transaction registry + roster gate); the server stamps `created_at`.\nUnder `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.",
+        "description": "`POST /v1/publish` body — a direct publish that moves `current`. The acting device rides the\n`Authorization: Bearer` workspace credential (resolved in-transaction to its registry row + the\nmembership gate); the server stamps `created_at`.\nUnder `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.",
         "required": [
           "workspace_id",
           "skill_id",
           "op_id",
-          "device_key_id",
           "expected",
           "candidate"
         ],
@@ -2554,10 +2678,6 @@
           "candidate": {
             "$ref": "#/components/schemas/WireCandidate",
             "description": "The full candidate bundle to ingest + publish."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "display_name": {
             "type": [
@@ -2666,7 +2786,7 @@
       },
       "RedeemRequest": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted\nper-skill read tokens. The server checks `device_public_key` equals the grant's bound key (a binding\ncheck) and re-derives the device key id from it.",
+        "description": "`POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + its\nONE minted workspace credential. The server checks `device_public_key` equals the grant's bound key\n(a binding check) and re-derives the device key id from it.",
         "required": [
           "workspace_id",
           "grant",
@@ -2689,15 +2809,20 @@
       },
       "RedeemResponse": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device and\nthe minted per-skill read tokens. **NO user token, ever.** Rides in the all-outcome envelope's `data`.",
+        "description": "`POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device\nand its ONE workspace credential (the `0600` at-rest secret this device presents on every read and\nwrite in this workspace). **NO user token, ever; no per-skill token, ever.** Rides in the all-outcome\nenvelope's `data`.",
         "required": [
           "workspace_id",
-          "device_key_id"
+          "device_key_id",
+          "credential"
         ],
         "properties": {
+          "credential": {
+            "type": "string",
+            "description": "The plaintext workspace credential (returned ONCE; only its sha256 is stored server-side, on the\ndevice's registry row). No expiry — revocation is a directory row-write, re-enrollment the rotation."
+          },
           "device_key_id": {
             "type": "string",
-            "description": "The server-derived device key id now registered."
+            "description": "The server-derived device key id now registered (the device's stable, non-secret name — the\nreceipts/audit actor; never an authenticator)."
           },
           "principal": {
             "type": [
@@ -2706,42 +2831,9 @@
             ],
             "description": "The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the\nclient persists and prints so a hijacked standup is visible (\"workspace X — owner Y\")."
           },
-          "read_creds": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RedeemedSkillCred"
-            },
-            "description": "The minted per-skill read credentials (returned ONCE; only their sha256 is stored server-side)."
-          },
           "workspace_id": {
             "type": "string",
             "description": "The workspace the device enrolled into."
-          }
-        }
-      },
-      "RedeemedSkillCred": {
-        "type": "object",
-        "description": "One minted per-skill read credential — the `0600` at-rest secret a follower stores to pull a skill.",
-        "required": [
-          "skill_id",
-          "read_token"
-        ],
-        "properties": {
-          "expires_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The token expiry in epoch-ms (`None` = non-expiring — per-device revoke is the kill switch)."
-          },
-          "read_token": {
-            "type": "string",
-            "description": "The plaintext read token (returned ONCE; only its sha256 is stored server-side)."
-          },
-          "skill_id": {
-            "type": "string",
-            "description": "The skill the token reads."
           }
         }
       },
@@ -2778,7 +2870,6 @@
           "workspace_id",
           "skill_id",
           "op_id",
-          "device_key_id",
           "expected",
           "good",
           "author",
@@ -2788,10 +2879,6 @@
           "author": {
             "type": "string",
             "description": "The author device id recorded in the forward-revert commit frame."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -2862,7 +2949,6 @@
           "workspace_id",
           "skill_id",
           "op_id",
-          "device_key_id",
           "expected",
           "proposal",
           "decision"
@@ -2871,10 +2957,6 @@
           "decision": {
             "$ref": "#/components/schemas/ReviewDecision",
             "description": "The verdict — `approve` (promote) or `reject`."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the device whose registry row (resolved in-transaction) authorizes this op."
           },
           "expected": {
             "$ref": "#/components/schemas/Generation",
@@ -2903,14 +2985,9 @@
         "description": "`DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster\n(owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.",
         "required": [
           "workspace_id",
-          "op_id",
-          "device_key_id"
+          "op_id"
         ],
         "properties": {
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the acting owner's device (the registry resolves its principal + role by this)."
-          },
           "op_id": {
             "type": "string",
             "description": "The client-minted UUIDv4 idempotency key."
@@ -2927,14 +3004,9 @@
         "required": [
           "workspace_id",
           "op_id",
-          "device_key_id",
           "role"
         ],
         "properties": {
-          "device_key_id": {
-            "type": "string",
-            "description": "The id of the acting owner's device (the registry resolves its principal + role by this)."
-          },
           "op_id": {
             "type": "string",
             "description": "The client-minted UUIDv4 idempotency key."
@@ -3237,7 +3309,7 @@
       },
       "WireSkillIndex": {
         "type": "object",
-        "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership (the `Topos-Device-Key-Id` header names the device; catalog\nvisibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list\nordered by `skill_id`.",
+        "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership (the `Authorization: Bearer` workspace credential names the\ndevice; catalog\nvisibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list\nordered by `skill_id`.",
         "required": [
           "skills"
         ],
@@ -3384,7 +3456,7 @@
     },
     {
       "name": "reads",
-      "description": "Token-scoped reads (current / bundles / versions)."
+      "description": "Workspace-credential reads (current / bundles / versions / proposals / catalog)."
     },
     {
       "name": "enrollment",

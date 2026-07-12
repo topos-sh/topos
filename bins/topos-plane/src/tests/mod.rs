@@ -1,10 +1,12 @@
 //! Per-route integration tests — `tower::ServiceExt::oneshot` against `router(state)`, no socket.
 //!
-//! Each test seeds a real [`Authority`] through the feature-gated test-fixtures shims (a registered device,
-//! a rostered principal, a minted read token, and — where needed — a published genesis), then drives the wire
-//! exactly as a client would: the presented `device_key_id` in the JSON body (no signature — the credential
-//! is the body, authenticated by registry-row lookup), and the conditional-GET headers. They assert the
-//! status, the canonical receipt/envelope shape, and the commit-sensitive 304.
+//! Each test seeds a real [`Authority`] through the feature-gated test-fixtures shims (a registered device
+//! WITH its workspace credential, a CONFIRMED workspace member, and — where needed — a published genesis),
+//! then drives the wire exactly as a client would: the workspace credential in the `Authorization: Bearer`
+//! header (one bearer secret per enrolled device authenticates every read AND write — no signature, no body
+//! credential; the plane resolves it to the device's registry row and gates on confirmed membership), and
+//! the conditional-GET headers. They assert the status, the canonical receipt/envelope shape, and the
+//! commit-sensitive 304.
 //!
 //! The suite mirrors `src/routes/`: one child module per route family, plus `misc` for the cross-route
 //! tests (state construction, the maintenance pass, the wire-error envelope). This module is the shared
@@ -53,7 +55,10 @@ const WS: &str = "w_acme";
 const SKILL: &str = "s_deploy";
 const DKID: &str = "dk_a";
 const PRINCIPAL: &str = "p_dev";
-const READ_TOKEN: &str = "rt_test_secret_value";
+/// The seeded device's ONE workspace credential — the bearer secret it presents on every read AND write
+/// (`Authorization: Bearer <credential>`). Distinct per device across a DB (the registry's stored sha256 is
+/// globally unique); each `#[sqlx::test]` gets a fresh DB, so a single constant per device is enough.
+const CREDENTIAL: &str = "cred_dev";
 const AUTHOR: &str = "d_test";
 const MESSAGE: &str = "topos publish";
 const CREATED_AT: &str = "2026-06-29T00:00:00Z";
@@ -62,7 +67,8 @@ const KEY_SEED: u8 = 7;
 
 // ── fixture ────────────────────────────────────────────────────────────────────────────────────────
 
-/// A seeded plane (temp dirs cleaned on drop): a registered+rostered device, a minted read token.
+/// A seeded plane (temp dirs cleaned on drop): a registered device WITH its workspace credential, its
+/// principal a CONFIRMED workspace member (the read AND write gate).
 struct Ctx {
     dir: PathBuf,
     state: PlaneState,
@@ -105,18 +111,22 @@ async fn setup(pool: PgPool, tag: &str) -> Ctx {
     let authority =
         Authority::from_pool(pool, &dir.join("git"), &dir.join("large")).expect("open authority");
     let ws = WorkspaceId::parse(WS).unwrap();
-    let skill = SkillId::parse(SKILL).unwrap();
     let principal = Principal::parse(PRINCIPAL).unwrap();
+    // The device carries its workspace credential; membership (a CONFIRMED workspace_member seat) is the read
+    // AND write gate — the per-skill roster gates nothing in the credential model, so it is not seeded.
     authority
-        .seed_device(&ws, DKID, &dev_pubkey(KEY_SEED), &principal, false)
+        .seed_device(
+            &ws,
+            DKID,
+            &dev_pubkey(KEY_SEED),
+            &principal,
+            false,
+            CREDENTIAL,
+        )
         .await
         .unwrap();
     authority
-        .seed_roster(&ws, &skill, &principal)
-        .await
-        .unwrap();
-    authority
-        .mint_read_token(&ws, &skill, &principal, READ_TOKEN)
+        .seed_workspace_member(&ws, &principal, "member", "confirmed")
         .await
         .unwrap();
     // Disable the rate limiter so a handful of test requests never trips it.
@@ -135,7 +145,7 @@ async fn seed_genesis(ctx: &Ctx, op_id: &str) -> ([u8; 32], [u8; 32]) {
         .seed_published_genesis(
             &WorkspaceId::parse(WS).unwrap(),
             &SkillId::parse(SKILL).unwrap(),
-            DKID,
+            CREDENTIAL,
             &OpId::parse(op_id).unwrap(),
             vec![file("SKILL.md", b"genesis v0\n")],
             AUTHOR,
@@ -206,11 +216,11 @@ fn candidate_body(
             })
         })
         .collect();
+    // No credential material rides the body — the workspace credential is the `Authorization: Bearer` header.
     let body = serde_json::json!({
         "workspace_id": WS,
         "skill_id": SKILL,
         "op_id": op_id,
-        "device_key_id": DKID,
         "expected": { "epoch": expected.epoch, "seq": expected.seq },
         "candidate": {
             "files": wire_files,
@@ -222,14 +232,23 @@ fn candidate_body(
     serde_json::to_vec(&body).unwrap()
 }
 
-/// A candidate-write POST — the credential is the `device_key_id` in the JSON body, no signature header.
+/// A candidate-write POST presenting the seeded device's workspace credential as `Authorization: Bearer`
+/// (the one bearer secret authenticating every write — no signature, no body credential).
 fn post(uri: &str, body: Vec<u8>) -> Request<Body> {
-    Request::builder()
+    post_as(uri, body, Some(CREDENTIAL))
+}
+
+/// A candidate-write POST presenting a CHOSEN bearer credential (or NONE) — for the unknown-credential
+/// (→ 200 DENIED) and missing-header (→ 404 uniform miss) write cases.
+fn post_as(uri: &str, body: Vec<u8>, credential: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap()
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(cred) = credential {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {cred}"));
+    }
+    builder.body(Body::from(body)).unwrap()
 }
 
 fn get(uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
@@ -274,12 +293,16 @@ fn envelope(bytes: &[u8]) -> JsonEnvelope {
 const OWNER_DK: &str = "dk_owner";
 const OWNER_PRINCIPAL: &str = "owner@acme.com";
 const OWNER_SEED: u8 = 11;
+/// The owner device's workspace credential — the Bearer secret the governance mutations present as the actor.
+const OWNER_CRED: &str = "cred_owner";
 const MEMBER_DK: &str = "dk_member";
 const MEMBER_PRINCIPAL: &str = "member@acme.com";
 const MEMBER_SEED: u8 = 12;
+const MEMBER_CRED: &str = "cred_member";
 const TARGET_DK: &str = "dk_target";
 const TARGET_PRINCIPAL: &str = "target@acme.com";
 const TARGET_SEED: u8 = 13;
+const TARGET_CRED: &str = "cred_target";
 const ALICE_EMAIL: &str = "alice@acme.com";
 const ALICE_SEED: u8 = 14;
 const ENROLL_BASE_URL: &str = "https://plane.test";
@@ -353,7 +376,14 @@ async fn enroll_setup_full(
         .await
         .unwrap();
     authority
-        .seed_device(&ws, OWNER_DK, &dev_pubkey(OWNER_SEED), &owner, false)
+        .seed_device(
+            &ws,
+            OWNER_DK,
+            &dev_pubkey(OWNER_SEED),
+            &owner,
+            false,
+            OWNER_CRED,
+        )
         .await
         .unwrap();
 
@@ -391,19 +421,37 @@ fn b64key(pubkey: &[u8; 32]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey)
 }
 
-/// A POST with a JSON body — the enrollment reads/steps and the credential-authenticated writes (the
-/// presented `device_key_id` / grant rides the body, never a header).
+/// A POST with a JSON body and NO `Authorization` header — the unauthenticated enrollment steps (device
+/// authorize/token, passcode, redeem, admin-claim) that carry their own grant/token in the body. Governance
+/// mutations use [`req_json_auth`] instead (the actor rides the Bearer workspace credential).
 fn post_nosig(uri: &str, body: serde_json::Value) -> Request<Body> {
     req_json("POST", uri, body)
 }
 
-/// A request with a JSON body for any method (POST/PUT/DELETE governance/redeem). The credential is the
-/// body's `device_key_id` (or the enrollment grant) — no signature header.
+/// A request with a JSON body for any method (POST/PUT/DELETE enrollment/redeem). No `Authorization` header:
+/// the enrollment steps are unauthenticated and carry their own grant/token in the body.
 fn req_json(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// A governance request (POST/PUT/DELETE) presenting the acting device's workspace credential as
+/// `Authorization: Bearer` — the actor of every governance mutation now rides the header, never a body field.
+fn req_json_auth(
+    method: &str,
+    uri: &str,
+    body: serde_json::Value,
+    credential: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {credential}"))
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -427,18 +475,21 @@ fn wait_for_passcode(fake: &FakeMailer) -> String {
     panic!("no passcode mailed within the timeout");
 }
 
-/// Drive `POST /v1/invites` as the owner (the owner device credential rides the body); return the success
-/// envelope (asserts a 200).
+/// Drive `POST /v1/invites` as the owner (the owner device credential rides the `Authorization: Bearer`
+/// header); return the success envelope (asserts a 200).
 async fn create_invite(ctx: &EnrollCtx, op_id: &str, emails: &[&str], skill: &str) -> JsonEnvelope {
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op_id,
-        "device_key_id": OWNER_DK,
         "emails": emails,
         "role": "member",
         "skills": [{ "skill_id": skill, "name": "Deploy" }],
     });
-    let (status, _, bytes) = send(ctx.app(), post_nosig("/v1/invites", body)).await;
+    let (status, _, bytes) = send(
+        ctx.app(),
+        req_json_auth("POST", "/v1/invites", body, OWNER_CRED),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     envelope(&bytes)
 }

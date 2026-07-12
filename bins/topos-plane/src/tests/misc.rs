@@ -34,9 +34,9 @@ async fn unique_database_url(tag: &str) -> String {
 /// Postgres database, its git/large stores in a tempdir) and yields a SERVING state. It is the only test
 /// that EXECUTES the production constructor (the bin isn't run in CI; the `open` doc-test is `no_run`), so
 /// it pins that the internal resolution matches the bin's (mode `"cloud"` ⇒ `Cloud`; no SMTP ⇒
-/// `device_code`) and that the composed `router(state)` answers — an unknown read token is the
-/// indistinguishable 404, never a panic/500. It provisions its own database (so it can pass a URL, not a
-/// pool), so it is a plain `#[tokio::test]`, not `#[sqlx::test(migrator = "plane_store::MIGRATOR")]`.
+/// `device_code`) and that the composed `router(state)` answers — a read with an unknown workspace
+/// credential is the indistinguishable 404, never a panic/500. It provisions its own database (so it can
+/// pass a URL, not a pool), so it is a plain `#[tokio::test]`, not `#[sqlx::test(migrator = "plane_store::MIGRATOR")]`.
 #[tokio::test]
 async fn open_builds_a_serving_state() {
     let dir = unique_dir("open");
@@ -63,9 +63,17 @@ async fn open_builds_a_serving_state() {
     assert_eq!(state.enroll().deployment_mode, DeploymentMode::Cloud);
     assert_eq!(state.enroll().enrollment_method, "device_code");
 
-    // The composed router serves: an unknown token is the indistinguishable 404, proving the authority +
-    // routes are wired by the constructor.
-    let (status, _h, _b) = send(router(state), get("/v1/current/rt_unknown_token", &[])).await;
+    // The composed router serves: a read presenting an unknown workspace credential reaches the authority
+    // and resolves to the indistinguishable 404 (not a route miss), proving the authority + routes are wired
+    // by the constructor.
+    let (status, _h, _b) = send(
+        router(state),
+        get(
+            "/v1/workspaces/w_unknown/skills/s_unknown/current",
+            &[("authorization", "Bearer cred_unknown")],
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -120,8 +128,9 @@ async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgP
     assert_eq!(sp, StatusCode::OK);
 
     let op_r = "90000000-0000-4000-8000-000000000002";
+    // No credential in the body — the workspace credential rides the `post` helper's Authorization header.
     let body = serde_json::to_vec(&serde_json::json!({
-        "workspace_id": WS, "skill_id": SKILL, "op_id": op_r, "device_key_id": DKID,
+        "workspace_id": WS, "skill_id": SKILL, "op_id": op_r,
         "expected": { "epoch": 1, "seq": 1 },
         "proposal": hex::encode(prop_vid), "decision": "reject",
     }))
@@ -252,7 +261,8 @@ async fn an_unconfigured_new_state_refuses_the_genesis_wrappers(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text(pool: PgPool) {
     let ctx = setup(pool, "bad-body").await;
-    // A non-JSON body — no signature header exists anymore; the credential rides the (here malformed) body.
+    // A non-JSON body — the credential rides the `Authorization` header (the `post` helper attaches it), so
+    // this is a pure body-parse fault: the 400 fires in the body extractor before the handler runs.
     let (status, _, bytes) = run(&ctx, post("/v1/publish", b"not json".to_vec())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let env = envelope(&bytes);
@@ -264,28 +274,26 @@ async fn a_malformed_body_is_a_400_envelope_not_axums_plain_text(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn a_publish_from_an_unknown_device_is_a_200_denied(pool: PgPool) {
-    // The write credential is the body's `device_key_id`, authenticated in-transaction by registry-row
-    // lookup. A publish naming a device that was never registered is a SYNTHESIZED pre-auth DENIED — a
-    // 200 carrying the DENIED receipt/error (never persisted, never a 401/403).
-    let ctx = setup(pool, "unknown-device").await;
+async fn a_publish_with_an_unknown_credential_is_a_200_denied(pool: PgPool) {
+    // The write credential is the `Authorization: Bearer` workspace credential, authenticated in-transaction
+    // by registry-row lookup (a device is resolved by its stored credential sha256). A publish presenting a
+    // credential that resolves to NO registered device is a SYNTHESIZED pre-auth DENIED — a 200 carrying the
+    // DENIED receipt/error (never persisted, never a 401/403). A MISSING/blank header, by contrast, is the
+    // uniform 404 (see the `bearer_token` miss); an UNKNOWN one reaches the authority and is DENIED.
+    let ctx = setup(pool, "unknown-credential").await;
     let (g_vid, _) = seed_genesis(&ctx, "70000000-0000-4000-8000-000000000000").await;
     let op = "70000000-0000-4000-8000-000000000001";
     let files = vec![file("SKILL.md", b"from a stranger\n")];
-    // Build the shared candidate body, then repoint its `device_key_id` at a device that was never
-    // registered (the shared builder hard-codes the seeded DKID).
-    let mut body: serde_json::Value =
-        serde_json::from_slice(&candidate_body(op, gn(1, 1), &[g_vid], &files)).unwrap();
-    body["device_key_id"] = serde_json::json!("dk_unregistered");
+    let body = candidate_body(op, gn(1, 1), &[g_vid], &files);
     let (status, _, bytes) = run(
         &ctx,
-        post("/v1/publish", serde_json::to_vec(&body).unwrap()),
+        post_as("/v1/publish", body, Some("cred_unregistered")),
     )
     .await;
-    // A protocol outcome is always a 200; an unknown device is DENIED.
+    // A protocol outcome is always a 200; an unknown credential is DENIED.
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
-    assert!(!env.ok, "an unknown device must be denied: {env:?}");
+    assert!(!env.ok, "an unknown credential must be denied: {env:?}");
     assert_eq!(
         env.error.expect("DENIED carries a WireError").outcome,
         TerminalOutcome::Denied

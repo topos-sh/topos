@@ -9,9 +9,12 @@
 //! never supplies a wall clock (an ambient time would be a replay / skew lever). The handler derives both
 //! the RFC-3339 string and the `now: i64` it passes into the authority op.
 //!
-//! **The write credential is the `device_key_id` in the body.** A write body carries the `device_key_id`
-//! that names the presented device; authority is resolved in-transaction from the non-revoked registry
-//! row for `(workspace, device_key_id)` → its principal → the roster gate. The `op` (publish / propose /
+//! **The write credential is the workspace credential in the `Authorization: Bearer` header — never a
+//! body field.** The plane resolves the presented secret (by its sha256) to the device's registry row
+//! in-transaction: the row supplies the acting `device_key_id` and its bound principal, whose CONFIRMED
+//! `workspace_member` seat is the authorization. Keeping the secret out of the body keeps it out of the
+//! receipt request identities and the client's persisted op-WAL, so a credential rotation between
+//! retries never breaks byte-identical replay. The `op` (publish / propose /
 //! revert / review-decision) is derived from the route, never the body.
 //!
 //! Field names are snake_case as written (no `rename_all`). Hex id fields carry the same `^[0-9a-f]{64}$`
@@ -83,8 +86,9 @@ pub struct WireCandidate {
     pub message: String,
 }
 
-/// `POST /v1/publish` body — a direct publish that moves `current`. The body names the acting device by
-/// `device_key_id` (authority is the in-transaction registry + roster gate); the server stamps `created_at`.
+/// `POST /v1/publish` body — a direct publish that moves `current`. The acting device rides the
+/// `Authorization: Bearer` workspace credential (resolved in-transaction to its registry row + the
+/// membership gate); the server stamps `created_at`.
 /// Under `review-required` the authority refuses this closed with `APPROVAL_REQUIRED`, ingesting nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
@@ -99,8 +103,6 @@ pub struct PublishRequest {
     /// The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
-    pub device_key_id: String,
     /// The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`.
     pub expected: Generation,
     /// The full candidate bundle to ingest + publish.
@@ -131,8 +133,6 @@ pub struct ProposeRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
-    pub device_key_id: String,
     /// The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current.
     pub expected: Generation,
     /// The full candidate bundle to ingest as the proposal's content.
@@ -160,8 +160,6 @@ pub struct RevertRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
-    pub device_key_id: String,
     /// The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`.
     pub expected: Generation,
     /// The GOOD version (the `version_id` whose bytes are restored) as 64-char lowercase hex.
@@ -190,8 +188,6 @@ pub struct ReviewRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the device whose registry row (resolved in-transaction) authorizes this op.
-    pub device_key_id: String,
     /// The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an
     /// `approve` yields `CONFLICT`.
     pub expected: Generation,
@@ -310,7 +306,8 @@ pub struct WireSkillIndexEntry {
 }
 
 /// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
-/// authorized by workspace membership (the `Topos-Device-Key-Id` header names the device; catalog
+/// authorized by workspace membership (the `Authorization: Bearer` workspace credential names the
+/// device; catalog
 /// visibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list
 /// ordered by `skill_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,9 +573,9 @@ pub struct PasscodeConfirmResponse {
     pub status: PasscodeConfirmStatus,
 }
 
-/// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + minted
-/// per-skill read tokens. The server checks `device_public_key` equals the grant's bound key (a binding
-/// check) and re-derives the device key id from it.
+/// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + its
+/// ONE minted workspace credential. The server checks `device_public_key` equals the grant's bound key
+/// (a binding check) and re-derives the device key id from it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -593,8 +590,10 @@ pub struct RedeemRequest {
     pub device_public_key: String,
 }
 
-/// `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device and
-/// the minted per-skill read tokens. **NO user token, ever.** Rides in the all-outcome envelope's `data`.
+/// `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device
+/// and its ONE workspace credential (the `0600` at-rest secret this device presents on every read and
+/// write in this workspace). **NO user token, ever; no per-skill token, ever.** Rides in the all-outcome
+/// envelope's `data`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -603,31 +602,16 @@ pub struct RedeemRequest {
 pub struct RedeemResponse {
     /// The workspace the device enrolled into.
     pub workspace_id: String,
-    /// The server-derived device key id now registered.
+    /// The server-derived device key id now registered (the device's stable, non-secret name — the
+    /// receipts/audit actor; never an authenticator).
     pub device_key_id: String,
     /// The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the
     /// client persists and prints so a hijacked standup is visible ("workspace X — owner Y").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
-    /// The minted per-skill read credentials (returned ONCE; only their sha256 is stored server-side).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read_creds: Vec<RedeemedSkillCred>,
-}
-
-/// One minted per-skill read credential — the `0600` at-rest secret a follower stores to pull a skill.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct RedeemedSkillCred {
-    /// The skill the token reads.
-    pub skill_id: String,
-    /// The plaintext read token (returned ONCE; only its sha256 is stored server-side).
-    pub read_token: String,
-    /// The token expiry in epoch-ms (`None` = non-expiring — per-device revoke is the kill switch).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    /// The plaintext workspace credential (returned ONCE; only its sha256 is stored server-side, on the
+    /// device's registry row). No expiry — revocation is a directory row-write, re-enrollment the rotation.
+    pub credential: String,
 }
 
 /// `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
@@ -659,9 +643,9 @@ impl std::fmt::Debug for AdminClaimRequest {
 }
 
 // =================================================================================================
-// Governance request bodies — owner/admin mutations. The body names the acting device by `device_key_id`
-// (authority is the in-transaction registry row + role matrix); the op is derived from the route + body.
-// `op_id` is a UUIDv4.
+// Governance request bodies — owner/admin mutations. The ACTING device rides the `Authorization:
+// Bearer` workspace credential (resolved in-transaction to its registry row; authority is the row +
+// role matrix — never a body field); the op is derived from the route + body. `op_id` is a UUIDv4.
 // =================================================================================================
 
 /// A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
@@ -708,8 +692,6 @@ pub struct InviteRequest {
     /// The client-minted UUIDv4 idempotency key (a retry replays the deterministic link + receipt).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the acting OWNER's device (the registry resolves its principal + role by this).
-    pub device_key_id: String,
     /// The emails to invite (seeded onto the roster as `invited`).
     pub emails: Vec<String>,
     /// The role the invitees are granted — omitted defaults to `member` (the client signs the same byte).
@@ -733,8 +715,6 @@ pub struct RosterSetRequest {
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the acting owner's device (the registry resolves its principal + role by this).
-    pub device_key_id: String,
     /// The role to set on the `{email}` target.
     pub role: WorkspaceRole,
 }
@@ -752,12 +732,11 @@ pub struct RosterRemoveRequest {
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the acting owner's device (the registry resolves its principal + role by this).
-    pub device_key_id: String,
 }
 
 /// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
-/// principal). The revoke is INSTANT (flip `revoked` + drop the device's read tokens in one transaction).
+/// principal). The revoke is INSTANT (flip `revoked` in one transaction — the row's credential stops
+/// authorizing fresh work the moment it commits).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -769,9 +748,8 @@ pub struct DeviceRevokeRequest {
     /// The client-minted UUIDv4 idempotency key.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The id of the ACTING device (the actor; not the target).
-    pub device_key_id: String,
-    /// The id of the device key to revoke.
+    /// The id of the device key to revoke (the TARGET, named by its non-secret id; the actor rides the
+    /// Bearer credential).
     pub target_device_key_id: String,
 }
 
@@ -832,7 +810,6 @@ mod tests {
             workspace_id: "w_demo".to_owned(),
             skill_id: "s_prdescribe".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
-            device_key_id: "dk_demo".to_owned(),
             expected: Generation { epoch: 1, seq: 42 },
             candidate: WireCandidate {
                 files: vec![WireFile {
@@ -847,21 +824,22 @@ mod tests {
             display_name: Some("Deploy".to_owned()),
         };
         let v = serde_json::to_value(&req).unwrap();
-        // snake_case field names, candidate nested, and the server-stamped time is absent.
+        // snake_case field names, candidate nested, the server-stamped time absent — and NO credential
+        // material: the workspace credential rides the Authorization header, never a body field.
         assert_eq!(v["workspace_id"], "w_demo");
         assert_eq!(v["expected"]["seq"], 42);
         assert_eq!(v["candidate"]["files"][0]["mode"], "100644");
         assert_eq!(v["display_name"], "Deploy");
         assert!(v.get("created_at").is_none());
+        assert!(v.get("device_key_id").is_none() && v.get("credential").is_none());
         let back: PublishRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back.candidate.parents, vec!["a".repeat(64)]);
         assert_eq!(back.display_name.as_deref(), Some("Deploy"));
-        // An OLD body without display_name still deserializes (additive-compat), yielding None.
+        // A body without display_name still deserializes (additive-compat), yielding None.
         let old: PublishRequest = serde_json::from_value(serde_json::json!({
             "workspace_id": "w_demo",
             "skill_id": "s_prdescribe",
             "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "device_key_id": "dk_demo",
             "expected": { "epoch": 1, "seq": 42 },
             "candidate": { "files": [], "parents": [], "author": "d", "message": "m" },
         }))
@@ -1024,29 +1002,27 @@ mod tests {
     }
 
     #[test]
-    fn redeem_response_carries_read_creds_and_no_user_token() {
+    fn redeem_response_carries_one_credential_and_no_user_token() {
         let resp = RedeemResponse {
             workspace_id: "w_acme".to_owned(),
             device_key_id: "dk_abc".to_owned(),
             principal: Some("alice@acme.com".to_owned()),
-            read_creds: vec![RedeemedSkillCred {
-                skill_id: "s_deploy".to_owned(),
-                read_token: "rt_secret".to_owned(),
-                expires_at: None,
-            }],
+            credential: "wsc_secret".to_owned(),
         };
         let v = serde_json::to_value(&resp).unwrap();
-        assert_eq!(v["read_creds"][0]["skill_id"], "s_deploy");
+        assert_eq!(v["credential"], "wsc_secret");
         assert_eq!(v["principal"], "alice@acme.com");
-        // NO user token field, ever.
+        // NO user token field, ever — and no per-skill token list.
         assert!(v.get("user_token").is_none());
         assert!(v.get("token").is_none());
+        assert!(v.get("read_creds").is_none());
         let back: RedeemResponse = serde_json::from_value(v).unwrap();
-        assert_eq!(back.read_creds.len(), 1);
-        // An OLD response without the principal still deserializes (additive-compat).
+        assert_eq!(back.credential, "wsc_secret");
+        // A response without the principal still deserializes (additive-compat).
         let old: RedeemResponse = serde_json::from_value(serde_json::json!({
             "workspace_id": "w_acme",
             "device_key_id": "dk_abc",
+            "credential": "wsc_secret",
         }))
         .unwrap();
         assert!(old.principal.is_none());
@@ -1061,7 +1037,6 @@ mod tests {
         let req = InviteRequest {
             workspace_id: "w_acme".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
-            device_key_id: "dk_owner".to_owned(),
             emails: vec!["alice@acme.com".to_owned()],
             role: Some(WorkspaceRole::Member),
             skills: vec![InviteSkill {
@@ -1072,13 +1047,14 @@ mod tests {
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["role"], "member");
         assert_eq!(v["emails"][0], "alice@acme.com");
+        // The acting device rides the Authorization header — never a body field.
+        assert!(v.get("device_key_id").is_none() && v.get("credential").is_none());
         let back: InviteRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].skill_id, "s_deploy");
         // An omitted role deserializes to None (the handler defaults it to member).
         let no_role: InviteRequest = serde_json::from_value(serde_json::json!({
             "workspace_id": "w_acme",
             "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "device_key_id": "dk_owner",
             "emails": ["bob@acme.com"],
         }))
         .unwrap();

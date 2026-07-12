@@ -1,7 +1,8 @@
 //! `GET /v1/workspaces/{ws}/skills/{skill}/versions/{version_id}` — a version's authenticated metadata
 //! (`version_id`, parents, author, message, `bundle_digest`, per-file `(path, mode, object_id)` leaves),
-//! assembled WITHOUT reading any blob bytes. Bearer read token → opaque scope; the PATH's `(ws, skill)`
-//! drive the authority's scope-vs-path + R1 check (mismatch/unauthorized ⇒ the indistinguishable 404).
+//! assembled WITHOUT reading any blob bytes. Bearer workspace credential + the path's `(ws, skill)` →
+//! opaque scope (credential resolution + membership join); the authority re-asserts scope-vs-path + R1
+//! (mismatch/unauthorized ⇒ the indistinguishable 404).
 //! Content-addressed (the id pins the bytes), so the response is `immutable` with the version id as ETag.
 
 use axum::Json;
@@ -22,9 +23,9 @@ const CACHE_CONTROL_IMMUTABLE: &str = "max-age=31536000, immutable";
     tag = "reads",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "Skill id (must match the read token's scope)."),
+        ("skill" = String, Path, description = "Skill id."),
         ("version_id" = String, Path, description = "The version (commit) id (hex64) whose metadata to read."),
-        ("Authorization" = String, Header, description = "Bearer <read_token>."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
         (status = 200, description = "The version's authenticated metadata (immutable).", body = WireVersionMeta),
@@ -38,10 +39,11 @@ pub(crate) async fn get_version(
     Path((ws, skill, version_id)): Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
-    let token = wire::bearer_token(&headers)?;
-    // The server clock (epoch-ms) enforces the read token's expiry inside the authority.
-    let now = wire::now_utc().1;
-    let scope = state.authority().resolve_read_token(&token, now).await?;
+    let credential = wire::bearer_token(&headers)?;
+    let scope = state
+        .authority()
+        .resolve_read_scope(&ws, &skill, &credential)
+        .await?;
     let meta = state
         .authority()
         .read_version_metadata(&scope, &ws, &skill, &version_id)

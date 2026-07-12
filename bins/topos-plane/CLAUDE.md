@@ -18,20 +18,24 @@
 - `pub fn router(state: PlaneState) -> axum::Router` — the **single** composed surface a downstream plane
   imports verbatim (the limiter lives inside `PlaneState`). There is **no** `PlaneExtension`/callback/fork
   hook (a check-arch guard also proves the production build never enables the test-only seeding feature).
-- Thin handlers (`routes/*`, `wire/*`) over the frozen routes: `GET /v1/current/{read_token}` (conditional
-  GET, `ETag = "<epoch>.<seq>"`, a commit-sensitive 304 via a `Topos-Known-Version-Id` header),
+- Thin handlers (`routes/*`, `wire/*`) over the frozen routes — EVERY device-lane route now
+  authenticates by the ONE **workspace credential** in the `Authorization: Bearer` header (never a body
+  field, never a path segment): `GET /v1/workspaces/{ws}/skills/{skill}/current` (conditional
+  GET, `ETag = "<epoch>.<seq>"`, a commit-sensitive 304 via a `Topos-Known-Version-Id` header — the old
+  token-in-path `/v1/current/{read_token}` shape is gone with the tokens),
   `GET /v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}` and the sibling
-  `GET /v1/workspaces/{ws}/skills/{skill}/versions/{version_id}` (both skill-scoped via an opaque read
-  credential, **404-not-403**, never by bare hash), the proposals-listing read
+  `GET /v1/workspaces/{ws}/skills/{skill}/versions/{version_id}` (membership-scoped,
+  **404-not-403**, never by bare hash), the proposals-listing read
   `GET /v1/workspaces/{ws}/skills/{skill}/proposals` (the OPEN proposals' `{version_id, base, created_at}` —
-  count + handles only, no bytes/roles; same Bearer-read scope + 404-not-403 + the shared `open ∧ base==current`
+  count + handles only, no bytes/roles; same Bearer scope + 404-not-403 + the shared `open ∧ base==current`
   staleness clause, so a staled proposal vanishes; a mutable list, so `must-revalidate`, no ETag), the
-  **device-credential workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog
-  — authenticated by a `Topos-Device-Key-Id` selector, a missing/malformed value folding to the uniform 404;
+  **workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog —
+  a missing/blank credential folding to the uniform 404;
   calls `Authority::list_skills_device` → `WireSkillIndex`; the FIRST HTTP-routed member-scoped read, serving
   cloud AND self-host), and the device-credential writes
-  `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (the presented `device_key_id` rides the body,
-  authenticated in-transaction by registry-row lookup — no signature header). Each handler is parse → call
+  `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (bodies carry NO credential material — the
+  Bearer credential is resolved in-transaction by registry-row lookup; keeping the secret out of bodies
+  keeps it out of receipt request identities and the client's persisted op-WAL). Each handler is parse → call
   the authority → serialize: **no trust decision, no raw object read, no client-asserted principal** in a
   handler.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
@@ -60,9 +64,11 @@
   `spawn_blocking`, so the constant-shaped ack never leaks whether an address was rostered),
   `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the grant is
   the bearer credential in the body, checked against the device public key it is bound to — no signature;
-  mints per-skill read creds, **never a user token**), and `POST /v1/admin-claim`; and the governance
+  mints the device's ONE **workspace credential**, **never a user token, never a per-skill token**), and
+  `POST /v1/admin-claim`; and the governance
   mutations `POST /v1/invites`, `PUT|DELETE /v1/workspaces/{ws}/roster/{email}`,
-  `DELETE /v1/workspaces/{ws}/devices` (each the acting `device_key_id` + op → ONE authority op). A confirmed
+  `DELETE /v1/workspaces/{ws}/devices` (each the acting Bearer workspace credential + op → ONE authority
+  op; the revoke's TARGET stays named by its non-secret `device_key_id`). A confirmed
   identity is **never `Principal::parse`d in a handler** (it comes from a server-trusted row in the
   authority); a target email is op data. The
   OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off `enroll-oidc` feature (so
@@ -90,7 +96,8 @@
   its own scheduler).
 - **Server diagnostics** (`router.rs` + `wire/error.rs`, no new dependency): request-level tracing — one
   `request` span per request (method + the matched ROUTE TEMPLATE, never the raw path, which carries the
-  read credential on `/v1/current/{read_token}` and the invite token on `/i/{token}`; unmatched logs the
+  invite token on `/i/{token}` — the workspace credential rides only the never-logged Authorization
+  header; unmatched logs the
   constant `(unmatched)`) closed by an `info` event with status + latency, layered OUTERMOST in `router()`
   so every composition gets it and 429s are recorded too. The 500 mapper honors `plane-store`'s "retained
   for server-side diagnostics" error contract: an `AuthorityError::{Integrity, Internal}` is

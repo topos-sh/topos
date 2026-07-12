@@ -1,10 +1,10 @@
 //! `GET /v1/workspaces/{ws}/skills` — the workspace skill CATALOG (metadata only, no bytes) for a confirmed
 //! workspace MEMBER, authorized by a DEVICE-credential read (catalog visibility == workspace membership, on
-//! BOTH cloud and self-host). The reading device names its key in the `Topos-Device-Key-Id` header; the
-//! authority resolves the non-revoked registry row and gates on confirmed membership. A missing/malformed
-//! header, an unknown/revoked device, or a non-member is the single indistinguishable **404** (never a
-//! 400/401/403). The catalog is MUTABLE (a publish moves a pointer; a proposal opens/closes) and
-//! membership-varying, so it carries only a short, `private` must-revalidate window.
+//! BOTH cloud and self-host). The reading device presents its Bearer workspace credential; the
+//! authority resolves the non-revoked registry row by its sha256 and gates on confirmed membership. A
+//! missing/blank credential, an unknown/revoked one, or a non-member is the single indistinguishable
+//! **404** (never a 400/401/403). The catalog is MUTABLE (a publish moves a pointer; a proposal
+//! opens/closes) and membership-varying, so it carries only a short, `private` must-revalidate window.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -27,11 +27,11 @@ const CACHE_CONTROL_LIST: &str = "private, max-age=10, must-revalidate";
     tag = "reads",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("Topos-Device-Key-Id" = String, Header, description = "The reading device's key id."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
         (status = 200, description = "The workspace skill catalog (metadata only; a possibly-empty list ordered by skill id).", body = WireSkillIndex),
-        (status = 404, description = "Missing/malformed header, unknown/revoked device, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -41,8 +41,8 @@ pub(crate) async fn list_skills(
     Path(ws): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
-    let device_key_id = wire::device_key_id_header(&headers)?;
-    let index = state.list_skills_device(&ws, &device_key_id).await?;
+    let credential = wire::bearer_token(&headers)?;
+    let index = state.list_skills_device(&ws, &credential).await?;
     let response_headers = [(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_CONTROL_LIST),

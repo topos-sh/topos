@@ -1,4 +1,5 @@
-//! `GET /v1/current/{read_token}` — the current record + the commit-sensitive 304.
+//! `GET /v1/workspaces/{ws}/skills/{skill}/current` — the current record + the commit-sensitive 304, read
+//! with the device's Bearer workspace credential (the token-in-path shape is gone).
 
 use topos_types::WireCurrentRecord;
 
@@ -10,11 +11,12 @@ use super::*;
 async fn current_serves_the_record_and_a_commit_sensitive_304(pool: PgPool) {
     let ctx = setup(pool, "current").await;
     let (g_vid, _) = seed_genesis(&ctx, "60000000-0000-4000-8000-000000000000").await;
-    let uri = format!("/v1/current/{READ_TOKEN}");
+    let uri = format!("/v1/workspaces/{WS}/skills/{SKILL}/current");
+    let auth = format!("Bearer {CREDENTIAL}");
     let known_version = hex::encode(g_vid);
 
     // 200 with the current record + an ETag of "<epoch>.<seq>".
-    let (status, headers, bytes) = run(&ctx, get(&uri, &[])).await;
+    let (status, headers, bytes) = run(&ctx, get(&uri, &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::OK);
     let etag = headers
         .get(header::ETAG)
@@ -33,6 +35,7 @@ async fn current_serves_the_record_and_a_commit_sensitive_304(pool: PgPool) {
         get(
             &uri,
             &[
+                ("authorization", &auth),
                 ("if-none-match", &etag),
                 ("topos-known-version-id", &known_version),
             ],
@@ -49,6 +52,7 @@ async fn current_serves_the_record_and_a_commit_sensitive_304(pool: PgPool) {
         get(
             &uri,
             &[
+                ("authorization", &auth),
                 ("if-none-match", &etag),
                 ("topos-known-version-id", &"f".repeat(64)),
             ],

@@ -409,19 +409,19 @@ impl PlaneState {
     /// route handler calls: parse the workspace id (a malformed id is the uniform miss), stamp the server
     /// clock, run [`Authority::list_skills_device`](plane_store::Authority), and map each `SkillIndexRow`
     /// into the wire [`WireSkillIndex`] (metadata only, no bytes). A [`PlaneHttpError`] carries the outcome:
-    /// [`AuthorityError::NotFound`](plane_store::AuthorityError) — unknown/revoked device or non-member —
+    /// [`AuthorityError::NotFound`](plane_store::AuthorityError) — unknown/revoked credential or non-member —
     /// becomes the indistinguishable 404; an Integrity/Internal fault becomes a 500.
     pub(crate) async fn list_skills_device(
         &self,
         workspace_id: &str,
-        device_key_id: &str,
+        credential: &str,
     ) -> Result<WireSkillIndex, PlaneHttpError> {
         let ws =
             WorkspaceId::parse(workspace_id).map_err(|_| plane_store::AuthorityError::NotFound)?;
         let now = crate::wire::now_utc().1;
         let rows = self
             .authority()
-            .list_skills_device(&ws, device_key_id, now)
+            .list_skills_device(&ws, credential, now)
             .await?;
         Ok(crate::wire::map::skill_index_to_wire(rows))
     }

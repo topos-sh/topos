@@ -56,7 +56,7 @@ async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
+async fn full_device_flow_enrolls_and_redeems_a_workspace_credential(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-redeem").await;
     let (grant, _user_code, device_pk) = enroll_to_grant(
         &ctx,
@@ -77,21 +77,60 @@ async fn full_device_flow_enrolls_and_redeems_read_creds(pool: PgPool) {
 
     let (status, _, bytes) = send(
         ctx.app(),
-        post_nosig(&format!("/v1/workspaces/{WS}/devices"), body),
+        post_nosig(&format!("/v1/workspaces/{WS}/devices"), body.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
     assert!(env.ok, "redeem should be ok: {env:?}");
     assert_eq!(env.command, "redeem");
+    // The redeem mints the device's ONE workspace credential — never a per-skill `read_creds` bundle.
+    assert!(
+        env.data.get("read_creds").is_none(),
+        "the retired per-skill read_creds must not appear: {:?}",
+        env.data
+    );
     let resp: RedeemResponse =
         serde_json::from_value(env.data).expect("OK data is a RedeemResponse");
     assert_eq!(resp.workspace_id, WS);
     assert_eq!(resp.device_key_id, device_key_id);
+    let credential = resp.credential.clone();
     assert!(
-        resp.read_creds.iter().any(|c| c.skill_id == SKILL),
-        "a read cred for the offered skill is minted: {resp:?}"
+        !credential.is_empty(),
+        "one workspace credential is minted: {resp:?}"
     );
+
+    // A redeem REPLAY (the deterministic grant) re-derives the IDENTICAL credential (idempotent lost-ack).
+    let (s2, _, b2) = send(
+        ctx.app(),
+        post_nosig(&format!("/v1/workspaces/{WS}/devices"), body),
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+    let resp2: RedeemResponse =
+        serde_json::from_value(envelope(&b2).data).expect("OK data is a RedeemResponse");
+    assert_eq!(
+        resp2.credential, credential,
+        "a redeem replay must re-derive the identical credential"
+    );
+
+    // …and the minted credential WORKS end-to-end: alice is now a confirmed member (cloud redeem flipped her
+    // invited seat to confirmed), so her credential reads the workspace catalog (empty here — no skill yet).
+    let (s_cat, _, cat_bytes) = send(
+        ctx.app(),
+        get(
+            &format!("/v1/workspaces/{WS}/skills"),
+            &[("authorization", &format!("Bearer {credential}"))],
+        ),
+    )
+    .await;
+    assert_eq!(
+        s_cat,
+        StatusCode::OK,
+        "the minted credential reads the catalog"
+    );
+    let _: topos_types::requests::WireSkillIndex =
+        serde_json::from_slice(&cat_bytes).expect("the catalog body is a WireSkillIndex");
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]

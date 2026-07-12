@@ -38,10 +38,11 @@ async fn propose_opens_a_proposal_needs_review_without_moving_current(pool: PgPo
 // ── proposals listing: 200 + the open proposals, 404 on a bad token / scope mismatch ──────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token(pool: PgPool) {
+async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_credential(pool: PgPool) {
     // The proposals-listing read over `router(state)`: open a proposal via the HTTP propose route, then GET
-    // the list with the read token → 200 + the proposal's @hash + base; a bad/absent token or a scope/path
-    // mismatch → the indistinguishable 404 (never 401/403).
+    // the list with the device's workspace credential → 200 + the proposal's @hash + base; a bad/absent
+    // credential → the indistinguishable 404 (never 401/403). A member reads ANY skill (the skill comes from
+    // the path), so a different skill with no proposals is a 200 + empty list — not a 404.
     let ctx = setup(pool, "list-proposals").await;
     let (g_vid, _) = seed_genesis(&ctx, "70000000-0000-4000-8000-000000000000").await;
 
@@ -59,11 +60,11 @@ async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token(pool: 
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // GET the proposals list with the read token → 200 + the one open proposal.
+    // GET the proposals list with the device's workspace credential → 200 + the one open proposal.
     let uri = format!("/v1/workspaces/{WS}/skills/{SKILL}/proposals");
     let (s_ok, headers, bytes) = run(
         &ctx,
-        get(&uri, &[("authorization", &format!("Bearer {READ_TOKEN}"))]),
+        get(&uri, &[("authorization", &format!("Bearer {CREDENTIAL}"))]),
     )
     .await;
     assert_eq!(s_ok, StatusCode::OK);
@@ -84,23 +85,31 @@ async fn list_proposals_route_returns_open_proposals_and_404s_a_bad_token(pool: 
     assert_eq!(list.proposals[0].base_generation, gn(1, 1));
     assert!(!list.proposals[0].created_at.is_empty());
 
-    // A bogus bearer token → the indistinguishable 404.
+    // A bogus bearer credential → the indistinguishable 404.
     let (s_bad, _, _) = run(
         &ctx,
-        get(&uri, &[("authorization", "Bearer not-a-real-token")]),
+        get(&uri, &[("authorization", "Bearer not-a-real-credential")]),
     )
     .await;
     assert_eq!(s_bad, StatusCode::NOT_FOUND);
 
-    // A scope/path mismatch (a DIFFERENT skill in the path, valid token) → 404, BEFORE any roster read.
-    let mismatch = format!("/v1/workspaces/{WS}/skills/s_other/proposals");
-    let (s_mis, _, _) = run(
+    // A DIFFERENT skill in the path with the SAME valid member credential → 200 + an empty list: catalog/
+    // proposal visibility is workspace membership (the credential is not skill-scoped), and s_other simply
+    // has no open proposals. (Under the retired read-token model this was a skill-scoped 404.)
+    let other = format!("/v1/workspaces/{WS}/skills/s_other/proposals");
+    let (s_other, _, other_bytes) = run(
         &ctx,
         get(
-            &mismatch,
-            &[("authorization", &format!("Bearer {READ_TOKEN}"))],
+            &other,
+            &[("authorization", &format!("Bearer {CREDENTIAL}"))],
         ),
     )
     .await;
-    assert_eq!(s_mis, StatusCode::NOT_FOUND);
+    assert_eq!(s_other, StatusCode::OK);
+    let other_list: topos_types::requests::WireProposalList =
+        serde_json::from_slice(&other_bytes).expect("the body is a WireProposalList");
+    assert!(
+        other_list.proposals.is_empty(),
+        "a skill with no open proposals lists empty for a member: {other_list:?}"
+    );
 }

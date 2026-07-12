@@ -3,9 +3,9 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plane_store::{CommitId, DeviceOp, DeviceOpRequest, SkillId, WorkspaceId};
+use plane_store::{CommitId, DeviceOp, DeviceOpAuth, SkillId, WorkspaceId};
 use topos_types::JsonEnvelope;
 use topos_types::requests::RevertRequest;
 
@@ -18,17 +18,23 @@ use crate::wire::{self, ApiJson, map};
     path = "/v1/reverts",
     tag = "writes",
     request_body = RevertRequest,
+    params(
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting device's credential."),
+    ),
     responses(
         (status = 200, description = "The revert receipt (OK on success; CONFLICT / DENIED / … otherwise).", body = JsonEnvelope),
         (status = 400, description = "Malformed body or identifier.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
 pub(crate) async fn revert(
     State(state): State<PlaneState>,
+    headers: HeaderMap,
     ApiJson(req): ApiJson<RevertRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
@@ -36,8 +42,8 @@ pub(crate) async fn revert(
     let good = wire::hex32(&req.good)
         .map(CommitId)
         .ok_or_else(|| PlaneHttpError::BadId(format!("invalid good version id {:?}", req.good)))?;
-    let device = DeviceOpRequest {
-        device_key_id: req.device_key_id,
+    let auth = DeviceOpAuth {
+        credential,
         op: DeviceOp::Revert,
         expected: req.expected,
     };
@@ -48,7 +54,7 @@ pub(crate) async fn revert(
             &ws,
             &skill,
             good,
-            device,
+            auth,
             &req.author,
             &req.message,
             &op_id,

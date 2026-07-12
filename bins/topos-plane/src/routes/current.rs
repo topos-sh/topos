@@ -1,5 +1,6 @@
-//! `GET /v1/current/{read_token}` — a follower's currency check. Resolves the path token to an opaque scope
-//! and serves the skill's `current` record, with a **commit-sensitive 304**: the ETag is the frozen
+//! `GET /v1/workspaces/{ws}/skills/{skill}/current` — a follower's currency check. Resolves the Bearer
+//! workspace credential (+ the path's workspace/skill) to an opaque scope and serves the skill's
+//! `current` record, with a **commit-sensitive 304**: the ETag is the frozen
 //! `"<epoch>.<seq>"` (for caching), but a 304 fires ONLY when the client's `If-None-Match` AND its
 //! `Topos-Known-Version-Id` both match the served record — so a record that reuses a generation for a
 //! DIFFERENT commit is always returned (the client re-verifies the new bytes against the content-addressed
@@ -20,31 +21,32 @@ const CACHE_CONTROL_CURRENT: &str = "max-age=10, must-revalidate";
 
 #[utoipa::path(
     get,
-    path = "/v1/current/{read_token}",
+    path = "/v1/workspaces/{ws}/skills/{skill}/current",
     tag = "reads",
     params(
-        ("read_token" = String, Path, description = "The per-follower read token (resolves to an opaque scope)."),
+        ("ws" = String, Path, description = "The workspace id."),
+        ("skill" = String, Path, description = "The skill id."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the device's one workspace credential."),
         ("If-None-Match" = Option<String>, Header, description = "The cached ETag \"<epoch>.<seq>\"."),
         ("Topos-Known-Version-Id" = Option<String>, Header, description = "The client's known current commit id (hex64) — the commit-sensitive half of the 304."),
     ),
     responses(
         (status = 200, description = "The current record (application/json) + a commit-sensitive ETag.", body = topos_types::WireCurrentRecord, content_type = "application/json"),
         (status = 304, description = "Pointer unchanged (the ETag AND the known version both match)."),
-        (status = 404, description = "No such token, or no current pointer yet.", body = topos_types::JsonEnvelope),
+        (status = 404, description = "No such credential/membership/skill, or no current pointer yet.", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = topos_types::JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = topos_types::JsonEnvelope),
     ),
 )]
 pub(crate) async fn get_current(
     State(state): State<PlaneState>,
-    Path(read_token): Path<String>,
+    Path((ws, skill)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
-    // The server clock (epoch-ms) enforces the read token's expiry inside the authority.
-    let now = crate::wire::now_utc().1;
+    let credential = crate::wire::bearer_token(&headers)?;
     let scope = state
         .authority()
-        .resolve_read_token(&read_token, now)
+        .resolve_read_scope(&ws, &skill, &credential)
         .await?;
     let pointer = state
         .authority()

@@ -53,9 +53,10 @@ pub(crate) fn parse_op_id(s: &str) -> Result<OpId, PlaneHttpError> {
     OpId::parse(s).map_err(|e| PlaneHttpError::BadId(e.to_string()))
 }
 
-/// Parse the READ credential — `Authorization: Bearer <token>` → the token string. A missing/blank/no-scheme
+/// Parse the presented WORKSPACE CREDENTIAL — `Authorization: Bearer <credential>` → the secret string
+/// (the one credential a device presents on every read AND write). A missing/blank/no-scheme
 /// credential is the single indistinguishable `MissingReadCredential` (→ 404, never 401/403): the plane never
-/// reveals whether a token, workspace, or skill exists.
+/// reveals whether a credential, workspace, or skill exists.
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<String, PlaneHttpError> {
     let raw = headers
         .get(header::AUTHORIZATION)
@@ -72,23 +73,6 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<String, PlaneHttpError
         return Err(PlaneHttpError::MissingReadCredential);
     }
     Ok(token.to_owned())
-}
-
-/// Parse the reading device's key id — the `Topos-Device-Key-Id` header. A missing/blank/non-ASCII value is
-/// the single indistinguishable `MissingReadCredential` (→ 404, never 400/401/403): a device-credential READ
-/// never reveals whether a device, workspace, or membership exists (the same posture as [`bearer_token`]).
-pub(crate) fn device_key_id_header(headers: &HeaderMap) -> Result<String, PlaneHttpError> {
-    let raw = headers
-        .get("topos-device-key-id")
-        .ok_or(PlaneHttpError::MissingReadCredential)?;
-    let text = raw
-        .to_str()
-        .map_err(|_| PlaneHttpError::MissingReadCredential)?
-        .trim();
-    if text.is_empty() {
-        return Err(PlaneHttpError::MissingReadCredential);
-    }
-    Ok(text.to_owned())
 }
 
 /// Decode a base64url-unpadded raw 32-byte key (a device public key in an enrollment body) → `[u8; 32]`.

@@ -1,6 +1,7 @@
 //! `GET /v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}` — one object's raw bytes through the
-//! skill-scoped access rule. Bearer read token → opaque scope; the PATH's `(ws, skill)` go in as the
-//! request scope so the authority does the scope-vs-path check (mismatch ⇒ the indistinguishable 404).
+//! skill-scoped access rule. Bearer workspace credential + the path's `(ws, skill)` → opaque scope
+//! (authentication is the credential resolution; authorization the membership join); the authority
+//! re-asserts scope-vs-path (mismatch ⇒ the indistinguishable 404).
 //! Content-addressed, so the response is `immutable` with the object id as the ETag.
 
 use axum::extract::{Path, State};
@@ -19,9 +20,9 @@ const CACHE_CONTROL_IMMUTABLE: &str = "max-age=31536000, immutable";
     tag = "reads",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "Skill id (must match the read token's scope)."),
+        ("skill" = String, Path, description = "Skill id."),
         ("object_id" = String, Path, description = "The content id (hex64) of the object to fetch."),
-        ("Authorization" = String, Header, description = "Bearer <read_token>."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
         (status = 200, description = "The raw object bytes (content-addressed, immutable).", body = String, content_type = "application/octet-stream"),
@@ -35,10 +36,11 @@ pub(crate) async fn get_bundle(
     Path((ws, skill, object_id)): Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, PlaneHttpError> {
-    let token = wire::bearer_token(&headers)?;
-    // The server clock (epoch-ms) enforces the read token's expiry inside the authority.
-    let now = wire::now_utc().1;
-    let scope = state.authority().resolve_read_token(&token, now).await?;
+    let credential = wire::bearer_token(&headers)?;
+    let scope = state
+        .authority()
+        .resolve_read_scope(&ws, &skill, &credential)
+        .await?;
     let bytes = state
         .authority()
         .serve_object(&scope, &ws, &skill, &object_id)

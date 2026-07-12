@@ -1,6 +1,7 @@
 //! [`router`] — the ONE composed surface. `router(state)` is the entire HTTP plane a downstream cloud mounts
-//! verbatim (its own middleware sits in front; there is no extension hook here). The device-credential writes,
-//! the token-scoped reads, the unauthenticated invite bootstrap, the enrollment flow, and the governance
+//! verbatim (its own middleware sits in front; there is no extension hook here). The workspace-credential
+//! writes and reads (one Bearer credential per enrolled device), the unauthenticated invite bootstrap, the
+//! enrollment flow, and the governance
 //! mutations (axum 0.8 `{param}` syntax), all under the rate-limit middleware, with the body-size belts.
 
 use axum::Router;
@@ -35,7 +36,7 @@ pub fn router(state: PlaneState) -> Router {
 
     let reads = Router::new()
         .route(
-            "/v1/current/{read_token}",
+            "/v1/workspaces/{ws}/skills/{skill}/current",
             get(routes::current::get_current),
         )
         // The device-credential workspace CATALOG read (metadata only; catalog visibility == membership).
@@ -83,11 +84,12 @@ pub fn router(state: PlaneState) -> Router {
 /// chains ([`crate::wire::error`]) — run inside the span, so a 500's server-side diagnostics correlate with
 /// exactly one request line in the JSON logs.
 ///
-/// The span records the route TEMPLATE (`/v1/current/{read_token}`), never the raw path: a raw path carries
-/// the read credential on the conditional-GET route (and the invite token on `/i/{token}`), and a credential
-/// never reaches the logs (the same posture as storing only token sha256s). A request that matched no route
-/// has no template and logs the constant `(unmatched)` — same reasoning: a mistyped credential-bearing URL
-/// must not land in the logs either.
+/// The span records the route TEMPLATE, never the raw path: a raw path carries
+/// the invite token on `/i/{token}`, and a credential
+/// never reaches the logs (the same posture as storing only credential sha256s; the workspace
+/// credential itself rides the Authorization header, which is never logged). A request that matched no
+/// route has no template and logs the constant `(unmatched)` — same reasoning: a mistyped
+/// token-bearing URL must not land in the logs either.
 async fn trace_requests(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let route = req

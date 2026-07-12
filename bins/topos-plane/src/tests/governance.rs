@@ -53,22 +53,27 @@ async fn a_member_device_invite_is_denied(pool: PgPool) {
             &dev_pubkey(MEMBER_SEED),
             &member_principal,
             false,
+            MEMBER_CRED,
         )
         .await
         .unwrap();
 
     let op = "eeeeeeee-0000-4000-8000-000000000001";
     let emails = [ALICE_EMAIL];
+    // The acting device rides the Bearer credential (MEMBER_CRED) — never a body field.
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op,
-        "device_key_id": MEMBER_DK,
         "emails": emails,
         "role": "member",
         "skills": [{ "skill_id": SKILL, "name": "Deploy" }],
     });
 
-    let (status, _, bytes) = send(ctx.app(), post_nosig("/v1/invites", body)).await;
+    let (status, _, bytes) = send(
+        ctx.app(),
+        req_json_auth("POST", "/v1/invites", body, MEMBER_CRED),
+    )
+    .await;
     // A role-denial is a 200 + DENIED envelope (the actor is an authenticated member — nothing to hide).
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
@@ -92,21 +97,27 @@ async fn an_owner_revoke_of_a_device_is_ok(pool: PgPool) {
             &dev_pubkey(TARGET_SEED),
             &target_principal,
             false,
+            TARGET_CRED,
         )
         .await
         .unwrap();
 
     let op = "ffffffff-0000-4000-8000-000000000001";
+    // The acting owner rides the Bearer credential (OWNER_CRED); the body names only the TARGET device id.
     let body = serde_json::json!({
         "workspace_id": WS,
         "op_id": op,
-        "device_key_id": OWNER_DK,
         "target_device_key_id": TARGET_DK,
     });
 
     let (status, _, bytes) = send(
         ctx.app(),
-        req_json("DELETE", &format!("/v1/workspaces/{WS}/devices"), body),
+        req_json_auth(
+            "DELETE",
+            &format!("/v1/workspaces/{WS}/devices"),
+            body,
+            OWNER_CRED,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

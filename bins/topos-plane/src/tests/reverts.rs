@@ -32,8 +32,9 @@ async fn revert_is_a_forward_commit_that_advances_seq(pool: PgPool) {
         message: MESSAGE,
     })
     .unwrap();
+    // No credential in the body — the workspace credential rides the `post` helper's Authorization header.
     let body = serde_json::to_vec(&serde_json::json!({
-        "workspace_id": WS, "skill_id": SKILL, "op_id": op_r, "device_key_id": DKID,
+        "workspace_id": WS, "skill_id": SKILL, "op_id": op_r,
         "expected": { "epoch": 1, "seq": 2 },
         "good": hex::encode(g_vid), "author": AUTHOR, "message": MESSAGE,
     }))

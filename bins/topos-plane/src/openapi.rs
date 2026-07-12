@@ -19,11 +19,10 @@ use topos_types::requests::{
     DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
     InviteRequest, InviteSkill, PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest,
     PasscodeConfirmResponse, PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest,
-    ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RedeemedSkillCred,
-    RevertRequest, ReviewRequest, RosterRemoveRequest, RosterSetRequest, SessionIntent,
-    VerificationContextResponse, WireCandidate, WireFile, WireFileMode, WireOpenProposal,
-    WireProposalList, WireSkillIndex, WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
-    WorkspaceRole,
+    ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest,
+    RosterRemoveRequest, RosterSetRequest, SessionIntent, VerificationContextResponse,
+    WireCandidate, WireFile, WireFileMode, WireOpenProposal, WireProposalList, WireSkillIndex,
+    WireSkillIndexEntry, WireVersionFile, WireVersionMeta, WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
@@ -37,7 +36,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos OSS plane",
-        description = "The self-hostable Topos plane — device-credential writes + token-scoped reads, plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The self-hostable Topos plane — workspace-credential writes AND reads (one Bearer credential per enrolled device; membership is the authorization), plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -135,7 +134,6 @@ use topos_types::{
         PasscodeConfirmStatus,
         RedeemRequest,
         RedeemResponse,
-        RedeemedSkillCred,
         AdminClaimRequest,
         // Governance request DTOs (+ the invite `data` shape).
         InviteRequest,
@@ -148,7 +146,7 @@ use topos_types::{
     )),
     tags(
         (name = "writes", description = "Device-credential writes (publish / propose / revert / review)."),
-        (name = "reads", description = "Token-scoped reads (current / bundles / versions)."),
+        (name = "reads", description = "Workspace-credential reads (current / bundles / versions / proposals / catalog)."),
         (name = "enrollment", description = "Invite bootstrap + the device-auth / passcode / redeem / admin-claim enrollment flow."),
         (name = "governance", description = "Owner/admin device-credential mutations (invite / roster / revoke)."),
     ),

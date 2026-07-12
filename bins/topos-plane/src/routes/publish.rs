@@ -3,9 +3,9 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plane_store::{DeviceOp, DeviceOpRequest, SkillId, WorkspaceId};
+use plane_store::{DeviceOp, DeviceOpAuth, SkillId, WorkspaceId};
 use topos_types::JsonEnvelope;
 use topos_types::requests::PublishRequest;
 
@@ -18,24 +18,30 @@ use crate::wire::{self, ApiJson, map};
     path = "/v1/publish",
     tag = "writes",
     request_body = PublishRequest,
+    params(
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting device's credential."),
+    ),
     responses(
         (status = 200, description = "The publish receipt — EVERY protocol outcome (OK / CONFLICT / APPROVAL_REQUIRED / DENIED / …).", body = JsonEnvelope),
         (status = 400, description = "Malformed body or identifier.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
 pub(crate) async fn publish(
     State(state): State<PlaneState>,
+    headers: HeaderMap,
     ApiJson(req): ApiJson<PublishRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let op_id = wire::parse_op_id(&req.op_id)?;
     let candidate = map::candidate_to_domain(req.candidate)?;
-    let device = DeviceOpRequest {
-        device_key_id: req.device_key_id,
+    let auth = DeviceOpAuth {
+        credential,
         op: DeviceOp::PublishDirect,
         expected: req.expected,
     };
@@ -47,7 +53,7 @@ pub(crate) async fn publish(
             &skill,
             &op_id,
             candidate,
-            device,
+            auth,
             req.display_name.as_deref(),
             &created_at,
             now,

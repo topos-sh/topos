@@ -1,10 +1,10 @@
 //! The governance routes — owner/admin device-credential mutations: create-invite, roster set/remove, and
-//! device revoke. Each handler is THIN: rebuild the typed [`GovernanceRequest`] from the body (the presented
-//! `device_key_id` + the op, plus the `{email}` path target), call ONE authority op, and map the
+//! device revoke. Each handler is THIN: rebuild the typed [`GovernanceRequest`] (the Bearer workspace
+//! credential + the op, plus the `{email}` path target), call ONE authority op, and map the
 //! [`GovernanceOutcome`] to a 200 all-outcome envelope.
 //!
 //! The acting device (the **actor**) is NEVER `Principal::parse`d here — the authority resolves its principal
-//! (and role) from the device registry row selected by the presented `device_key_id`. A `{email}` / target is
+//! (and role) from the device registry row the presented credential's sha256 selects. A `{email}` / target is
 //! op DATA, so it is parsed into a [`Principal`] to build the typed op — never trusted as an identity. A
 //! role-denial is a 200 + DENIED envelope (the actor is an authenticated member — nothing to hide), never a
 //! 403; the indistinguishable 404 is reserved for skill-scoped object reads.
@@ -27,6 +27,9 @@ use crate::wire::{self, ApiJson, map};
     path = "/v1/invites",
     tag = "governance",
     request_body = InviteRequest,
+    params(
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting owner device's credential."),
+    ),
     responses(
         (status = 200, description = "The invite receipt — OK carries the InviteData (link + seeded roster/skills); DENIED the flat error.", body = topos_types::JsonEnvelope),
         (status = 400, description = "Malformed body or identifier.", body = topos_types::JsonEnvelope),
@@ -36,8 +39,10 @@ use crate::wire::{self, ApiJson, map};
 )]
 pub(crate) async fn create_invite(
     State(state): State<PlaneState>,
+    headers: axum::http::HeaderMap,
     ApiJson(req): ApiJson<InviteRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     // The invited emails + offered skills are op DATA.
@@ -47,7 +52,7 @@ pub(crate) async fn create_invite(
     let role = role_or_default(req.role);
     let (created_at, _now) = wire::now_utc();
     let request = GovernanceRequest {
-        device_key_id: req.device_key_id,
+        credential,
         op: GovernanceOp::Invite {
             role,
             // The wire body carries no invite expiry; an invite never expires unless governance adds it later.
@@ -71,6 +76,7 @@ pub(crate) async fn create_invite(
     params(
         ("ws" = String, Path, description = "Workspace id (REST sugar; the authoritative workspace_id rides the body)."),
         ("email" = String, Path, description = "The target principal whose role is set."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting owner device's credential."),
     ),
     responses(
         (status = 200, description = "The roster-set receipt — OK on success, DENIED (a 200) on a role denial.", body = topos_types::JsonEnvelope),
@@ -83,14 +89,16 @@ pub(crate) async fn roster_set(
     State(state): State<PlaneState>,
     // `{ws}` is REST sugar; the authoritative `workspace_id` rides the body. `{email}` is the (op-data) target.
     Path((_ws, email)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     ApiJson(req): ApiJson<RosterSetRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let target = parse_target(&email)?;
     let (created_at, _now) = wire::now_utc();
     let request = GovernanceRequest {
-        device_key_id: req.device_key_id,
+        credential,
         op: GovernanceOp::RosterSet {
             role: wire::domain_role(req.role),
             target,
@@ -119,6 +127,7 @@ pub(crate) async fn roster_set(
     params(
         ("ws" = String, Path, description = "Workspace id (REST sugar; the authoritative workspace_id rides the body)."),
         ("email" = String, Path, description = "The target principal to remove from the roster."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting owner device's credential."),
     ),
     responses(
         (status = 200, description = "The roster-remove receipt — OK on success, DENIED (a 200) on a role denial.", body = topos_types::JsonEnvelope),
@@ -130,14 +139,16 @@ pub(crate) async fn roster_set(
 pub(crate) async fn roster_remove(
     State(state): State<PlaneState>,
     Path((_ws, email)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     ApiJson(req): ApiJson<RosterRemoveRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let target = parse_target(&email)?;
     let (created_at, _now) = wire::now_utc();
     let request = GovernanceRequest {
-        device_key_id: req.device_key_id,
+        credential,
         op: GovernanceOp::RosterRemove { target },
     };
     let outcome = state
@@ -162,6 +173,7 @@ pub(crate) async fn roster_remove(
     request_body = DeviceRevokeRequest,
     params(
         ("ws" = String, Path, description = "Workspace id (REST sugar; the authoritative workspace_id rides the body)."),
+        ("Authorization" = String, Header, description = "`Bearer <workspace credential>` — the acting device's credential (owner, or the target's own principal)."),
     ),
     responses(
         (status = 200, description = "The revoke receipt — OK on success (instant revoke), DENIED (a 200) on a role denial.", body = topos_types::JsonEnvelope),
@@ -173,13 +185,15 @@ pub(crate) async fn roster_remove(
 pub(crate) async fn revoke_device(
     State(state): State<PlaneState>,
     Path(_ws): Path<String>,
+    headers: axum::http::HeaderMap,
     ApiJson(req): ApiJson<DeviceRevokeRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let (created_at, _now) = wire::now_utc();
     let request = GovernanceRequest {
-        device_key_id: req.device_key_id,
+        credential,
         op: GovernanceOp::DeviceRevoke {
             target_device_key_id: req.target_device_key_id,
         },

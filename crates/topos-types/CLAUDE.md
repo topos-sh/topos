@@ -3,12 +3,16 @@
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
 ([`results`]), the frozen terminal-outcome enum, the unsigned `WireCurrentRecord` pointer body,
 the error taxonomy, the HTTP wire request/response DTOs ([`requests`]: the write bodies + the
-version metadata + the **enrollment** device-flow/passcode/redeem/admin-claim DTOs — now intent-aware for
-the workspace-standup flow, all additive: `DeviceAuthorizeRequest` made `invite_token` optional and gained
-the closed `SessionIntent` (`enroll`/`standup`); `DeviceAuthorizeResponse` gained the optional
-`verification_uri_complete` + the standup `plane` TOFU block; `DeviceTokenResponse` the optional granted
-`workspace {workspace_id, display_name}`; `RedeemResponse` the optional seated `principal`;
-`VerificationContextResponse` the optional `intent` — + the **governance**
+version metadata + the **enrollment** device-flow/passcode/redeem/admin-claim DTOs — intent-aware for
+the workspace-standup flow; **reshaped by the workspace-credential clean break** (deliberate:
+pre-1.0, no compatibility window): the write + governance bodies DROPPED `device_key_id` (the acting
+device rides the `Authorization: Bearer` workspace credential, never a body field), `RedeemResponse`
+dropped the per-skill `read_creds` (and `RedeemedSkillCred` with it) for the ONE plaintext
+`credential`; earlier standup-era additions stay: `DeviceAuthorizeRequest`'s optional `invite_token` +
+the closed `SessionIntent` (`enroll`/`standup`), `DeviceAuthorizeResponse`'s optional
+`verification_uri_complete` + the standup `plane` block, `DeviceTokenResponse`'s optional granted
+`workspace {workspace_id, display_name}`, `RedeemResponse`'s optional seated `principal`,
+`VerificationContextResponse`'s optional `intent` — + the **governance**
 invite/roster/revoke bodies), the unauthenticated invite-**bootstrap** payload ([`bootstrap`]: the
 pre-enrollment read — workspace + the plane API base to dial; no trust root, no bytes, no role), and the on-disk
 client documents ([`persisted`]: sync / lock / map / op / conflict — the last records an unresolved author
