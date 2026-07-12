@@ -685,7 +685,7 @@ mod tests {
             version_id: None,
             bundle_digest: "c".repeat(64),
             current_generation: None,
-            invite_link: None,
+            share_line: None,
             pending: Some(PublishPending {
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete: "https://topos.sh/verify/CODE".to_owned(),
@@ -708,16 +708,21 @@ mod tests {
             version_id: Some("a".repeat(64)),
             bundle_digest: "c".repeat(64),
             current_generation: Some(Generation { epoch: 1, seq: 1 }),
-            invite_link: None,
+            share_line: None,
             pending: None,
             standup: Some(StandupReceipt {
                 workspace_display_name: "robert's workspace".to_owned(),
+                address: Some("https://topos.example/roberts-workspace".to_owned()),
                 owner_principal: Some("robert@example.com".to_owned()),
             }),
             added: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["standup"]["workspace_display_name"], "robert's workspace");
+        assert_eq!(
+            v["standup"]["address"],
+            "https://topos.example/roberts-workspace"
+        );
         assert_eq!(v["standup"]["owner_principal"], "robert@example.com");
         assert!(v.get("pending").is_none());
         // An OLD-shape ordinary publish (no pending/standup fields) still deserializes (additive-compat).

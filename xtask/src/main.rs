@@ -106,8 +106,8 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::ReviewData)),
         ),
         (
-            "invite-data",
-            emit(schemars::schema_for!(topos_types::results::InviteData)),
+            "invitation-data",
+            emit(schemars::schema_for!(topos_types::requests::InvitationData)),
         ),
         // On-disk persisted client documents.
         (
@@ -337,6 +337,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            notices: Vec::new(),
+            sync: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -363,6 +365,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            notices: Vec::new(),
+            sync: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -396,6 +400,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            notices: Vec::new(),
+            sync: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -589,7 +595,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             version_id: None,
             bundle_digest: fx_digest.to_owned(),
             current_generation: None,
-            invite_link: None,
+            share_line: None,
             pending: Some(PublishPending {
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete: "https://topos.sh/verify/hxk3v9q2m8w4t6r5".to_owned(),
@@ -691,6 +697,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             message: None,
             created_at: "2026-06-25T00:00:00Z".to_owned(),
         }],
+        staleness_window_ms: 604_800_000,
         proposals_awaiting: 1,
     };
 

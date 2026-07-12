@@ -1409,6 +1409,7 @@ mod tests {
             workspace: Some(DeviceTokenWorkspace {
                 workspace_id: "w_acme".to_owned(),
                 display_name: "Acme".to_owned(),
+                address: Some("https://topos.example/acme".to_owned()),
             }),
         };
         let v = serde_json::to_value(&granted).unwrap();
@@ -1416,6 +1417,7 @@ mod tests {
         assert_eq!(v["grant"], "g_opaque");
         assert_eq!(v["workspace"]["workspace_id"], "w_acme");
         assert_eq!(v["workspace"]["display_name"], "Acme");
+        assert_eq!(v["workspace"]["address"], "https://topos.example/acme");
         // An OLD response without the workspace block still deserializes (additive-compat).
         let old: DeviceTokenResponse =
             serde_json::from_value(serde_json::json!({ "status": "granted", "grant": "g" }))
@@ -1424,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn device_authorize_request_intent_and_optional_invite_are_additive() {
+    fn device_authorize_request_intent_and_optional_workspace_are_additive() {
         assert_eq!(
             serde_json::to_string(&SessionIntent::Standup).unwrap(),
             "\"standup\""
@@ -1433,24 +1435,37 @@ mod tests {
             serde_json::to_string(&SessionIntent::Enroll).unwrap(),
             "\"enroll\""
         );
-        // The OLD enroll body (invite_token only) still parses; intent defaults to absent.
-        let old: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
-            "invite_token": "tok",
+        assert_eq!(
+            serde_json::to_string(&SessionIntent::Login).unwrap(),
+            "\"login\""
+        );
+        // The ENROLL body names the workspace ADDRESS; intent may default to absent.
+        let enroll: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
+            "workspace": "acme",
             "device_public_key": "AAAA",
             "machine_name": "laptop",
         }))
         .unwrap();
-        assert_eq!(old.invite_token.as_deref(), Some("tok"));
-        assert!(old.intent.is_none());
-        // The STANDUP body: no invite token, intent standup.
+        assert_eq!(enroll.workspace.as_deref(), Some("acme"));
+        assert!(enroll.intent.is_none());
+        // The STANDUP body: no workspace, intent standup.
         let standup: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
             "intent": "standup",
             "device_public_key": "AAAA",
             "machine_name": "laptop",
         }))
         .unwrap();
-        assert!(standup.invite_token.is_none());
+        assert!(standup.workspace.is_none());
         assert_eq!(standup.intent, Some(SessionIntent::Standup));
+        // The LOGIN body: no workspace, intent login.
+        let login: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
+            "intent": "login",
+            "device_public_key": "AAAA",
+            "machine_name": "laptop",
+        }))
+        .unwrap();
+        assert!(login.workspace.is_none());
+        assert_eq!(login.intent, Some(SessionIntent::Login));
         // An unknown intent is a CLOSED-enum parse failure, not a silent default.
         assert!(
             serde_json::from_value::<DeviceAuthorizeRequest>(serde_json::json!({
@@ -1582,6 +1597,7 @@ mod tests {
                 created_at: "2026-06-25T00:00:00Z".to_owned(),
             }],
             proposals_awaiting: 2,
+            staleness_window_ms: 604_800_000,
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -1597,6 +1613,8 @@ mod tests {
         // Absent optional notice fields omit (skip_serializing_if) — never serialized as null.
         assert!(v["notices"][0].get("version_id").is_none());
         assert!(v["notices"][0].get("message").is_none());
+        // The ONE staleness clock rides every delivery.
+        assert_eq!(v["staleness_window_ms"], 604_800_000_u64);
         let back: WireDelivery = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills.len(), 1);
         assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
@@ -1609,6 +1627,7 @@ mod tests {
             "detached": [],
             "notices": [],
             "proposals_awaiting": 0,
+            "staleness_window_ms": 604800000,
         }))
         .unwrap();
         assert!(empty.skills.is_empty() && empty.notices.is_empty());
@@ -1637,35 +1656,34 @@ mod tests {
     }
 
     #[test]
-    fn workspace_role_is_snake_case_and_invite_request_round_trips() {
+    fn workspace_role_is_snake_case_and_invitation_bodies_round_trip() {
         assert_eq!(
             serde_json::to_string(&WorkspaceRole::Reviewer).unwrap(),
             "\"reviewer\""
         );
-        let req = InviteRequest {
-            workspace_id: "w_acme".to_owned(),
-            op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
+        // The invitation is a roster write: emails + optional channel pre-placements, no role
+        // field (every CLI invitee starts as a member) and no link (the address is the answer).
+        let req = InvitationRequest {
             emails: vec!["alice@acme.com".to_owned()],
-            role: Some(WorkspaceRole::Member),
-            skills: vec![InviteSkill {
-                skill_id: "s_deploy".to_owned(),
-                name: Some("Deploy".to_owned()),
-            }],
+            channels: vec!["ops".to_owned()],
         };
         let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["role"], "member");
         assert_eq!(v["emails"][0], "alice@acme.com");
+        assert_eq!(v["channels"][0], "ops");
         // The acting device rides the Authorization header — never a body field.
         assert!(v.get("device_key_id").is_none() && v.get("credential").is_none());
-        let back: InviteRequest = serde_json::from_value(v).unwrap();
-        assert_eq!(back.skills[0].skill_id, "s_deploy");
-        // An omitted role deserializes to None (the handler defaults it to member).
-        let no_role: InviteRequest = serde_json::from_value(serde_json::json!({
-            "workspace_id": "w_acme",
-            "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "emails": ["bob@acme.com"],
-        }))
-        .unwrap();
-        assert!(no_role.role.is_none());
+        assert!(v.get("role").is_none(), "invitations mint members only");
+        // Channels omit when empty (skip_serializing_if) and default on the way in.
+        let bare: InvitationRequest =
+            serde_json::from_value(serde_json::json!({ "emails": ["bob@acme.com"] })).unwrap();
+        assert!(bare.channels.is_empty());
+        let data = InvitationData {
+            address: "https://topos.example/acme".to_owned(),
+            invited: vec!["alice@acme.com".to_owned()],
+            mailed: false,
+        };
+        let v = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["address"], "https://topos.example/acme");
+        assert_eq!(v["mailed"], false);
     }
 }

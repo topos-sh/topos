@@ -98,6 +98,7 @@ fn good_delivery() -> WireDelivery {
             created_at: "2026-06-25T00:00:00Z".into(),
         }],
         proposals_awaiting: 1,
+        staleness_window_ms: 604_800_000,
     }
 }
 
