@@ -20,6 +20,7 @@ pub(crate) mod delivery;
 pub(crate) mod describe;
 pub(crate) mod enroll;
 pub(crate) mod governance;
+pub(crate) mod internal;
 pub(crate) mod invitations;
 pub(crate) mod login;
 pub(crate) mod notices;

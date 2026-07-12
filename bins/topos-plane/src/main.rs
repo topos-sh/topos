@@ -146,6 +146,11 @@ struct Config {
     /// `PUT /v1/workspaces/{ws}/policy/review-required` toggle; unset, that route answers 404.
     #[arg(long, env = "TOPOS_PLANE_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+    /// The internal-session-lane token (a secret — never logged; only its sha256 is retained). Enables the
+    /// `/internal/v1/*` lane — HTTP over the session wrappers for a downstream session-authenticated
+    /// composing surface; unset, every route on that lane answers 404.
+    #[arg(long, env = "TOPOS_PLANE_INTERNAL_TOKEN", hide_env_values = true)]
+    internal_token: Option<String>,
     /// The ACME TLS domain list (repeatable flag; comma-delimited in the env var). NON-EMPTY turns the
     /// EXPERIMENTAL built-in ACME TLS listener on; empty (the default) serves plain HTTP exactly like a
     /// build without the feature (terminate TLS at a reverse proxy — the recommended posture).
@@ -361,6 +366,12 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
     // The operator admin token (post-construction, like the rate limits): only its sha256 is retained.
     let state = match cfg.admin_token.as_deref() {
         Some(token) if !token.trim().is_empty() => state.with_admin_token(token),
+        _ => state,
+    };
+    // The internal-session-lane token (post-construction, like the admin token): only its sha256 is retained;
+    // unset (or blank), the whole `/internal/v1/*` lane stays 404-invisible.
+    let state = match cfg.internal_token.as_deref() {
+        Some(token) if !token.trim().is_empty() => state.with_internal_token(token),
         _ => state,
     };
 

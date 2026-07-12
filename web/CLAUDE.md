@@ -1,0 +1,60 @@
+# `web/` — the product web app (TypeScript / React Router 8 on bun)
+
+The signed-in surface for Topos: a workspace dashboard, the skill browser, the rendered review UI
+(unified diff + Approve/Reject + comments), the verification page, and the create/join flows. It
+renders state read from the vault over HTTP and its own Postgres schema. It holds **no signing key,
+computes no digest, and initiates no device-signed write** — publishing stays on the enrolled device;
+this app is surfaces.
+
+**Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
+Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the
+`--color-*` table in `app/app.css @theme` is kept identical to it by `check:tokens`) · Martian Mono +
+IBM Plex Sans/Mono self-hosted via `@fontsource` · `@pierre/diffs` behind a sanitizing wrapper · zod ·
+Biome · Vitest + Playwright. Blocking SSR — every page ships one complete document, no visible loading
+states on the signed-in path; every vault/DB read is per-request fresh.
+
+**Composition — four additive seams.** The package (`@topos/web`) exports `./routes`, `./nav`,
+`./entitlements`, and `./auth-config`. A deployment's `app/routes.ts` is one line — `ossRoutes()`; a
+downstream superset build composes `[...ossRoutes({ dir }), ...ownRoutes]` and appends its own nav
+entries, entitlements provider, and auth rungs. Composition is **additive-only**: a superset appends,
+never patches or shadows an OSS entry. The route modules type their args with the generic
+`LoaderFunctionArgs`/`ActionFunctionArgs` (never `./+types/*`) so the table works unchanged from another
+app directory.
+
+**Auth + authorization (fail-closed).** The OSS default rung is **email+password with zero delivery
+dependency** — a self-hosted team signs in with no SMTP or OAuth. A session is evidence, never
+authority: every admission resolves against the **directory roster** at request time.
+`app/lib/auth/guards.server.ts` is the only place that mints **branded actors** (`requireSession` →
+`requireMember` → `requireWorkspaceOwner`/`requireReviewer`); the brand symbol is module-private, so a
+loader that skipped its guard cannot construct one. Every function in the DAL
+(`app/lib/db/queries.server.ts`) requires an actor as its first argument, and workspace-scoped reads
+take their scope from the actor — a wrong-scope actor fails loudly. **Misses render 404, never 403.**
+
+**Data path split.** Row **reads** (roster, catalog, policy, memberships) are direct Drizzle SELECTs on
+the read-only `plane` schema. Row **writes** go through the directory's guarded `topos_*` SQL functions
+(e.g. `topos_invite`) — policy logic lives in the database, written once. **Byte/pointer** ops (current,
+versions, bundles, proposals, review approve/reject, revert, workspace create, session approves) ride
+the vault's **internal session lane** through the one transport, `app/lib/plane/client.server.ts`
+(`vaultFetch` + a runtime route allowlist). The app keeps its **own** `web` schema (Better Auth tables +
+the policy audit trail + proposal comments); migrations run at first request and via `bun run db:migrate`.
+
+**Boundary gates** (`bun run check`, all in CI): `check:tokens` (DESIGN.md ↔ `app.css` color drift),
+`check:boundary` (no crypto/digest/signature anywhere; the vault URL + `fetch(` confined to the one
+transport; no device-signed write path spelled; server modules carry the `.server` suffix; every
+data-reading route guards or is on the sessionless allowlist; the raw DB surface stays inside the DAL;
+zero client env), `check:contract` (`app/lib/plane/contract/schema.d.ts` regenerated from the repo's
+committed OpenAPI, drift-gated), and `check:bundle` (post-build byte-scan of `build/client` for server
+secret names).
+
+**Run it.**
+
+```sh
+bun install
+bun run dev          # needs DATABASE_URL + PLANE_INTERNAL_URL/PLANE_INTERNAL_TOKEN + BETTER_AUTH_SECRET/URL
+bun run db:migrate   # DATABASE_URL=… apply the web-schema migrations
+bun test             # vitest unit
+bun run test:e2e     # playwright
+bun run check        # biome + the boundary/token/contract gates + typecheck
+```
+
+`AGENTS.md` symlinks to this file.

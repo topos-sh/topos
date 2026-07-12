@@ -146,6 +146,23 @@
   posture — an operator's own secret, not an object-existence oracle); success is **204**, an idempotent
   set. NOT device-credential authenticated (a device-credential-authenticated governance variant over this
   policy is later work).
+- **The internal session lane** (`routes/internal.rs`, `internal_session_routes()`): the `/internal/v1/*`
+  HTTP front for the lib-only session wrappers (the member-scoped reads `session_read_cmd`, the
+  review/revert `session_review_cmd`, `remove_member`, `set_review_required`, and the standup
+  `create_workspace`/`approve_session`/`approve_standup`) — for a downstream session-authenticated composing
+  surface that has already proven who is acting. It mirrors the policy route's auth shape: ONE **internal
+  bearer token** (`--internal-token` / `TOPOS_PLANE_INTERNAL_TOKEN`, sha256-only via
+  `PlaneState::with_internal_token`) gates the whole lane — with NO token configured every route answers the
+  uniform **404** (invisible, so `router(state)` never exposes it unarmed); configured-but-wrong is an honest
+  **401**; then the acting principal rides the `x-topos-acting-email` header (missing/empty ⇒ **400**), all
+  three decided BEFORE any body/id parse (no oracle). The acting email is the composer's session-verified
+  assertion; the wrappers' own in-transaction gates re-verify the roster rows, so the lane adds no trust
+  decision. Reads answer **200** `no-store` (a verbatim `/v1`-parity wire body, or a uniform **404** on any
+  miss); writes answer **200** all-outcome bodies (`created`/`approved`/`denied`/`not_found`/… — a
+  member-entitled miss stays a 200 `not_found` the composing page renders itself), except the idempotent
+  policy set (**204**). Its request/response DTOs are **lane-local** (`snake_case` serde) — deliberately NOT
+  in `topos-types` and NOT in the OpenAPI (the handlers carry no `#[utoipa::path]`); the lane is
+  composition-internal, out of the public contract.
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 - **The backup/restore epoch bump** (`restore_cmd.rs`): `PlaneState::restore_bump_epochs(workspaces,

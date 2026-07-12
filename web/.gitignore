@@ -1,0 +1,11 @@
+node_modules/
+build/
+.react-router/
+test-results/
+playwright-report/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.invite-emails.jsonl
+tests/e2e/.auth/

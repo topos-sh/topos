@@ -80,11 +80,17 @@ pub fn router(state: PlaneState) -> Router {
     let enroll_and_governance =
         enroll_and_governance_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
 
+    // The INTERNAL session lane (`/internal/v1/*`): HTTP over the lib-only session wrappers for a downstream
+    // session-authenticated composing surface. Small JSON bodies behind the same 64 KiB belt; the whole lane
+    // is 404-invisible until an internal token is configured (`with_internal_token`).
+    let internal = internal_session_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
+
     writes
         .merge(reads)
         .merge(member_verbs)
         .merge(public)
         .merge(enroll_and_governance)
+        .merge(internal)
         // Any UNMATCHED path is the constant protocol card (a GET) or the uniform JSON 404 (any other
         // method) — a resource address a client can re-root from, with no path echo and no existence signal.
         .fallback(routes::card::protocol_card)
@@ -155,6 +161,72 @@ fn member_verb_routes() -> Router<PlaneState> {
         .route(
             "/v1/workspaces/{ws}/invitations",
             post(routes::invitations::invite),
+        )
+}
+
+/// The INTERNAL session-lane route group — HTTP over the lib-only session wrappers for a downstream
+/// session-authenticated composing surface. Every route is gated by the ONE internal bearer token (the whole
+/// lane is 404-invisible until [`PlaneState::with_internal_token`](crate::PlaneState::with_internal_token) is
+/// called) and reads the acting principal from the `x-topos-acting-email` header; the wrappers' own
+/// in-transaction gates re-verify the roster rows. Factored out so the body-size belt wraps the group in one
+/// place. These handlers carry NO `#[utoipa::path]` — the lane is composition-internal, out of the committed
+/// OpenAPI.
+fn internal_session_routes() -> Router<PlaneState> {
+    Router::new()
+        // Reads (member-scoped; `no-store`).
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/current",
+            get(routes::internal::read_current),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}",
+            get(routes::internal::read_version),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
+            get(routes::internal::read_object),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals",
+            get(routes::internal::list_proposals),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}",
+            get(routes::internal::read_proposal),
+        )
+        // Genesis / session-approval writes.
+        .route(
+            "/internal/v1/workspaces",
+            post(routes::internal::create_workspace),
+        )
+        .route(
+            "/internal/v1/device-sessions/{user_code}/approve",
+            post(routes::internal::approve_session),
+        )
+        .route(
+            "/internal/v1/device-sessions/{user_code}/approve-standup",
+            post(routes::internal::approve_standup),
+        )
+        // Roster / policy / review writes.
+        .route(
+            "/internal/v1/workspaces/{ws}/roster/remove",
+            post(routes::internal::remove_member),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/policy/review-required",
+            put(routes::internal::set_review_required),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/approve",
+            post(routes::internal::approve_proposal),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/reject",
+            post(routes::internal::reject_proposal),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/reverts",
+            post(routes::internal::revert),
         )
 }
 

@@ -231,12 +231,12 @@ This prints a one-time `/i/` claim link (a bearer owner capability — store it 
 `topos follow <claim-link>` stands the workspace up and seats that device as its first owner, who can then
 `publish` and invite teammates (`topos invite <emails…>` seats them; they join by the workspace address).
 
-**Joining a self-hosted workspace (current limitation).** Following by address opens a browser sign-in page,
-and this repo deliberately ships **no page HTML** — so until the OSS web app lands, a self-hosted plane
-admits new members through one of two doors: **emailed-passcode enrollment** (configure the `TOPOS_PLANE_SMTP_*`
-vars below, and a hosted composition that serves the passcode page), or the **owner's claim link** — the
-same `topos-plane mint-claim` above, minted once per joining device. The hosted plane at `topos.sh` serves
-the sign-in page itself, so `follow <address>` there just works.
+**Joining a self-hosted workspace.** Following by address opens a browser sign-in page. That page lives
+in this repo's [`web/`](web/) app (sign-in, the device-approval verification page, the dashboard and
+review UI) — run it next to the plane (see `web/CLAUDE.md`; email+password by default, no SMTP needed).
+The compose stack does not package the web app yet — until it does, a plane-only deployment admits new
+members through **emailed-passcode enrollment** (the `TOPOS_PLANE_SMTP_*` vars below) or the **owner's
+claim link** — the same `topos-plane mint-claim` above, minted once per joining device.
 
 ### Configuration
 
@@ -277,6 +277,15 @@ the suite provisions per test:
 export DATABASE_URL="postgres://topos:topos@localhost:5432/topos"
 docker run --rm -e POSTGRES_USER=topos -e POSTGRES_PASSWORD=topos \
   -e POSTGRES_DB=topos -p 5432:5432 postgres:18
+```
+
+The web app is a separate TypeScript workspace under [`web/`](web/) (React Router, bun):
+
+```sh
+cd web && bun install
+bun run check      # biome + typecheck + the boundary/token/contract gates
+bun test           # vitest (needs a Postgres; see web/CLAUDE.md)
+bun run test:e2e   # playwright
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) to propose changes and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the

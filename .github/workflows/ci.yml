@@ -156,3 +156,48 @@ jobs:
       - name: prepare --check (fails if the committed .sqlx has drifted from the schema)
         working-directory: crates/plane-store
         run: cargo sqlx prepare --check -- --tests --features test-fixtures
+
+  # The web app: the static gates (biome + typegen/tsc + design tokens + boundary + contract), the
+  # unit suite (provisions a scratch database per run on the service Postgres), and the Playwright
+  # e2e (the fixture vault + a bootstrapped topos_e2e database — db-setup.mjs creates the app roles
+  # itself, so the virgin service container is enough).
+  web:
+    name: web (check + unit + e2e)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+      E2E_MAINTENANCE_URL: "postgres://postgres:postgres@localhost:5432/postgres"
+      E2E_ADMIN_URL: "postgres://postgres:postgres@localhost:5432/topos_e2e"
+      DATABASE_URL: "postgres://topos_web:web@localhost:5432/topos_e2e"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.3.10
+      - name: install
+        run: bun install --frozen-lockfile
+      - name: check (biome + typegen + tsc + tokens + boundary + contract)
+        run: bun run check
+      - name: unit tests
+        run: bunx vitest run
+      - name: install chromium
+        run: bunx playwright install --with-deps chromium
+      - name: e2e
+        run: bunx playwright test

@@ -19,6 +19,7 @@ mod card;
 mod current;
 mod enroll;
 mod governance;
+mod internal;
 mod invitations;
 mod login;
 mod member_verbs;

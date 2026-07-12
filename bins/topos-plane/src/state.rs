@@ -39,6 +39,11 @@ pub struct PlaneState {
     /// admin-authenticated policy route is disabled (it answers 404, so a composition that never sets a
     /// token can't accidentally expose an unauthenticated toggle).
     admin_token_sha256: Option<[u8; 32]>,
+    /// The sha256 of the internal-session-lane token, when one is configured
+    /// ([`with_internal_token`](Self::with_internal_token)) — the raw token is never stored. `None` ⇒ the
+    /// internal session lane (`/internal/v1/*`) is disabled (every route answers 404, so a composition that
+    /// never sets a token can't accidentally expose an unauthenticated internal lane).
+    internal_token_sha256: Option<[u8; 32]>,
 }
 
 /// The static enrollment configuration the verification routes read: the public base URL, the deployment
@@ -200,6 +205,7 @@ impl PlaneState {
             #[cfg(feature = "enroll-oidc")]
             oidc: None,
             admin_token_sha256: None,
+            internal_token_sha256: None,
         }
     }
 
@@ -331,6 +337,31 @@ impl PlaneState {
     /// token is configured.
     pub(crate) fn admin_token_matches(&self, provided: &str) -> bool {
         self.admin_token_sha256
+            .is_some_and(|stored| topos_core::digest::sha256(provided.as_bytes()) == stored)
+    }
+
+    /// Enable the internal session lane (`/internal/v1/*`) by configuring its bearer token. Only the token's
+    /// sha256 is retained (never the raw secret — it can't reach a `Debug`/log); with no token configured the
+    /// lane stays disabled and every route answers 404. The OSS bin wires this from `--internal-token` /
+    /// `TOPOS_PLANE_INTERNAL_TOKEN`; a composing plane that fronts the lane with its own session-authenticated
+    /// surface calls it too.
+    #[must_use]
+    pub fn with_internal_token(mut self, token: &str) -> Self {
+        self.internal_token_sha256 = Some(topos_core::digest::sha256(token.as_bytes()));
+        self
+    }
+
+    /// Whether an internal-session-lane token is configured (every `/internal/v1/*` route is 404-invisible
+    /// otherwise).
+    pub(crate) fn internal_token_configured(&self) -> bool {
+        self.internal_token_sha256.is_some()
+    }
+
+    /// Whether `provided` is the configured internal-session-lane token — a fixed 32-byte sha256 compare
+    /// (timing-independent of any prefix match), the same token-as-sha256 idiom the admin token uses.
+    /// `false` when no token is configured.
+    pub(crate) fn internal_token_matches(&self, provided: &str) -> bool {
+        self.internal_token_sha256
             .is_some_and(|stored| topos_core::digest::sha256(provided.as_bytes()) == stored)
     }
 
