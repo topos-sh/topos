@@ -1466,8 +1466,7 @@ impl Authority {
         skill_id: &str,
         created_at: &str,
     ) -> Result<CurationOutcome> {
-        crate::channels::channel_unplace(self, ws, credential, channel, skill_id, created_at)
-            .await
+        crate::channels::channel_unplace(self, ws, credential, channel, skill_id, created_at).await
     }
 
     /// **Join a channel** — always self-serve for a confirmed member; `everyone` refuses (its

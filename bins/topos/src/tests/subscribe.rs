@@ -1115,7 +1115,9 @@ fn an_excluded_skills_unreadable_sync_doc_warns_and_never_aborts_the_quiet_sweep
         },
     )]);
     // Poison the skill's sync.json with an unknown schema version — the fail-closed doc load refuses it.
-    let sp = rig.layout().published(&crate::id::SkillId::parse("s_docs").unwrap());
+    let sp = rig
+        .layout()
+        .published(&crate::id::SkillId::parse("s_docs").unwrap());
     std::fs::create_dir_all(sp.sync.parent().unwrap()).unwrap();
     std::fs::write(&sp.sync, br#"{"schema_version":9999}"#).unwrap();
 

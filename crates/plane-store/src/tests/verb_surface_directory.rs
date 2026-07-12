@@ -936,11 +936,16 @@ async fn device_lane_ops_key_on_the_skill_id_not_the_catalog_name(pool: PgPool) 
 
     // follow_skill by the ID works; by the NAME it is the uniform NotFound.
     assert_eq!(
-        fx.authority.follow_skill(&w, &alice, "s_deploy", CREATED_AT).await.unwrap(),
+        fx.authority
+            .follow_skill(&w, &alice, "s_deploy", CREATED_AT)
+            .await
+            .unwrap(),
         crate::channels::SubscriptionOutcome::Followed,
     );
     assert!(matches!(
-        fx.authority.follow_skill(&w, &alice, "deploy", CREATED_AT).await,
+        fx.authority
+            .follow_skill(&w, &alice, "deploy", CREATED_AT)
+            .await,
         Err(AuthorityError::NotFound),
     ));
 
@@ -962,13 +967,27 @@ async fn device_lane_ops_key_on_the_skill_id_not_the_catalog_name(pool: PgPool) 
     // protect (skill kind) and reach both take the id.
     assert!(matches!(
         fx.authority
-            .protect(&w, &alice, ProtectKind::Skill, "deploy", ProtectLevel::Protected, CREATED_AT)
+            .protect(
+                &w,
+                &alice,
+                ProtectKind::Skill,
+                "deploy",
+                ProtectLevel::Protected,
+                CREATED_AT
+            )
             .await,
         Err(AuthorityError::NotFound),
     ));
     assert_eq!(
         fx.authority
-            .protect(&w, &alice, ProtectKind::Skill, "s_deploy", ProtectLevel::Protected, CREATED_AT)
+            .protect(
+                &w,
+                &alice,
+                ProtectKind::Skill,
+                "s_deploy",
+                ProtectLevel::Protected,
+                CREATED_AT
+            )
             .await
             .unwrap(),
         crate::channels::ProtectOutcome::Set,
@@ -978,5 +997,12 @@ async fn device_lane_ops_key_on_the_skill_id_not_the_catalog_name(pool: PgPool) 
         Err(AuthorityError::NotFound),
     ));
     // The author self-follows at genesis, so the audience is at least one.
-    assert!(fx.authority.reach(&w, &alice, "s_deploy").await.unwrap().persons >= 1);
+    assert!(
+        fx.authority
+            .reach(&w, &alice, "s_deploy")
+            .await
+            .unwrap()
+            .persons
+            >= 1
+    );
 }

@@ -479,7 +479,13 @@ async fn a_direct_follow_survives_dropping_from_every_channel(pool: PgPool) {
     );
     // Drop B from every channel it sits in.
     fx.authority
-        .channel_unplace(&w, &cred(&w, "dk_alice"), "everyone", sb.as_str(), CREATED_AT)
+        .channel_unplace(
+            &w,
+            &cred(&w, "dk_alice"),
+            "everyone",
+            sb.as_str(),
+            CREATED_AT,
+        )
         .await
         .unwrap();
 

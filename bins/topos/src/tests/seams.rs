@@ -333,13 +333,19 @@ fn keep_as_yours_fails_closed_on_ambiguous_drafts_and_loses_nothing() {
     // The describe still runs (a draft rides along — the user is not told "nothing to keep").
     match ops::keep_as_yours(&ctx, "deploy", false).unwrap() {
         Some(ops::KeepAsYoursOutcome::Described { data, .. }) => {
-            assert!(data.has_draft, "an ambiguous history still has a draft to keep");
+            assert!(
+                data.has_draft,
+                "an ambiguous history still has a draft to keep"
+            );
         }
         other => panic!("expected a describe, got {other:?}"),
     }
     // `--yes` fails closed — and deletes NOTHING.
     assert!(
-        matches!(ops::keep_as_yours(&ctx, "deploy", true), Err(ClientError::Corrupt(_))),
+        matches!(
+            ops::keep_as_yours(&ctx, "deploy", true),
+            Err(ClientError::Corrupt(_))
+        ),
         "an ambiguous retained history refuses the fork rather than lose a draft"
     );
     assert!(

@@ -1707,13 +1707,13 @@ fn build_pull_scope(
         }
         return Ok(ops::PullScope::One {
             name: name.to_owned(),
-                workspace: None,
+            workspace: None,
             mode: ops::TargetMode::GoBack(vref),
         });
     }
     Ok(ops::PullScope::One {
         name: arg,
-                workspace: None,
+        workspace: None,
         mode: if onto_current {
             ops::TargetMode::OntoCurrent
         } else {
@@ -1753,7 +1753,7 @@ pub(crate) fn pull_with_name_fallback(
                 ctx,
                 ops::PullScope::One {
                     name: arg.expect("guard checked Some"),
-                workspace: None,
+                    workspace: None,
                     mode: ops::TargetMode::AcceptPending,
                 },
             )

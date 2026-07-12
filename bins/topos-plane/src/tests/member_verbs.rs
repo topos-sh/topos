@@ -26,7 +26,6 @@ async fn seed_owner_genesis(ctx: &EnrollCtx, op_id: &str) {
         .expect("seed genesis");
 }
 
-
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn the_describe_reads_serve_a_member(pool: PgPool) {
     let ctx = enroll_setup(pool, "verbs-describe").await;

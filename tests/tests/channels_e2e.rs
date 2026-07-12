@@ -236,7 +236,7 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
         let a: &Authority = &plane.authority;
         // Remove B from ops — it is now referenced by NO channel.
         assert_eq!(
-            a.channel_unplace(&ws(), OWNER_CRED, "ops", "beacon", AT)
+            a.channel_unplace(&ws(), OWNER_CRED, "ops", "s_beacon", AT)
                 .await
                 .unwrap(),
             plane_store::CurationOutcome::Removed
@@ -273,7 +273,7 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
     // into the person's delivered set (the server-side half of the self-heal).
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        a.channel_place(&ws(), OWNER_CRED, "ops", "beacon", AT)
+        a.channel_place(&ws(), OWNER_CRED, "ops", "s_beacon", AT)
             .await
             .unwrap();
         let d = a.delivery(&ws(), FOL_CRED).await.unwrap();
@@ -350,7 +350,7 @@ fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
             Some("ops"),
         )
         .await;
-        a.channel_place(&ws(), OWNER_CRED, "eng", "beacon", AT)
+        a.channel_place(&ws(), OWNER_CRED, "eng", "s_beacon", AT)
             .await
             .unwrap();
         a.channel_join(&ws(), FOL_CRED, "ops", AT).await.unwrap();
@@ -421,7 +421,7 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
             None,
         )
         .await;
-        a.channel_place(&ws(), OWNER_CRED, "ops", "beacon", AT)
+        a.channel_place(&ws(), OWNER_CRED, "ops", "s_beacon", AT)
             .await
             .unwrap();
         a.channel_join(&ws(), FOL_CRED, "ops", AT).await.unwrap();
@@ -459,7 +459,7 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
     // Now UNFOLLOW B (person-scoped) — the reconcile FREEZES it in place (Detached), bytes intact.
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        a.unfollow_skill(&ws(), FOL_CRED, "beacon", NOW, AT)
+        a.unfollow_skill(&ws(), FOL_CRED, "s_beacon", NOW, AT)
             .await
             .unwrap();
     });
@@ -527,7 +527,7 @@ fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
     plane.rt.block_on(async {
         plane
             .authority
-            .exclude_device(&ws(), FOL_CRED, "deploy", AT)
+            .exclude_device(&ws(), FOL_CRED, "s_deploy", AT)
             .await
             .unwrap();
     });
@@ -550,7 +550,7 @@ fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
     plane.rt.block_on(async {
         plane
             .authority
-            .follow_skill(&ws(), FOL_CRED, "deploy", AT)
+            .follow_skill(&ws(), FOL_CRED, "s_deploy", AT)
             .await
             .unwrap();
         // The server delivers it again (the exclusion is lifted).

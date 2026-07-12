@@ -590,7 +590,15 @@ async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
     )
     .await;
     crate::set_current::publish(
-        &fx.authority, &w, &s, &staged, &device, Some("Deploy"), None, CREATED_AT, NOW,
+        &fx.authority,
+        &w,
+        &s,
+        &staged,
+        &device,
+        Some("Deploy"),
+        None,
+        CREATED_AT,
+        NOW,
     )
     .await
     .unwrap();
@@ -612,7 +620,13 @@ async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
     assert_eq!(
         fx.authority
             .purge_version_session(
-                &w, "alice@acme.com", "deploy", vcommit, DeploymentMode::Cloud, CREATED_AT, NOW,
+                &w,
+                "alice@acme.com",
+                "deploy",
+                vcommit,
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW,
             )
             .await
             .unwrap(),
@@ -636,7 +650,10 @@ async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
     )
     .await;
     assert_eq!(rp2.outcome, TO::NeedsReview);
-    assert_eq!(vcommit2, vcommit, "content addressing re-derives the same id");
+    assert_eq!(
+        vcommit2, vcommit,
+        "content addressing re-derives the same id"
+    );
     assert_eq!(
         purge_tombstone(&pool, "w_acme", &vcommit).await,
         None,
