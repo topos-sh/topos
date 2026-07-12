@@ -203,5 +203,7 @@ jobs:
         run: bunx vitest run
       - name: install chromium
         run: bunx playwright install --with-deps chromium
+      # The database must exist BEFORE the suite: Playwright launches the web servers ahead of
+      # globalSetup, and the served app's readiness probe is a database-backed /healthz.
       - name: e2e
-        run: bunx playwright test
+        run: node tests/e2e/db-setup.mjs && bunx playwright test
