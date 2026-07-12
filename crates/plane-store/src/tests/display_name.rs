@@ -38,6 +38,7 @@ async fn publish_named(
         &staged,
         &device,
         display_name,
+        None,
         CREATED_AT,
         NOW,
     )
@@ -238,6 +239,7 @@ async fn a_name_less_move_keeps_the_name_and_the_next_named_move_updates_it(pool
         &staged,
         &device,
         None,
+        None,
         CREATED_AT,
         NOW,
     )
@@ -269,6 +271,7 @@ async fn a_name_less_move_keeps_the_name_and_the_next_named_move_updates_it(pool
         &staged,
         &device,
         Some("Second Name"),
+        None,
         CREATED_AT,
         NOW,
     )

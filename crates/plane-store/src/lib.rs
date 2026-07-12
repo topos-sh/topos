@@ -96,9 +96,17 @@ mod tests;
 // exposed as the public `Authority::run_gc`/`run_recovery`/`run_janitor` (the composing server owns
 // scheduling — this library holds none, but it hands the composer the handles to schedule).
 pub(crate) use custody::{gc, lifecycle, lineage, read, restore, set_current, upload};
-pub(crate) use directory::{enroll, governance, session_read, session_review, session_roster};
+pub(crate) use directory::{
+    catalog, channels, delivery, enroll, governance, session_read, session_review, session_roster,
+};
 
 pub use authority::{Authority, PoolConfig};
+pub use catalog::{LifecycleOutcome, PurgeOutcome};
+pub use channels::{
+    ChannelMembershipOutcome, CurationOutcome, ProtectKind, ProtectLevel, ProtectOutcome,
+    SubscriptionOutcome,
+};
+pub use delivery::{AppliedSkill, DeliveredSkill, Delivery, DeliveryNotice};
 pub use enroll::{
     ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
     EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap, PasscodeComplete,

@@ -418,7 +418,6 @@ async fn recovery_sweep_spares_a_deleting_object_re_rooted_by_a_commit_edge(pool
         .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
     let body = b"shared content the recovery must not reclaim";
 
     // (1) Fenced migrate of `body`, then abandon -> present, unrooted (a normal GC candidate). The migrated

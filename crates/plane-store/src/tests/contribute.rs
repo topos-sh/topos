@@ -78,6 +78,7 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool:
             genesis(vec![file("SKILL.md", b"v0")]),
             device,
             None,
+            None,
             CREATED_AT,
             NOW,
         )

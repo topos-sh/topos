@@ -302,14 +302,15 @@ async fn register(
         .seed_device(ws, dkid, key, &p, false, &cred(ws, dkid))
         .await
         .unwrap();
-    // Every device write now gates on a CONFIRMED workspace member (any role); seat one (the per-skill
-    // roster no longer authorizes anything — it survives only as follow-state).
+    // Every device write gates on a CONFIRMED workspace member (any role); seat one. The per-skill
+    // `roster` table is gone (increment 3 lifted follow-state into person-scoped `skill_follows`);
+    // membership alone authorizes reads AND writes, so no per-skill seeding is needed here.
     fx.authority
         .db()
         .seed_workspace_member(ws, &p, "member", "confirmed")
         .await
         .unwrap();
-    fx.authority.db().seed_roster(ws, skill, &p).await.unwrap();
+    let _ = skill; // the skill is still named by callers (their intent), but no longer seeded per-skill
 }
 
 /// Ingest + migrate, returning the staged candidate + the device request — so a test can drive the
@@ -391,6 +392,7 @@ async fn publish(
         skill,
         &staged,
         &device,
+        None,
         None,
         CREATED_AT,
         NOW,
@@ -482,6 +484,7 @@ async fn do_propose(
         skill,
         &staged,
         &device,
+        None,
         None,
         CREATED_AT,
         NOW,

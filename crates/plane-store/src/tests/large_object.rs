@@ -215,8 +215,6 @@ async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash(pool: PgPo
         .seed_workspace_member(&w, &reader, "member", "confirmed")
         .await
         .unwrap();
-    a.db().seed_roster(&w, &s, &reader).await.unwrap();
-    a.db().seed_roster(&w, &other, &reader).await.unwrap();
 
     // A member reads the offloaded bytes of `s` (the read dispatched to the large store + re-verified).
     assert_eq!(a.read_object(&reader, &w, &s, obj).await.unwrap(), body);
@@ -259,7 +257,6 @@ async fn cross_workspace_offload_has_no_dedup_and_stays_isolated(pool: PgPool) {
         .seed_workspace_member(&wa, &p, "member", "confirmed")
         .await
         .unwrap();
-    a.db().seed_roster(&wa, &s, &p).await.unwrap();
     assert_eq!(a.read_object(&p, &wa, &s, obj).await.unwrap(), body);
     assert!(matches!(
         a.read_object(&p, &wb, &s, obj).await,
@@ -372,7 +369,6 @@ async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound
         .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
     // The object is authorized + offloaded; now remove the large bytes out-of-band (a provenance/store
     // divergence). The read is reachable only AFTER authz, so surfacing the fault discloses nothing.
     a.large_store(&w).delete(obj.0).unwrap();
@@ -578,7 +574,6 @@ async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds(pool: PgPoo
         .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
 
     // The git-resident file reads correctly despite the offloaded sibling…
     assert_eq!(a.read_object(&p, &w, &s, small_id).await.unwrap(), small);

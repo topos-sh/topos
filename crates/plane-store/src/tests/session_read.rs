@@ -534,7 +534,6 @@ async fn both_lanes_gate_on_membership_not_roster(pool: PgPool) {
     // A per-skill roster row but NO confirmed membership → the uniform miss on BOTH lanes (roster grants
     // nothing): the device lane (public `read_object`, the shared membership gate) and the session lane.
     let rostered = prin("rostered@acme.com");
-    a.db().seed_roster(&w, &s, &rostered).await.unwrap();
     assert!(matches!(
         a.read_object(&rostered, &w, &s, obj).await,
         Err(AuthorityError::NotFound)

@@ -1062,10 +1062,13 @@ fn check_seam() -> Result<()> {
     // Both the module-group paths AND the crate-root forwarding aliases (lib.rs re-exports the
     // directory modules at the crate root for the facade/tests) — an alias path would otherwise
     // slip a custody→directory import past the group check.
-    const DIRECTORY_PATHS: [&str; 9] = [
+    const DIRECTORY_PATHS: [&str; 12] = [
         "crate::directory",
         "db::directory",
         "super::directory",
+        "crate::catalog",
+        "crate::channels",
+        "crate::delivery",
         "crate::enroll",
         "crate::governance",
         "crate::session_read",
@@ -1073,7 +1076,7 @@ fn check_seam() -> Result<()> {
         "crate::session_roster",
         "crate::secret",
     ];
-    const DIRECTORY_TABLES: [&str; 15] = [
+    const DIRECTORY_TABLES: [&str; 25] = [
         "workspace",
         "workspace_member",
         "workspace_policy",
@@ -1089,6 +1092,16 @@ fn check_seam() -> Result<()> {
         "admin_claim",
         "workspace_events",
         "genesis_requests",
+        "catalog",
+        "channels",
+        "channel_skills",
+        "channel_members",
+        "channel_events",
+        "skill_follows",
+        "skill_unfollows",
+        "device_exclusions",
+        "notices",
+        "device_skill_state",
     ];
     const SQL_INTRODUCERS: [&str; 4] = ["from", "join", "into", "update"];
     let root = workspace_root();

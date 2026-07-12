@@ -32,7 +32,7 @@ async fn invite_ok(
 ) -> (String, usize) {
     let emails: Vec<String> = emails.iter().map(|s| (*s).to_owned()).collect();
     match a
-        .invite_members_session(w, rid, acting, &emails, role, CLOUD, T0)
+        .invite_members_session(w, rid, acting, &emails, role, CLOUD, T0, NOW)
         .await
         .unwrap()
     {
@@ -138,21 +138,21 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
                 SessionInviteRole::Member,
                 CLOUD,
                 T0,
-            )
+            , NOW)
             .await
             .unwrap();
         let SessionInviteOutcome::Denied(inv_reason) = inv else {
             panic!("{acting} must be denied");
         };
         let rem = a
-            .roster_remove_session(&w, &op_id(200 + n), acting, "member@acme.com", CLOUD, T0)
+            .roster_remove_session(&w, &op_id(200 + n), acting, "member@acme.com", CLOUD, T0, NOW)
             .await
             .unwrap();
         let GovernanceOutcome::Denied(rem_reason) = rem else {
             panic!("{acting} must be denied");
         };
         let rot = a
-            .rotate_join_link_session(&w, &op_id(300 + n), acting, CLOUD, T0)
+            .rotate_join_link_session(&w, &op_id(300 + n), acting, CLOUD, T0, NOW)
             .await
             .unwrap();
         let SessionRotateOutcome::Denied(rot_reason) = rot else {
@@ -271,19 +271,19 @@ async fn all_four_session_ops_deny_on_self_host(pool: PgPool) {
             SessionInviteRole::Member,
             sh,
             T0
-        )
+        , NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied(_)
     ));
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(2), owner.as_str(), "a@x.com", sh, T0)
+        a.roster_remove_session(&w, &op_id(2), owner.as_str(), "a@x.com", sh, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Denied(_)
     ));
     assert!(matches!(
-        a.rotate_join_link_session(&w, &op_id(3), owner.as_str(), sh, T0)
+        a.rotate_join_link_session(&w, &op_id(3), owner.as_str(), sh, T0, NOW)
             .await
             .unwrap(),
         SessionRotateOutcome::Denied(_)
@@ -313,7 +313,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             SessionInviteRole::Member,
             CLOUD,
             T0
-        )
+        , NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("request_id is not a canonical UUID")
@@ -354,14 +354,14 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             SessionInviteRole::Member,
             CLOUD,
             T0
-        )
+        , NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("op id reused with a different request")
     ));
     // …and under a different VERB too (remove reusing the invite's id).
     assert!(matches!(
-        a.roster_remove_session(&w, &rid, owner.as_str(), "a@x.com", CLOUD, T0)
+        a.roster_remove_session(&w, &rid, owner.as_str(), "a@x.com", CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Denied("op id reused with a different request")
@@ -381,7 +381,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     )
     .await;
     assert!(matches!(
-        a.roster_remove_session(&w, &device_op, owner.as_str(), "carol@acme.com", CLOUD, T0)
+        a.roster_remove_session(&w, &device_op, owner.as_str(), "carol@acme.com", CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Denied("op id reused with a different request")
@@ -391,14 +391,14 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     // a second rotation has revoked it (byte-identical lost-ack semantics).
     let rot1 = op_id(12);
     let SessionRotateOutcome::Rotated { invite_token: t1 } = a
-        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0)
+        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
         panic!("rotate 1");
     };
     let SessionRotateOutcome::Rotated { invite_token: t2 } = a
-        .rotate_join_link_session(&w, &op_id(13), owner.as_str(), CLOUD, T0)
+        .rotate_join_link_session(&w, &op_id(13), owner.as_str(), CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
@@ -408,7 +408,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     let SessionRotateOutcome::Rotated {
         invite_token: t1_replay,
     } = a
-        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0)
+        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
@@ -468,10 +468,6 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
         .seed_workspace_member(&w, &alice, "member", "confirmed")
         .await
         .unwrap();
-    a.db()
-        .seed_roster(&w, &skill("s_deploy"), &alice)
-        .await
-        .unwrap();
     // Alice's device credential authenticates her device read lane; her confirmed membership is the gate.
     a.db()
         .seed_device(
@@ -493,7 +489,7 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
 
     // The last confirmed owner cannot be removed — typed, recorded.
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(1), owner.as_str(), owner.as_str(), CLOUD, T0)
+        a.roster_remove_session(&w, &op_id(1), owner.as_str(), owner.as_str(), CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Denied("would remove the last owner")
@@ -501,7 +497,7 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
 
     // Removing alice severs the seat AND her per-skill roster row in ONE transaction.
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(2), owner.as_str(), alice.as_str(), CLOUD, T0)
+        a.roster_remove_session(&w, &op_id(2), owner.as_str(), alice.as_str(), CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Ok
@@ -518,7 +514,7 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
 
     // Removing an absent principal is an idempotent Ok (mirrors a DELETE of nothing).
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(3), owner.as_str(), "ghost@x.com", CLOUD, T0)
+        a.roster_remove_session(&w, &op_id(3), owner.as_str(), "ghost@x.com", CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Ok
@@ -619,29 +615,53 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
         SessionInviteRole::Member,
     )
     .await;
+    // Bob has a device with an applied fleet-state row (device × skill) — the per-skill `roster` table
+    // is gone; removal no longer deletes rows, it writes the FINAL DETACH RECORD on the person's fleet
+    // rows. Register the device under the CANONICAL principal, then stage a live (detached = 0) row.
     a.db()
-        .seed_roster(&w, &skill("s_deploy"), &bob)
+        .seed_device(&w, "dk_bob", &dev_key(9), &bob, false, &cred(&w, "dk_bob"))
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO device_skill_state \
+           (workspace_id, device_key_id, skill_id, applied_commit, reported_at, detached) \
+         VALUES ($1, 'dk_bob', 's_deploy', NULL, 0, 0)",
+    )
+    .bind("w_canon_rm")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    // Remove by the MIXED-CASE spelling: the target folds, and the canonical seat + per-skill roster
-    // are severed in the one transaction (the instant-revoke shape).
+    // Remove by the MIXED-CASE spelling: the target folds, the canonical seat is severed, and the fleet
+    // row is stamped detached at `now` — all in the one transaction (the instant-revoke shape). The
+    // device row itself survives (re-adding the member re-enables it — the git/GitHub model).
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(2), owner.as_str(), "Bob@X.io", CLOUD, T0)
+        a.roster_remove_session(&w, &op_id(2), owner.as_str(), "Bob@X.io", CLOUD, T0, NOW)
             .await
             .unwrap(),
         GovernanceOutcome::Ok
     ));
     assert!(seat_of(&pool, "w_canon_rm", "bob@x.io").await.is_none());
-    let roster_rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM roster WHERE workspace_id = $1 AND principal = $2",
+    // The fleet row is now the FINAL DETACH RECORD: detached = 1, frozen at `now`.
+    let (detached, detached_at) = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT detached, detached_at FROM device_skill_state \
+         WHERE workspace_id = $1 AND device_key_id = 'dk_bob' AND skill_id = 's_deploy'",
     )
     .bind("w_canon_rm")
-    .bind("bob@x.io")
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(roster_rows, 0);
+    assert_eq!(detached, 1, "removal writes the final detach record");
+    assert_eq!(detached_at, Some(NOW), "the detach is frozen at `now`");
+    // The device_registry row is audit-retained — removal deletes the seat, never the device.
+    let device_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM device_registry WHERE workspace_id = $1 AND device_key_id = 'dk_bob'",
+    )
+    .bind("w_canon_rm")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(device_rows, 1, "the device row survives the member removal");
 }
 
 // ── the standing door family ────────────────────────────────────────────────────────────────────
@@ -683,7 +703,7 @@ async fn genesis_door_is_the_standing_door_until_rotation_revokes_it(pool: PgPoo
     let SessionRotateOutcome::Rotated {
         invite_token: new_door,
     } = a
-        .rotate_join_link_session(&w, &op_id(2), "owner@acme.com", CLOUD, T0)
+        .rotate_join_link_session(&w, &op_id(2), "owner@acme.com", CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
@@ -783,7 +803,7 @@ async fn rotation_blocks_future_redemption_only(pool: PgPool) {
     let SessionRotateOutcome::Rotated {
         invite_token: new_door,
     } = a
-        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0)
+        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
@@ -846,11 +866,11 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
         SessionInviteRole::Member,
     )
     .await;
-    a.roster_remove_session(&w, &op_id(2), owner.as_str(), "alice@acme.com", CLOUD, T0)
+    a.roster_remove_session(&w, &op_id(2), owner.as_str(), "alice@acme.com", CLOUD, T0, NOW)
         .await
         .unwrap();
     let SessionRotateOutcome::Rotated { .. } = a
-        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0)
+        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0, NOW)
         .await
         .unwrap()
     else {
@@ -957,7 +977,7 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             SessionInviteRole::Member,
             CLOUD,
             T0
-        ),
+        , NOW),
         a.invite_members_session(
             &w,
             &rid,
@@ -966,7 +986,7 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             SessionInviteRole::Member,
             CLOUD,
             T0
-        ),
+        , NOW),
     );
     let tok = |o: SessionInviteOutcome| match o {
         SessionInviteOutcome::Invited {
@@ -1008,8 +1028,8 @@ async fn raced_mutual_owner_removes_keep_one_owner(pool: PgPool) {
     // would_orphan_owner DENIES the loser).
     let (op1, op2) = (op_id(1), op_id(2));
     let (ra, rb) = tokio::join!(
-        a.roster_remove_session(&w, &op1, owner1.as_str(), owner2.as_str(), CLOUD, T0),
-        a.roster_remove_session(&w, &op2, owner2.as_str(), owner1.as_str(), CLOUD, T0),
+        a.roster_remove_session(&w, &op1, owner1.as_str(), owner2.as_str(), CLOUD, T0, NOW),
+        a.roster_remove_session(&w, &op2, owner2.as_str(), owner1.as_str(), CLOUD, T0, NOW),
     );
     let outcomes = [ra.unwrap(), rb.unwrap()];
     assert_eq!(
@@ -1063,7 +1083,7 @@ async fn a_session_request_id_slot_is_closed_to_a_later_device_op(pool: PgPool) 
         },
     );
     assert!(matches!(
-        a.create_invite(&w, &shared, signed, T0).await.unwrap(),
+        a.create_invite(&w, &shared, signed, T0, NOW).await.unwrap(),
         crate::CreateInviteOutcome::Denied("op id reused with a different request")
     ));
 }

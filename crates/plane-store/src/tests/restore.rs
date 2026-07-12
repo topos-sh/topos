@@ -201,11 +201,6 @@ async fn bump_past_the_safe_integer_bound_fails_typed_and_writes_nothing(pool: P
     let (w, s_a, s_b) = (ws("w_acme"), skill("s_a"), skill("s_b"));
     let key = dev_key(0xE2);
     register(&fx, &w, &s_a, "dk_r", &key, "p_op").await;
-    fx.authority
-        .db()
-        .seed_roster(&w, &s_b, &prin("p_op"))
-        .await
-        .unwrap();
     let g = publish(
         &fx,
         &key,

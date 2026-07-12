@@ -746,6 +746,7 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
                 expected: gn(0, 0),
             },
             None,
+            None,
             CREATED_AT,
             NOW,
         )

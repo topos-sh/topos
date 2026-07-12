@@ -5,7 +5,13 @@ use std::time::Duration;
 
 use topos_gitstore::{LocalLargeStore, Store};
 
+use crate::catalog::{LifecycleOutcome, PurgeOutcome};
+use crate::channels::{
+    ChannelMembershipOutcome, CurationOutcome, ProtectKind, ProtectLevel, ProtectOutcome,
+    SubscriptionOutcome,
+};
 use crate::db::Db;
+use crate::delivery::{AppliedSkill, Delivery};
 use crate::enroll::DeploymentMode;
 use crate::enroll::{
     ConfirmOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentDisclosure,
@@ -1325,6 +1331,301 @@ impl Authority {
         now: i64,
     ) -> Result<Vec<SkillIndexRow>> {
         crate::session_read::list_skills_device(self, ws, credential, now).await
+    }
+
+    /// **The delivery read** — what THIS device should have: the ONE entitlement predicate
+    /// (roster-derived `everyone` ∪ followed channels ∪ direct follows − unfollows − this device's
+    /// exclusions, active + current-holding skills only) plus the person's detached skills
+    /// (freeze-in-place), the unacked notices feed, and the open-proposal count. Device-lane
+    /// authenticated (Bearer workspace credential); every miss — unknown/revoked credential,
+    /// non-member (a REMOVED member reads this for the whole workspace) — is the uniform
+    /// [`AuthorityError::NotFound`]. A pool read; mints nothing durable.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] per the lane's uniformity rule; [`AuthorityError::Integrity`] on
+    /// a corrupt stored row; [`AuthorityError::Internal`] on a database fault.
+    pub async fn delivery(&self, ws: &WorkspaceId, credential: &str) -> Result<Delivery> {
+        crate::delivery::delivery(self, ws, credential).await
+    }
+
+    /// **The applied-state report** — the fleet's visibility write: upsert this device's
+    /// `(skill, applied version)` snapshot, drop the non-detached rows it no longer names, stamp
+    /// `last_report_at` (the staleness clock). Detach records are never touched. Same
+    /// authentication + uniformity as [`delivery`](Self::delivery); last-writer-wins (no receipt).
+    ///
+    /// # Errors
+    /// As [`delivery`](Self::delivery).
+    pub async fn report_applied(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        applied: &[AppliedSkill],
+        now: i64,
+    ) -> Result<()> {
+        crate::delivery::report_applied(self, ws, credential, applied, now).await
+    }
+
+    /// **Curation: place a skill reference into a channel** (`channel add` / the standalone
+    /// `publish --to` twin) — creating the channel on first use (member-level self-serve); a
+    /// `curated` channel takes reviewer+. Device-lane authenticated; misses uniform; role/mode
+    /// refusals typed (an authenticated member is entitled to the reason). Idempotent; the audit
+    /// trail is trigger-emitted.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
+    pub async fn channel_place(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        channel: &str,
+        skill_name: &str,
+        created_at: &str,
+    ) -> Result<CurationOutcome> {
+        crate::channels::channel_place(self, ws, credential, channel, skill_name, created_at).await
+    }
+
+    /// **Curation: remove a skill reference from a channel** — symmetric gate with
+    /// [`channel_place`](Self::channel_place); the channel and the skill keep existing either way.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn channel_unplace(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        channel: &str,
+        skill_name: &str,
+        created_at: &str,
+    ) -> Result<CurationOutcome> {
+        crate::channels::channel_unplace(self, ws, credential, channel, skill_name, created_at)
+            .await
+    }
+
+    /// **Join a channel** — always self-serve for a confirmed member; `everyone` refuses (its
+    /// membership IS the roster). Joining re-attaches any detach records the new entitlements
+    /// cover.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn channel_join(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        channel: &str,
+        created_at: &str,
+    ) -> Result<ChannelMembershipOutcome> {
+        crate::channels::channel_join(self, ws, credential, channel, created_at).await
+    }
+
+    /// **Leave a channel** — self-serve; `everyone` cannot be left. Runs the lapse-detach
+    /// reconcile: skills the person now receives from NO source get their final per-device detach
+    /// records (reference counting via the union — a skill another followed channel still
+    /// references stays live).
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn channel_leave(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        channel: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<ChannelMembershipOutcome> {
+        crate::channels::channel_leave(self, ws, credential, channel, now, created_at).await
+    }
+
+    /// **Direct-follow a skill** (person-scoped; by its catalog NAME): survives any channel
+    /// dropping it; clears the person's unfollow mask + THIS device's exclusion; re-attaches
+    /// detach records. An archived skill refuses typed (a freed name is a new identity).
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn follow_skill(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        skill_name: &str,
+        created_at: &str,
+    ) -> Result<SubscriptionOutcome> {
+        crate::channels::follow_skill(self, ws, credential, skill_name, created_at).await
+    }
+
+    /// **Unfollow a skill** (person-scoped): the standing negative mask — delivery ends on ALL the
+    /// person's devices however many channels reference it — plus the final per-device detach
+    /// records. `follow` re-attaches.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn unfollow_skill(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        skill_name: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<SubscriptionOutcome> {
+        crate::channels::unfollow_skill(self, ws, credential, skill_name, now, created_at).await
+    }
+
+    /// **Exclude a followed skill from THIS device** ("not on this device" — the `remove` verb's
+    /// row): other devices keep receiving; `follow` on this device lifts it.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn exclude_device(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        skill_name: &str,
+        created_at: &str,
+    ) -> Result<SubscriptionOutcome> {
+        crate::channels::exclude_device(self, ws, credential, skill_name, created_at).await
+    }
+
+    /// **The `protect` setter** — per-bundle protection (`reviewed`) or per-channel mode
+    /// (`curated`), kind-polymorphic. Tightening takes reviewer+; loosening back to `open` widens
+    /// what members can do and takes an owner (pinning `open` explicitly is also an owner act — it
+    /// opts the bundle out of a future default tightening). Pending proposals survive a loosening.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn protect(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        kind: ProtectKind,
+        target_name: &str,
+        level: ProtectLevel,
+        created_at: &str,
+    ) -> Result<ProtectOutcome> {
+        crate::channels::protect(self, ws, credential, kind, target_name, level, created_at).await
+    }
+
+    /// **Join a channel from a verified session** (the web "join" button's row op) — the same
+    /// guarded function as the device lane, gated by the same membership predicate.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn channel_join_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        channel: &str,
+        created_at: &str,
+    ) -> Result<ChannelMembershipOutcome> {
+        crate::channels::channel_join_session(self, ws, acting_email, channel, created_at).await
+    }
+
+    /// **Leave a channel from a verified session** — the session twin of
+    /// [`channel_leave`](Self::channel_leave), lapse-detach reconcile included.
+    ///
+    /// # Errors
+    /// As [`channel_place`](Self::channel_place).
+    pub async fn channel_leave_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        channel: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<ChannelMembershipOutcome> {
+        crate::channels::channel_leave_session(self, ws, acting_email, channel, now, created_at)
+            .await
+    }
+
+    /// **Archive a skill from a verified OWNER session** (web-surface class; self-host denied like
+    /// every session op): renames the catalog entry (`<name>-archived-<date>`) FREEING the base
+    /// name, removes it from every channel, closes open proposals with author notices, and drops it
+    /// out of delivery. Unfollowed/detached copies are never touched.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform pre-gate miss; [`AuthorityError::Internal`] on a
+    /// fault.
+    pub async fn archive_skill_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        skill_name: &str,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+        now: i64,
+    ) -> Result<LifecycleOutcome> {
+        crate::catalog::archive_skill_session(
+            self,
+            ws,
+            acting_email,
+            skill_name,
+            plane_mode,
+            created_at,
+            now,
+        )
+        .await
+    }
+
+    /// **Unarchive** — renames back if the base name is still free, else the typed `NameTaken`
+    /// refusal; channel placements are NOT restored (curation moved on).
+    ///
+    /// # Errors
+    /// As [`archive_skill_session`](Self::archive_skill_session).
+    pub async fn unarchive_skill_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        skill_name: &str,
+        plane_mode: DeploymentMode,
+    ) -> Result<LifecycleOutcome> {
+        crate::catalog::unarchive_skill_session(self, ws, acting_email, skill_name, plane_mode)
+            .await
+    }
+
+    /// **Delete an archived skill** (archive-first; the catalog row is the tombstone under its
+    /// archived name): un-roots every version's content for the GC. Deletion cannot recall device
+    /// copies — the fleet page names who still holds them.
+    ///
+    /// # Errors
+    /// As [`archive_skill_session`](Self::archive_skill_session).
+    pub async fn delete_skill_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        skill_name: &str,
+        plane_mode: DeploymentMode,
+        now: i64,
+    ) -> Result<LifecycleOutcome> {
+        crate::catalog::delete_skill_session(self, ws, acting_email, skill_name, plane_mode, now)
+            .await
+    }
+
+    /// **Purge ONE version's bytes** (the leak tool): refused while it is `current`; the hash stays
+    /// in history as a tombstone (who, when); only blobs unreachable from any live version drop
+    /// out; dependent proposals close with author notices. The reclaim itself rides the next GC
+    /// pass.
+    ///
+    /// # Errors
+    /// As [`archive_skill_session`](Self::archive_skill_session).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn purge_version_session(
+        &self,
+        ws: &WorkspaceId,
+        acting_email: &str,
+        skill_name: &str,
+        version: CommitId,
+        plane_mode: DeploymentMode,
+        created_at: &str,
+        now: i64,
+    ) -> Result<PurgeOutcome> {
+        crate::catalog::purge_version_session(
+            self,
+            ws,
+            acting_email,
+            skill_name,
+            version,
+            plane_mode,
+            created_at,
+            now,
+        )
+        .await
     }
 
     /// A skill's `current` pointer for a confirmed member. `Ok(None)` — no pointer record exists

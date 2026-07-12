@@ -1,6 +1,15 @@
 //! Directory — the raw-SQL twins for access / identity / policy: enrollment issuance, governance +
 //! admin-claim, and the two web-session directory legs (read index, roster).
 
+// The skill-lifecycle SQL (archive/unarchive/delete/purge — the guarded functions + custody un-rooting).
+pub(crate) mod catalog;
+
+// The channel/subscription/protection SQL (name resolution + the guarded topos_* function calls).
+pub(crate) mod channels;
+
+// The delivery + fleet SQL (the entitlement read + the applied-state report).
+pub(crate) mod delivery;
+
 pub(crate) mod enroll;
 pub(crate) mod governance;
 
