@@ -174,11 +174,18 @@ pub fn run() -> ExitCode {
         } => {
             // The two-phase describe/`--yes` flow lands in a later leg; today `add` applies directly.
             let _ = yes;
+            // MULTI selectors (`-s a -s b`, `-a x -a y`) apply to a REMOTE import — loop the single-select
+            // path per (skill × harness) combination, disclosing each. A single (or absent) selector keeps
+            // the classic single path below; `'*'` (all-skills / all-agents) stays a marked seam.
+            if skill.len() > 1 || agent.len() > 1 {
+                let has_star = skill.iter().chain(agent.iter()).any(|v| v == "*");
+                let result = add_multi(&ctx, &source, &skill, &agent, global, has_star);
+                return finish_add_many(json, cmd_name, result, &diag);
+            }
             // The one positional is classified by shape (crate::source): a local path adopts in place; a
             // bare name resolves against `list`'s untracked discovery; a remote `owner/repo`/URL fetches +
             // imports. No prompts — a remote import is fully non-interactive (the source's trust is the
-            // user/agent's to verify). The `-s/--agent` selectors stay single-valued for now (multi + `'*'`
-            // are marked seams).
+            // user/agent's to verify).
             let result = single_selector(skill, "add --skill with multiple values or '*'")
                 .and_then(|skill| {
                     single_selector(agent, "add --agent with multiple values or '*'")
@@ -290,20 +297,12 @@ pub fn run() -> ExitCode {
             channel,
             yes,
         } => {
-            let _ = yes;
-            finish(
-                json,
-                cmd_name,
-                ops::invite(
-                    &ctx,
-                    &connect_governance,
-                    email,
-                    channel,
-                    workspace.as_deref(),
-                ),
-                render::invite_tty,
-                &diag,
-            )
+            let connectors = ops::InviteConnectors {
+                governance: &connect_governance,
+                directory: &connect_directory,
+            };
+            let result = ops::invite(&ctx, &connectors, email, channel, workspace.as_deref(), yes);
+            finish_invite(json, cmd_name, result, &diag)
         }
         Command::List {
             name,
@@ -371,17 +370,43 @@ pub fn run() -> ExitCode {
             yes,
             wait,
         } => {
-            // The two-phase describe/`--yes` flow lands later; today `publish` applies directly.
-            let _ = yes;
+            // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
+            // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
+            let roots = list_discovery(false);
+            // A bare ENROLLED publish DESCRIBES what shipping would do (nothing lands on the plane); `--yes`
+            // applies. An un-enrolled publish keeps the standup flow (the sign-in IS its interactive gate),
+            // so the describe is gated on enrollment — the standup / genesis / WAL paths stay byte-identical.
+            if !yes && enrollment.is_some() {
+                let connectors = ops::PublishDescribeConnectors {
+                    directory: &connect_directory,
+                };
+                let described = ops::publish_describe(
+                    &ctx,
+                    &connectors,
+                    roots.as_ref(),
+                    &target,
+                    propose,
+                    to.as_deref(),
+                    workspace.as_deref(),
+                );
+                // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`).
+                let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
+                if propose {
+                    yes_argv.push("--propose".to_owned());
+                }
+                if let Some(ch) = &to {
+                    yes_argv.push("--to".to_owned());
+                    yes_argv.push(ch.clone());
+                }
+                yes_argv.push("--yes".to_owned());
+                return finish_publish_describe(json, cmd_name, described, yes_argv, &diag);
+            }
             // The standup branch's plane base: the env override, else the compiled-in hosted default.
             // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
             let standup = ops::StandupConnectors {
                 enroll: &connect_enroll,
                 base_url: resolve_standup_base(std::env::var("TOPOS_PLANE_URL").ok()),
             };
-            // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
-            // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
-            let roots = list_discovery(false);
             let publish_once = |t: &str| {
                 ops::publish(
                     &ctx,
@@ -428,18 +453,18 @@ pub fn run() -> ExitCode {
             } else {
                 None
             };
-            let result = match (target, verdict) {
-                (Some(t), Some(v)) => {
-                    ops::review(&ctx, &connect_contribute, &t, v, workspace.as_deref())
-                }
-                // A bare `review` (the inbox) and a bare target (the describe) are the two-phase seam.
-                (None, None) => Err(ops::not_yet("review inbox")),
-                (Some(_), None) => Err(ops::not_yet("review describe")),
-                (None, Some(_)) => Err(ClientError::InvalidArgument(
-                    "review needs a <skill>@<hash> target".into(),
-                )),
+            let connectors = ops::ReviewConnectors {
+                directory: &connect_directory,
+                contribute: &connect_contribute,
             };
-            finish(json, cmd_name, result, render::review_tty, &diag)
+            let result = ops::review_dispatch(
+                &ctx,
+                &connectors,
+                target.as_deref(),
+                verdict,
+                workspace.as_deref(),
+            );
+            finish_review(json, cmd_name, result, &diag)
         }
         Command::Revert { skill, to, yes } => finish(
             json,
@@ -456,13 +481,18 @@ pub fn run() -> ExitCode {
             render::revert_tty,
             &diag,
         ),
-        Command::Log { skill } => finish(
-            json,
-            cmd_name,
-            ops::log(&ctx, &skill),
-            render::log_tty,
-            &diag,
-        ),
+        Command::Log { skill } => {
+            let connectors = ops::LogConnectors {
+                directory: &connect_directory,
+            };
+            finish(
+                json,
+                cmd_name,
+                ops::log(&ctx, &connectors, &skill),
+                render::log_tty,
+                &diag,
+            )
+        }
         Command::Update {
             targets,
             channel,
@@ -472,11 +502,10 @@ pub fn run() -> ExitCode {
             onto_current,
             quiet,
         } => {
-            let _ = yes;
             // The bare sweep prefers the delivery-driven reconcile when enrolled (one delivery
             // call per workspace answers "what should this device have"); every targeted form and
-            // the un-enrolled state keep the classic engine. `--reset` and the `--channel`/`--skill`
-            // selectors + multi-target resolution land with the full grammar in a later leg.
+            // the un-enrolled state keep the classic engine. `--reset` is a two-phase discard (below);
+            // the `--channel`/`--skill` selectors + multi-target resolution land later.
             let delivery = enrollment
                 .as_ref()
                 .map(|e| &e.plane as &dyn crate::plane::DeliverySource);
@@ -487,19 +516,19 @@ pub fn run() -> ExitCode {
                 ack_notices: !quiet,
                 ..ops::ReconcileOpts::default()
             };
-            let result = if reset {
-                Err(ops::not_yet("update --reset"))
-            } else {
-                match single_target(targets, &channel, &skill, "update") {
-                    Ok(target) => pull_with_name_fallback(
-                        &ctx,
-                        target,
-                        onto_current,
-                        delivery,
-                        &reconcile_opts,
-                    ),
-                    Err(e) => Err(e),
+            // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it does not
+            // flow through the currency engine and is never a `--quiet` hook shape.
+            if reset {
+                let mut reset_targets = targets.clone();
+                reset_targets.extend(skill.iter().cloned());
+                let _ = &channel;
+                return finish_reset(json, cmd_name, ops::reset(&ctx, &reset_targets, yes), &diag);
+            }
+            let result = match single_target(targets, &channel, &skill, "update") {
+                Ok(target) => {
+                    pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
                 }
+                Err(e) => Err(e),
             };
             if quiet {
                 // NEAR-byte-silent stdout (the session-start hook injects stdout into the session):
@@ -527,12 +556,40 @@ pub fn run() -> ExitCode {
                 finish_pull(json, cmd_name, result, &diag)
             }
         }
-        // `remove` (the followed→exclusion / untracked-clean verb) is dispatch-seamed — the exclusion PUT
-        // and the agent-dir clean land with the full grammar in a later leg.
-        Command::Remove { .. } => emit_err(json, cmd_name, &ops::not_yet("remove"), &diag),
-        // `channel add/remove` are dispatch seams; a bare `channel` teaches usage and recognizes `create`.
-        Command::Channel { args, .. } => emit_err(json, cmd_name, &channel_seam(&args), &diag),
-        Command::Protect { .. } => emit_err(json, cmd_name, &ops::not_yet("protect"), &diag),
+        Command::Remove { skill, agent, yes } => {
+            let connectors = ops::RemoveConnectors {
+                directory: &connect_directory,
+            };
+            let roots = list_discovery(false);
+            let result = ops::remove(&ctx, &connectors, &skill, &agent, roots.as_ref(), yes);
+            finish_remove(json, cmd_name, result, &diag)
+        }
+        // `channel add|remove <channel> <skill>...` dispatches to the two-phase op; a bare `channel` (or an
+        // unrecognized subword / `create`) teaches usage without touching the network.
+        Command::Channel { args, yes } => match args.first().map(String::as_str) {
+            Some("add") | Some("remove") => {
+                let connectors = ops::ChannelConnectors {
+                    directory: &connect_directory,
+                };
+                let result = ops::channel(&ctx, &connectors, &args, workspace.as_deref(), yes);
+                finish_channel(json, cmd_name, result, &diag)
+            }
+            _ => emit_err(json, cmd_name, &channel_seam(&args), &diag),
+        },
+        Command::Protect { target, level, yes } => {
+            let connectors = ops::ProtectConnectors {
+                directory: &connect_directory,
+            };
+            let result = ops::protect(
+                &ctx,
+                &connectors,
+                &target,
+                level.as_deref(),
+                workspace.as_deref(),
+                yes,
+            );
+            finish_protect(json, cmd_name, result, &diag)
+        }
         Command::SelfUpdate { check, version } => {
             // A MAINTENANCE command: it replaces the binary itself. It mints no device identity (kept out
             // of the device-id match above) and never touches a skill / the plane / the account.
@@ -602,12 +659,11 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Map a `topos channel …` invocation to its typed refusal. `add`/`remove` are marked seams (the placement
-/// writes land later); a bare `channel` (or an unrecognized subword) teaches channel-first usage; `create`
-/// is recognized as a hint keyword — channels are created on first placement, never as a standalone verb.
+/// Map a NON-`add`/`remove` `topos channel …` invocation to its typed refusal: a bare `channel` (or an
+/// unrecognized subword) teaches channel-first usage; `create` is recognized as a hint keyword — channels
+/// are created on first placement, never as a standalone verb. (`add`/`remove` dispatch to the op above.)
 fn channel_seam(args: &[String]) -> ClientError {
     match args.first().map(String::as_str) {
-        Some("add") | Some("remove") => ops::not_yet("channel add/remove"),
         Some("create") => ClientError::InvalidArgument(
             "channels are created on first placement — run `topos channel add <channel> <skill>` (a \
              new channel is created automatically); there is no separate `channel create`"
@@ -889,6 +945,308 @@ fn finish_unfollow(
     }
 }
 
+/// Import a REMOTE source into several skills and/or several harness dirs — the `-s a -s b` / `-a x -a y`
+/// loop over the single-select [`ops::add_remote`] path (disclosing each). Multi selectors apply to a
+/// remote import only (a local path/name adopts exactly one skill); `'*'` expansion stays a seam.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] for a non-remote source or a missing `$HOME`; [`ops::not_yet`] for a
+/// `'*'` selector; whatever [`ops::add_remote`] returns for a given combination (all-or-error).
+fn add_multi(
+    ctx: &Ctx<'_>,
+    source: &str,
+    skills: &[String],
+    agents: &[String],
+    global: bool,
+    has_star: bool,
+) -> Result<Vec<topos_types::results::AddData>, ClientError> {
+    if has_star {
+        return Err(ops::not_yet(
+            "add with a `*` selector (all-skills / all-agents)",
+        ));
+    }
+    let spec = match crate::source::classify(source) {
+        crate::source::SourceSpec::Remote(spec) => spec,
+        _ => {
+            return Err(ClientError::InvalidArgument(
+                "multiple `-s`/`-a` selectors apply to a REMOTE import (`owner/repo` or a github.com \
+                 URL) — a local path or name adopts a single skill"
+                    .into(),
+            ));
+        }
+    };
+    let Some(roots) = list_discovery(false) else {
+        return Err(ClientError::InvalidArgument(
+            "cannot import a remote skill without $HOME set (needed to resolve the harness skills dir)"
+                .into(),
+        ));
+    };
+    let git = crate::plane_http::UreqGitSource::new();
+    let skill_opts: Vec<Option<String>> = if skills.is_empty() {
+        vec![None]
+    } else {
+        skills.iter().cloned().map(Some).collect()
+    };
+    let agent_opts: Vec<Option<String>> = if agents.is_empty() {
+        vec![None]
+    } else {
+        agents.iter().cloned().map(Some).collect()
+    };
+    let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
+    for s in &skill_opts {
+        for a in &agent_opts {
+            out.push(ops::add_remote(
+                ctx,
+                &git,
+                &spec,
+                &roots,
+                &ops::AddRemoteOpts {
+                    skill: s.clone(),
+                    harness: a.clone(),
+                    global,
+                },
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.
+fn finish_add_many(
+    json: bool,
+    command: &str,
+    result: Result<Vec<topos_types::results::AddData>, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(items) => {
+            if json {
+                let value = serde_json::json!({ "added": items });
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                let body = items
+                    .iter()
+                    .map(render::add_tty)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                println!("{body}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `remove`'s finisher — the two-phase pair (describe / applied).
+fn finish_remove(
+    json: bool,
+    command: &str,
+    result: Result<ops::RemoveOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::RemoveOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::remove_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::RemoveOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::remove_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `channel add|remove`'s finisher — the two-phase pair.
+fn finish_channel(
+    json: bool,
+    command: &str,
+    result: Result<ops::ChannelOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::ChannelOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::channel_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::ChannelOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::channel_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `update --reset`'s finisher — the loss-led describe / the applied discard.
+fn finish_reset(
+    json: bool,
+    command: &str,
+    result: Result<ops::ResetOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::ResetOutcome::Described { items, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": { "items": items } });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::reset_describe_tty(&items, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::ResetOutcome::Applied(items)) => {
+            if json {
+                let value = serde_json::json!({ "items": items });
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::reset_applied_tty(&items));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `invite`'s finisher — the bare read, the two-phase describe, or the applied roster write.
+fn finish_invite(
+    json: bool,
+    command: &str,
+    result: Result<ops::InviteOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::InviteOutcome::Read(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::invite_read_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::InviteOutcome::Described { describe, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::invite_describe_tty(&describe, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::InviteOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::invite_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `review`'s finisher — the inbox, a target describe, or an applied verdict.
+fn finish_review(
+    json: bool,
+    command: &str,
+    result: Result<ops::ReviewOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::ReviewOutcome::Inbox(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::review_inbox_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::ReviewOutcome::Describe { data, next_argvs }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(next_argvs.clone());
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::review_describe_tty(&data, &next_argvs));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::ReviewOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::review_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `protect`'s finisher — the two-phase pair.
+fn finish_protect(
+    json: bool,
+    command: &str,
+    result: Result<ops::ProtectOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::ProtectOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::protect_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::ProtectOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::protect_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
 /// `auth login`'s finisher — pending (the device-flow wait) or done (the per-workspace report).
 fn finish_login(
     json: bool,
@@ -1114,6 +1472,32 @@ fn block_on_pending<T>(
             // Settled (enrolled / published) or a terminal error (incl. the device code's expiry) — done.
             return next;
         }
+    }
+}
+
+/// `publish`'s bare-DESCRIBE finisher — the enrolled two-phase preview (nothing landed on the plane) +
+/// the paste-ready `--yes` next-action. A typed refusal (NO_CHANGES / CONSENT_MISMATCH / …) flows through
+/// [`emit_err`].
+fn finish_publish_describe(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::PublishDescribeData, ClientError>,
+    yes_argv: Vec<String>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::publish_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 

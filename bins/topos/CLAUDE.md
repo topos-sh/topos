@@ -324,6 +324,55 @@ are asserted byte-equal in tests.
   the checksum still enforced). NOT a behavior verb — it touches no skills, no plane, no account, and
   mints no device identity.
 
+- **The reshaped team verbs** (`ops/{remove,channel,protect,invite,review,log,list,pull,publish}`) — each
+  runs the ONE resolution grammar + the two-phase describe/`--yes` gate over the built directory row ops:
+  - **`remove`** (`ops/remove`) — take skills off THIS machine, two-phase. A FOLLOWED skill becomes a
+    per-device **exclusion** (`PUT exclusions/{skill}`): delivery stops here, the person keeps following it
+    (other devices still receive it), the agent dirs are cleaned (any draft snapshotted first) and every
+    sidecar byte KEPT — via the shared `snapshot_and_clean` the upstream-withdrawal sweep also runs (factored
+    out of `withdraw_upstream`, never forked). A tracked never-published local (or an untracked agent-dir
+    copy `<name>@<agent>` / `-a`-scoped) is a **permanent** delete. Multi-skill, all-or-none; the local
+    exclusion cause is marked on `follows.json` (`excluded_here`) for `list`.
+  - **`channel add|remove`** (`ops/channel`) — channel-first placement, two-phase. Resolves every skill
+    ALL-OR-NONE through the grammar, reads the channel's mode for the describe (create-on-first-place says
+    "creates #<ch>"), then `PUT`/`DELETE channels/{ch}/skills/{skill}` per skill; a curated-channel role
+    refusal (`CURATED_ROLE_REQUIRED`) is a typed refusal naming who can, and a later per-skill failure after
+    an earlier landed is reported honestly, per skill.
+  - **`protect`** (`ops/protect`) — dual-kind target, two-phase. Bare TIGHTENS to the kind's protected level
+    (skill → `reviewed`, channel → `curated`); an explicit `open` LOOSENS (an owner act, per the describe);
+    a level that does not apply to the kind is a typed usage error. The describe carries the audience — the
+    reach (people) for a skill, the channel's member count — plus the pending-proposals-survive note on a
+    skill loosening; `OWNER_ROLE_REQUIRED` / `REVIEWER_ROLE_REQUIRED` surface typed, naming the role.
+  - **`invite`** (`ops/invite`) — the roster write is now two-phase, and a BARE `invite` (no emails) is a
+    no-mutation `/me` read (the workspace address + invite policy + "nothing was sent or changed"). Emails
+    without `--yes` describe (who gets seated, the channel pre-placements, the mail-or-paste note); `--yes`
+    POSTs the folded-email invitation. (The `/i/`-link mint is retired — joining is `follow <address>`.)
+  - **`review`** (`ops/review`) — a bare `review` is the review INBOX/OUTBOX across every enrolled workspace
+    (`GET /proposals` per ws; author-message FIRST; the outbox is your own proposals, matched on
+    `user.json`'s principal). A bare TARGET (`<skill>[@<hash>]`, a bare skill resolving to its one open
+    proposal) DESCRIBES it — author, message, base, staleness, and the diff vs current (`current..<proposal>`
+    through the same plane-diff machinery `diff` runs) — with the verdict next-actions; a target + a verdict
+    flag applies directly (the verdict IS the consent).
+  - **`log`** (`ops/log`) — the local action log + git history now MERGE the plane's version/proposal history
+    for a followed skill (`GET /skills/{skill}/log`): versions with purge tombstones ("purged by <who> <when>
+    — bytes gone"), proposal events, and the archived-successor hint when resolved by a freed base name. A
+    channel target is refused toward the web; un-enrolled / local-only skills keep the local log.
+  - **`list`** (`ops/list`) — each tracked row gains the SOURCE (workspace label | origin host | local),
+    STATUS (`current` / `behind` / `draft` / `detached`), and CAUSE (`unfollowed` / `excluded-here` /
+    `signed-out`) columns, derived offline from `follows.json` flags + credential presence + the origin doc.
+    A purely-local never-followed skill carries no columns (the pinned shape stays byte-identical there).
+  - **`update --reset`** (`ops/pull` + `sync_engine::reset_to_base`) — a loss-led two-phase discard. Refuses
+    without a named skill (it never blanket-resets); the describe LEADS with the exact draft delta (the local
+    diff); `--yes` snapshots the draft into the sidecar store, then re-materializes the followed `current`
+    (an imported skill's adopted origin) over the placement.
+  - **`publish`** (`ops/publish::publish_describe`) — a bare ENROLLED publish now DESCRIBES: the workspace,
+    the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or
+    `everyone` for a new skill), the audience (reach), the share line, the undo path, and the origin-demotion
+    note; a no-op (the draft equals current) is a typed `NO_CHANGES`. The scan is local-first; the network is
+    read only after it; the standup / genesis / WAL apply paths stay byte-identical (the describe is gated on
+    enrollment, so an un-enrolled publish keeps the standup flow). `add -s/-a` accept MULTIPLE values (a
+    remote import loops per skill × harness); `'*'` and the keep-as-yours re-adopt stay marked seams.
+
 ## Planned (lands later)
 
 The **workspace-credential model is now in place**: enrollment mints ONE Bearer **workspace credential**

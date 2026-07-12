@@ -119,6 +119,11 @@ pub(crate) struct FollowEntry {
     pub review_required: bool,
     /// Whether the skill is currently followed (a `false` skill is inventoried but not pulled).
     pub following: bool,
+    /// Whether `topos remove` excluded this skill on THIS device (a per-device exclusion — the person
+    /// still follows it, and other devices still receive it). Local cause marker for `list`; the server
+    /// exclusion row is the source of truth. Defaults `false` for a pre-field document.
+    #[serde(default)]
+    pub excluded_here: bool,
 }
 
 /// The on-disk spelling of [`FollowMode`] (snake_case). A local copy because [`FollowMode`] is a
@@ -887,6 +892,36 @@ pub(crate) fn set_following(
     )
 }
 
+/// Flip one skill's `excluded_here` marker IN PLACE (the `remove` verb's per-device exclusion cause for
+/// `list`), under the same `"identity"` lock as [`set_following`]. A missing file / entry is a clean
+/// no-op (an untracked local has no follow row); an already-equal flag writes nothing.
+pub(crate) fn set_excluded(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    skill_id: &str,
+    excluded: bool,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
+        return Ok(());
+    };
+    let Some(entry) = follows.follows.iter_mut().find(|e| e.skill_id == skill_id) else {
+        return Ok(());
+    };
+    if entry.excluded_here == excluded {
+        return Ok(());
+    }
+    entry.excluded_here = excluded;
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            follows: follows.follows,
+        },
+    )
+}
+
 /// Write `identity/user.json` (metadata only; ordinary perms). The identity dir must exist.
 pub(crate) fn write_user(
     fs: &dyn FsOps,
@@ -1055,6 +1090,7 @@ mod tests {
                     mode: FollowModeDoc::Auto,
                     review_required: false,
                     following: true,
+                    excluded_here: false,
                 },
                 FollowEntry {
                     skill_id: "s_paused".to_owned(),
@@ -1062,6 +1098,7 @@ mod tests {
                     mode: FollowModeDoc::ConfirmEach,
                     review_required: true,
                     following: false,
+                    excluded_here: false,
                 },
             ],
         }
@@ -1690,6 +1727,7 @@ mod tests {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         };
         write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
         // The SAME skill_id arriving under a DIFFERENT workspace is refused (a skill id is unique to one
@@ -1720,6 +1758,7 @@ mod tests {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         };
         // The SAME skill_id under w_a AND w_b — a cross-workspace collision.
         let hostile = Follows {

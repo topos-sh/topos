@@ -12,16 +12,202 @@
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::{OpKind, OpRecord};
-use topos_types::results::{ReviewData, ReviewDecision};
+use topos_types::results::{
+    ReviewData, ReviewDecision, ReviewDescribeData, ReviewIndexData, ReviewIndexEntry,
+};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, ReviewSend};
+use super::follow::{DirectoryConnect, build_universe_via};
 use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
 use crate::ctx::Ctx;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::{op_wal, sidecar};
+
+/// The seams `review` needs — the directory connector (the inbox / describe reads) and the contribute
+/// connector (the approve/reject/withdraw write).
+pub(crate) struct ReviewConnectors<'a> {
+    pub directory: &'a DirectoryConnect<'a>,
+    pub contribute: &'a ContributeConnect<'a>,
+}
+
+/// The verb's outcome — the inbox (bare), a target describe (target, no verdict), or an applied verdict.
+#[derive(Debug)]
+pub(crate) enum ReviewOutcome {
+    /// A bare `review` — the review inbox/outbox across every enrolled workspace.
+    Inbox(ReviewIndexData),
+    /// A bare target (`review <skill>[@<hash>]`) — the proposal describe + the verdict next-actions.
+    Describe {
+        data: Box<ReviewDescribeData>,
+        next_argvs: Vec<Vec<String>>,
+    },
+    /// A target + a verdict flag — the write landed (the verdict IS the consent).
+    Applied(ReviewData),
+}
+
+/// Dispatch `review`: a bare invocation is the inbox; a bare target is the describe; a target with a
+/// verdict flag applies directly (the verdict is the consent — `--yes` is accepted there as a no-op).
+///
+/// # Errors
+/// As the individual arms below.
+pub(crate) fn review_dispatch(
+    ctx: &Ctx<'_>,
+    connectors: &ReviewConnectors<'_>,
+    target: Option<&str>,
+    verdict: Option<ReviewVerdict>,
+    workspace: Option<&str>,
+) -> Result<ReviewOutcome, ClientError> {
+    match (target, verdict) {
+        (None, None) => review_inbox(ctx, connectors, workspace).map(ReviewOutcome::Inbox),
+        (Some(t), None) => review_describe(ctx, connectors, t, workspace),
+        (Some(t), Some(v)) => {
+            review(ctx, connectors.contribute, t, v, workspace).map(ReviewOutcome::Applied)
+        }
+        (None, Some(_)) => Err(ClientError::InvalidArgument(
+            "review needs a <skill>@<hash> target for a verdict — a bare `review` is the inbox"
+                .into(),
+        )),
+    }
+}
+
+/// The review inbox/outbox: every OPEN proposal across the enrolled workspaces, split by author
+/// (yours = the outbox, everyone else's = the inbox). Author-message first (the renderer leads with it).
+///
+/// # Errors
+/// [`ClientError::Enrollment`] if not enrolled; a transport failure on a proposals read.
+fn review_inbox(
+    ctx: &Ctx<'_>,
+    connectors: &ReviewConnectors<'_>,
+    workspace: Option<&str>,
+) -> Result<ReviewIndexData, ClientError> {
+    let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
+    let base_url = base_url.ok_or_else(|| {
+        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
+    })?;
+    // Fold the caller's principal to the canonical form so the outbox match is address-shape-agnostic.
+    let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
+        .and_then(|u| u.principal)
+        .map(|p| topos_core::identity::canonical_principal(&p));
+    let directory = (connectors.directory)(&base_url);
+    let mut inbox = Vec::new();
+    let mut outbox = Vec::new();
+    for ws in &universe {
+        // `--workspace` narrows the inbox to one workspace when the install joined several.
+        if workspace.is_some_and(|w| w != ws.workspace_id) {
+            continue;
+        }
+        let index = directory.proposals_index(&ws.workspace_id)?;
+        for p in index.proposals {
+            let entry = ReviewIndexEntry {
+                workspace_id: ws.workspace_id.clone(),
+                workspace_name: ws.name.clone(),
+                skill: p.skill_name.clone(),
+                proposal: format!("{}@{}", p.skill_name, p.version_id),
+                proposer: p.proposer.clone(),
+                message: p.message,
+                base_version_id: p.base_version_id,
+                created_at: p.created_at,
+                stale: p.stale,
+            };
+            let mine = me_principal
+                .as_deref()
+                .is_some_and(|me| me == topos_core::identity::canonical_principal(&p.proposer));
+            if mine {
+                outbox.push(entry);
+            } else {
+                inbox.push(entry);
+            }
+        }
+    }
+    Ok(ReviewIndexData { inbox, outbox })
+}
+
+/// A bare target's describe: the author, message, base, staleness, and the DIFF against current
+/// (`current..<proposal>` through the same plane-diff machinery `diff` uses). Nothing mutates.
+///
+/// # Errors
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::TargetNotFound`] for an unknown proposal;
+/// name-resolution / transport / integrity errors.
+fn review_describe(
+    ctx: &Ctx<'_>,
+    connectors: &ReviewConnectors<'_>,
+    target: &str,
+    workspace: Option<&str>,
+) -> Result<ReviewOutcome, ClientError> {
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
+        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
+    })?;
+    // A target is `<skill>` (its one open proposal) or `<skill>@<hash>` (a specific one).
+    let (skill_name, wanted_hash) = match target.split_once('@') {
+        Some((s, h)) if !s.is_empty() && !h.is_empty() => (s.to_owned(), Some(h.to_owned())),
+        Some(_) => {
+            return Err(ClientError::InvalidArgument(format!(
+                "a review target is `<skill>` or `<skill>@<hash>`, got `{target}`"
+            )));
+        }
+        None => (target.to_owned(), None),
+    };
+    let (id, _lock) = resolve_followed_skill_in_workspace(ctx, &skill_name, workspace)?;
+    let workspace_id = workspace_of(ctx, id.as_str())?;
+    let directory = (connectors.directory)(&instance.base_url);
+    let index = directory.proposals_index(&workspace_id)?;
+    // The proposal on this skill matching the wanted hash, or its SOLE open proposal for a bare skill.
+    let mut candidates: Vec<_> = index
+        .proposals
+        .into_iter()
+        .filter(|p| p.skill_id == id.as_str())
+        .filter(|p| wanted_hash.as_deref().is_none_or(|h| p.version_id == h))
+        .collect();
+    let proposal = match candidates.len() {
+        0 => return Err(crate::resolve::not_found(target)),
+        1 => candidates.remove(0),
+        _ => {
+            return Err(ClientError::InvalidArgument(format!(
+                "'{skill_name}' has {} open proposals — name one as `{skill_name}@<hash>` (run \
+                 `topos review` for the inbox)",
+                candidates.len()
+            )));
+        }
+    };
+    // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`).
+    let diff = super::diff(
+        ctx,
+        &skill_name,
+        Some(&format!("current..{}", proposal.version_id)),
+    )?
+    .diff;
+    let handle = format!("{}@{}", skill_name, proposal.version_id);
+    let next_argvs = vec![
+        vec![
+            "topos".to_owned(),
+            "review".to_owned(),
+            handle.clone(),
+            "--approve".to_owned(),
+        ],
+        vec![
+            "topos".to_owned(),
+            "review".to_owned(),
+            handle.clone(),
+            "--reject".to_owned(),
+            "-m".to_owned(),
+            "<reason>".to_owned(),
+        ],
+    ];
+    Ok(ReviewOutcome::Describe {
+        data: Box::new(ReviewDescribeData {
+            proposal: handle,
+            skill: skill_name,
+            proposer: proposal.proposer,
+            message: proposal.message,
+            base_version_id: proposal.base_version_id,
+            stale: proposal.stale,
+            diff,
+        }),
+        next_argvs,
+    })
+}
 
 /// A review verdict, parsed from the CLI's `--approve` / `--reject` / `--withdraw` group. `Reject` carries
 /// its (required) reason; `Withdraw` is the author retracting their own open proposal.

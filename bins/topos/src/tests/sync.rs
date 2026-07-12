@@ -1826,7 +1826,11 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
 
     // The REAL read path: `topos log <skill>` filters on the first-class skill_id field, so the wedged
     // skill's error event surfaces in its own log.
-    let log = ops::log(&rig.ctx(&plane, &foll), &name).unwrap();
+    let dir = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
+        unreachable!("local log builds no directory transport")
+    };
+    let connectors = ops::LogConnectors { directory: &dir };
+    let log = ops::log(&rig.ctx(&plane, &foll), &connectors, &name).unwrap();
     let errors: Vec<_> = log
         .events
         .iter()

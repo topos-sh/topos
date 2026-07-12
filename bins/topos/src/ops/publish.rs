@@ -32,10 +32,12 @@ use topos_types::results::{
 };
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
+use topos_types::results::{PublishDescribeData, PublishGate};
+
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::follow::{
-    EnrollConnect, complete_uri, device_fingerprint, guard_one_plane, machine_name, promote_core,
-    resolve_api_base,
+    DirectoryConnect, EnrollConnect, complete_uri, device_fingerprint, guard_one_plane,
+    machine_name, promote_core, resolve_api_base,
 };
 use super::sync_engine;
 use super::{
@@ -138,6 +140,136 @@ pub(crate) fn publish(
         message,
     )?;
     Ok(stamp_added(outcome, added))
+}
+
+/// The seam `publish`'s describe needs — the directory connector reads the audience (reach) + the
+/// workspace address (the share line), AFTER the local scan.
+pub(crate) struct PublishDescribeConnectors<'a> {
+    pub directory: &'a DirectoryConnect<'a>,
+}
+
+/// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
+/// the gate outcome, the audience, the share line, and the undo path. Mutates nothing on the plane (a
+/// local auto-add of an untracked source is the one disclosed local step, exactly as the apply performs).
+/// The network is read only AFTER the local scan; the standup / genesis / WAL apply paths are untouched
+/// (this runs only for an enrolled `!yes` invocation, dispatched in the composition root).
+///
+/// # Errors
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::NoChanges`] when the draft equals current;
+/// [`ClientError::ApprovalMismatch`] on a failed `@<digest>` pin; [`ClientError::PublishBlocked`] on an
+/// unresolved merge; name-resolution / scan / transport errors.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_describe(
+    ctx: &Ctx<'_>,
+    connectors: &PublishDescribeConnectors<'_>,
+    roots: Option<&DiscoveryRoots>,
+    target: &str,
+    propose: bool,
+    channel: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<PublishDescribeData, ClientError> {
+    let (source_str, pin) = parse_target(target);
+    // Adopt an untracked LOCAL source first (the same disclosed local step the apply performs) so the
+    // describe can scan its bytes; a remote source is refused here exactly as in the apply.
+    let (skill_name, _added) = ensure_tracked(ctx, roots, &source_str)?;
+
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
+        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
+    })?;
+    let (id, lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
+    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
+    let sp = ctx.layout.published(&id);
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
+
+    // Publish-block guard (same presence check the apply runs): an unresolved merge blocks a publish.
+    if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
+        return Err(ClientError::PublishBlocked {
+            skill: skill_name.clone(),
+        });
+    }
+
+    // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
+    // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
+    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
+        .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+    let placement = sync_engine::first_placement(&map)?;
+    let scanned = scan::scan(std::path::Path::new(&placement))?;
+    let digest_hex = to_hex(&scanned.bundle_digest);
+    if let Some(pin) = &pin
+        && digest_hex != *pin
+    {
+        return Err(ClientError::ApprovalMismatch {
+            skill: skill_name.clone(),
+            expected: digest_hex,
+            got: pin.clone(),
+        });
+    }
+
+    // A FOLLOWED skill's `current` is the bytes this client holds (`lock.bundle_digest`); an identical
+    // draft is a no-op. A genesis skill (no follow entry) has no current — its first publish is never a
+    // no-op.
+    let follow_entry = ctx
+        .follow
+        .followed()
+        .into_iter()
+        .find(|(fid, _)| fid == id.as_str())
+        .map(|(_, fc)| fc);
+    let followed = follow_entry.is_some();
+    if followed && digest_hex == lock.bundle_digest {
+        return Err(ClientError::NoChanges { skill: skill_name });
+    }
+
+    // The gate the plane will apply: a reviewed bundle (or an explicit `--propose`) becomes a proposal;
+    // an open one lands directly.
+    let review_required = follow_entry.as_ref().is_some_and(|fc| fc.review_required);
+    let gate = if propose || review_required {
+        PublishGate::Proposal
+    } else {
+        PublishGate::Lands
+    };
+
+    // Network reads AFTER the local scan: the audience (reach) + the workspace address (the share line).
+    let directory = (connectors.directory)(&instance.base_url);
+    let reach = directory
+        .reach(&workspace_id, id.as_str())
+        .ok()
+        .map(|r| r.persons);
+    let me = directory.me(&workspace_id).ok();
+
+    let placements = match channel {
+        Some(ch) => vec![ch.to_owned()],
+        // A brand-new skill's reference lands in `everyone`; a re-publish of a followed skill keeps its
+        // existing placements (none added here).
+        None if !followed => vec!["everyone".to_owned()],
+        None => Vec::new(),
+    };
+    let share_line = me
+        .as_ref()
+        .map(|m| format!("{}/skills/{}", m.address, skill_name));
+    let undo = followed.then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
+    let origin_note = doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)?.map(|o| {
+        format!(
+            "this skill was imported from {} — publishing makes the team copy the source of truth",
+            o.origin.source
+        )
+    });
+
+    Ok(PublishDescribeData {
+        skill: skill_name,
+        skill_id: id.into_string(),
+        workspace_id,
+        workspace_display_name: me.map(|m| m.display_name),
+        bundle_digest: digest_hex,
+        placements,
+        gate,
+        // The full ancestor-bytes revert detection is the apply path's (the server treats a revert-shaped
+        // publish as a forward move); the describe reports the gate + placements without pre-judging it.
+        is_revert: false,
+        reach,
+        share_line,
+        undo,
+        origin_note,
+    })
 }
 
 /// Publish an ALREADY-tracked skill by name (the pre-auto-add body): dispatch enrolled vs standup, then run

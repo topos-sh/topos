@@ -18,6 +18,7 @@
 
 mod add;
 mod auth;
+mod channel;
 mod contribute;
 mod diff;
 mod follow;
@@ -25,8 +26,10 @@ mod invite;
 mod list;
 mod log;
 mod merge_resolve;
+mod protect;
 mod publish;
 mod pull;
+mod remove;
 mod revert;
 mod review;
 mod self_update;
@@ -41,28 +44,33 @@ pub(crate) use auth::{
     AuthConnectors, AuthLoginData, AuthLoginOutcome, AuthLoginPending, AuthLogoutData,
     AuthLogoutDescribe, AuthLogoutOutcome, AuthStatusData, login, logout, status,
 };
+pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
 pub(crate) use diff::diff;
 pub(crate) use follow::{
     FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, follow,
 };
-pub(crate) use invite::invite;
+pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, RemoteScope, list};
 pub(crate) use unfollow::{UnfollowApplied, UnfollowDescribe};
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
 #[cfg(test)]
 pub(crate) use list::{FollowNote, ListEnrollment};
-pub(crate) use log::log;
-pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
+pub(crate) use log::{LogConnectors, log};
+pub(crate) use publish::{
+    PublishDescribeConnectors, PublishOutcome, StandupConnectors, publish, publish_describe,
+};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
+pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, TargetMode, pull, pull_reconcile_with, quiet_hook_lines,
-    quiet_soft_failure,
+    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
+    quiet_hook_lines, quiet_soft_failure, reset,
 };
+pub(crate) use remove::{RemoveConnectors, RemoveOutcome, remove};
 pub(crate) use revert::revert;
-pub(crate) use review::{ReviewVerdict, review};
+pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_dispatch};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
 

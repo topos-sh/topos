@@ -274,6 +274,48 @@ pub struct SkillEntry {
     /// Open proposals, each as `<skill>@<version_id>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_proposals: Vec<String>,
+    /// Where the bytes come from: the followed workspace's address name, an imported skill's origin
+    /// host, or `local` for a purely local `add`. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The currency posture of the local copy: `current` / `behind` / `draft` / `detached`.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SkillStatus>,
+    /// Why a `detached` row is no longer live: `unfollowed` / `excluded-here` / `removed-upstream` /
+    /// `signed-out`. Absent when the row is live. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<DetachCause>,
+}
+
+/// A tracked skill's currency posture in [`SkillEntry`]. **INFERRED** (additive value set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum SkillStatus {
+    /// On the followed `current` (or a local skill at its own head), no local edits.
+    Current,
+    /// The followed workspace serves a newer `current` than this copy holds — `update` to advance.
+    Behind,
+    /// Local edits ahead of the version this copy is on.
+    Draft,
+    /// No longer live here (see [`SkillEntry::cause`]) — the bytes are a frozen copy.
+    Detached,
+}
+
+/// Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DetachCause {
+    /// The person unfollowed the skill (delivery stopped on every device).
+    Unfollowed,
+    /// `topos remove` excluded the skill on THIS device (other devices still receive it).
+    ExcludedHere,
+    /// Upstream withdrew the skill (archived, or its last delivering channel dropped it).
+    RemovedUpstream,
+    /// No stored workspace credential — signed out of the workspace this skill lives in.
+    SignedOut,
 }
 
 // =================================================================================================
@@ -448,6 +490,10 @@ pub struct LogData {
     /// Plane-side records under `--team` (op-receipts ⋈ approvals ⋈ lineage) — honestly partial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<Vec<serde_json::Value>>,
+    /// When the skill was resolved by a FREED base name (it has since been archived under a new name),
+    /// the archived-successor hint: "`<base>` is archived as `<archived>`". **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_successor: Option<String>,
 }
 
 /// `publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in
@@ -643,6 +689,267 @@ pub enum ReviewDecision {
     Approve,
     Reject,
     Withdraw,
+}
+
+// =================================================================================================
+// INFERRED — the verb-reshape describe/apply payloads (`remove` / `channel` / `protect` / the review
+// inbox+describe / `invite`'s read+describe / `update --reset` / `publish`'s describe). Each rides the
+// two-phase envelope: a bare mutating verb returns the payload under `data.describe` (nothing changed),
+// `--yes` returns it as `data` with `applied: true`. Additive-only.
+// =================================================================================================
+
+/// `remove` — take skills off THIS device. A followed skill becomes a per-device exclusion (other
+/// devices keep receiving it); an untracked local copy (or a never-published tracked one) is deleted
+/// permanently. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoveData {
+    pub items: Vec<RemoveItem>,
+    /// `true` on the `--yes` apply, `false` on the describe (nothing changed yet).
+    pub applied: bool,
+}
+
+/// One skill in a [`RemoveData`]. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoveItem {
+    pub name: String,
+    /// How the removal behaves for this skill.
+    pub kind: RemoveKind,
+    /// The workspace the exclusion is recorded in (a followed skill); absent for a local copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The agent directories cleaned (or, on the describe, that would be cleaned).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_dirs: Vec<String>,
+    /// Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a
+    /// frozen copy; an untracked-local delete removes the only copy there is).
+    pub bytes_kept: bool,
+}
+
+/// How `remove` treats one skill. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoveKind {
+    /// A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).
+    FollowedExclusion,
+    /// An untracked local copy in an agent dir → permanent delete (no other copy exists).
+    UntrackedLocal,
+    /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).
+    TrackedLocalPermanent,
+}
+
+/// `channel add|remove <channel> <skill>...` — place / remove skill references in a channel. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ChannelData {
+    pub channel: String,
+    pub workspace_id: String,
+    /// `add` or `remove`.
+    pub action: ChannelAction,
+    /// The channel's mode (`open` / `curated`) — the gate a placement passes.
+    pub mode: String,
+    /// `true` when this `add` would CREATE the channel (it does not exist yet).
+    pub creates: bool,
+    /// The per-skill placement/removal outcomes.
+    pub items: Vec<ChannelItem>,
+    /// `true` on the `--yes` apply, `false` on the describe.
+    pub applied: bool,
+}
+
+/// `add` vs `remove` for a [`ChannelData`]. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelAction {
+    Add,
+    Remove,
+}
+
+/// One skill's placement/removal in a [`ChannelData`]. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ChannelItem {
+    pub skill: String,
+    pub skill_id: String,
+    /// `pending` (describe), `placed` / `removed` (applied ok), or `failed` (a mid-flight refusal after
+    /// an earlier one landed — reported honestly, per skill).
+    pub outcome: ChannelItemOutcome,
+    /// The refusal detail when `failed` (e.g. a curated-channel role refusal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One skill's channel-op outcome. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelItemOutcome {
+    Pending,
+    Placed,
+    Removed,
+    Failed,
+}
+
+/// `protect <target> [<level>]` — set a skill's or channel's protection level. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ProtectData {
+    pub target: String,
+    /// `skill` or `channel`.
+    pub kind: String,
+    pub workspace_id: String,
+    /// The level being set (`reviewed` / `curated` / `open`).
+    pub level: String,
+    /// `true` when the level LOOSENS protection (`open`) — the owner-gated direction.
+    pub loosening: bool,
+    /// The audience this protection governs: the reach (people) for a skill, the member count for a
+    /// channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<u64>,
+    /// A standing note the describe carries (e.g. "pending proposals survive a loosening").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// `true` on the `--yes` apply, `false` on the describe.
+    pub applied: bool,
+}
+
+/// `review` (bare) — the review inbox/outbox across every enrolled workspace, author-message first.
+/// **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ReviewIndexData {
+    /// Proposals others opened that you can review (inbox).
+    pub inbox: Vec<ReviewIndexEntry>,
+    /// Your own open proposals (outbox).
+    pub outbox: Vec<ReviewIndexEntry>,
+}
+
+/// One proposal in the review inbox/outbox. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ReviewIndexEntry {
+    pub workspace_id: String,
+    /// The workspace's address name (the inbox groups by it).
+    pub workspace_name: String,
+    pub skill: String,
+    /// The review target handle, `<skill>@<version_id>`.
+    pub proposal: String,
+    pub proposer: String,
+    /// The author's message — rendered FIRST.
+    pub message: String,
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub base_version_id: String,
+    pub created_at: String,
+    /// Whether `current` has moved past the proposal's base (a stale proposal needs a re-propose).
+    pub stale: bool,
+}
+
+/// `review <target>` (bare, no verdict) — the target describe: who, what, base, staleness, and the
+/// diff against current. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ReviewDescribeData {
+    /// The review target handle, `<skill>@<version_id>`.
+    pub proposal: String,
+    pub skill: String,
+    pub proposer: String,
+    pub message: String,
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub base_version_id: String,
+    pub stale: bool,
+    /// The unified diff of the proposal against current (`current..<proposal>`).
+    pub diff: String,
+}
+
+/// `invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy.
+/// **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct InviteReadData {
+    /// The workspace address teammates paste to join.
+    pub address: String,
+    /// The workspace's invite policy (`members` / `owners`) — who may invite.
+    pub invite_policy: String,
+    /// Always `false` — a bare read sends nothing and changes nothing.
+    pub changed: bool,
+}
+
+/// `invite <email>...` (bare, no `--yes`) — the describe: who gets seated, the channel pre-placements,
+/// and the mail-or-paste note. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct InviteDescribeData {
+    pub address: String,
+    pub invite_policy: String,
+    /// The emails that would be seated (canonical form).
+    pub seat: Vec<String>,
+    /// The channels each invitee would be pre-placed into.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
+}
+
+/// `update --reset <skill>` — discard a local draft back to the followed `current` (or an imported
+/// skill's last-fetched origin snapshot). The describe LEADS with what is lost. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ResetData {
+    pub skill: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The version the reset lands on (the followed current / the origin snapshot).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub to_version: String,
+    /// The unified diff of the draft that would be (describe) / was (apply) discarded.
+    pub drop_diff: String,
+    /// `true` on the `--yes` apply, `false` on the describe.
+    pub applied: bool,
+}
+
+/// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the
+/// share line, and the undo path. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PublishDescribeData {
+    pub skill: String,
+    pub skill_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_display_name: Option<String>,
+    /// The byte-exact digest of the draft being published.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub bundle_digest: String,
+    /// The channels the reference lands in (`--to`, or `everyone` for a brand-new skill).
+    pub placements: Vec<String>,
+    /// The gate outcome: an OPEN bundle lands directly; a REVIEWED one becomes a proposal.
+    pub gate: PublishGate,
+    /// Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).
+    pub is_revert: bool,
+    /// The audience the change reaches (people entitled to the skill), when the plane discloses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<u64>,
+    /// The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_line: Option<String>,
+    /// The undo path — the version `revert --to` restores to get back here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    /// The origin-demotion disclosure for an imported skill (publishing makes the team copy the source
+    /// of truth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_note: Option<String>,
+}
+
+/// The gate a `publish` describe predicts. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PublishGate {
+    /// The bundle is open — publishing moves `current` directly.
+    Lands,
+    /// The bundle is reviewed — publishing opens a proposal instead of moving `current`.
+    Proposal,
 }
 
 #[cfg(test)]

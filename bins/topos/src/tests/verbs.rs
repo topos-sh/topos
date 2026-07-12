@@ -699,7 +699,13 @@ fn log_reports_local_action_and_git_history() {
     let h = Harness::new("log");
     let add = ops::add(&h.ctx(), &root).unwrap();
 
-    let log = ops::log(&h.ctx(), "pr-describe").unwrap();
+    // Un-enrolled: `log` never builds the plane-directory transport (no instance.json), so the
+    // connector is never invoked.
+    let dir = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
+        unreachable!("local log builds no directory transport")
+    };
+    let connectors = ops::LogConnectors { directory: &dir };
+    let log = ops::log(&h.ctx(), &connectors, "pr-describe").unwrap();
     assert_eq!(log.team, None);
     // The add action + the genesis version.
     let actions: Vec<&str> = log
@@ -1091,6 +1097,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         }],
     )
     .unwrap();
@@ -1260,6 +1267,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         }],
     )
     .unwrap();
@@ -1376,6 +1384,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         }],
     )
     .unwrap();

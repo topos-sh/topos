@@ -432,6 +432,83 @@ pub(crate) fn go_back(
     })
 }
 
+/// `update --reset <skill>` — DISCARD the local draft, restoring the followed `current` (an imported
+/// skill's adopted origin snapshot). The draft is snapshotted into the sidecar store FIRST (never lost —
+/// recoverable), then the base bytes are re-materialized over the placement. `observed`/`applied` are
+/// untouched (the team's current did not move) and `held` stays `false`, so a later sweep sees the skill
+/// current again. A pristine working tree is a clean no-op (nothing to discard).
+///
+/// # Errors
+/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity failure.
+pub(crate) fn reset_to_base(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+) -> Result<[u8; 32], ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    let sp = ctx.layout.published(skill_id);
+    let sid = skill_id.as_str();
+    let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
+    let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
+    let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
+
+    let base = super::parse_hex32(&lock.base_commit)?;
+    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
+    let base_digest_hex = lock.bundle_digest.clone();
+
+    // Snapshot-on-touch FIRST — a reset OVERWRITES the placement, so a draft is committed to the store
+    // (recoverable) before the swap; an unreadable placement fails closed rather than risk a clobber.
+    let work = compute_work(ctx, &map, &lock)?;
+    match &work {
+        WorkState::Unscannable => {
+            return Err(ClientError::PlacementUnsupported {
+                reason: "the placement cannot be read; refusing a reset that might clobber it"
+                    .into(),
+            });
+        }
+        WorkState::Present {
+            eq_base: false,
+            scanned,
+            ..
+        } => {
+            snapshot_draft(ctx, &sp, &lock, scanned)?;
+        }
+        // Already pristine (or absent) — nothing to discard; the re-materialize below is a safe no-op swap.
+        _ => {}
+    }
+
+    let store = Store::open(&sp.store)?;
+    let bundle = store.render_verified(base, base_digest)?;
+    fsync_batch(ctx, &store.version_durability(&base)?)?;
+
+    // The restored state: base bytes on the placement, work_hash back at the base digest, held cleared,
+    // observed/applied unchanged (the team's current never moved).
+    let next_sync = SyncState {
+        schema_version: sync.schema_version,
+        observed: sync.observed,
+        observed_version_id: sync.observed_version_id.clone(),
+        applied: sync.applied,
+        base_commit: lock.base_commit.clone(),
+        work_hash: base_digest_hex.clone(),
+        held: false,
+    };
+    let placement = first_placement(&map)?;
+    let report = materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id: sid,
+            placement_dir: Path::new(&placement),
+            bundle: &bundle,
+            prior_map: &map,
+            next_map_core: map_core(&map, base, &base_digest_hex),
+            next_lock: &lock,
+            next_sync: &next_sync,
+            sp: &sp,
+        },
+    )?;
+    log_apply(ctx, sid, "update-reset", base, &report);
+    Ok(base)
+}
+
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a
 /// targeted pull names a tracked-but-unfollowed skill (there is no `current` to pull).
 pub(crate) fn current_state(

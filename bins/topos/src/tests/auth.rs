@@ -516,6 +516,7 @@ fn logout_revokes_best_effort_deletes_credentials_and_keeps_every_byte() {
             mode: enroll::FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         }],
     )
     .unwrap();

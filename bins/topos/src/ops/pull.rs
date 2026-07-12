@@ -23,7 +23,7 @@ use std::path::Path;
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::{Lock, PlacementMap, SyncState};
-use topos_types::results::{PullAction, PullData, PullSkill, WorkspaceSyncReport};
+use topos_types::results::{PullAction, PullData, PullSkill, ResetData, WorkspaceSyncReport};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::ctx::Ctx;
@@ -248,6 +248,71 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
 /// with a warning — never a clean (the copies are yours; re-adding re-enables). Afterwards each
 /// workspace gets this device's applied-state report — best-effort fleet visibility, never a sync
 /// blocker.
+/// `update --reset <skill>...` — the loss-led two-phase discard. Refuses without a named skill (a reset
+/// throws away local edits; it must never be a blanket "reset everything"). The describe LEADS with the
+/// exact draft delta being discarded (the local `diff` — draft vs current); `--yes` discards it, restoring
+/// the followed `current` (an imported skill's adopted origin). Resolves ALL-OR-NONE.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] with no named skill; name-resolution errors; a store / io failure.
+pub(crate) fn reset(
+    ctx: &Ctx<'_>,
+    targets: &[String],
+    yes: bool,
+) -> Result<ResetOutcome, ClientError> {
+    if targets.is_empty() {
+        return Err(ClientError::InvalidArgument(
+            "`update --reset` needs a skill name — it discards that skill's local edits; it will not \
+             reset every followed skill at once (name the skill: `topos update <skill> --reset`)"
+                .into(),
+        ));
+    }
+    // Resolve ALL-OR-NONE, then compute each draft delta (the loss the describe leads with).
+    let mut resolved = Vec::with_capacity(targets.len());
+    for token in targets {
+        resolved.push(super::resolve_skill(ctx, token)?);
+    }
+    let mut items = Vec::with_capacity(resolved.len());
+    for (id, lock) in &resolved {
+        // The draft delta vs current — the exact bytes a reset drops.
+        let drop_diff = super::diff(ctx, &lock.name, None)?.diff;
+        items.push(ResetData {
+            skill: lock.name.clone(),
+            workspace_id: super::followed_workspace(ctx, id.as_str()),
+            to_version: lock.base_commit.clone(),
+            drop_diff,
+            applied: false,
+        });
+    }
+
+    if !yes {
+        let mut yes_argv = vec!["topos".to_owned(), "update".to_owned()];
+        yes_argv.extend(targets.iter().cloned());
+        yes_argv.push("--reset".to_owned());
+        yes_argv.push("--yes".to_owned());
+        return Ok(ResetOutcome::Described { items, yes_argv });
+    }
+
+    // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first).
+    for (id, _lock) in &resolved {
+        sync_engine::reset_to_base(ctx, id)?;
+    }
+    for item in &mut items {
+        item.applied = true;
+    }
+    Ok(ResetOutcome::Applied(items))
+}
+
+/// The two-phase outcome of `update --reset`.
+#[derive(Debug)]
+pub(crate) enum ResetOutcome {
+    Described {
+        items: Vec<ResetData>,
+        yes_argv: Vec<String>,
+    },
+    Applied(Vec<ResetData>),
+}
+
 /// The reconcile with explicit [`ReconcileOpts`] — the `follow --yes` apply (one workspace,
 /// batch-accepted first receives, declined/renamed collisions) and the interactive `update` (acked
 /// notices) drive the non-default forms; `&ReconcileOpts::default()` is the bare sweep.
@@ -555,6 +620,8 @@ fn install_new_arrival(
             mode: FollowModeDoc::Auto,
             review_required: ds.review_required,
             following: true,
+            // A fresh delivery-driven arrival clears any prior per-device exclusion of this id.
+            excluded_here: false,
         }],
     )?;
     let follow = FollowContext {
@@ -607,48 +674,84 @@ fn freeze_detached(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientErro
 /// is ever lost), remove the agent dirs, keep every sidecar byte, and freeze the entry. Idempotent
 /// across a crash at any step (a re-run re-snapshots nothing, re-removes nothing, re-flips
 /// nothing).
-fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
+/// Which caller drives [`snapshot_and_clean`] — only the fail-closed refusal wording differs (an
+/// unreadable placement must never be silently deleted, and the message names the actual cause).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WithdrawReason {
+    /// The sweep's upstream withdrawal (archived / last channel dropped).
+    Upstream,
+    /// The `remove` verb's per-device exclusion.
+    RemoveExclusion,
+}
+
+/// Snapshot any local draft into the sidecar store, then CLEAN the agent dirs — keeping every sidecar
+/// byte. The shared half of managed-distribution takedown: the sweep's upstream withdrawal and the
+/// `remove` verb's per-device exclusion both run it. Returns the prior [`SyncState`] (for the caller's
+/// row/reset). Idempotent across a crash (a re-run re-snapshots nothing, re-removes nothing). FAILS
+/// CLOSED on an unscannable placement — a symlink/device/non-UTF-8 name we cannot snapshot must never
+/// be silently deleted.
+///
+/// # Errors
+/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store/io failure otherwise.
+pub(crate) fn snapshot_and_clean(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    reason: WithdrawReason,
+) -> Result<Option<SyncState>, ClientError> {
     let sp = ctx.layout.published(sid);
-    let sync: Option<SyncState>;
-    {
-        let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
-        sync = doc::read_doc(ctx.fs, &sp.sync)?;
-        let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
-        let map: Option<PlacementMap> = doc::read_doc(ctx.fs, &sp.map)?;
-        if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
-            match sync_engine::compute_work(ctx, map, lock)? {
-                // A draft delta is retained in the sidecar store BEFORE any byte leaves the agent
-                // dir — nothing is ever lost.
-                WorkState::Present {
-                    eq_base: false,
-                    scanned,
-                    ..
-                } => {
-                    sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
-                }
-                // Pristine (or absent) — nothing local to retain beyond what the store already has.
-                WorkState::Present { .. } | WorkState::Absent => {}
-                // UNSCANNABLE — the placement exists but cannot be read safely (a symlink/device
-                // node/non-UTF-8 name someone put there). We CANNOT snapshot what we cannot scan, so
-                // we must not delete it: FAIL CLOSED, exactly as the sync engine refuses to
-                // fast-forward over an unreadable placement. The skill freezes with a typed refusal
-                // instead of a silent, unrecoverable delete.
-                WorkState::Unscannable => {
-                    return Err(ClientError::PlacementUnsupported {
-                        reason: "upstream withdrew this skill, but its placement cannot be read; \
-                                 refusing to remove it — inspect or move the directory by hand"
-                            .into(),
-                    });
-                }
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
+    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+    let map: Option<PlacementMap> = doc::read_doc(ctx.fs, &sp.map)?;
+    if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
+        match sync_engine::compute_work(ctx, map, lock)? {
+            // A draft delta is retained in the sidecar store BEFORE any byte leaves the agent
+            // dir — nothing is ever lost.
+            WorkState::Present {
+                eq_base: false,
+                scanned,
+                ..
+            } => {
+                sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
             }
-            for placement in &map.placements {
-                let p = Path::new(placement);
-                if ctx.fs.exists(p) {
-                    ctx.fs.remove_dir_all(p)?;
-                }
+            // Pristine (or absent) — nothing local to retain beyond what the store already has.
+            WorkState::Present { .. } | WorkState::Absent => {}
+            // UNSCANNABLE — the placement exists but cannot be read safely (a symlink/device
+            // node/non-UTF-8 name someone put there). We CANNOT snapshot what we cannot scan, so
+            // we must not delete it: FAIL CLOSED, exactly as the sync engine refuses to
+            // fast-forward over an unreadable placement. The skill freezes with a typed refusal
+            // instead of a silent, unrecoverable delete.
+            WorkState::Unscannable => {
+                return Err(ClientError::PlacementUnsupported {
+                    reason: match reason {
+                        WithdrawReason::Upstream => {
+                            "upstream withdrew this skill, but its placement cannot be read; \
+                             refusing to remove it — inspect or move the directory by hand"
+                        }
+                        WithdrawReason::RemoveExclusion => {
+                            "this skill's placement cannot be read; refusing to remove it — \
+                             inspect or move the directory by hand"
+                        }
+                    }
+                    .into(),
+                });
+            }
+        }
+        for placement in &map.placements {
+            let p = Path::new(placement);
+            if ctx.fs.exists(p) {
+                ctx.fs.remove_dir_all(p)?;
             }
         }
     }
+    Ok(sync)
+}
+
+fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
+    let sp = ctx.layout.published(sid);
+    // Snapshot any draft into the sidecar store, then clean the agent dirs (keeping every sidecar
+    // byte) — the shared machinery `remove` reuses for a per-device exclusion.
+    let sync = snapshot_and_clean(ctx, sid, WithdrawReason::Upstream)?;
     // NOTE: no follow-state flip. The entry stays LIVE (a withdrawal is a delivery change, not a
     // subscription change): the sidecar keeps every byte + any draft, and the sync state is reset to
     // the NEVER-RECEIVED baseline — the same all-zero sentinel `follow` lays. That reset is what

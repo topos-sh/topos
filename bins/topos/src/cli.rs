@@ -1,11 +1,12 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
 //!
 //! The behavior verbs are grouped by SCOPE — self-scoped (affect only your machine), team-scoped (change
-//! shared state), and maintenance. `follow`/`unfollow`/`auth` run the FULL resolution grammar + the
-//! two-phase describe/`--yes` flow (`crate::resolve`); the remaining reshaped verbs (`remove`,
-//! `channel add/remove`, `protect`, the review inbox/describe, `update --reset` + the `update`/`list`
-//! selectors) still parse here and refuse with a marked seam at dispatch (see `ops::not_yet`), so the
-//! argv surface stays frozen ahead of their semantics.
+//! shared state), and maintenance. The reshaped verbs run the FULL resolution grammar + the two-phase
+//! describe/`--yes` flow (`crate::resolve`): `follow`/`unfollow`/`auth`, plus `remove`, `channel
+//! add/remove`, `protect`, the review inbox/describe, `invite`'s bare read/describe, `update --reset`,
+//! `publish`'s describe, and the log/list plane columns. A few tails still parse here and refuse with a
+//! marked seam at dispatch (see `ops::not_yet`): the `update`/`list` `--channel`/`--skill` selectors +
+//! multi-target, `add`'s `'*'` (all-skills/all-agents) selector, and the keep-as-yours re-adopt.
 
 use clap::{Parser, Subcommand};
 

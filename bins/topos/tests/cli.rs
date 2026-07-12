@@ -298,7 +298,7 @@ fn a_bad_review_hash_is_invalid_argument_on_both_surfaces() {
 }
 
 #[test]
-fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_describe_seam() {
+fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_describe() {
     let home = scratch("verdict");
     let target = format!("docs@{}", "ab".repeat(32));
 
@@ -310,12 +310,13 @@ fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_descri
     assert!(stderr.contains("--approve"), "{stderr}");
     assert!(stderr.contains("Usage"), "{stderr}");
 
-    // NO verdict is now allowed by clap (the group is OPTIONAL) — a bare target is the two-phase describe,
-    // a marked runtime seam (INVALID_ARGUMENT, exit 1), not a clap usage error.
+    // NO verdict is allowed by clap (the group is OPTIONAL) — a bare target is the two-phase describe.
+    // Un-enrolled there is nothing to describe (the proposal lives on the plane), so it fails with the
+    // enrollment error, exit 1 — a runtime domain refusal, not a clap usage error.
     let out = run_raw(&home, &["review", &target, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
-    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(v["error"]["code"], "ENROLLMENT_FAILED");
 
     let _ = std::fs::remove_dir_all(&home);
 }

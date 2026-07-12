@@ -16,7 +16,8 @@ use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::requests::WireSkillIndexEntry;
 use topos_types::results::{
-    ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry, UntrackedEntry,
+    DetachCause, ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry, SkillStatus,
+    UntrackedEntry,
 };
 
 use crate::ctx::Ctx;
@@ -124,6 +125,26 @@ pub(crate) fn list(
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
         .map(|f| f.follows)
         .unwrap_or_default();
+    // The offline signals the SOURCE/STATUS/CAUSE columns read: the stored credentials (a followed
+    // workspace with no credential is signed out here) and the membership labels (the friendly source
+    // name for a followed skill). Both best-effort — absence just narrows what a column can say.
+    let credentials: std::collections::HashMap<String, String> =
+        enroll::read_credentials(ctx.fs, &ctx.layout)?
+            .map(enroll::Credentials::into_map)
+            .unwrap_or_default();
+    let labels: HashMap<String, String> = enroll::read_user(ctx.fs, &ctx.layout)?
+        .map(|u| {
+            u.workspaces
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.workspace_id.clone(),
+                        m.display_name.unwrap_or(m.workspace_id),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Carry the stable skill id alongside each entry — the proposals read route and the follow-state
     // are keyed by id, not name.
@@ -146,12 +167,24 @@ pub(crate) fn list(
         };
         let draft = is_draft(ctx, &paths.map, &lock)?;
         let id_str = id.into_string();
-        // The skill's workspace provenance, from its follow entry (a retained-but-paused entry still
-        // carries it); `None` for a purely local, never-followed `add`'d skill.
-        let workspace_id = follows
-            .iter()
-            .find(|f| f.skill_id == id_str)
-            .map(|f| f.workspace_id.clone());
+        // The skill's follow entry (a retained-but-paused entry still carries its workspace); `None`
+        // for a purely local, never-followed `add`'d skill.
+        let follow_entry = follows.iter().find(|f| f.skill_id == id_str);
+        let workspace_id = follow_entry.map(|f| f.workspace_id.clone());
+        // The recorded remote import origin (best-effort — absence means no upstream).
+        let origin_host = doc::read_doc::<crate::ops::add::OriginDoc>(ctx.fs, &paths.origin)
+            .ok()
+            .flatten()
+            .and_then(|o| origin_host(&o.origin.source));
+        let (source, status, cause) = derive_columns(
+            follow_entry,
+            draft,
+            origin_host,
+            workspace_id.as_deref().and_then(|w| labels.get(w)),
+            workspace_id
+                .as_deref()
+                .is_none_or(|w| credentials.contains_key(w)),
+        );
         tracked.push((
             id_str,
             SkillEntry {
@@ -161,6 +194,9 @@ pub(crate) fn list(
                 bundle_digest: lock.bundle_digest,
                 draft,
                 pending_proposals: Vec::new(),
+                source,
+                status,
+                cause,
             },
         ));
     }
@@ -494,6 +530,58 @@ fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientE
     }
 }
 
+/// The SOURCE / STATUS / CAUSE columns for one tracked row, from the offline signals: the follow entry
+/// (following flag + the per-device exclusion marker), the draft flag, an import origin host, the
+/// workspace's friendly label, and whether a workspace credential is held (signed-out detection).
+///
+/// The `behind` status needs the plane's `current` and is decided by the online `--remote` view; offline
+/// a live followed row is reported `current` (or `draft` when it holds local edits).
+fn derive_columns(
+    follow: Option<&FollowEntry>,
+    draft: bool,
+    origin_host: Option<String>,
+    ws_label: Option<&String>,
+    has_credential: bool,
+) -> (Option<String>, Option<SkillStatus>, Option<DetachCause>) {
+    // A purely local, never-followed, non-imported skill carries no columns (its absent workspace already
+    // says "local") — leaving the pinned `list` shape byte-identical for that common case.
+    if follow.is_none() && origin_host.is_none() {
+        return (None, None, None);
+    }
+    // SOURCE: an imported skill names its origin host; a followed one its workspace label; else local.
+    let source = origin_host
+        .or_else(|| ws_label.cloned())
+        .unwrap_or_else(|| "local".to_owned());
+
+    // CAUSE (only when detached): the per-device exclusion, a person-scoped unfollow, or signed-out —
+    // checked most-specific first.
+    let cause = match follow {
+        Some(f) if f.excluded_here => Some(DetachCause::ExcludedHere),
+        Some(f) if !f.following => Some(DetachCause::Unfollowed),
+        Some(_) if !has_credential => Some(DetachCause::SignedOut),
+        _ => None,
+    };
+    let status = if cause.is_some() {
+        SkillStatus::Detached
+    } else if draft {
+        SkillStatus::Draft
+    } else {
+        SkillStatus::Current
+    };
+    (Some(source), Some(status), cause)
+}
+
+/// The host of an import source (`github.com/owner/repo` → `github.com`), or `None` for an empty source.
+fn origin_host(source: &str) -> Option<String> {
+    source
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -596,6 +684,7 @@ mod tests {
             mode: FollowModeDoc::Auto,
             review_required: false,
             following,
+            excluded_here: false,
         }
     }
 

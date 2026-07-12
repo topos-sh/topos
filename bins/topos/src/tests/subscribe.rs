@@ -910,6 +910,7 @@ fn unfollow_skill_writes_the_detach_row_and_flips_the_local_pause() {
             mode: enroll::FollowModeDoc::Auto,
             review_required: false,
             following: true,
+            excluded_here: false,
         }],
     )
     .unwrap();

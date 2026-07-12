@@ -1713,6 +1713,7 @@ pub(super) fn promote_core(
             mode: context.mode,
             review_required: false,
             following: true,
+            excluded_here: false,
         })
         .collect();
     enroll::write_follows_merged(ctx.fs, &ctx.layout, &additions)?;

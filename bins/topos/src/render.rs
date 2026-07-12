@@ -6,8 +6,8 @@ use topos_types::persisted::ConflictPathKind;
 use topos_types::requests::InvitationData;
 use topos_types::results::{
     AddData, AddedNote, DiffData, FollowData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData, ReviewDecision,
-    SkillEntry, UntrackedEntry,
+    PullSkill, RemoteFollowState, RemoteSkillEntry, RemoveData, RemoveItem, RemoveKind, RevertData,
+    ReviewData, ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -409,19 +409,57 @@ fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
         Some((_, false)) => format!("  (not following — `topos follow {}` resumes)", entry.skill),
         None => String::new(),
     };
+    // The SOURCE / STATUS / CAUSE columns (present once `list` populated them): `[status]` + the source,
+    // and the detach cause on a detached row.
+    let columns = list_columns(entry);
     let mut s = format!(
-        "  {}  {}@{}{}{}\n",
+        "  {}  {}@{}{}{}{}\n",
         entry.skill,
         entry.skill,
         short(&entry.version_id),
         follow_note,
-        if entry.draft { "  (draft)" } else { "" }
+        if entry.draft { "  (draft)" } else { "" },
+        columns,
     );
     // Open proposals print IN FULL — this is the surface a reviewer copies the hash from.
     for p in &entry.pending_proposals {
         s.push_str(&format!(
             "    open proposal {p} — run `topos review {p} --approve` (or `--reject`)\n"
         ));
+    }
+    s
+}
+
+/// The SOURCE / STATUS / CAUSE suffix for a tracked row (`  [behind]  from acme  (excluded here)`) —
+/// rendered only for the fields `list` populated (an older/local producer leaves them `None`).
+fn list_columns(entry: &SkillEntry) -> String {
+    use topos_types::results::{DetachCause, SkillStatus};
+    let mut s = String::new();
+    // `draft` already shows via its own flag; skip it here to avoid a doubled note.
+    if let Some(status) = entry.status
+        && !matches!(status, SkillStatus::Draft)
+    {
+        let label = match status {
+            SkillStatus::Current => "current",
+            SkillStatus::Behind => "behind",
+            SkillStatus::Detached => "detached",
+            SkillStatus::Draft => "draft",
+        };
+        s.push_str(&format!("  [{label}]"));
+    }
+    if let Some(source) = &entry.source
+        && source != "local"
+    {
+        s.push_str(&format!("  from {source}"));
+    }
+    if let Some(cause) = entry.cause {
+        let label = match cause {
+            DetachCause::Unfollowed => "unfollowed",
+            DetachCause::ExcludedHere => "excluded here",
+            DetachCause::RemovedUpstream => "removed upstream",
+            DetachCause::SignedOut => "signed out",
+        };
+        s.push_str(&format!("  ({label})"));
     }
     s
 }
@@ -454,6 +492,46 @@ fn ordered_workspace_groups<'a>(
     ordered
 }
 
+/// The `update --reset` DESCRIBE's TTY — LOSS-led: it shows exactly the draft delta being discarded.
+pub(crate) fn reset_describe_tty(
+    items: &[topos_types::results::ResetData],
+    yes_argv: &[String],
+) -> String {
+    let mut s = String::new();
+    for item in items {
+        s.push_str(&format!(
+            "Reset '{}' — this DISCARDS your local edits back to {}:\n",
+            item.skill,
+            short(&item.to_version)
+        ));
+        if item.drop_diff.trim().is_empty() {
+            s.push_str("  (no local edits — nothing to discard)\n");
+        } else {
+            for line in item.drop_diff.trim_end_matches('\n').lines() {
+                s.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
+    s.push_str(&format!(
+        "Nothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The `update --reset` APPLY's TTY.
+pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> String {
+    let mut s = String::new();
+    for item in items {
+        s.push_str(&format!(
+            "Reset '{}' to {} — local edits discarded (a snapshot was kept in the sidecar store).\n",
+            item.skill,
+            short(&item.to_version)
+        ));
+    }
+    s.trim_end().to_owned()
+}
+
 pub(crate) fn diff_tty(data: &DiffData) -> String {
     if data.diff.is_empty() {
         "No changes — the draft matches current.".to_owned()
@@ -463,10 +541,18 @@ pub(crate) fn diff_tty(data: &DiffData) -> String {
 }
 
 pub(crate) fn log_tty(data: &LogData) -> String {
-    if data.events.is_empty() {
-        return "No history.".to_owned();
-    }
     let mut out = String::new();
+    // Lead with the archived-successor hint when the skill was resolved by its freed base name.
+    if let Some(hint) = &data.archived_successor {
+        out.push_str(&format!("note: {hint}\n"));
+    }
+    if data.events.is_empty() {
+        return if out.is_empty() {
+            "No history.".to_owned()
+        } else {
+            out.trim_end().to_owned()
+        };
+    }
     for e in &data.events {
         out.push_str(&format!("  {}\n", log_line(e)));
     }
@@ -497,6 +583,36 @@ fn log_line(e: &serde_json::Value) -> String {
         )
         .trim_end()
         .to_owned();
+    }
+    // A PURGED plane version renders its tombstone — the bytes are gone, so lead with who purged it.
+    if action == "version"
+        && let Some(purged_by) = get("purged_by")
+    {
+        let vid = get("version_id").map(short).unwrap_or("?");
+        let purged_when = e
+            .get("purged_at")
+            .and_then(serde_json::Value::as_u64)
+            .map(fmt_utc_millis)
+            .unwrap_or_default();
+        return format!("version {vid} — purged by {purged_by} {purged_when} — bytes gone")
+            .trim_end()
+            .to_owned();
+    }
+    // A plane proposal event: who proposed, its status, and any resolution.
+    if action == "proposal" {
+        let vid = get("version_id").map(short).unwrap_or("?");
+        let status = get("status").unwrap_or("open");
+        let mut s = format!(
+            "proposal {vid}  {status}  by {}",
+            get("proposer").unwrap_or("?")
+        );
+        if let Some(by) = get("resolved_by") {
+            s.push_str(&format!(" — {status} by {by}"));
+        }
+        if let Some(reason) = get("resolved_reason") {
+            s.push_str(&format!(": {reason}"));
+        }
+        return s;
     }
     let mut parts = vec![when, action.to_owned()];
     // Who/what: the human name where recorded, else the skill id; git version events carry the author.
@@ -939,6 +1055,194 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     s
 }
 
+/// One `remove` item line for the describe/apply — the boundary a followed removal keeps vs the
+/// permanence of a local delete.
+fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
+    match item.kind {
+        RemoveKind::FollowedExclusion => {
+            let verb = if applied { "Removed" } else { "Would remove" };
+            format!(
+                "{verb} '{}' from THIS device only — your other devices and the team are \
+                 unaffected. The local copy is kept as a frozen copy; nothing returns at the next \
+                 sync. `topos follow {}` re-attaches (stopping it everywhere is `topos unfollow`).",
+                item.name, item.name
+            )
+        }
+        RemoveKind::TrackedLocalPermanent => {
+            let verb = if applied { "Deleted" } else { "Would delete" };
+            format!(
+                "{verb} '{}' PERMANENTLY — it was never published, so no other copy exists (the \
+                 topos entry is dropped too).",
+                item.name
+            )
+        }
+        RemoveKind::UntrackedLocal => {
+            let verb = if applied { "Deleted" } else { "Would delete" };
+            format!(
+                "{verb} '{}' PERMANENTLY — an untracked local copy; no other copy exists.",
+                item.name
+            )
+        }
+    }
+}
+
+/// The `remove` DESCRIBE's TTY — the per-skill boundary + the `--yes` argv (nothing changed yet).
+pub(crate) fn remove_describe_tty(data: &RemoveData, yes_argv: &[String]) -> String {
+    let mut s = String::new();
+    for item in &data.items {
+        s.push_str(&remove_item_line(item, false));
+        s.push('\n');
+    }
+    s.push_str(&format!(
+        "Nothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The `remove` APPLY's TTY.
+pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
+    let mut s = String::new();
+    for item in &data.items {
+        s.push_str(&remove_item_line(item, true));
+        s.push('\n');
+    }
+    s.trim_end().to_owned()
+}
+
+/// The `channel add|remove` DESCRIBE's TTY — the placements/removals, the mode gate, the create note.
+pub(crate) fn channel_describe_tty(
+    data: &topos_types::results::ChannelData,
+    yes_argv: &[String],
+) -> String {
+    use topos_types::results::ChannelAction;
+    let verb = match data.action {
+        ChannelAction::Add => "Place into",
+        ChannelAction::Remove => "Remove from",
+    };
+    let mut s = format!("{verb} #{}", data.channel);
+    if data.creates {
+        s.push_str(&format!(
+            " (creates #{} — it does not exist yet)",
+            data.channel
+        ));
+    } else {
+        s.push_str(&format!(" (mode: {})", data.mode));
+    }
+    s.push(':');
+    for item in &data.items {
+        s.push_str(&format!("\n  {}", item.skill));
+    }
+    if data.mode == "curated" {
+        s.push_str("\nThis channel is curated — placement takes reviewer or owner.");
+    }
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The `channel add|remove` APPLY's TTY — per-skill outcomes, honest about a partial failure.
+pub(crate) fn channel_applied_tty(data: &topos_types::results::ChannelData) -> String {
+    use topos_types::results::{ChannelAction, ChannelItemOutcome};
+    let mut s = match data.action {
+        ChannelAction::Add if data.creates => format!("Created #{} and placed:", data.channel),
+        ChannelAction::Add => format!("Placed into #{}:", data.channel),
+        ChannelAction::Remove => format!("Removed from #{}:", data.channel),
+    };
+    for item in &data.items {
+        let outcome = match item.outcome {
+            ChannelItemOutcome::Placed => "placed".to_owned(),
+            ChannelItemOutcome::Removed => "removed".to_owned(),
+            ChannelItemOutcome::Pending => "pending".to_owned(),
+            ChannelItemOutcome::Failed => {
+                format!("FAILED — {}", item.detail.as_deref().unwrap_or("refused"))
+            }
+        };
+        s.push_str(&format!("\n  {}  {}", item.skill, outcome));
+    }
+    s
+}
+
+/// The `protect` DESCRIBE's TTY — the level being set, the audience it governs, and the standing note.
+pub(crate) fn protect_describe_tty(
+    data: &topos_types::results::ProtectData,
+    yes_argv: &[String],
+) -> String {
+    let direction = if data.loosening { "Loosen" } else { "Tighten" };
+    let mut s = format!(
+        "{direction} {} '{}' to `{}`",
+        data.kind, data.target, data.level
+    );
+    if let Some(n) = data.audience {
+        let noun = if data.kind == "channel" {
+            "members"
+        } else {
+            "people"
+        };
+        s.push_str(&format!(" — reaches {n} {noun}"));
+    }
+    if data.loosening {
+        s.push_str(" (an owner act)");
+    } else {
+        s.push_str(" (reviewer or owner)");
+    }
+    if let Some(note) = &data.note {
+        s.push_str(&format!("\nnote: {note}"));
+    }
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The `protect` APPLY's TTY.
+pub(crate) fn protect_applied_tty(data: &topos_types::results::ProtectData) -> String {
+    format!("Set {} '{}' to `{}`.", data.kind, data.target, data.level)
+}
+
+/// The bare `invite` read's TTY — the workspace address + invite policy, and the explicit no-op note.
+pub(crate) fn invite_read_tty(data: &topos_types::results::InviteReadData) -> String {
+    let who = if data.invite_policy == "owners" {
+        "owners"
+    } else {
+        "any member"
+    };
+    format!(
+        "Workspace address: {}\nInvite policy: {} ({who} may invite).\nNothing was sent or changed \
+         — pass emails to invite (`topos invite <email>...`).",
+        data.address, data.invite_policy
+    )
+}
+
+/// The `invite <email>...` DESCRIBE's TTY — who gets seated, the pre-placements, the mail-or-paste note.
+pub(crate) fn invite_describe_tty(
+    data: &topos_types::results::InviteDescribeData,
+    yes_argv: &[String],
+) -> String {
+    let mut s = format!("Would seat as invited members of {}:", data.address);
+    for e in &data.seat {
+        s.push_str(&format!("\n  {e}"));
+    }
+    if !data.channels.is_empty() {
+        s.push_str(&format!(
+            "\nPre-placed into channels: #{}",
+            data.channels.join(", #")
+        ));
+    }
+    s.push_str(&format!(
+        "\nThey join at {} — the server mails them if it can, otherwise paste the address to them.",
+        data.address
+    ));
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
 pub(crate) fn invite_tty(data: &InvitationData) -> String {
     let mut out = if data.invited.is_empty() {
         "No new invitations.".to_owned()
@@ -963,6 +1267,54 @@ fn added_line(added: &AddedNote) -> String {
         Some(slug) => format!("Added '{}' from {slug} to topos.", added.name),
         None => format!("Added '{}' to topos.", added.name),
     }
+}
+
+/// The bare enrolled `publish` DESCRIBE — where it lands, the gate, the audience, the share line, and
+/// the undo. Nothing has landed on the plane yet.
+pub(crate) fn publish_describe_tty(
+    data: &topos_types::results::PublishDescribeData,
+    yes_argv: &[String],
+) -> String {
+    use topos_types::results::PublishGate;
+    let ws = data
+        .workspace_display_name
+        .as_deref()
+        .unwrap_or(&data.workspace_id);
+    let mut s = format!("Publish '{}' to {ws}:", data.skill);
+    s.push_str(&format!("\n  digest {}", short(&data.bundle_digest)));
+    let gate = match data.gate {
+        PublishGate::Lands => "open — this moves current directly",
+        PublishGate::Proposal => {
+            "reviewed — this opens a proposal (current does not move until approved)"
+        }
+    };
+    s.push_str(&format!("\n  gate: {gate}"));
+    if data.is_revert {
+        s.push_str("\n  this restores earlier bytes (a revert), shipped through the same gate");
+    }
+    if !data.placements.is_empty() {
+        s.push_str(&format!(
+            "\n  places into: #{}",
+            data.placements.join(", #")
+        ));
+    }
+    if let Some(reach) = data.reach {
+        s.push_str(&format!("\n  reaches {reach} people"));
+    }
+    if let Some(note) = &data.origin_note {
+        s.push_str(&format!("\n  note: {note}"));
+    }
+    if let Some(line) = &data.share_line {
+        s.push_str(&format!("\n  share: {line}"));
+    }
+    if let Some(undo) = &data.undo {
+        s.push_str(&format!("\n  undo: {undo}"));
+    }
+    s.push_str(&format!(
+        "\nNothing has landed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
 }
 
 pub(crate) fn publish_tty(data: &PublishData) -> String {
@@ -1062,6 +1414,80 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
         data.current_generation.epoch,
         data.current_generation.seq,
     )
+}
+
+/// The bare `review` inbox/outbox TTY — author-message FIRST, grouped by workspace, inbox before outbox.
+pub(crate) fn review_inbox_tty(data: &topos_types::results::ReviewIndexData) -> String {
+    use topos_types::results::ReviewIndexEntry;
+    let entry_line = |e: &ReviewIndexEntry| -> String {
+        let stale = if e.stale {
+            "  [STALE — needs re-propose]"
+        } else {
+            ""
+        };
+        format!(
+            "  {}  ({})\n    {}  by {}{}\n    review with `topos review {} --approve` (or `--reject -m <reason>`)",
+            e.message, e.workspace_name, e.proposal, e.proposer, stale, e.proposal
+        )
+    };
+    if data.inbox.is_empty() && data.outbox.is_empty() {
+        return "No open proposals.".to_owned();
+    }
+    let mut s = String::new();
+    if !data.inbox.is_empty() {
+        s.push_str("To review (others' proposals):\n");
+        for e in &data.inbox {
+            s.push_str(&entry_line(e));
+            s.push('\n');
+        }
+    }
+    if !data.outbox.is_empty() {
+        s.push_str("Your open proposals:\n");
+        for e in &data.outbox {
+            s.push_str(&format!(
+                "  {}  ({})\n    {}  awaiting review{}\n",
+                e.message,
+                e.workspace_name,
+                e.proposal,
+                if e.stale {
+                    "  [STALE — re-propose]"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    s.trim_end().to_owned()
+}
+
+/// A bare review TARGET's describe TTY — author, message, base, staleness, and the diff. Nothing mutates.
+pub(crate) fn review_describe_tty(
+    data: &topos_types::results::ReviewDescribeData,
+    next_argvs: &[Vec<String>],
+) -> String {
+    let mut s = format!(
+        "{}\n  proposal {}\n  by {}  on base {}{}",
+        data.message,
+        data.proposal,
+        data.proposer,
+        short(&data.base_version_id),
+        if data.stale {
+            "  [STALE — current moved; the author should re-propose]"
+        } else {
+            ""
+        },
+    );
+    if data.diff.trim().is_empty() {
+        s.push_str("\n(no changes against current)");
+    } else {
+        s.push_str("\n\n");
+        s.push_str(data.diff.trim_end_matches('\n'));
+    }
+    s.push_str("\nDecide with:");
+    for argv in next_argvs {
+        s.push_str(&format!("\n  {}", argv_line(argv)));
+    }
+    s
 }
 
 pub(crate) fn review_tty(data: &ReviewData) -> String {
@@ -1467,6 +1893,9 @@ mod tests {
             bundle_digest: "cd".repeat(32),
             draft,
             pending_proposals: Vec::new(),
+            source: None,
+            status: None,
+            cause: None,
         };
         let mut docs = entry("docs", false, Some("w_acme"));
         docs.pending_proposals = vec![format!("docs@{}", "ef".repeat(32))];
@@ -1628,6 +2057,7 @@ mod tests {
                 serde_json::json!({ "unknown": true }),
             ],
             team: None,
+            archived_successor: None,
         };
         let out = log_tty(&data);
         // Columns: human timestamp, action, name, short id.

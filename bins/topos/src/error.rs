@@ -31,6 +31,10 @@ pub(crate) enum ClientError {
     /// what the user needs. Sidecar-document parse failures stay [`ClientError::Corrupt`].
     #[error("{0}")]
     InvalidArgument(String),
+    /// A `publish` whose draft is byte-identical to `current` — there is nothing to ship. Distinct from a
+    /// usage error so an agent can branch on "already published" without treating it as a mistake.
+    #[error("'{skill}' has no changes to publish — the draft matches current")]
+    NoChanges { skill: String },
     /// A write-side git store failure.
     #[error("git store error: {0}")]
     Gitstore(#[from] GitstoreError),
@@ -334,6 +338,7 @@ impl ClientError {
             // set (which is closed on the client side; agents branch on `outcome`/`retryable`).
             ClientError::Io(_) | ClientError::IoKind { .. } => "IO_ERROR",
             ClientError::InvalidArgument(_) => "INVALID_ARGUMENT",
+            ClientError::NoChanges { .. } => "NO_CHANGES",
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",
