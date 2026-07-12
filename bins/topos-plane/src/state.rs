@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use plane_store::{Authority, DeploymentMode, EnrollmentConfig, PoolConfig, WorkspaceId};
+use plane_store::{
+    AppliedSkill, Authority, DeploymentMode, EnrollmentConfig, PoolConfig, WorkspaceId,
+};
 
-use topos_types::requests::WireSkillIndex;
+use topos_types::requests::{WireDelivery, WireSkillIndex};
 
 use crate::enroll::mailer::{Mailer, NoopMailer, SmtpConfig, SmtpMailer};
 use crate::rate_limit::{Limiter, Limits};
@@ -424,6 +426,45 @@ impl PlaneState {
             .list_skills_device(&ws, credential, now)
             .await?;
         Ok(crate::wire::map::skill_index_to_wire(rows))
+    }
+
+    /// The DEVICE-credential DELIVERY read (`GET /v1/workspaces/{ws}/delivery`) — the currency hot path the
+    /// route handler calls: parse the workspace id (a malformed id is the uniform miss), run
+    /// [`Authority::delivery`](plane_store::Authority), and map the domain `Delivery` into the wire
+    /// [`WireDelivery`] (the entitled set, the detached ids, the notices feed, the open-proposal count —
+    /// **no bytes**, ids hex-encoded, the `workspace_id` echoed from the path). A
+    /// [`PlaneHttpError`] carries the outcome: [`AuthorityError::NotFound`](plane_store::AuthorityError) —
+    /// unknown/revoked credential or non-member — becomes the indistinguishable 404; an Integrity/Internal
+    /// fault becomes a 500.
+    pub(crate) async fn delivery(
+        &self,
+        workspace_id: &str,
+        credential: &str,
+    ) -> Result<WireDelivery, PlaneHttpError> {
+        let ws =
+            WorkspaceId::parse(workspace_id).map_err(|_| plane_store::AuthorityError::NotFound)?;
+        let delivery = self.authority().delivery(&ws, credential).await?;
+        Ok(crate::wire::map::delivery_to_wire(delivery, workspace_id))
+    }
+
+    /// The DEVICE-credential APPLIED-STATE REPORT write (`PUT /v1/workspaces/{ws}/report`) — the fleet's
+    /// visibility write the route handler calls after mapping the body into `applied` at the wire edge:
+    /// parse the workspace id (a malformed id is the uniform miss), stamp the server clock, and run
+    /// [`Authority::report_applied`](plane_store::Authority) (a last-writer-wins upsert; no receipt). Same
+    /// [`PlaneHttpError`] mapping as [`delivery`](Self::delivery).
+    pub(crate) async fn report_applied(
+        &self,
+        workspace_id: &str,
+        credential: &str,
+        applied: &[AppliedSkill],
+    ) -> Result<(), PlaneHttpError> {
+        let ws =
+            WorkspaceId::parse(workspace_id).map_err(|_| plane_store::AuthorityError::NotFound)?;
+        let now = crate::wire::now_utc().1;
+        self.authority()
+            .report_applied(&ws, credential, applied, now)
+            .await?;
+        Ok(())
     }
 
     /// The storage authority — the only trust surface; handlers call its authorized operations.

@@ -4,10 +4,11 @@
 
 use base64::Engine as _;
 use plane_store::{
-    CandidateUpload, CommitId, CreateInviteOutcome, DeploymentMode as StoreDeploymentMode,
-    DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome, InviteBootstrap, OpenProposalSummary,
-    PasscodeComplete, RedeemOutcome, SessionIntent as StoreSessionIntent, SetCurrentReceipt,
-    SkillIndexRow, UploadedFile, VerificationContext, VersionMeta,
+    AppliedSkill, CandidateUpload, CommitId, CreateInviteOutcome, Delivery,
+    DeploymentMode as StoreDeploymentMode, DeviceAuthPoll, DeviceAuthStart, GovernanceOutcome,
+    InviteBootstrap, OpenProposalSummary, PasscodeComplete, RedeemOutcome,
+    SessionIntent as StoreSessionIntent, SetCurrentReceipt, SkillId, SkillIndexRow, UploadedFile,
+    VerificationContext, VersionMeta,
 };
 use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
@@ -16,8 +17,9 @@ use topos_types::bootstrap::{
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
     PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, SessionIntent,
-    VerificationContextResponse, WireCandidate, WireOpenProposal, WireProposalList, WireSkillIndex,
-    WireSkillIndexEntry, WireVersionFile, WireVersionMeta,
+    VerificationContextResponse, WireAppliedReport, WireCandidate, WireDelivery, WireDeliverySkill,
+    WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex, WireSkillIndexEntry, WireVia,
+    WireVersionFile, WireVersionMeta,
 };
 use topos_types::results::InviteData;
 use topos_types::{
@@ -181,6 +183,8 @@ pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {
             .into_iter()
             .map(|r| WireSkillIndexEntry {
                 skill_id: r.skill_id,
+                name: r.name,
+                status: r.status,
                 version_id: hex::encode(r.version_id),
                 bundle_digest: hex::encode(r.bundle_digest),
                 generation: r.generation,
@@ -190,6 +194,73 @@ pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {
             })
             .collect(),
     }
+}
+
+/// Map the authority's [`Delivery`] (the per-device currency answer) to the wire [`WireDelivery`] —
+/// hex-encode each 32-byte id (the same `hex::encode` [`skill_index_to_wire`] uses), carry the `via`
+/// attribution / protection / timestamps through, and stamp the `workspace_id` from the request path. **NO
+/// bytes** — the client fetches each version through the per-blob bundle read after reconciling.
+pub(crate) fn delivery_to_wire(d: Delivery, ws: &str) -> WireDelivery {
+    WireDelivery {
+        schema_version: 1,
+        workspace_id: ws.to_owned(),
+        skills: d
+            .skills
+            .into_iter()
+            .map(|s| WireDeliverySkill {
+                skill_id: s.skill_id,
+                name: s.name,
+                display_name: s.display_name,
+                protection: s.protection,
+                version_id: hex::encode(s.version_id),
+                bundle_digest: hex::encode(s.bundle_digest),
+                generation: s.generation,
+                updated_at: s.updated_at,
+                via: WireVia {
+                    channels: s.via_channels,
+                    direct: s.direct,
+                },
+            })
+            .collect(),
+        detached: d.detached,
+        notices: d
+            .notices
+            .into_iter()
+            .map(|n| WireNotice {
+                id: n.id,
+                kind: n.kind,
+                skill_id: n.skill_id,
+                skill_name: n.skill_name,
+                version_id: n.version_id.map(hex::encode),
+                actor: n.actor,
+                outcome: n.outcome,
+                reason: n.reason,
+                message: n.message,
+                created_at: n.created_at,
+            })
+            .collect(),
+        proposals_awaiting: d.proposals_awaiting,
+    }
+}
+
+/// Map an inbound applied-state report to the authority's `Vec<AppliedSkill>`: parse each skill id and
+/// hex-decode each version id at the edge, mapping a bad id to a 400 (mirroring [`candidate_to_domain`]).
+pub(crate) fn applied_report_to_domain(
+    req: WireAppliedReport,
+) -> Result<Vec<AppliedSkill>, PlaneHttpError> {
+    let mut applied = Vec::with_capacity(req.applied.len());
+    for a in req.applied {
+        let skill_id =
+            SkillId::parse(&a.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
+        let version_id = super::hex32(&a.version_id).map(CommitId).ok_or_else(|| {
+            PlaneHttpError::BadId(format!("invalid version id {:?}", a.version_id))
+        })?;
+        applied.push(AppliedSkill {
+            skill_id,
+            version_id,
+        });
+    }
+    Ok(applied)
 }
 
 /// The CLI verb a domain command string maps to (the envelope's `command`).

@@ -44,6 +44,17 @@ pub fn router(state: PlaneState) -> Router {
             "/v1/workspaces/{ws}/skills",
             get(routes::skills_index::list_skills),
         )
+        // The per-device currency read (delivery) + the fleet's applied-state report. The report is a
+        // body-light device WRITE grouped with the reads (the currency lane); it carries the small 64 KiB
+        // belt as a per-route layer (the other reads carry no body, so the group has no shared belt).
+        .route(
+            "/v1/workspaces/{ws}/delivery",
+            get(routes::delivery::get_delivery),
+        )
+        .route(
+            "/v1/workspaces/{ws}/report",
+            put(routes::delivery::put_report).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
+        )
         .route(
             "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
             get(routes::bundles::get_bundle),

@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireDelivery",
+  "description": "`GET /v1/workspaces/{ws}/delivery` response body — the currency answer for ONE enrolled device: the\nentitled skills (what this device should have), the person's detached skills (freeze-in-place, never\ncleaned), the unacked notices feed, and the open-proposal count across the entitled set. The\nsession-start hook fetches it once per workspace and reconciles the harness against it, silently. A\nversioned envelope.",
+  "type": "object",
+  "properties": {
+    "detached": {
+      "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notices": {
+      "description": "The unacked, person-scoped notices (verdicts, proposal closures, …).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireNotice"
+      }
+    },
+    "proposals_awaiting": {
+      "description": "The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "schema_version": {
+      "description": "Always `1` for this contract version (the schema pins it `const`).",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "skills": {
+      "description": "The entitled skills — everything this device should have (a possibly-empty list).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireDeliverySkill"
+      }
+    },
+    "workspace_id": {
+      "description": "The workspace this delivery is scoped to (echoed from the path).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "workspace_id",
+    "skills",
+    "detached",
+    "notices",
+    "proposals_awaiting"
+  ],
+  "$defs": {
+    "Generation": {
+      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ]
+    },
+    "WireDeliverySkill": {
+      "description": "One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`\nversion + its consent digest, the resolved protection posture, and the `via` attribution. **NO bytes** —\nafter reconciling the client fetches each version through the per-blob bundle read.",
+      "type": "object",
+      "properties": {
+        "bundle_digest": {
+          "description": "The `current` byte-exact consent hash (64-char lowercase hex) — the fetch + re-hash pin.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "display_name": {
+          "description": "The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "description": "The `current` pointer's `(epoch, seq)`.",
+          "$ref": "#/$defs/Generation"
+        },
+        "name": {
+          "description": "The catalog's user-facing name (the on-disk directory name for a fresh install).",
+          "type": "string"
+        },
+        "protection": {
+          "description": "The resolved per-bundle protection posture — `\"open\"` or `\"reviewed\"` (the client's publish\npreflight; the server re-decides authoritatively on every write). An OPEN string for forward\ncompat — a client treats an unrecognized value as the stricter posture.",
+          "type": "string"
+        },
+        "skill_id": {
+          "description": "The skill id (the `<skill>` path segment).",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "When `current` last moved (epoch milliseconds).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "version_id": {
+          "description": "The pinned `current` version's commit id (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "via": {
+          "description": "Why this device is entitled to the skill (channels ∪ direct).",
+          "$ref": "#/$defs/WireVia"
+        }
+      },
+      "required": [
+        "skill_id",
+        "name",
+        "protection",
+        "version_id",
+        "bundle_digest",
+        "generation",
+        "updated_at",
+        "via"
+      ]
+    },
+    "WireNotice": {
+      "description": "One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without\na schema break (today's values include `\"verdict\"` and `\"proposal_closed\"`); every other field is\npresent only when the notice names it. The silent currency hook fetches these without acking; an\ninteractive surface acks by id.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "description": "The actor whose action raised the notice, when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "When the notice was created (the server-stamped RFC-3339 string).",
+          "type": "string"
+        },
+        "id": {
+          "description": "The notice id (the ack handle).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The notice kind — an OPEN vocabulary (e.g. `\"verdict\"`, `\"proposal_closed\"`); a client ignores a\nkind it does not recognize.",
+          "type": "string"
+        },
+        "message": {
+          "description": "A rendered human message, when the notice carries one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "The outcome (e.g. a verdict's `approve` / `reject`), when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "The human reason (a review's rationale), when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_id": {
+          "description": "The skill the notice concerns, when it names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_name": {
+          "description": "The skill's current catalog name (joined for narration), when the notice names a skill.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_id": {
+          "description": "The version the notice concerns (64-char lowercase hex), when it names one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "created_at"
+      ]
+    },
+    "WireVia": {
+      "description": "Why THIS device is entitled to a delivered skill — the attribution the client's narration reads. A\ndelivered skill always has at least one of the two: it rides one or more channels, and/or the person\nfollows it directly (a direct follow survives every channel drop).",
+      "type": "object",
+      "properties": {
+        "channels": {
+          "description": "The channels delivering the skill (names, sorted; `everyone` is present when it delivers).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "direct": {
+          "description": "Whether the person also follows the skill directly (independent of any channel).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "channels",
+        "direct"
+      ]
+    }
+  }
+}

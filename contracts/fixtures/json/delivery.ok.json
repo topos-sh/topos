@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "workspace_id": "w_demo",
+  "skills": [
+    {
+      "skill_id": "s_prdescribe",
+      "name": "pr-describe",
+      "display_name": "PR describe",
+      "protection": "open",
+      "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "generation": {
+        "epoch": 1,
+        "seq": 42
+      },
+      "updated_at": 1700000000000,
+      "via": {
+        "channels": [
+          "everyone"
+        ],
+        "direct": false
+      }
+    },
+    {
+      "skill_id": "s_deploy",
+      "name": "deploy",
+      "protection": "reviewed",
+      "version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bundle_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "generation": {
+        "epoch": 2,
+        "seq": 3
+      },
+      "updated_at": 1700000100000,
+      "via": {
+        "channels": [
+          "ops",
+          "everyone"
+        ],
+        "direct": true
+      }
+    }
+  ],
+  "detached": [
+    "s_legacy"
+  ],
+  "notices": [
+    {
+      "id": "ntc_01",
+      "kind": "verdict",
+      "skill_id": "s_deploy",
+      "skill_name": "deploy",
+      "version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "actor": "reviewer@demo.test",
+      "outcome": "approve",
+      "reason": "Ship it — the rollback note is clear.",
+      "created_at": "2026-06-25T00:00:00Z"
+    }
+  ],
+  "proposals_awaiting": 1
+}

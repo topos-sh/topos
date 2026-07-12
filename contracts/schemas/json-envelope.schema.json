@@ -255,12 +255,7 @@
           ]
         },
         {
-          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the\n`publish --propose` next-action.",
-          "type": "string",
-          "const": "APPROVAL_REQUIRED"
-        },
-        {
-          "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
+          "description": "A successfully-opened proposal — an explicit `--propose`, or a direct publish/revert the\nper-bundle protection DOWNGRADED to one (the receipt's `details.downgraded` says which).",
           "type": "string",
           "const": "NEEDS_REVIEW"
         }

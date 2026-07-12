@@ -58,7 +58,8 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // The right token ⇒ 204, and the flip is OBSERVABLE: a direct publish now fails typed.
+    // The right token ⇒ 204, and the flip is OBSERVABLE: a plain member's direct publish now DOWNGRADES
+    // to a proposal (the protected-branch reroute), never a refusal.
     let (status, _h, _b) = run(&ctx, put_policy(Some("op_secret"), true)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
@@ -75,9 +76,19 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "a protocol outcome is always a 200");
     let env = envelope(&bytes);
-    assert!(!env.ok);
-    let receipt = env.receipt.expect("a gated receipt");
-    assert_eq!(receipt.outcome, TerminalOutcome::ApprovalRequired);
+    // The downgraded publish is a SUCCESSFUL proposal (NEEDS_REVIEW maps to `ok` in the wire).
+    assert!(env.ok, "a downgraded publish is a successful proposal: {env:?}");
+    let receipt = env.receipt.expect("a downgraded receipt");
+    assert_eq!(receipt.outcome, TerminalOutcome::NeedsReview);
+    assert_eq!(
+        receipt
+            .details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the receipt marks the direct publish downgraded to a proposal"
+    );
 
     // Toggle OFF ⇒ 204 (idempotent set), and a fresh direct publish is OK again.
     let (status, _h, _b) = run(&ctx, put_policy(Some("op_secret"), false)).await;

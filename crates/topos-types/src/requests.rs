@@ -289,8 +289,8 @@ pub struct WireProposalList {
 }
 
 /// One skill of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns it: the discovery
-/// metadata a member browses to decide what to follow — **NO bytes** (following still goes through the
-/// per-skill grant). Mirrors `plane-store`'s `SkillIndexRow` with every 32-byte id hex-encoded.
+/// metadata a member browses to decide what to follow — **NO bytes**. Mirrors `plane-store`'s
+/// `SkillIndexRow` with every 32-byte id hex-encoded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -299,6 +299,11 @@ pub struct WireProposalList {
 pub struct WireSkillIndexEntry {
     /// The skill id (the `<skill>` path segment).
     pub skill_id: String,
+    /// The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id).
+    pub name: String,
+    /// The catalog lifecycle status — `"active"` / `"archived"` (a deleted skill has no `current` row and
+    /// so no entry). An OPEN string, deliberately: a new state can land without a schema break.
+    pub status: String,
     /// The `current` version's commit id (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
@@ -329,6 +334,155 @@ pub struct WireSkillIndexEntry {
 pub struct WireSkillIndex {
     /// The workspace's skills (possibly empty).
     pub skills: Vec<WireSkillIndexEntry>,
+}
+
+/// Why THIS device is entitled to a delivered skill — the attribution the client's narration reads. A
+/// delivered skill always has at least one of the two: it rides one or more channels, and/or the person
+/// follows it directly (a direct follow survives every channel drop).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireVia {
+    /// The channels delivering the skill (names, sorted; `everyone` is present when it delivers).
+    pub channels: Vec<String>,
+    /// Whether the person also follows the skill directly (independent of any channel).
+    pub direct: bool,
+}
+
+/// One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`
+/// version + its consent digest, the resolved protection posture, and the `via` attribution. **NO bytes** —
+/// after reconciling the client fetches each version through the per-blob bundle read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireDeliverySkill {
+    /// The skill id (the `<skill>` path segment).
+    pub skill_id: String,
+    /// The catalog's user-facing name (the on-disk directory name for a fresh install).
+    pub name: String,
+    /// The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The resolved per-bundle protection posture — `"open"` or `"reviewed"` (the client's publish
+    /// preflight; the server re-decides authoritatively on every write). An OPEN string for forward
+    /// compat — a client treats an unrecognized value as the stricter posture.
+    pub protection: String,
+    /// The pinned `current` version's commit id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The `current` byte-exact consent hash (64-char lowercase hex) — the fetch + re-hash pin.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub bundle_digest: String,
+    /// The `current` pointer's `(epoch, seq)`.
+    pub generation: Generation,
+    /// When `current` last moved (epoch milliseconds).
+    pub updated_at: i64,
+    /// Why this device is entitled to the skill (channels ∪ direct).
+    pub via: WireVia,
+}
+
+/// One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without
+/// a schema break (today's values include `"verdict"` and `"proposal_closed"`); every other field is
+/// present only when the notice names it. The silent currency hook fetches these without acking; an
+/// interactive surface acks by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireNotice {
+    /// The notice id (the ack handle).
+    pub id: String,
+    /// The notice kind — an OPEN vocabulary (e.g. `"verdict"`, `"proposal_closed"`); a client ignores a
+    /// kind it does not recognize.
+    pub kind: String,
+    /// The skill the notice concerns, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    /// The skill's current catalog name (joined for narration), when the notice names a skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_name: Option<String>,
+    /// The version the notice concerns (64-char lowercase hex), when it names one.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    /// The actor whose action raised the notice, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// The outcome (e.g. a verdict's `approve` / `reject`), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The human reason (a review's rationale), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// A rendered human message, when the notice carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// When the notice was created (the server-stamped RFC-3339 string).
+    pub created_at: String,
+}
+
+/// `GET /v1/workspaces/{ws}/delivery` response body — the currency answer for ONE enrolled device: the
+/// entitled skills (what this device should have), the person's detached skills (freeze-in-place, never
+/// cleaned), the unacked notices feed, and the open-proposal count across the entitled set. The
+/// session-start hook fetches it once per workspace and reconciles the harness against it, silently. A
+/// versioned envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireDelivery {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    pub schema_version: u32,
+    /// The workspace this delivery is scoped to (echoed from the path).
+    pub workspace_id: String,
+    /// The entitled skills — everything this device should have (a possibly-empty list).
+    pub skills: Vec<WireDeliverySkill>,
+    /// The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
+    /// NOT currently re-entitled — every device freezes these in place, never cleaning them.
+    pub detached: Vec<String>,
+    /// The unacked, person-scoped notices (verdicts, proposal closures, …).
+    pub notices: Vec<WireNotice>,
+    /// The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).
+    pub proposals_awaiting: u64,
+}
+
+/// One applied-state row a device reports: the skill and the version it currently holds after its
+/// reconcile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireAppliedSkill {
+    /// The skill id (the `<skill>` path segment).
+    pub skill_id: String,
+    /// The version this device holds (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+}
+
+/// `PUT /v1/workspaces/{ws}/report` body — the fleet's applied-state report: this device's
+/// `(skill, applied version)` snapshot after a reconcile. The plane upserts the snapshot, drops the
+/// non-detached rows it no longer names, and stamps the staleness clock (last-writer-wins; no receipt).
+/// The acting device rides the `Authorization: Bearer` workspace credential, never a body field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireAppliedReport {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    pub schema_version: u32,
+    /// The device's applied skills (possibly empty — a device holding nothing reports an empty list).
+    pub applied: Vec<WireAppliedSkill>,
 }
 
 // =================================================================================================
@@ -1038,6 +1192,117 @@ mod tests {
         }))
         .unwrap();
         assert!(old.principal.is_none());
+    }
+
+    #[test]
+    fn skill_index_entry_carries_name_and_status() {
+        let entry = WireSkillIndexEntry {
+            skill_id: "s_prdescribe".to_owned(),
+            name: "pr-describe".to_owned(),
+            status: "active".to_owned(),
+            version_id: "a".repeat(64),
+            bundle_digest: "b".repeat(64),
+            generation: Generation { epoch: 1, seq: 3 },
+            display_name: None,
+            updated_at: 1_700_000_000_000,
+            open_proposals: 0,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        // The new fields ride under their snake_case spellings.
+        assert_eq!(v["name"], "pr-describe");
+        assert_eq!(v["status"], "active");
+        // An absent display_name omits (skip_serializing_if).
+        assert!(v.get("display_name").is_none());
+        let back: WireSkillIndexEntry = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, "pr-describe");
+        assert_eq!(back.status, "active");
+    }
+
+    #[test]
+    fn delivery_round_trips_snake_case_and_omits_absent_notice_fields() {
+        let delivery = WireDelivery {
+            schema_version: 1,
+            workspace_id: "w_demo".to_owned(),
+            skills: vec![WireDeliverySkill {
+                skill_id: "s_prdescribe".to_owned(),
+                name: "pr-describe".to_owned(),
+                display_name: Some("PR describe".to_owned()),
+                protection: "reviewed".to_owned(),
+                version_id: "a".repeat(64),
+                bundle_digest: "b".repeat(64),
+                generation: Generation { epoch: 1, seq: 7 },
+                updated_at: 1_700_000_000_000,
+                via: WireVia {
+                    channels: vec!["everyone".to_owned()],
+                    direct: true,
+                },
+            }],
+            detached: vec!["s_old".to_owned()],
+            notices: vec![WireNotice {
+                id: "ntc_1".to_owned(),
+                kind: "verdict".to_owned(),
+                skill_id: Some("s_prdescribe".to_owned()),
+                skill_name: Some("pr-describe".to_owned()),
+                version_id: None,
+                actor: Some("alice@acme.com".to_owned()),
+                outcome: Some("approve".to_owned()),
+                reason: Some("looks good".to_owned()),
+                message: None,
+                created_at: "2026-06-25T00:00:00Z".to_owned(),
+            }],
+            proposals_awaiting: 2,
+        };
+        let v = serde_json::to_value(&delivery).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["workspace_id"], "w_demo");
+        assert_eq!(v["skills"][0]["skill_id"], "s_prdescribe");
+        assert_eq!(v["skills"][0]["protection"], "reviewed");
+        // `via` carries the channels + direct flag under snake_case.
+        assert_eq!(v["skills"][0]["via"]["channels"][0], "everyone");
+        assert_eq!(v["skills"][0]["via"]["direct"], true);
+        assert_eq!(v["detached"][0], "s_old");
+        assert_eq!(v["notices"][0]["kind"], "verdict");
+        assert_eq!(v["notices"][0]["reason"], "looks good");
+        // Absent optional notice fields omit (skip_serializing_if) — never serialized as null.
+        assert!(v["notices"][0].get("version_id").is_none());
+        assert!(v["notices"][0].get("message").is_none());
+        let back: WireDelivery = serde_json::from_value(v).unwrap();
+        assert_eq!(back.skills.len(), 1);
+        assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
+        assert_eq!(back.proposals_awaiting, 2);
+        // An empty delivery (nothing entitled, nothing detached) still round-trips.
+        let empty: WireDelivery = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "workspace_id": "w_demo",
+            "skills": [],
+            "detached": [],
+            "notices": [],
+            "proposals_awaiting": 0,
+        }))
+        .unwrap();
+        assert!(empty.skills.is_empty() && empty.notices.is_empty());
+    }
+
+    #[test]
+    fn applied_report_round_trips_snake_case() {
+        let report = WireAppliedReport {
+            schema_version: 1,
+            applied: vec![WireAppliedSkill {
+                skill_id: "s_prdescribe".to_owned(),
+                version_id: "c".repeat(64),
+            }],
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["applied"][0]["skill_id"], "s_prdescribe");
+        assert_eq!(v["applied"][0]["version_id"], "c".repeat(64));
+        let back: WireAppliedReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back.applied.len(), 1);
+        // An empty report (a device that holds nothing yet) round-trips.
+        let empty: WireAppliedReport =
+            serde_json::from_value(serde_json::json!({ "schema_version": 1, "applied": [] }))
+                .unwrap();
+        assert!(empty.applied.is_empty());
     }
 
     #[test]

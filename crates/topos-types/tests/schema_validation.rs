@@ -9,6 +9,7 @@
 use jsonschema::Validator;
 use schemars::schema_for;
 use serde_json::{Value, json};
+use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
 use topos_types::{
     CurrentRecord, Generation, PointerScope, Receipt, TerminalOutcome, WireCurrentRecord,
 };
@@ -61,6 +62,76 @@ fn current_pointer_accepts_valid_and_rejects_malformed() {
     assert!(
         !v.is_valid(&bad),
         "schema_version != 1 must be rejected (const)"
+    );
+}
+
+fn good_delivery() -> WireDelivery {
+    WireDelivery {
+        schema_version: 1,
+        workspace_id: "w_1".into(),
+        skills: vec![WireDeliverySkill {
+            skill_id: "s_1".into(),
+            name: "one".into(),
+            display_name: None,
+            protection: "open".into(),
+            version_id: "a".repeat(64),
+            bundle_digest: "b".repeat(64),
+            generation: Generation { epoch: 1, seq: 1 },
+            updated_at: 1,
+            via: WireVia {
+                channels: vec!["everyone".into()],
+                direct: false,
+            },
+        }],
+        detached: vec![],
+        notices: vec![WireNotice {
+            id: "n_1".into(),
+            kind: "verdict".into(),
+            skill_id: Some("s_1".into()),
+            skill_name: Some("one".into()),
+            version_id: None,
+            actor: None,
+            outcome: Some("approve".into()),
+            reason: Some("ok".into()),
+            message: None,
+            created_at: "2026-06-25T00:00:00Z".into(),
+        }],
+        proposals_awaiting: 1,
+    }
+}
+
+#[test]
+fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
+    let v = validator_for::<WireDelivery>();
+    let good: Value = serde_json::to_value(good_delivery()).unwrap();
+    assert!(
+        v.is_valid(&good),
+        "a serialized valid delivery must validate against its own schema"
+    );
+
+    // A skill's version_id must be 64 lowercase hex — a 63-char id is rejected (pattern).
+    let mut bad = good.clone();
+    bad["skills"][0]["version_id"] = json!("a".repeat(63));
+    assert!(
+        !v.is_valid(&bad),
+        "a 63-char skill version_id must be rejected (pattern)"
+    );
+
+    // schema_version is pinned const 1.
+    let mut bad = good.clone();
+    bad["schema_version"] = json!(2);
+    assert!(
+        !v.is_valid(&bad),
+        "schema_version != 1 must be rejected (const)"
+    );
+
+    // An unknown extra field is ACCEPTED — schemars sets no `additionalProperties: false`, so the wire
+    // stays additively tolerant (a newer plane may add fields an older client ignores).
+    let mut extra = good.clone();
+    extra["unknown_future_field"] = json!("tolerated");
+    assert!(
+        v.is_valid(&extra),
+        "an unknown extra field must be tolerated (additive)"
     );
 }
 

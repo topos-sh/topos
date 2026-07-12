@@ -11,6 +11,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod bootstrap_doc;
 pub(crate) mod bundles;
 pub(crate) mod current;
+pub(crate) mod delivery;
 pub(crate) mod enroll;
 pub(crate) mod governance;
 pub(crate) mod policy;

@@ -14,6 +14,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "channel": {
+      "description": "The `--to` channel placement sent alongside a publish/propose so a replay re-sends the identical\nvalue. `None` when no placement was requested (and for a revert/review and pre-existing WALs).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "display_name": {
       "description": "The skill's advisory display name (the author's folder name) sent alongside a publish/propose so a\nreplay re-sends the identical value. Advisory only — it names the follower's folder + the dashboard\nentry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.",
       "type": [
@@ -231,12 +238,7 @@
           ]
         },
         {
-          "description": "A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the\n`publish --propose` next-action.",
-          "type": "string",
-          "const": "APPROVAL_REQUIRED"
-        },
-        {
-          "description": "Returned only for a successfully-opened proposal (an explicit `--propose`).",
+          "description": "A successfully-opened proposal — an explicit `--propose`, or a direct publish/revert the\nper-bundle protection DOWNGRADED to one (the receipt's `details.downgraded` says which).",
           "type": "string",
           "const": "NEEDS_REVIEW"
         }

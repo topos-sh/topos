@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireAppliedReport",
+  "description": "`PUT /v1/workspaces/{ws}/report` body — the fleet's applied-state report: this device's\n`(skill, applied version)` snapshot after a reconcile. The plane upserts the snapshot, drops the\nnon-detached rows it no longer names, and stamps the staleness clock (last-writer-wins; no receipt).\nThe acting device rides the `Authorization: Bearer` workspace credential, never a body field.",
+  "type": "object",
+  "properties": {
+    "applied": {
+      "description": "The device's applied skills (possibly empty — a device holding nothing reports an empty list).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireAppliedSkill"
+      }
+    },
+    "schema_version": {
+      "description": "Always `1` for this contract version (the schema pins it `const`).",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "applied"
+  ],
+  "$defs": {
+    "WireAppliedSkill": {
+      "description": "One applied-state row a device reports: the skill and the version it currently holds after its\nreconcile.",
+      "type": "object",
+      "properties": {
+        "skill_id": {
+          "description": "The skill id (the `<skill>` path segment).",
+          "type": "string"
+        },
+        "version_id": {
+          "description": "The version this device holds (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "skill_id",
+        "version_id"
+      ]
+    }
+  }
+}

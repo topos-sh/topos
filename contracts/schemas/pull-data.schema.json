@@ -225,6 +225,16 @@
           "description": "A transient local hold (e.g. a local go-back is pinned).",
           "type": "string",
           "const": "held"
+        },
+        {
+          "description": "UPSTREAM withdrew the skill (archived, or its last delivering channel dropped it): the agent\ndirs were cleaned; the sidecar keeps the bytes + any draft delta (\"keep it as yours\" is a\nnarration away).",
+          "type": "string",
+          "const": "withdrawn"
+        },
+        {
+          "description": "The PERSON detached the skill (an unfollow, or a channel leave that lapsed it) on some\ndevice: this copy froze in place — bytes untouched, delivery ended.",
+          "type": "string",
+          "const": "detached"
         }
       ]
     },

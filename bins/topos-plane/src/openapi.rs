@@ -21,8 +21,9 @@ use topos_types::requests::{
     PasscodeConfirmResponse, PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest,
     ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest,
     RosterRemoveRequest, RosterSetRequest, SessionIntent, VerificationContextResponse,
-    WireCandidate, WireFile, WireFileMode, WireOpenProposal, WireProposalList, WireSkillIndex,
-    WireSkillIndexEntry, WireVersionFile, WireVersionMeta, WorkspaceRole,
+    WireAppliedReport, WireAppliedSkill, WireCandidate, WireDelivery, WireDeliverySkill, WireFile,
+    WireFileMode, WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex, WireSkillIndexEntry,
+    WireVersionFile, WireVersionMeta, WireVia, WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
@@ -51,6 +52,9 @@ use topos_types::{
         crate::routes::proposals::list_proposals,
         // The device-credential workspace catalog read (catalog visibility == membership).
         crate::routes::skills_index::list_skills,
+        // The per-device currency lane: the delivery read + the applied-state report.
+        crate::routes::delivery::get_delivery,
+        crate::routes::delivery::put_report,
         // The unauthenticated invite bootstrap.
         crate::routes::bootstrap::read_invite_bootstrap,
         // Enrollment flow.
@@ -102,6 +106,13 @@ use topos_types::{
         // The device-credential workspace catalog read.
         WireSkillIndex,
         WireSkillIndexEntry,
+        // The per-device delivery read + the applied-state report.
+        WireDelivery,
+        WireDeliverySkill,
+        WireVia,
+        WireNotice,
+        WireAppliedReport,
+        WireAppliedSkill,
         // Per-verb `data` shapes (the agent's typed payloads).
         PublishData,
         ProposeData,
@@ -146,7 +157,7 @@ use topos_types::{
     )),
     tags(
         (name = "writes", description = "Device-credential writes (publish / propose / revert / review)."),
-        (name = "reads", description = "Workspace-credential reads (current / bundles / versions / proposals / catalog)."),
+        (name = "reads", description = "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery) plus the body-light applied-state report."),
         (name = "enrollment", description = "Invite bootstrap + the device-auth / passcode / redeem / admin-claim enrollment flow."),
         (name = "governance", description = "Owner/admin device-credential mutations (invite / roster / revoke)."),
     ),

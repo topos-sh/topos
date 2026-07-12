@@ -866,6 +866,76 @@
         }
       }
     },
+    "/v1/workspaces/{ws}/delivery": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "get_delivery",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "This device's delivery answer (entitled skills, detached, notices, open-proposal count).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireDelivery"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/devices": {
       "post": {
         "tags": [
@@ -1097,6 +1167,89 @@
           },
           "500": {
             "description": "Internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{ws}/report": {
+      "put": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "put_report",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <workspace credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WireAppliedReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The applied-state report was recorded (no body)."
+          },
+          "400": {
+            "description": "Malformed body or a bad skill / version id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2522,6 +2675,13 @@
             "$ref": "#/components/schemas/WireCandidate",
             "description": "The full candidate bundle to ingest as the proposal's content."
           },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `--to` channel placement (same semantics as `PublishRequest.channel`): the placement\napplies when the proposal opens — a placement is curation, gated by the channel's mode,\nindependent of the version's review."
+          },
           "display_name": {
             "type": [
               "string",
@@ -2678,6 +2838,13 @@
           "candidate": {
             "$ref": "#/components/schemas/WireCandidate",
             "description": "The full candidate bundle to ingest + publish."
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `--to` channel placement: place the skill's reference into this channel (created on first\nuse, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the\nreceipt's details, independently of the version gate). Absent ⇒ no explicit placement (a\nbrand-new skill still lands in `everyone`)."
           },
           "display_name": {
             "type": [
@@ -3054,7 +3221,6 @@
         "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
         "enum": [
           "OK",
-          "APPROVAL_REQUIRED",
           "NEEDS_REVIEW",
           "CONFLICT",
           "DIVERGED",
@@ -3127,6 +3293,47 @@
           "verified"
         ]
       },
+      "WireAppliedReport": {
+        "type": "object",
+        "description": "`PUT /v1/workspaces/{ws}/report` body — the fleet's applied-state report: this device's\n`(skill, applied version)` snapshot after a reconcile. The plane upserts the snapshot, drops the\nnon-detached rows it no longer names, and stamps the staleness clock (last-writer-wins; no receipt).\nThe acting device rides the `Authorization: Bearer` workspace credential, never a body field.",
+        "required": [
+          "schema_version",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireAppliedSkill"
+            },
+            "description": "The device's applied skills (possibly empty — a device holding nothing reports an empty list)."
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          }
+        }
+      },
+      "WireAppliedSkill": {
+        "type": "object",
+        "description": "One applied-state row a device reports: the skill and the version it currently holds after its\nreconcile.",
+        "required": [
+          "skill_id",
+          "version_id"
+        ],
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "description": "The skill id (the `<skill>` path segment)."
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The version this device holds (64-char lowercase hex)."
+          }
+        }
+      },
       "WireCandidate": {
         "type": "object",
         "description": "A full candidate bundle: every file's bytes, the declared parents, and the author + message — the\nshared input the `publish` and `propose` writes ingest (the `revert` write needs no candidate; the\nserver builds that forward commit from the good version). Maps to `plane-store`'s\n`CandidateUpload { files, parents, author, message }` — each `parents` entry hex-decoded into a\n`CommitId`.",
@@ -3181,6 +3388,113 @@
           },
           "scope": {
             "$ref": "#/components/schemas/PointerScope"
+          }
+        }
+      },
+      "WireDelivery": {
+        "type": "object",
+        "description": "`GET /v1/workspaces/{ws}/delivery` response body — the currency answer for ONE enrolled device: the\nentitled skills (what this device should have), the person's detached skills (freeze-in-place, never\ncleaned), the unacked notices feed, and the open-proposal count across the entitled set. The\nsession-start hook fetches it once per workspace and reconciles the harness against it, silently. A\nversioned envelope.",
+        "required": [
+          "schema_version",
+          "workspace_id",
+          "skills",
+          "detached",
+          "notices",
+          "proposals_awaiting"
+        ],
+        "properties": {
+          "detached": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them."
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireNotice"
+            },
+            "description": "The unacked, person-scoped notices (verdicts, proposal closures, …)."
+          },
+          "proposals_awaiting": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).",
+            "minimum": 0
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1` for this contract version (the schema pins it `const`).",
+            "minimum": 0
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireDeliverySkill"
+            },
+            "description": "The entitled skills — everything this device should have (a possibly-empty list)."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace this delivery is scoped to (echoed from the path)."
+          }
+        }
+      },
+      "WireDeliverySkill": {
+        "type": "object",
+        "description": "One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`\nversion + its consent digest, the resolved protection posture, and the `via` attribution. **NO bytes** —\nafter reconciling the client fetches each version through the per-blob bundle read.",
+        "required": [
+          "skill_id",
+          "name",
+          "protection",
+          "version_id",
+          "bundle_digest",
+          "generation",
+          "updated_at",
+          "via"
+        ],
+        "properties": {
+          "bundle_digest": {
+            "type": "string",
+            "description": "The `current` byte-exact consent hash (64-char lowercase hex) — the fetch + re-hash pin."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`."
+          },
+          "generation": {
+            "$ref": "#/components/schemas/Generation",
+            "description": "The `current` pointer's `(epoch, seq)`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The catalog's user-facing name (the on-disk directory name for a fresh install)."
+          },
+          "protection": {
+            "type": "string",
+            "description": "The resolved per-bundle protection posture — `\"open\"` or `\"reviewed\"` (the client's publish\npreflight; the server re-decides authoritatively on every write). An OPEN string for forward\ncompat — a client treats an unrecognized value as the stricter posture."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The skill id (the `<skill>` path segment)."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When `current` last moved (epoch milliseconds)."
+          },
+          "version_id": {
+            "type": "string",
+            "description": "The pinned `current` version's commit id (64-char lowercase hex)."
+          },
+          "via": {
+            "$ref": "#/components/schemas/WireVia",
+            "description": "Why this device is entitled to the skill (channels ∪ direct)."
           }
         }
       },
@@ -3268,6 +3582,78 @@
           "100755"
         ]
       },
+      "WireNotice": {
+        "type": "object",
+        "description": "One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without\na schema break (today's values include `\"verdict\"` and `\"proposal_closed\"`); every other field is\npresent only when the notice names it. The silent currency hook fetches these without acking; an\ninteractive surface acks by id.",
+        "required": [
+          "id",
+          "kind",
+          "created_at"
+        ],
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The actor whose action raised the notice, when recorded."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When the notice was created (the server-stamped RFC-3339 string)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The notice id (the ack handle)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The notice kind — an OPEN vocabulary (e.g. `\"verdict\"`, `\"proposal_closed\"`); a client ignores a\nkind it does not recognize."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A rendered human message, when the notice carries one."
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The outcome (e.g. a verdict's `approve` / `reject`), when recorded."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The human reason (a review's rationale), when recorded."
+          },
+          "skill_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill the notice concerns, when it names one."
+          },
+          "skill_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill's current catalog name (joined for narration), when the notice names a skill."
+          },
+          "version_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version the notice concerns (64-char lowercase hex), when it names one."
+          }
+        }
+      },
       "WireOpenProposal": {
         "type": "object",
         "description": "One OPEN proposal on the wire — its candidate `version_id` (the `@hash`), the `base_generation` it was\nopened against, and when. The proposals-listing read returns ONLY these three fields: **no bytes, no\nproposer, no roles, no rendered diff**. Mirrors `plane-store`'s `OpenProposalSummary` with the id hex-encoded.",
@@ -3325,9 +3711,11 @@
       },
       "WireSkillIndexEntry": {
         "type": "object",
-        "description": "One skill of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns it: the discovery\nmetadata a member browses to decide what to follow — **NO bytes** (following still goes through the\nper-skill grant). Mirrors `plane-store`'s `SkillIndexRow` with every 32-byte id hex-encoded.",
+        "description": "One skill of the workspace catalog, as `GET /v1/workspaces/{ws}/skills` returns it: the discovery\nmetadata a member browses to decide what to follow — **NO bytes**. Mirrors `plane-store`'s\n`SkillIndexRow` with every 32-byte id hex-encoded.",
         "required": [
           "skill_id",
+          "name",
+          "status",
           "version_id",
           "bundle_digest",
           "generation",
@@ -3350,6 +3738,10 @@
             "$ref": "#/components/schemas/Generation",
             "description": "The `current` pointer's `(epoch, seq)`."
           },
+          "name": {
+            "type": "string",
+            "description": "The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id)."
+          },
           "open_proposals": {
             "type": "integer",
             "format": "int64",
@@ -3359,6 +3751,10 @@
           "skill_id": {
             "type": "string",
             "description": "The skill id (the `<skill>` path segment)."
+          },
+          "status": {
+            "type": "string",
+            "description": "The catalog lifecycle status — `\"active\"` / `\"archived\"` (a deleted skill has no `current` row and\nso no entry). An OPEN string, deliberately: a new state can land without a schema break."
           },
           "updated_at": {
             "type": "integer",
@@ -3438,6 +3834,27 @@
           }
         }
       },
+      "WireVia": {
+        "type": "object",
+        "description": "Why THIS device is entitled to a delivered skill — the attribution the client's narration reads. A\ndelivered skill always has at least one of the two: it rides one or more channels, and/or the person\nfollows it directly (a direct follow survives every channel drop).",
+        "required": [
+          "channels",
+          "direct"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The channels delivering the skill (names, sorted; `everyone` is present when it delivers)."
+          },
+          "direct": {
+            "type": "boolean",
+            "description": "Whether the person also follows the skill directly (independent of any channel)."
+          }
+        }
+      },
       "WorkspaceRole": {
         "type": "string",
         "description": "A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.",
@@ -3456,7 +3873,7 @@
     },
     {
       "name": "reads",
-      "description": "Workspace-credential reads (current / bundles / versions / proposals / catalog)."
+      "description": "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery) plus the body-light applied-state report."
     },
     {
       "name": "enrollment",

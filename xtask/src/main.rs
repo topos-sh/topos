@@ -49,6 +49,17 @@ fn schemas() -> Vec<(&'static str, String)> {
             "trigger-report",
             emit(schemars::schema_for!(topos_types::TriggerReport)),
         ),
+        // The per-device currency lane wire bodies (the delivery read + the applied-state report).
+        (
+            "wire-delivery",
+            emit(schemars::schema_for!(topos_types::requests::WireDelivery)),
+        ),
+        (
+            "wire-applied-report",
+            emit(schemars::schema_for!(
+                topos_types::requests::WireAppliedReport
+            )),
+        ),
         // Per-verb `--json` `data` payloads — one schema each.
         (
             "pull-data",
@@ -256,6 +267,7 @@ fn gen_schema(check: bool) -> Result<()> {
 fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::bootstrap::DeploymentMode;
     use topos_types::persisted::ConflictPathKind;
+    use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
         AddData, ConflictPathReport, DiffData, DiffSource, FollowData, ListData, LogData,
         MergeReport, PublishData, PublishPending, PublishPendingStatus, PullAction, PullData,
@@ -628,6 +640,59 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // The per-device delivery answer (`GET /v1/workspaces/{ws}/delivery`): two entitled skills — one via
+    // `everyone` only (indirect), one via `ops` + `everyone` WITH a direct follow and `reviewed`
+    // protection — one detached skill frozen in place, one `verdict` notice carrying its reason, and one
+    // open proposal awaiting review.
+    let delivery_ok = WireDelivery {
+        schema_version: 1,
+        workspace_id: "w_demo".to_owned(),
+        skills: vec![
+            WireDeliverySkill {
+                skill_id: "s_prdescribe".to_owned(),
+                name: "pr-describe".to_owned(),
+                display_name: Some("PR describe".to_owned()),
+                protection: "open".to_owned(),
+                version_id: "a".repeat(64),
+                bundle_digest: "b".repeat(64),
+                generation: Generation { epoch: 1, seq: 42 },
+                updated_at: 1_700_000_000_000,
+                via: WireVia {
+                    channels: vec!["everyone".to_owned()],
+                    direct: false,
+                },
+            },
+            WireDeliverySkill {
+                skill_id: "s_deploy".to_owned(),
+                name: "deploy".to_owned(),
+                display_name: None,
+                protection: "reviewed".to_owned(),
+                version_id: "c".repeat(64),
+                bundle_digest: "d".repeat(64),
+                generation: Generation { epoch: 2, seq: 3 },
+                updated_at: 1_700_000_100_000,
+                via: WireVia {
+                    channels: vec!["ops".to_owned(), "everyone".to_owned()],
+                    direct: true,
+                },
+            },
+        ],
+        detached: vec!["s_legacy".to_owned()],
+        notices: vec![WireNotice {
+            id: "ntc_01".to_owned(),
+            kind: "verdict".to_owned(),
+            skill_id: Some("s_deploy".to_owned()),
+            skill_name: Some("deploy".to_owned()),
+            version_id: Some("c".repeat(64)),
+            actor: Some("reviewer@demo.test".to_owned()),
+            outcome: Some("approve".to_owned()),
+            reason: Some("Ship it — the rollback note is clear.".to_owned()),
+            message: None,
+            created_at: "2026-06-25T00:00:00Z".to_owned(),
+        }],
+        proposals_awaiting: 1,
+    };
+
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
@@ -641,6 +706,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.conflict", emit_json(&publish_conflict)),
         ("json/publish.pending", emit_json(&publish_pending)),
         ("json/follow.claim.ok", emit_json(&follow_claim_ok)),
+        ("json/delivery.ok", emit_json(&delivery_ok)),
     ]
 }
 
