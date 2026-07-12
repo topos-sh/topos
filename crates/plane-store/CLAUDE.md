@@ -628,10 +628,16 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   un-roots all content for the shipped GC; purge un-roots ONE version's bytes (refused while `current`;
   the hash stays as a who/when tombstone; only blobs unreachable from live versions drop — no
   object-denylist, content-addressed bytes may legitimately reappear). Migration 0018 also lands the
-  web-admin roster/channel/device acts as guarded functions (`topos_set_member_role` with the sole-owner
-  lockout, `topos_leave_workspace` running the lapse-detach reconcile BEFORE the seat delete,
-  `topos_channel_rename`/`topos_channel_delete` — builtin-refusing, the delete cascading references +
-  memberships with NO person-detach records — and the owner-or-self `topos_revoke_device`), called by
+  web-admin roster/channel/device acts as guarded functions (`topos_set_member_role` and
+  `topos_leave_workspace` — the sole-owner lockout is a read-then-write invariant and its callers are
+  plain READ COMMITTED connections, so both functions SERIALIZE THE GUARD THEMSELVES with a
+  deterministic `FOR UPDATE` fence over the confirmed-owner seats: two racing owner-losing acts
+  converge to one landing and one refusal at ANY caller isolation, and leave runs the lapse-detach
+  reconcile BEFORE the seat delete; `topos_channel_rename`/`topos_channel_delete` — keyed on the
+  IMMUTABLE channel_id, builtin-refusing, the delete cascading references + memberships with NO
+  person-detach records — and `topos_revoke_device`, whose owner-or-self matrix narrows to SELF under
+  a `p_self_only` flag so the account page's step-up-LESS sign-out can never reach the owner arm the
+  fleet page's step-up ceremony earns), called by
   the web tier directly. Verdict + closure notices are
   person-scoped rows written IN the deciding transaction. Driven by `src/tests/channels_*.rs` + the
   adapted `set_current`/`contribute`/`session_*` suites.

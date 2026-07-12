@@ -13,10 +13,17 @@ device; this app is surfaces.
 
 **Step-up.** Every admin ceremony re-authenticates immediately before the act: the person
 re-enters their password inside the ceremony form (`app/lib/auth/step-up.server.ts`, verified with
-better-auth's own hasher; its own rate belt, armed by `APP_ENV` like the sign-in limiter), and the
-destructive ceremonies (delete a skill, purge a version, delete a channel) additionally require
-typing the resource's exact name. Deliberately STATELESS — no sudo window. Every attempt lands an
-`admin_event` audit row, refused step-ups included.
+better-auth's own hasher against the SESSION's account — never a form-supplied identity; its own
+rate belt, armed by `APP_ENV` like the sign-in limiter), and the destructive ceremonies (delete a
+skill, purge a version, delete a channel) additionally require typing the resource's exact name,
+compared against server-re-read state. Deliberately STATELESS — no sudo window. Every attempt
+lands an `admin_event` audit row, refused step-ups included. **The grade of a ceremony and the
+reach of its act stay matched IN THE DATABASE**, never by convention: the account page's
+step-up-LESS device sign-out passes `topos_revoke_device`'s self-only flag, so it cannot reach the
+owner arm that the fleet page's step-up ceremony earns. **Known limit (v1):** step-up IS the
+password rung — a deployment configured with only magic-link or social sign-in has no password to
+re-enter and every ceremony would refuse; a second factor for password-less deployments is later
+work.
 
 **Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
 `/{workspace}/skills/{name}` are the shareable addresses, plus a root catch-all: a non-browser

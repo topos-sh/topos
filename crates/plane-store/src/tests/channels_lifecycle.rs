@@ -1385,10 +1385,11 @@ async fn leave_writes_the_detach_records_before_the_seat_delete_and_locks_the_so
     );
 }
 
-/// `topos_channel_rename` / `topos_channel_delete`: owner existence-acts. `everyone` refuses typed
-/// (`builtin`) on both; a rename moves only the display key (the channel_id survives); a delete
-/// cascades the references and memberships itself and writes NO person-detach records (a deletion is
-/// an upstream withdrawal, never the person's own act).
+/// `topos_channel_rename` / `topos_channel_delete`: owner existence-acts, both keyed on the
+/// IMMUTABLE channel_id (a stale caller whose name was freed and reused misses; it never
+/// retargets). `everyone` refuses typed (`builtin`) on both; a rename moves only the display key
+/// (the channel_id survives); a delete cascades the references and memberships itself and writes
+/// NO person-detach records (a deletion is an upstream withdrawal, never the person's own act).
 #[sqlx::test]
 async fn channel_rename_and_delete_are_owner_acts_that_spare_everyone_and_detach_nobody(
     pool: PgPool,
@@ -1504,11 +1505,16 @@ async fn channel_rename_and_delete_are_owner_acts_that_spare_everyone_and_detach
     assert_eq!(cid, "tools", "the immutable channel_id never moves");
     assert_eq!((refs, members), (1, 1), "references + memberships survive");
 
-    // Delete: the channel, its references, and its memberships are gone — and NOBODY gets a
-    // person-detach record (the skill still delivers via `everyone`; a channel deletion is an
-    // upstream act).
+    // Delete addresses the IMMUTABLE id — the rename moved only the name, so the NEW name is not
+    // a valid selector here (and a freed-then-reused name can never retarget a stale caller).
     assert_eq!(
         fn_outcome(&pool, delete, &["w_acme", "toolbox", ALICE, CREATED_AT]).await,
+        "unknown_channel"
+    );
+    // ... and NOBODY gets a person-detach record once it lands (the skill still delivers via
+    // `everyone`; a channel deletion is an upstream act).
+    assert_eq!(
+        fn_outcome(&pool, delete, &["w_acme", "tools", ALICE, CREATED_AT]).await,
         "deleted"
     );
     for probe in [
@@ -1583,4 +1589,136 @@ async fn revoke_device_allows_self_and_owner_and_refuses_another_member(pool: Pg
     .await
     .unwrap();
     assert_eq!(revoked, vec!["dk_bob".to_owned(), "dk_carol".to_owned()]);
+}
+
+/// The sole-owner lockout is a READ-THEN-WRITE invariant, and the web tier calls these functions
+/// from plain autocommit (READ COMMITTED) connections — where two racing owner-losing acts would
+/// each read the pre-race snapshot and both commit, leaving the workspace OWNERLESS (a state no
+/// serial order can produce). The functions therefore serialize the guard THEMSELVES (a `FOR
+/// UPDATE` lock over the confirmed-owner seats, one deterministic order), so the second racer
+/// waits, re-reads committed state, and refuses. This drives the race at the isolation the web
+/// tier actually uses: two owners demoting each other, and two owners leaving at once. Exactly one
+/// act may land in each pair, and a confirmed owner always survives.
+#[sqlx::test]
+async fn the_sole_owner_guard_holds_against_racing_web_lane_writers(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-race").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "owner").await;
+
+    let confirmed_owners = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::int8 FROM workspace_member \
+             WHERE workspace_id = $1 AND role = 'owner' AND status = 'confirmed'",
+        )
+        .bind("w_acme")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    // RACE 1 — each owner demotes the other, concurrently, on separate connections.
+    let (a, b) = tokio::join!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_set_member_role($1, $2, $3, $4)",
+            &["w_acme", ALICE, BOB, "member"],
+        ),
+        fn_outcome(
+            &pool,
+            "SELECT topos_set_member_role($1, $2, $3, $4)",
+            &["w_acme", BOB, ALICE, "member"],
+        ),
+    );
+    // The LOSER's refusal code depends on the interleaving — it either took the fence first and
+    // re-read committed state (`sole_owner`), or started after the winner committed and finds its
+    // OWN seat demoted (`owner_role_required`). Both are correct refusals; what must never happen
+    // is two landings, which would leave the workspace ownerless.
+    let outcomes = [a.as_str(), b.as_str()];
+    assert_eq!(
+        outcomes.iter().filter(|o| **o == "set").count(),
+        1,
+        "exactly one demote may land — got {outcomes:?}"
+    );
+    assert_eq!(
+        confirmed_owners(pool.clone()).await,
+        1,
+        "a confirmed owner always survives"
+    );
+
+    // RACE 2 — the survivor plus a fresh second owner both LEAVE at once.
+    let survivor: String = sqlx::query_scalar(
+        "SELECT principal FROM workspace_member \
+         WHERE workspace_id = $1 AND role = 'owner' AND status = 'confirmed'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let other = if survivor == ALICE { BOB } else { ALICE };
+    sqlx::query(
+        "UPDATE workspace_member SET role = 'owner' WHERE workspace_id = $1 AND principal = $2",
+    )
+    .bind("w_acme")
+    .bind(other)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let leave = "SELECT topos_leave_workspace($1, $2, $3::BIGINT, $4)";
+    let survivor_binds: [&str; 4] = ["w_acme", &survivor, "1770000000000", CREATED_AT];
+    let other_binds: [&str; 4] = ["w_acme", other, "1770000000000", CREATED_AT];
+    let (a, b) = tokio::join!(
+        fn_outcome(&pool, leave, &survivor_binds),
+        fn_outcome(&pool, leave, &other_binds),
+    );
+    let outcomes = [a.as_str(), b.as_str()];
+    assert_eq!(
+        outcomes.iter().filter(|o| **o == "left").count(),
+        1,
+        "exactly one leave may land; the last owner cannot walk out — got {outcomes:?}"
+    );
+    assert_eq!(
+        confirmed_owners(pool).await,
+        1,
+        "the workspace is never left ownerless"
+    );
+}
+
+/// `topos_revoke_device`'s SELF-ONLY grade (`p_self_only = 1`): the account-level sign-out page
+/// runs a lighter ceremony than the owner's step-up fleet revoke, so its calls must not be able to
+/// exercise the OWNER arm of the matrix — even for a caller who happens to be an owner. The reach
+/// of the act and the grade of the ceremony stay matched IN the database.
+#[sqlx::test]
+async fn revoke_device_self_only_refuses_even_an_owner_reaching_for_another_device(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-selfonly").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    let sql = "SELECT topos_revoke_device($1, $2, $3, $4::BIGINT)";
+
+    // The OWNER arm is unreachable under the self-only grade — even though the same owner may
+    // revoke this very device through the step-up fleet ceremony (the default grade, below).
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, "dk_bob", "1"]).await,
+        "self_required"
+    );
+    let revoked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM device_registry WHERE workspace_id = $1 AND revoked = 1",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(revoked, 0, "the refusal wrote nothing");
+
+    // Own device under the self-only grade: allowed. And the owner's default (step-up) grade
+    // still reaches the same device — the matrix is unchanged where the ceremony earns it.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", BOB, "dk_bob", "1"]).await,
+        "revoked"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, "dk_bob", "0"]).await,
+        "revoked"
+    );
 }

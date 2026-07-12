@@ -42,20 +42,26 @@ const DB_NAME = "topos_e2e";
 
 /** The grant shape the unit `topos_test` database already holds: broad SELECT + the exact
  * guarded-function DML edges (topos_web writes the authority tables ONLY through the topos_*
- * functions, which run SECURITY INVOKER, so it needs DML on precisely the tables they touch). */
+ * functions, which run SECURITY INVOKER, so it needs DML on precisely what they touch — UPDATE at
+ * COLUMN grain, so the role cannot reach a column no guarded function writes). Production
+ * provisioning must carry this same shape: this file is the in-repo record of it. */
 const PLANE_GRANTS = `
 GRANT USAGE ON SCHEMA plane TO topos_web;
 GRANT SELECT ON ALL TABLES IN SCHEMA plane TO topos_web;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA plane TO topos_web;
 GRANT INSERT ON plane.channel_events, plane.channel_members, plane.workspace_member, plane.workspace_policy TO topos_web;
-GRANT UPDATE ON plane.notices, plane.workspace_member, plane.workspace_policy TO topos_web;
-GRANT DELETE ON plane.channel_members TO topos_web;
-GRANT UPDATE, DELETE ON plane.channels TO topos_web;
-GRANT DELETE ON plane.channel_skills TO topos_web;
-GRANT DELETE ON plane.workspace_member TO topos_web;
 GRANT INSERT ON plane.skill_detachments TO topos_web;
-GRANT UPDATE ON plane.device_skill_state TO topos_web;
-GRANT UPDATE ON plane.device_registry TO topos_web;
+GRANT DELETE ON plane.channel_members, plane.channel_skills, plane.channels, plane.workspace_member TO topos_web;
+-- UPDATE is granted at COLUMN grain — exactly the columns the guarded functions write. The
+-- row/byte rule is enforced by grants, not convention: a table-wide UPDATE on device_registry
+-- would let a compromised web tier rewrite a device's credential hash and then drive the DEVICE
+-- lane as that device, which no guarded function can do.
+GRANT UPDATE (review_required, invite_policy, staleness_window_ms) ON plane.workspace_policy TO topos_web;
+GRANT UPDATE (role, invited_by) ON plane.workspace_member TO topos_web;
+GRANT UPDATE (acked_at) ON plane.notices TO topos_web;
+GRANT UPDATE (name) ON plane.channels TO topos_web;
+GRANT UPDATE (detached, detached_at) ON plane.device_skill_state TO topos_web;
+GRANT UPDATE (revoked) ON plane.device_registry TO topos_web;
 ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane GRANT SELECT ON TABLES TO topos_web;
 `;
 

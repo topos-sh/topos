@@ -261,8 +261,15 @@ describe("renameChannel", () => {
     // The structural everyone refuses (the trigger guard backs the function's `builtin` code).
     expect(await queries.renameChannel(owner(ws), "everyone", "all")).toBe("builtin");
 
-    // A name another channel already holds refuses.
-    expect(await queries.renameChannel(owner(ws), "reviews-v2", "audits")).toBe("name_taken");
+    // A name another channel already holds refuses — addressed by the IMMUTABLE id (the rename
+    // moved only the display name; 'reviews' stays the selector).
+    expect(await queries.renameChannel(owner(ws), "reviews", "audits")).toBe("name_taken");
+
+    // The moved-away NAME is not a selector: id-keying means a stale caller misses, never
+    // retargets a freed-and-reused name.
+    expect(await queries.renameChannel(owner(ws), "reviews-v2", "anything")).toBe(
+      "unknown_channel",
+    );
 
     // A malformed name refuses.
     expect(await queries.renameChannel(owner(ws), "audits", "Bad Name")).toBe("bad_name");

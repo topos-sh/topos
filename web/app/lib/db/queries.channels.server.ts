@@ -101,6 +101,35 @@ export async function channelsOf(actor: MemberActor): Promise<ChannelSummary[]> 
   }));
 }
 
+/** The immutable-key probe the owner ceremonies re-read their target through: a stale form whose
+ * channel was renamed still acts on THE CHANNEL THE OWNER WAS LOOKING AT (the id never moves), and
+ * the delete's typed-name compares against the row's CURRENT name — server state, never a form
+ * echo. A missing row (deleted meanwhile) is the caller's honest refusal. */
+export interface ChannelKey {
+  channelId: string;
+  name: string;
+  builtin: boolean;
+}
+
+export async function channelRowById(
+  actor: MemberActor,
+  channelId: string,
+): Promise<ChannelKey | undefined> {
+  const rows = await getDb()
+    .select({
+      channelId: planeChannels.channelId,
+      name: planeChannels.name,
+      builtin: planeChannels.builtin,
+    })
+    .from(planeChannels)
+    .where(
+      and(eq(planeChannels.workspaceId, actor.workspaceId), eq(planeChannels.channelId, channelId)),
+    )
+    .limit(1);
+  const row = rows[0];
+  return row === undefined ? undefined : { ...row, builtin: row.builtin === 1 };
+}
+
 /** One skill reference a channel holds — joined to the catalog for its name/display/status. */
 export interface ChannelSkillRef {
   skillId: string;
@@ -291,13 +320,13 @@ export type ChannelRenameOutcome =
  */
 export async function renameChannel(
   actor: OwnerActor,
-  name: string,
+  channelId: string,
   newName: string,
 ): Promise<ChannelRenameOutcome> {
   const createdAt = new Date().toISOString();
   const result = await getPool().query<{ outcome: ChannelRenameOutcome }>(
     "select topos_channel_rename($1, $2, $3, $4, $5) as outcome",
-    [actor.workspaceId, name, newName, actor.email, createdAt],
+    [actor.workspaceId, channelId, newName, actor.email, createdAt],
   );
   const outcome = result.rows[0]?.outcome;
   if (outcome === undefined) {
@@ -323,12 +352,12 @@ export type ChannelDeleteOutcome =
  */
 export async function deleteChannel(
   actor: OwnerActor,
-  name: string,
+  channelId: string,
 ): Promise<ChannelDeleteOutcome> {
   const createdAt = new Date().toISOString();
   const result = await getPool().query<{ outcome: ChannelDeleteOutcome }>(
     "select topos_channel_delete($1, $2, $3, $4) as outcome",
-    [actor.workspaceId, name, actor.email, createdAt],
+    [actor.workspaceId, channelId, actor.email, createdAt],
   );
   const outcome = result.rows[0]?.outcome;
   if (outcome === undefined) {

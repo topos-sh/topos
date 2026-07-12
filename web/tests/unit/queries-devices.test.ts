@@ -213,7 +213,7 @@ describe("signOutDevice (the guarded topos_revoke_device self sign-out)", () => 
     expect(await queries.signOutDevice(user(me), "w_rev_self", "dk_self")).toBe("revoked");
   });
 
-  it("a plain member cannot sign out ANOTHER person's device — owner_or_self_required", async () => {
+  it("nobody — not even an owner — signs out ANOTHER person's device from this lane", async () => {
     const queries = await q();
     const me = "plain@revoke.example.com";
     const other = "colleague@revoke.example.com";
@@ -223,7 +223,7 @@ describe("signOutDevice (the guarded topos_revoke_device self sign-out)", () => 
     await seedDevice("w_rev_foreign", "dk_theirs", other);
 
     expect(await queries.signOutDevice(user(me), "w_rev_foreign", "dk_theirs")).toBe(
-      "owner_or_self_required",
+      "self_required",
     );
     // The device is untouched.
     expect(await revokedFlag("w_rev_foreign", "dk_theirs")).toBe(0);

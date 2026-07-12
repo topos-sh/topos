@@ -101,64 +101,66 @@ END
 $$;
 
 -- ────────────────────────────────────────────────────────────────────────────────────────────────
--- CHANNEL RENAME — an owner existence-act. The channel_id (the immutable key) never moves, so
--- references, memberships, and the audit trail survive; only the display key changes. `everyone`
--- refuses typed (the trigger guard is the backstop). No hint table for channels — a channel name
--- is a grouping label, not a distribution address a device pins.
-CREATE FUNCTION topos_channel_rename(p_ws TEXT, p_channel_name TEXT, p_new_name TEXT, p_actor TEXT, p_created_at TEXT)
+-- CHANNEL RENAME — an owner existence-act, keyed on the IMMUTABLE channel_id (the composing
+-- surface resolves the mutable name in its own loader, so a stale form whose name was reassigned
+-- to another channel is a harmless miss, never a wrong-target act). The channel_id never moves,
+-- so references, memberships, and the audit trail survive; only the display key changes.
+-- `everyone` refuses typed (the trigger guard is the backstop). No hint table for channels — a
+-- channel name is a grouping label, not a distribution address a device pins.
+CREATE FUNCTION topos_channel_rename(p_ws TEXT, p_channel TEXT, p_new_name TEXT, p_actor TEXT, p_created_at TEXT)
 RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_role TEXT;
-    v_channel_id TEXT;
+    v_name TEXT;
     v_builtin BIGINT;
 BEGIN
     v_role := topos_member_role(p_ws, p_actor);
     IF v_role IS NULL THEN RETURN 'member_required'; END IF;
     IF v_role IS DISTINCT FROM 'owner' THEN RETURN 'owner_role_required'; END IF;
-    SELECT channel_id, builtin INTO v_channel_id, v_builtin FROM channels
-    WHERE workspace_id = p_ws AND name = p_channel_name;
-    IF v_channel_id IS NULL THEN RETURN 'unknown_channel'; END IF;
+    SELECT name, builtin INTO v_name, v_builtin FROM channels
+    WHERE workspace_id = p_ws AND channel_id = p_channel;
+    IF v_name IS NULL THEN RETURN 'unknown_channel'; END IF;
     IF v_builtin = 1 THEN RETURN 'builtin'; END IF;
     IF p_new_name IS NULL OR p_new_name !~ '^[a-z0-9][a-z0-9-]*$' OR length(p_new_name) > 64 THEN
         RETURN 'bad_name';
     END IF;
-    IF p_new_name = p_channel_name THEN RETURN 'renamed'; END IF;
+    IF p_new_name = v_name THEN RETURN 'renamed'; END IF;
     IF EXISTS (SELECT 1 FROM channels WHERE workspace_id = p_ws AND name = p_new_name) THEN
         RETURN 'name_taken';
     END IF;
     PERFORM set_config('topos.actor', p_actor, true);
     PERFORM set_config('topos.created_at', p_created_at, true);
-    UPDATE channels SET name = p_new_name WHERE workspace_id = p_ws AND channel_id = v_channel_id;
+    UPDATE channels SET name = p_new_name WHERE workspace_id = p_ws AND channel_id = p_channel;
     RETURN 'renamed';
 END
 $$;
 
--- CHANNEL DELETE — an owner existence-act, and a CASCADE by decision: the FKs on channel_skills /
+-- CHANNEL DELETE — an owner existence-act keyed on the IMMUTABLE channel_id (same stale-form
+-- reasoning as the rename), and a CASCADE by decision: the FKs on channel_skills /
 -- channel_members carry no ON DELETE, so this function deletes the references and memberships
 -- itself (each DELETE rides the audit trigger — the history says exactly what the deletion
 -- unplaced). Deliberately NO person-detach records: a channel deletion is an UPSTREAM withdrawal
 -- (the client cleans agent dirs and offers keep-as-yours), never a person's own detach — skills
 -- another source still delivers keep flowing via the union. The audit rows keep the channel_id of
 -- the deleted channel: history is append-only and survives the row.
-CREATE FUNCTION topos_channel_delete(p_ws TEXT, p_channel_name TEXT, p_actor TEXT, p_created_at TEXT)
+CREATE FUNCTION topos_channel_delete(p_ws TEXT, p_channel TEXT, p_actor TEXT, p_created_at TEXT)
 RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_role TEXT;
-    v_channel_id TEXT;
     v_builtin BIGINT;
 BEGIN
     v_role := topos_member_role(p_ws, p_actor);
     IF v_role IS NULL THEN RETURN 'member_required'; END IF;
     IF v_role IS DISTINCT FROM 'owner' THEN RETURN 'owner_role_required'; END IF;
-    SELECT channel_id, builtin INTO v_channel_id, v_builtin FROM channels
-    WHERE workspace_id = p_ws AND name = p_channel_name;
-    IF v_channel_id IS NULL THEN RETURN 'unknown_channel'; END IF;
+    SELECT builtin INTO v_builtin FROM channels
+    WHERE workspace_id = p_ws AND channel_id = p_channel;
+    IF v_builtin IS NULL THEN RETURN 'unknown_channel'; END IF;
     IF v_builtin = 1 THEN RETURN 'builtin'; END IF;
     PERFORM set_config('topos.actor', p_actor, true);
     PERFORM set_config('topos.created_at', p_created_at, true);
-    DELETE FROM channel_skills WHERE workspace_id = p_ws AND channel_id = v_channel_id;
-    DELETE FROM channel_members WHERE workspace_id = p_ws AND channel_id = v_channel_id;
-    DELETE FROM channels WHERE workspace_id = p_ws AND channel_id = v_channel_id;
+    DELETE FROM channel_skills WHERE workspace_id = p_ws AND channel_id = p_channel;
+    DELETE FROM channel_members WHERE workspace_id = p_ws AND channel_id = p_channel;
+    DELETE FROM channels WHERE workspace_id = p_ws AND channel_id = p_channel;
     RETURN 'deleted';
 END
 $$;
@@ -166,7 +168,13 @@ $$;
 -- ────────────────────────────────────────────────────────────────────────────────────────────────
 -- ROLE CHANGE — an owner act on any seat (invited seats included: a role rides the seat and
 -- survives confirmation). The last-owner lockout guards BOTH directions a workspace could lose
--- its last owner here: demoting the sole confirmed owner is refused.
+-- its last owner here: demoting the sole confirmed owner is refused. The lockout is a
+-- read-then-write invariant, and these functions are called from plain READ COMMITTED
+-- connections — so the guard SERIALIZES ITSELF: it locks the workspace's confirmed OWNER seats
+-- first, forcing a concurrent owner-losing act (another demote, a leave, a removal — the Rust
+-- lanes' seat writes conflict with these row locks too) to wait and then re-read committed
+-- state. Two racing "demote the other owner" calls converge to one 'set' and one 'sole_owner'
+-- at ANY caller isolation; a workspace can never end up ownerless.
 CREATE FUNCTION topos_set_member_role(p_ws TEXT, p_actor TEXT, p_email TEXT, p_role TEXT)
 RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
@@ -178,6 +186,12 @@ BEGIN
     IF v_role IS NULL THEN RETURN 'member_required'; END IF;
     IF v_role IS DISTINCT FROM 'owner' THEN RETURN 'owner_role_required'; END IF;
     IF p_role NOT IN ('owner', 'reviewer', 'member') THEN RETURN 'bad_role'; END IF;
+    -- The write-skew fence (see the header comment): every statement after this lock reads
+    -- post-commit state under READ COMMITTED, so the sole-owner guard below cannot act on a
+    -- stale snapshot.
+    PERFORM 1 FROM workspace_member
+    WHERE workspace_id = p_ws AND role = 'owner' AND status = 'confirmed'
+    ORDER BY principal FOR UPDATE;
     SELECT role, status INTO v_target_role, v_target_status FROM workspace_member
     WHERE workspace_id = p_ws AND principal = p_email;
     IF v_target_role IS NULL THEN RETURN 'unknown_member'; END IF;
@@ -203,6 +217,12 @@ DECLARE
     v_role TEXT;
     v_status TEXT;
 BEGIN
+    -- The same write-skew fence as topos_set_member_role (one lock order, no deadlock cycle):
+    -- two owners leaving at once converge to one 'left' and one 'sole_owner' at ANY caller
+    -- isolation — a workspace can never end up ownerless.
+    PERFORM 1 FROM workspace_member
+    WHERE workspace_id = p_ws AND role = 'owner' AND status = 'confirmed'
+    ORDER BY principal FOR UPDATE;
     SELECT role, status INTO v_role, v_status FROM workspace_member
     WHERE workspace_id = p_ws AND principal = p_principal;
     IF v_role IS NULL THEN RETURN 'member_required'; END IF;
@@ -223,7 +243,11 @@ $$;
 -- matrix (owner, or the device's own principal signing their device out). A revoke is an instant
 -- row flip: the registry row and its credential hash stay (receipts replay; the audit survives),
 -- fresh work dies, re-enrollment is the recovery. Idempotent — re-revoking answers 'revoked'.
-CREATE FUNCTION topos_revoke_device(p_ws TEXT, p_actor TEXT, p_device TEXT)
+-- `p_self_only = 1` narrows the matrix to SELF alone: the account-level sign-out surface runs a
+-- lighter ceremony than the owner's fleet revoke, so it must not be able to exercise the owner
+-- arm — the grade of the ceremony and the reach of the act stay matched IN the database, and the
+-- gate ORDER (membership → row → matrix) stays one implementation with no second oracle shape.
+CREATE FUNCTION topos_revoke_device(p_ws TEXT, p_actor TEXT, p_device TEXT, p_self_only BIGINT DEFAULT 0)
 RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_role TEXT;
@@ -234,6 +258,9 @@ BEGIN
     SELECT principal INTO v_principal FROM device_registry
     WHERE workspace_id = p_ws AND device_key_id = p_device;
     IF v_principal IS NULL THEN RETURN 'unknown_device'; END IF;
+    IF p_self_only = 1 AND v_principal <> p_actor THEN
+        RETURN 'self_required';
+    END IF;
     IF v_principal <> p_actor AND v_role IS DISTINCT FROM 'owner' THEN
         RETURN 'owner_or_self_required';
     END IF;

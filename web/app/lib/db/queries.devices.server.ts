@@ -16,7 +16,8 @@ import { planeDeviceRegistry, planeWorkspace, planeWorkspaceMember } from "@/lib
  * disclose or touch ONLY the person's own rows, keyed on their VERIFIED email (the same email the
  * roster gates on). There is no single-workspace admission because the page spans every workspace
  * the person belongs to; the disclosure stays the person's own devices, and the sign-out is
- * re-gated by the database's own owner-or-self matrix.
+ * SELF-ONLY in this module (a stricter grade than the database's owner-or-self matrix — see the
+ * comment on `signOutDevice`), then re-gated by the database.
  */
 
 /** One device_registry row as the account page renders it. */
@@ -98,23 +99,31 @@ export async function devicesFor(actor: UserActor): Promise<WorkspaceDevices[]> 
 export type SignOutOutcome =
   | "revoked"
   | "unknown_device"
+  /** The self-only refusal this lane speaks: the target is someone else's device. */
+  | "self_required"
   | "owner_or_self_required"
   | "member_required";
 
 /**
  * Sign one device out — ONE call to the guarded `topos_revoke_device`, which re-runs its own
- * role matrix (member gate, then owner-or-self on the target device). The web guard on the action
- * is a signed-in-actor check, never the lock: a self sign-out is legal in ANY workspace where the
- * actor holds a confirmed seat because the function's OWN matrix admits the device's own principal
- * regardless of role. The outcome code is the function's vocabulary, relayed to the caller as-is.
+ * role matrix under this lane's SELF-ONLY grade. The web guard on the action is a signed-in-actor
+ * check, never the lock: a self sign-out is legal in ANY workspace where the actor holds a
+ * confirmed seat because the function's OWN matrix admits the device's own principal regardless of
+ * role. The outcome code is the function's vocabulary, relayed to the caller as-is.
  */
 export async function signOutDevice(
   actor: UserActor,
   workspaceId: string,
   deviceKeyId: string,
 ): Promise<SignOutOutcome> {
+  // SELF-ONLY, enforced IN THE DATABASE: `topos_revoke_device`'s matrix is owner-or-self, and the
+  // owner arm belongs to the fleet page's STEP-UP ceremony. This account page runs no step-up (a
+  // person signing their own device out needs no second proof), so it must not be able to reach
+  // the owner arm — otherwise an owner could forge a POST here and revoke a teammate's device
+  // through the lighter ceremony. The self-only flag narrows the matrix for this lane; a foreign
+  // target answers `self_required` and writes nothing.
   const result = await getPool().query<{ outcome: SignOutOutcome }>(
-    "select topos_revoke_device($1, $2, $3) as outcome",
+    "select topos_revoke_device($1, $2, $3, 1) as outcome",
     [workspaceId, actor.email, deviceKeyId],
   );
   const outcome = result.rows[0]?.outcome;

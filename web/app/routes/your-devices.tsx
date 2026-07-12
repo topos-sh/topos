@@ -63,6 +63,7 @@ export async function action({ request }: ActionFunctionArgs) {
 /** The human copy for each non-success sign-out outcome (a self sign-out normally just succeeds). */
 const SIGN_OUT_ERROR: Record<string, string> = {
   unknown_device: "That device is no longer enrolled — nothing to sign out.",
+  self_required: "You can only sign out your own devices.",
   owner_or_self_required: "You can only sign out your own devices.",
   member_required: "You are no longer a member of that workspace.",
   error: "The server could not sign that device out. Try again.",

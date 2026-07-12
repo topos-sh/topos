@@ -16,6 +16,7 @@ import {
   type ChannelDetail as ChannelDetailData,
   type ChannelRenameOutcome,
   channelDetail,
+  channelRowById,
   deleteChannel,
   renameChannel,
 } from "@/lib/db/queries.channels.server";
@@ -59,11 +60,15 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
+  // The ceremonies key on the IMMUTABLE channel_id the page was LOADED with (a hidden field) —
+  // resolving the URL's mutable name at action time could retarget a freed-and-reused name; the
+  // id keeps a stale form acting on the channel the owner was actually looking at, or missing.
+  const channelId = String(formData.get("channel_id") ?? "");
   if (intent === "rename-channel") {
-    return renameChannelIntent(request, ws, channel, formData);
+    return renameChannelIntent(request, ws, channelId, formData);
   }
   if (intent === "delete-channel") {
-    return deleteChannelIntent(request, ws, channel, formData);
+    return deleteChannelIntent(request, ws, channelId, formData);
   }
   return data<ChannelActionData>({ form: "unknown", error: "Unknown action." }, { status: 400 });
 }
@@ -107,7 +112,7 @@ function deleteErrorCopy(outcome: ChannelDeleteOutcome): string {
 async function renameChannelIntent(
   request: Request,
   ws: string,
-  channel: string,
+  channelId: string,
   formData: FormData,
 ) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -116,19 +121,26 @@ async function renameChannelIntent(
   if (!stepUp.ok) {
     await recordAdminEvent(owner, {
       kind: "channel_rename",
-      subject: channel,
+      subject: channelId,
       detail: "step_up",
       outcome: "denied",
     });
     return data<ChannelActionData>({ form: "rename", error: stepUp.error }, { status: 400 });
   }
+  const row = await channelRowById(owner, channelId);
+  if (row === undefined) {
+    return data<ChannelActionData>(
+      { form: "rename", error: "This channel no longer exists." },
+      { status: 400 },
+    );
+  }
   let outcome: ChannelRenameOutcome;
   try {
-    outcome = await renameChannel(owner as OwnerActor, channel, newName);
+    outcome = await renameChannel(owner as OwnerActor, channelId, newName);
   } catch {
     await recordAdminEvent(owner, {
       kind: "channel_rename",
-      subject: channel,
+      subject: row.name,
       detail: "error",
       outcome: "error",
     });
@@ -140,7 +152,7 @@ async function renameChannelIntent(
   const ok = outcome === "renamed";
   await recordAdminEvent(owner, {
     kind: "channel_rename",
-    subject: channel,
+    subject: row.name,
     detail: ok ? newName : outcome,
     outcome: ok ? "ok" : "denied",
   });
@@ -161,7 +173,7 @@ async function renameChannelIntent(
 async function deleteChannelIntent(
   request: Request,
   ws: string,
-  channel: string,
+  channelId: string,
   formData: FormData,
 ) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -169,17 +181,26 @@ async function deleteChannelIntent(
   if (!stepUp.ok) {
     await recordAdminEvent(owner, {
       kind: "channel_delete",
-      subject: channel,
+      subject: channelId,
       detail: "step_up",
       outcome: "denied",
     });
     return data<ChannelActionData>({ form: "delete", error: stepUp.error }, { status: 400 });
   }
-  const typed = requireTypedName(formData, channel);
+  const row = await channelRowById(owner, channelId);
+  if (row === undefined) {
+    return data<ChannelActionData>(
+      { form: "delete", error: "This channel no longer exists." },
+      { status: 400 },
+    );
+  }
+  // The typed name is anchored to the row's CURRENT name (server state): a channel renamed
+  // between page load and submit refuses honestly rather than deleting under a stale name.
+  const typed = requireTypedName(formData, row.name);
   if (!typed.ok) {
     await recordAdminEvent(owner, {
       kind: "channel_delete",
-      subject: channel,
+      subject: row.name,
       detail: "confirm_name",
       outcome: "denied",
     });
@@ -187,11 +208,11 @@ async function deleteChannelIntent(
   }
   let outcome: ChannelDeleteOutcome;
   try {
-    outcome = await deleteChannel(owner as OwnerActor, channel);
+    outcome = await deleteChannel(owner as OwnerActor, channelId);
   } catch {
     await recordAdminEvent(owner, {
       kind: "channel_delete",
-      subject: channel,
+      subject: row.name,
       detail: "error",
       outcome: "error",
     });
@@ -203,7 +224,7 @@ async function deleteChannelIntent(
   const ok = outcome === "deleted";
   await recordAdminEvent(owner, {
     kind: "channel_delete",
-    subject: channel,
+    subject: row.name,
     detail: ok ? undefined : outcome,
     outcome: ok ? "ok" : "denied",
   });
@@ -261,8 +282,8 @@ export default function ChannelDetail() {
             <SectionHeading>
               <span id="admin-heading">Owner controls</span>
             </SectionHeading>
-            <RenameChannelForm channel={channel} />
-            <DeleteChannelForm channel={channel} />
+            <RenameChannelForm channel={channel} channelId={detail.channelId} />
+            <DeleteChannelForm channel={channel} channelId={detail.channelId} />
           </section>
         ))}
     </div>
@@ -371,7 +392,7 @@ function BuiltinAdminNote() {
 }
 
 /** The rename ceremony — step-up + the new name; the database's outcome codes surface inline. */
-function RenameChannelForm({ channel }: { channel: string }) {
+function RenameChannelForm({ channel, channelId }: { channel: string; channelId: string }) {
   const fetcher = useFetcher<ChannelActionData>();
   const pending = fetcher.state !== "idle";
   const error = fetcher.data?.form === "rename" ? fetcher.data.error : undefined;
@@ -385,6 +406,7 @@ function RenameChannelForm({ channel }: { channel: string }) {
       </div>
       <fetcher.Form method="post" className="space-y-3">
         <input type="hidden" name="intent" value="rename-channel" />
+        <input type="hidden" name="channel_id" value={channelId} />
         <label className="block" htmlFor="rename-new-name">
           <span className="mb-1 block font-medium text-sm text-dim">New name</span>
           <input
@@ -413,7 +435,7 @@ function RenameChannelForm({ channel }: { channel: string }) {
 }
 
 /** The delete ceremony — step-up + type-the-name; the copy states the semantics honestly. */
-function DeleteChannelForm({ channel }: { channel: string }) {
+function DeleteChannelForm({ channel, channelId }: { channel: string; channelId: string }) {
   const fetcher = useFetcher<ChannelActionData>();
   const pending = fetcher.state !== "idle";
   const error = fetcher.data?.form === "delete" ? fetcher.data.error : undefined;
@@ -429,6 +451,7 @@ function DeleteChannelForm({ channel }: { channel: string }) {
       </div>
       <fetcher.Form method="post" className="space-y-3">
         <input type="hidden" name="intent" value="delete-channel" />
+        <input type="hidden" name="channel_id" value={channelId} />
         <StepUpFields idPrefix={`delete-${channel}`} typedName={channel} />
         {error && (
           <p className="text-red-600 text-sm" role="alert">
