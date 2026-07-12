@@ -5,8 +5,8 @@
 //!   authorization, write a `0600` WAL, and return `ENROLLMENT_PENDING` + the verification URL.
 //! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow` (with
 //!   any target, or none) RESUMES it — the "re-invoking IS the resume" idiom the standup publish uses:
-//!   poll once; on a granted poll, sign the enroll possession proof, redeem the grant into per-skill read
-//!   creds, record them in the WAL (the lockout fence), PROMOTE (write `instance.json` / `follows.json` /
+//!   poll once; on a granted poll, redeem the grant into the workspace credential, record it in the WAL
+//!   (the lockout fence), PROMOTE (write `instance.json` / `credentials.json` / `follows.json` /
 //!   `user.json` / the device key + lay the first-receive baselines), delete the WAL, and disclose the
 //!   offers.
 //! - **`follow <skill>[@<hash>]`** (post-enroll) — a KNOWN followed-skill name drives the existing pull
@@ -18,9 +18,10 @@
 //! forces the skill path; a known skill name is the skill path; otherwise it is an `/i/` link or a bare
 //! invite token.
 //!
-//! **I-NO-USER-TOKEN.** The agent only ever holds the opaque grant + the minted read creds — never a user
-//! token; enrollment completes by POLLING. **Secrets** (the device code, the grant, the read tokens) live
-//! only in the `0600` WAL / `follows.json`, are redacted in `Debug`, and never reach a URL / log / error.
+//! **I-NO-USER-TOKEN.** The agent only ever holds the opaque grant + the minted workspace credential —
+//! never a user token; enrollment completes by POLLING. **Secrets** (the device code, the grant, the
+//! workspace credential) live only in the `0600` WAL / `credentials.json`, are redacted in `Debug`, and
+//! never reach a URL / log / error.
 
 use std::collections::HashMap;
 
@@ -57,7 +58,7 @@ pub(crate) struct FollowOpts {
 
 /// Builds the creds-free enrollment transport for a plane base URL.
 pub(crate) type EnrollConnect<'a> = dyn Fn(&str) -> Box<dyn EnrollSource> + 'a;
-/// Builds the read transport (the offer-disclosure source) for a base URL + the minted read creds.
+/// Builds the read transport (the offer-disclosure source) for a base URL + the minted workspace credential.
 pub(crate) type PlaneConnect<'a> =
     dyn Fn(&str, HashMap<String, SkillCred>) -> Box<dyn PlaneSource> + 'a;
 
@@ -307,10 +308,10 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
 
     match wal.state {
         // A Redeemed-but-unpromoted WAL: PROMOTE without re-redeeming (the single-use grant is spent;
-        // recovery completes from the persisted creds).
+        // recovery completes from the persisted workspace credential).
         enroll::EnrollPhase::Redeemed {
             context,
-            read_creds,
+            credential,
             device_key_id,
             principal,
             enrolled_at_millis,
@@ -320,7 +321,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                 ctx,
                 connectors,
                 &context,
-                &read_creds,
+                &credential,
                 &device_key_id,
                 principal.as_deref(),
                 enrolled_at_millis,
@@ -389,21 +390,12 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                 }
                 TokenPoll::Granted(granted) => {
                     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-                    // Redeem the grant (the bearer credential) into per-skill read creds; nothing is signed.
+                    // Redeem the grant (the bearer credential) into the workspace credential; nothing is signed.
                     let redeem =
                         redeem_grant(&*enroll_src, &context, granted.grant.as_str(), &signer)?;
-                    let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
-                        .read_creds
-                        .iter()
-                        .map(|c| enroll::RedeemedCredDoc {
-                            skill_id: c.skill_id.clone(),
-                            read_token: c.read_token.clone(),
-                            expires_at: c.expires_at,
-                        })
-                        .collect();
                     let enrolled_at = now_millis(ctx);
-                    // The lockout fence: record the redeemed creds (a single-use grant cannot be
-                    // re-redeemed) BEFORE promotion, so a crash mid-promote completes from this WAL.
+                    // The lockout fence: record the redeemed workspace credential (a single-use grant cannot
+                    // be re-redeemed) BEFORE promotion, so a crash mid-promote completes from this WAL.
                     enroll::write_wal(
                         ctx.fs,
                         &ctx.layout,
@@ -411,7 +403,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                             schema_version: PERSISTED_SCHEMA_VERSION,
                             state: enroll::EnrollPhase::Redeemed {
                                 context: context.clone(),
-                                read_creds: read_creds.clone(),
+                                credential: redeem.credential.clone(),
                                 device_key_id: redeem.device_key_id.clone(),
                                 principal: redeem.principal.clone(),
                                 enrolled_at_millis: enrolled_at,
@@ -422,7 +414,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                         ctx,
                         connectors,
                         &context,
-                        &read_creds,
+                        &redeem.credential,
                         &redeem.device_key_id,
                         redeem.principal.as_deref(),
                         enrolled_at,
@@ -526,15 +518,6 @@ fn retry_claim(
         mode: enroll::FollowModeDoc::Auto,
         root: enroll::EnrollRoot::Claim,
     };
-    let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
-        .read_creds
-        .iter()
-        .map(|c| enroll::RedeemedCredDoc {
-            skill_id: c.skill_id.clone(),
-            read_token: c.read_token.clone(),
-            expires_at: c.expires_at,
-        })
-        .collect();
     let enrolled_at = now_millis(ctx);
     // The same lockout fence as the grant flow: the claim is consumed server-side, so the redeemed facts
     // are recorded BEFORE promotion and a crash mid-promote completes from here without re-sending.
@@ -545,7 +528,7 @@ fn retry_claim(
             schema_version: PERSISTED_SCHEMA_VERSION,
             state: enroll::EnrollPhase::Redeemed {
                 context: context.clone(),
-                read_creds: read_creds.clone(),
+                credential: redeem.credential.clone(),
                 device_key_id: redeem.device_key_id.clone(),
                 principal: redeem.principal.clone(),
                 enrolled_at_millis: enrolled_at,
@@ -556,7 +539,7 @@ fn retry_claim(
         ctx,
         connectors,
         &context,
-        &read_creds,
+        &redeem.credential,
         &redeem.device_key_id,
         redeem.principal.as_deref(),
         enrolled_at,
@@ -564,8 +547,8 @@ fn retry_claim(
     )
 }
 
-/// Redeem the grant into a registered device + per-skill read creds. The grant is the bearer credential and
-/// the body's `device_public_key` registers this device (the server checks it matches the grant's bound
+/// Redeem the grant into a registered device + its workspace credential. The grant is the bearer credential
+/// and the body's `device_public_key` registers this device (the server checks it matches the grant's bound
 /// pubkey) — nothing is signed.
 fn redeem_grant(
     enroll_src: &dyn EnrollSource,
@@ -592,7 +575,7 @@ fn promote(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
     context: &enroll::EnrollContext,
-    read_creds: &[enroll::RedeemedCredDoc],
+    credential: &str,
     device_key_id: &str,
     principal: Option<&str>,
     enrolled_at: i64,
@@ -601,7 +584,7 @@ fn promote(
     let currency = promote_core(
         ctx,
         context,
-        read_creds,
+        credential,
         device_key_id,
         principal,
         enrolled_at,
@@ -610,7 +593,7 @@ fn promote(
 
     // Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
     // sidecar, so first-receive stays an OFFER). Best-effort: a fetch hiccup omits that skill's offer.
-    let skills = disclose_offers(connectors, context, read_creds);
+    let skills = disclose_offers(connectors, context, credential);
 
     Ok(FollowData {
         workspace_id: context.workspace_id.clone(),
@@ -633,7 +616,7 @@ fn promote(
 pub(super) fn promote_core(
     ctx: &Ctx<'_>,
     context: &enroll::EnrollContext,
-    read_creds: &[enroll::RedeemedCredDoc],
+    credential: &str,
     device_key_id: &str,
     principal: Option<&str>,
     enrolled_at: i64,
@@ -641,37 +624,39 @@ pub(super) fn promote_core(
 ) -> Result<topos_types::TriggerReport, ClientError> {
     // Crash-coherence of a (possibly second, same-plane) promotion. Every step below is a SINGLE
     // atomic-per-file durable write (or an idempotent read-merge-write). The `Redeemed` enrollment WAL —
-    // written BEFORE this fn and deleted only in step 6 — is the transaction log: a crash at any step
+    // written BEFORE this fn and deleted only in the last step — is the transaction log: a crash at any step
     // leaves every touched file byte-for-byte pre- or post-write (never torn), and the next
     // re-invoking `follow` REPLAYS this whole sequence from the WAL until it converges. Each step is
     // idempotent under that replay:
-    //   1) instance.json — atomic write of identical bytes (the plane is the same on a re-promote);
-    //   2) follows.json  — read-merge-write, deduped by skill_id, so this workspace's row is added-or-
-    //                      refreshed and an already-followed workspace's rows are never dropped;
-    //   3) user.json     — read-upsert-write, deduped by workspace_id, so this membership is added-or-
-    //                      refreshed and any already-joined workspace's membership is never dropped;
-    //   4) host.json     — re-records the same device-key reference (identical bytes);
-    //   5) baselines     — a skill dir that already exists is left untouched; a partial staging is rebuilt;
-    //   6) delete the WAL — the LAST durable step, so "WAL absent" proves steps 1-5 all completed.
-    // The write ORDER is load-bearing: follows.json (step 2) lands before the membership (step 3), so a
-    // committed membership always implies its read credential is already on disk. Proven by the crash-gate
-    // test `second_enrollment_promote_is_crash_coherent_and_never_drops_the_first`.
+    //   1) instance.json      — atomic write of identical bytes (the plane is the same on a re-promote);
+    //   2) credentials.json   — read-merge-write, upsert this workspace's credential (the Bearer for every
+    //                           request in it), deduped by workspace_id, so an already-joined workspace's
+    //                           credential is never dropped;
+    //   3) follows.json       — read-merge-write, deduped by skill_id, so this workspace's rows are added-
+    //                           or-refreshed and an already-followed workspace's rows are never dropped;
+    //   4) user.json          — read-upsert-write, deduped by workspace_id, so this membership is added-or-
+    //                           refreshed and any already-joined workspace's membership is never dropped;
+    //   5) host.json          — re-records the same device-key reference (identical bytes);
+    //   6) baselines          — a skill dir that already exists is left untouched; a partial staging is rebuilt;
+    //   7) delete the WAL      — the LAST durable step, so "WAL absent" proves steps 1-6 all completed.
+    // The write ORDER is load-bearing: credentials.json (step 2) lands before the membership (step 4), so a
+    // committed membership always implies its workspace credential is already on disk. Proven by the
+    // crash-gate test `second_enrollment_promote_is_crash_coherent_and_never_drops_the_first`.
     //
     // Residual (documented, not closed): the steps are atomic PER FILE, not as one transaction, so a
     // DIFFERENT command running CONCURRENTLY during this promotion could observe the transient gap where
-    // follows.json already carries this workspace but user.json does not yet. This is benign and
+    // credentials.json already carries this workspace but user.json does not yet. This is benign and
     // self-healing: every file is atomic (no torn reads), the WAL heals the gap on the next resume, and the
     // worst an ambient write can observe is a fail-closed WorkspaceSelection/Enrollment error — user.json
     // is all-or-nothing, so a membership is either fully present or absent, never a wrong-workspace
-    // signature and never corruption. Widening the identity lock across steps 1-3 to make them one critical
-    // section would need a lock-free inner variant split out of `write_follows_merged` (it re-takes that
-    // lock, so calling it under a held lock would deadlock) plus holding the guard across the instance /
-    // follows / user writes and dropping it before step 4 (`set_device_key` re-takes the same lock) —
-    // meaningful new internal surface to close a sub-second window whose worst case is already a clean,
-    // self-healing error, so this stays a documented residual rather than a lock-widening refactor.
+    // signature and never corruption. Widening the identity lock across the credential / follows / user
+    // writes to make them one critical section would need lock-free inner variants (each re-takes that
+    // lock, so calling one under a held lock would deadlock) — meaningful new internal surface to close a
+    // sub-second window whose worst case is already a clean, self-healing error, so this stays a documented
+    // residual rather than a lock-widening refactor.
 
     // 1) instance.json — PUBLIC (no secret) → ordinary perms. PLANE-scoped only now; the per-workspace
-    // disclosure moved to the user.json membership written in step 3.
+    // disclosure moved to the user.json membership written in step 4.
     enroll::write_instance(
         ctx.fs,
         &ctx.layout,
@@ -683,14 +668,19 @@ pub(super) fn promote_core(
         },
     )?;
 
-    // 2) follows.json — 0600 (the read tokens are secret); READ-MERGE-WRITE so a second follow never
-    // clobbers the first. One entry per minted read cred (= one per followed skill).
-    let additions: Vec<enroll::FollowEntry> = read_creds
+    // 2) credentials.json — 0600 (the workspace credential is THE secret); UPSERT this workspace's
+    // credential, so a second-workspace follow never drops the first's credential. Lands BEFORE the
+    // membership (step 4), so a committed membership always implies its Bearer credential is on disk.
+    enroll::write_credential(ctx.fs, &ctx.layout, &context.workspace_id, credential)?;
+
+    // 3) follows.json — pure subscription state; READ-MERGE-WRITE so a second follow never clobbers the
+    // first. One entry per skill the enrollment offered (the bootstrap-declared set the WAL carries).
+    let additions: Vec<enroll::FollowEntry> = context
+        .offered_skills
         .iter()
-        .map(|c| enroll::FollowEntry {
-            skill_id: c.skill_id.clone(),
+        .map(|s| enroll::FollowEntry {
+            skill_id: s.skill_id.clone(),
             workspace_id: context.workspace_id.clone(),
-            read_token: c.read_token.clone(),
             mode: context.mode,
             review_required: false,
             following: true,
@@ -698,7 +688,7 @@ pub(super) fn promote_core(
         .collect();
     enroll::write_follows_merged(ctx.fs, &ctx.layout, &additions)?;
 
-    // 3) user.json — metadata only (no secret) → ordinary perms. READ-MERGE-WRITE the memberships so a
+    // 4) user.json — metadata only (no secret) → ordinary perms. READ-MERGE-WRITE the memberships so a
     // second follow (into another workspace on the same plane) ADDS a membership rather than dropping the
     // first. The per-INSTALL identity (principal/email) is refreshed only when this promote carries a
     // principal (an email-shaped one also fills `email`; a device-rooted `dev.…` id is NOT an email and
@@ -730,7 +720,7 @@ pub(super) fn promote_core(
     );
     enroll::write_user(ctx.fs, &ctx.layout, &user)?;
 
-    // 4) Record the device key reference in host.json (the PUBLIC key + a pointer to the 0600 seed).
+    // 5) Record the device key reference in host.json (the PUBLIC key + a pointer to the 0600 seed).
     identity::set_device_key(
         ctx.fs,
         &ctx.layout,
@@ -742,23 +732,23 @@ pub(super) fn promote_core(
         },
     )?;
 
-    // 5) Lay the first-receive baseline for each followed skill (so the pull engine treats it as state-②).
-    // The minted skill id is parsed at this boundary too (the redeem transport already validated it; a
-    // WAL-resumed promote revalidates) — only the validated newtype reaches the path joins below.
-    for cred in read_creds {
-        let skill_id = crate::id::SkillId::parse(&cred.skill_id)?;
+    // 6) Lay the first-receive baseline for each offered skill (so the pull engine treats it as state-②).
+    // The bootstrap-declared skill id is parsed at this boundary too (the wire transport already validated
+    // it; a WAL-resumed promote revalidates) — only the validated newtype reaches the path joins below.
+    for offered in &context.offered_skills {
+        let skill_id = crate::id::SkillId::parse(&offered.skill_id)?;
         lay_first_receive_baseline(
             ctx,
             &skill_id,
-            display_name(context, &cred.skill_id),
+            display_name(context, &offered.skill_id),
             &context.workspace_display_name,
         )?;
     }
 
-    // 6) Delete the WAL — enrollment is complete.
+    // 7) Delete the WAL — enrollment is complete.
     enroll::delete_wal(ctx.fs, &ctx.layout)?;
 
-    // 7) Arm session-start currency for this follower — best-effort + idempotent, mirroring `add`. A pure
+    // 8) Arm session-start currency for this follower — best-effort + idempotent, mirroring `add`. A pure
     // follower never runs `add`, so this is the one place their hook gets installed; it edits the harness
     // CONFIG (never a skill dir), and the sweep no-ops until the first bytes land. Infallible (a
     // TriggerReport, degraded on a config hiccup), so it can never roll back the completed enrollment;
@@ -872,28 +862,30 @@ fn lay_first_receive_baseline(
 fn disclose_offers(
     connectors: &FollowConnectors<'_>,
     context: &enroll::EnrollContext,
-    read_creds: &[enroll::RedeemedCredDoc],
+    credential: &str,
 ) -> Vec<FollowOffer> {
-    if read_creds.is_empty() {
+    if context.offered_skills.is_empty() {
         return Vec::new();
     }
-    let creds: HashMap<String, SkillCred> = read_creds
+    // Every offered skill reads under the ONE workspace credential (a `SkillCred` per skill sharing it).
+    let creds: HashMap<String, SkillCred> = context
+        .offered_skills
         .iter()
-        .map(|c| {
+        .map(|s| {
             (
-                c.skill_id.clone(),
-                SkillCred::new(context.workspace_id.clone(), c.read_token.clone()),
+                s.skill_id.clone(),
+                SkillCred::new(context.workspace_id.clone(), credential.to_owned()),
             )
         })
         .collect();
     let plane = (connectors.plane)(&context.base_url, creds);
 
     let mut offers = Vec::new();
-    for cred in read_creds {
-        if let Some(offer) = disclose_one(&*plane, &cred.skill_id, &context.workspace_id) {
+    for s in &context.offered_skills {
+        if let Some(offer) = disclose_one(&*plane, &s.skill_id, &context.workspace_id) {
             offers.push(FollowOffer {
-                skill_id: cred.skill_id.clone(),
-                name: display_name(context, &cred.skill_id),
+                skill_id: s.skill_id.clone(),
+                name: display_name(context, &s.skill_id),
                 offer,
             });
         }

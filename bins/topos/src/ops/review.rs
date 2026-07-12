@@ -15,7 +15,6 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 use super::contribute::{self, ContributeConnect};
 use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
@@ -62,7 +61,6 @@ pub(crate) fn review(
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
     let transport = connect(&instance.base_url);
 
     // Resume a crashed prior review for this skill before minting a new op.
@@ -123,7 +121,7 @@ pub(crate) fn review(
         }
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &signer, &sp, &rec)?;
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
     map_outcome(ctx, &sp, &rec, &receipt, target)
 }
 

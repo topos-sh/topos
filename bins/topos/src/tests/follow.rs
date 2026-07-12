@@ -29,7 +29,7 @@ use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
     DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion, FollowContext, FollowMode,
     FollowSource, Grant, GrantedToken, InertFollow, InertPlane, KnownCurrent, PlaneError,
-    PlaneSource, PointerFetch, Redeem, RedeemedCred, StandupAuthorize, TokenPoll,
+    PlaneSource, PointerFetch, Redeem, StandupAuthorize, TokenPoll,
 };
 use crate::plane_http::SkillCred;
 use crate::sidecar::Layout;
@@ -194,22 +194,14 @@ impl EnrollSource for FakeEnroll {
         device_public_key: [u8; 32],
     ) -> Result<Redeem, ClientError> {
         // The device pubkey is the identity anchor; the server derives the key id from it, and the client
-        // mirrors that derivation. Nothing is signed or verified.
+        // mirrors that derivation. Nothing is signed or verified. The redeem mints the ONE workspace
+        // credential (the followed set now comes from the bootstrap's offered skills, carried in the WAL).
         let dk = topos_core::identity::device_key_id(&device_public_key);
         Ok(Redeem {
             workspace_id: workspace_id.to_owned(),
             device_key_id: dk,
             principal: Some("alice@acme.com".to_owned()),
-            read_creds: self
-                .bootstrap
-                .offered_skills
-                .iter()
-                .map(|s| RedeemedCred {
-                    skill_id: s.skill_id.clone(),
-                    read_token: format!("rt_secret_{}", s.skill_id),
-                    expires_at: None,
-                })
-                .collect(),
+            credential: format!("wsc_secret_{workspace_id}"),
         })
     }
     fn admin_claim(
@@ -568,7 +560,7 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
     assert_eq!(
         mode_of(&layout.follows_path()),
         0o600,
-        "follows.json holds secret read tokens"
+        "follows.json is 0600 for perm hygiene (pure subscription state now)"
     );
     let follows = enroll::read_follows(&rig.fs, &layout)
         .unwrap()
@@ -576,9 +568,21 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
     assert_eq!(follows.follows.len(), 1);
     assert_eq!(follows.follows[0].skill_id, "s_deploy");
     assert!(follows.follows[0].following);
-    assert_eq!(follows.follows[0].read_token, "rt_secret_s_deploy");
     // The load_enrollment Some-condition holds (instance present AND ≥1 following skill).
     assert!(follows.follows.iter().any(|f| f.following));
+
+    // credentials.json — 0600, holds the workspace credential the redeem minted (the followed skill's
+    // Bearer). The secret lives HERE now, not on the follow entry.
+    assert_eq!(
+        mode_of(&layout.credentials_path()),
+        0o600,
+        "credentials.json holds the secret workspace credential"
+    );
+    let creds = enroll::read_credentials(&rig.fs, &layout)
+        .unwrap()
+        .expect("credentials.json")
+        .into_map();
+    assert_eq!(creds.get(WS).map(String::as_str), Some("wsc_secret_w_acme"));
 
     // user.json — metadata only, ordinary perms, NO secret.
     assert_eq!(mode_of(&layout.user_path()), 0o644);
@@ -692,11 +696,7 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
         schema_version: 1,
         state: enroll::EnrollPhase::Redeemed {
             context,
-            read_creds: vec![enroll::RedeemedCredDoc {
-                skill_id: "s_deploy".into(),
-                read_token: "rt_secret_s_deploy".into(),
-                expires_at: None,
-            }],
+            credential: "wsc_secret_w_acme".into(),
             device_key_id: device_key_id_for(&device_pubkey(&rig)),
             principal: None,
             enrolled_at_millis: 1,
@@ -908,29 +908,22 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
 }
 
 #[test]
-fn the_read_token_never_leaks_in_debug() {
-    // The secret read tokens are redacted everywhere they could surface (follows.json's entry, the
-    // transport credential, the WAL's redeemed creds).
-    let entry = enroll::FollowEntry {
-        skill_id: "s".into(),
+fn the_workspace_credential_never_leaks_in_debug() {
+    // The secret is the WORKSPACE credential now — redacted everywhere it could surface (the transport
+    // credential, credentials.json's entry, the WAL's redeemed credential). A follow entry carries no
+    // secret any more.
+    let cred = SkillCred::new(WS.into(), "wsc_super_secret".into());
+    assert!(!format!("{cred:?}").contains("wsc_super_secret"));
+    let entry = enroll::CredentialEntry {
         workspace_id: WS.into(),
-        read_token: "rt_super_secret".into(),
-        mode: enroll::FollowModeDoc::Auto,
-        review_required: false,
-        following: true,
+        credential: "wsc_super_secret".into(),
     };
-    assert!(!format!("{entry:?}").contains("rt_super_secret"));
-    let cred = SkillCred::new(WS.into(), "rt_super_secret".into());
-    assert!(!format!("{cred:?}").contains("rt_super_secret"));
+    assert!(!format!("{entry:?}").contains("wsc_super_secret"));
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
         state: enroll::EnrollPhase::Redeemed {
             context: tiny_context(),
-            read_creds: vec![enroll::RedeemedCredDoc {
-                skill_id: "s".into(),
-                read_token: "rt_super_secret".into(),
-                expires_at: None,
-            }],
+            credential: "wsc_super_secret".into(),
             device_key_id: "dk_x".into(),
             principal: None,
             enrolled_at_millis: 1,
@@ -939,10 +932,17 @@ fn the_read_token_never_leaks_in_debug() {
     let dbg = format!("{wal:?}");
     assert!(dbg.contains("<redacted>"));
     assert!(
-        !dbg.contains("rt_super_secret"),
-        "WAL Debug leaked a read token"
+        !dbg.contains("wsc_super_secret"),
+        "WAL Debug leaked the workspace credential"
     );
-    // The grant + device-code domain types redact too.
+    // The redeem result + the grant + device-code domain types redact too.
+    let redeem = Redeem {
+        workspace_id: WS.into(),
+        device_key_id: "dk_x".into(),
+        principal: None,
+        credential: "wsc_super_secret".into(),
+    };
+    assert!(!format!("{redeem:?}").contains("wsc_super_secret"));
     assert!(!format!("{:?}", Grant::new("grant_x".into())).contains("grant_x"));
 }
 
@@ -1176,22 +1176,26 @@ fn a_second_follow_while_the_first_is_still_pending_resumes_it_and_keeps_the_wal
 
 #[test]
 fn a_follow_while_a_redeemed_wal_is_unpromoted_completes_the_promotion() {
-    // A Redeemed-but-unpromoted grant is single-use (spent server-side) and its minted read creds live ONLY
-    // in this WAL. Re-invoking `follow` (with any target) COMPLETES the promotion from those persisted
-    // creds — it never loses them and never clobbers the WAL with a fresh begin.
+    // A Redeemed-but-unpromoted grant is single-use (spent server-side) and its minted workspace credential
+    // lives ONLY in this WAL. Re-invoking `follow` (with any target) COMPLETES the promotion from the
+    // persisted credential + the WAL's offered skills — it never loses them and never clobbers the WAL.
     let rig = Rig::new("interleave-redeemed");
     let plane = FixturePlane::default();
     rig.mint_identity();
 
+    // The followed set comes from `context.offered_skills` now — the WAL carries s_deploy.
+    let context = enroll::EnrollContext {
+        offered_skills: vec![enroll::OfferedSkill {
+            skill_id: "s_deploy".into(),
+            name: Some("deploy".into()),
+        }],
+        ..tiny_context()
+    };
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
         state: enroll::EnrollPhase::Redeemed {
-            context: tiny_context(),
-            read_creds: vec![enroll::RedeemedCredDoc {
-                skill_id: "s_deploy".into(),
-                read_token: "rt_secret_s_deploy".into(),
-                expires_at: None,
-            }],
+            context,
+            credential: "wsc_secret_w_acme".into(),
             device_key_id: device_key_id_for(&device_pubkey(&rig)),
             principal: None,
             enrolled_at_millis: 1,
@@ -1206,7 +1210,7 @@ fn a_follow_while_a_redeemed_wal_is_unpromoted_completes_the_promotion() {
         Some(&format!("{BASE_URL}/i/tok_b")),
         opts(false),
     )
-    .expect("a re-invoked follow promotes the redeemed grant from its persisted creds");
+    .expect("a re-invoked follow promotes the redeemed grant from its persisted credential");
     assert!(data.enrolled, "the redeemed enrollment completed");
     // The single-use creds were USED (never lost): follows.json now carries the skill, and the WAL is gone.
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
@@ -1339,11 +1343,7 @@ fn write_workspace_b_redeemed_wal(rig: &Rig) {
         schema_version: 1,
         state: enroll::EnrollPhase::Redeemed {
             context,
-            read_creds: vec![enroll::RedeemedCredDoc {
-                skill_id: B_SKILL.into(),
-                read_token: format!("rt_secret_{B_SKILL}"),
-                expires_at: None,
-            }],
+            credential: format!("wsc_secret_{WS_B}"),
             device_key_id: device_key_id_for(&device_pubkey(rig)),
             principal: Some("alice@acme.com".into()),
             enrolled_at_millis: 2,

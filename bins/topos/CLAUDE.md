@@ -48,12 +48,12 @@ renderer over the SAME typed outcomes (one value, two presentations).
   one adoption path: mint id+name, scan + import, stage + publish with one rename — all-or-nothing;
   **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
-  below), `invite` (an owner mints an `/i/` link by signing + POSTing the governance Invite op — see below),
+  below), `invite` (an owner mints an `/i/` link by POSTing the governance Invite op under the workspace credential — see below),
   `list [--footprint] [--tracked] [--remote]` (the tracked bucket + **untracked discovery** — skills sitting
   in any known harness's skill dir, across a baked registry ported from `vercel-labs/skills`, deduped against
   tracked placements by canonical path; `--tracked` suppresses discovery; `--remote` is the **catalog read** —
-  a `GET /v1/workspaces/{ws}/skills` (naming the acting `device_key_id` in the `Topos-Device-Key-Id` header)
-  per followed workspace, merged with local follow-state
+  a `GET /v1/workspaces/{ws}/skills` (under the workspace Bearer credential) per followed workspace, merged
+  with local follow-state
   (Available / Following / FollowingBehind), a per-workspace transport fault degrading to a warning;
   `followed`/`published_by_you` still render empty; footprint = the `~/.topos/` walk plus any harness config
   topos holds an entry in), `diff`
@@ -77,14 +77,16 @@ renderer over the SAME typed outcomes (one value, two presentations).
   interactive run or a `--wait [<seconds>]` run, so a person never re-runs by hand; a headless `--json` run
   without `--wait` returns the pending state and never hangs); on a granted poll it **redeems** the grant
   (the bearer credential — the redeem body carries `device_public_key`, which the server checks against the
-  grant's bound pubkey; nothing is signed) into per-skill read creds, records them in the WAL **before
-  promotion** (the lockout
+  grant's bound pubkey; nothing is signed) into the ONE **workspace credential**, records it in the WAL
+  **before promotion** (the lockout
   fence — a single-use grant can't be re-redeemed; a re-invoked `follow` over a `Redeemed` WAL re-promotes without
-  re-redeeming), then PROMOTES: `instance.json` (the plane + the workspace disclosure), `follows.json`
-  (read-merge-write under the `identity` lock, **`0600`** — a second follow never clobbers the first), and
-  `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
-  **first-receive baseline** per skill. The agent only ever holds the opaque grant + the read creds — never a
-  user token (I-NO-USER-TOKEN); the device code / grant / read tokens are redacted from every `Debug` and
+  re-redeeming), then PROMOTES: `instance.json` (the plane), `identity/credentials.json` (the workspace
+  credential, `0600`, upsert under the `identity` lock), `follows.json` (the followed set from the WAL's
+  offered skills — read-merge-write under the `identity` lock, `0600`; pure subscription state, no secret),
+  and `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
+  **first-receive baseline** per offered skill. The agent only ever holds the opaque grant + the workspace
+  credential — never a user token (I-NO-USER-TOKEN); the device code / grant / workspace credential are
+  redacted from every `Debug` and
   never reach a URL / log / error. The promote also **arms the session-start currency hook** — best-effort
   + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
   degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
@@ -97,19 +99,20 @@ renderer over the SAME typed outcomes (one value, two presentations).
   whole flow is tested over a **fake** with no HTTP (the real loopback proof lives in
   `tests/tests/follow_e2e.rs`).
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
-  by POSTing the governance Invite op. Requires prior enrollment: the plane (`base_url` from `instance.json`),
-  the workspace (`workspace_id` from `identity/user.json`), and the device key all come from what `follow`
+  by POSTing the governance Invite op. Requires prior enrollment: the plane (`base_url` from `instance.json`)
+  and the workspace (`workspace_id` from `identity/user.json`) come from what `follow`
   wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the canonical hyphenated UUID
-  rides the wire, the plane re-parses it to the SAME 16 bytes for idempotency) and POSTs the body naming the
-  acting **`device_key_id`** — the plane resolves its non-revoked registry row → principal → role matrix (a
-  non-owner is DENIED). **Nothing is signed** (git/GitHub-level trust). The role rides the wire body (an
+  rides the wire, the plane re-parses it to the SAME 16 bytes for idempotency) and POSTs the body under the
+  **workspace Bearer credential** — the plane resolves the credential's non-revoked registry row → principal
+  → role matrix (a non-owner is DENIED); the acting device is never a body field. **Nothing is signed**
+  (git/GitHub-level trust). The role rides the wire body (an
   omitted `--role` defaults to member, matching the plane); the emails are folded to
   `topos_core::identity::canonical_principal`'s ASCII-lowercase form ONCE before the wire body (the plane
   re-folds at its parse boundary), so the roster rows carry one identity per human; the skill **ids** (never
   names) are what the invite pre-offers. The POST rides through the `UreqDeviceClient` behind a
   `GovernanceSource` seam, mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a role-DENIED
   `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the wire body's
-  shape (workspace / acting device / role / folded emails / skill ids) over a **fake** with no HTTP.
+  shape (workspace / role / folded emails / skill ids) over a **fake** with no HTTP.
 - **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
   `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
   the **unsigned** `current` pointer through the `PlaneSource` seam, a workspace/skill **scope check** (a
@@ -148,26 +151,30 @@ renderer over the SAME typed outcomes (one value, two presentations).
   currency/harness hook.
 - **The real plane transport** (`plane_http`, `enroll`) — a blocking `ureq` (rustls+ring) `PlaneSource` that
   feeds the engine above (no engine change). `get_current` is the commit-sensitive conditional GET
-  (`If-None-Match` + `Topos-Known-Version-Id`); `fetch_version` is a version-metadata GET + per-blob
-  content-addressed bundle GETs that **re-verify each `sha256 == object_id`**. It is a dumb transport — the
+  (`GET /v1/workspaces/{ws}/skills/{skill}/current` with `If-None-Match` + `Topos-Known-Version-Id`);
+  `fetch_version` is a version-metadata GET + per-blob
+  content-addressed bundle GETs that **re-verify each `sha256 == object_id`** — all under the workspace
+  **Bearer credential**. It is a dumb transport — the
   engine scope-checks the served (unsigned) pointer and re-verifies the fetched bytes against the version
-  id. `FileFollow` + the crash-safe `instance.json` (the plane base URL — no trust root) and `follows.json`
-  (per-skill workspace + read token + mode) docs supply the transport creds + the consent state; the read
-  token is a **secret** (redacted from `Debug`, never in an error message or URL). `app.rs` (via
+  id. `FileFollow` + the crash-safe `instance.json` (the plane base URL — no trust root), `follows.json`
+  (per-skill workspace + mode — pure subscription state), and `identity/credentials.json` (the per-workspace
+  Bearer credentials — the **secret**, redacted from `Debug`, never in an error message or URL, joined onto
+  the follow-state by `skill_creds`) supply the transport creds + the consent state. `app.rs` (via
   `load_enrollment`) selects the real transport only when `instance.json` is present, else stays inert — and
   `load_enrollment` is **no longer inert in practice**, because `follow` now writes `instance.json` +
-  `follows.json`. The end-to-end
+  `credentials.json` + `follows.json`. The end-to-end
   pull-over-loopback-HTTP proof lives in the `tests/` member; adding `ureq` keeps the client arch-clean (no
   `plane-store`/`sqlx`/`tokio` edge).
-- **The device keypair** (`device_signer`, `identity`) — the device's presented identity. An Ed25519
+- **The device keypair** (`device_signer`, `identity`) — the device's **keygen-only identity**. An Ed25519
   keypair is **load-or-generated** from a `0600` `identity/device.key` seed (refuse-on-permissive,
   exactly-32-bytes, a `Zeroizing` seed held only transiently, serialized under the identity lock; the
   `SigningKey` self-zeroizes on drop and a hand-written `Debug` redacts the key material). The public key
   REGISTERS the device at enroll; the **`device_key_id`** (`dk_` + the first 32 hex of `sha256(pubkey)`,
-  the ONE kernel derivation `topos_core::identity::device_key_id`) is the device's presented identity on
-  every request — the plane re-derives the SAME id from the registered public key. **Nothing signs with the
-  private key** (git/GitHub-level trust: the client trusts the plane it enrolled with; the private key sits
-  unused pending the next increment's per-workspace credential redesign). `host.json` carries a secret-free
+  the ONE kernel derivation `topos_core::identity::device_key_id`) is the device's stable, non-secret NAME
+  (the receipts/audit actor) — the plane re-derives the SAME id from the registered public key. **Nothing
+  signs with the private key** (git/GitHub-level trust): every plane request — reads AND writes AND
+  governance — authenticates with the **workspace credential** the redeem mints (Bearer), never the key.
+  `host.json` carries a secret-free
   **`DeviceKeyRef`** (the PUBLIC key + a pointer to the sibling `0600` seed, NEVER the seed) via
   `set_device_key`. A KAT pins `device_key_id` against `topos_core::identity::device_key_id`.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
@@ -176,7 +183,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `atomic_write_private` is the crash-safe secret write (its temp is 0600 from creation, so a fault never
   leaves a world-readable partial), and `write_doc_private` / `read_doc_private` the typed secret-doc pair
   (`read_doc_private` fails closed on a group/other-accessible secret BEFORE parsing). The device seed,
-  `follows.json`, **and** the enrollment WAL (`identity/enrollment.json`) now all go through these `0600`
+  `identity/credentials.json`, `follows.json` (perm hygiene — pure subscription state now), **and** the
+  enrollment WAL (`identity/enrollment.json`) all go through these `0600`
   primitives.
 
 Identity is the kernel's: `version_id`/`bundle_digest` depend only on the bytes + device id + a fixed
@@ -184,8 +192,9 @@ message, so injectable id/time sources make `add` deterministic. Golden `--json`
 are asserted byte-equal in tests.
 
 - **The contribute write verbs** (`ops/{publish,review,revert}` + `ops/contribute` + `op_wal` + the plane
-  half of `ops/diff`) — the client contribute writes (each body names the acting `device_key_id`; the op
-  kind rides the ROUTE, nothing is signed). A **`ContributeSource`** transport seam (mirroring
+  half of `ops/diff`) — the client contribute writes (the op kind rides the ROUTE; the acting device rides
+  the transport's workspace **Bearer credential** — never a body field — nothing is signed). A
+  **`ContributeSource`** transport seam (mirroring
   `GovernanceSource` on `UreqDeviceClient`) POSTs the four write routes; `map_write_envelope` maps the
   **all-outcome 200 envelope** to a typed `WriteReceipt` (every protocol outcome — OK / NEEDS_REVIEW /
   CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`; only a transport/non-200/malformed body
@@ -245,9 +254,9 @@ are asserted byte-equal in tests.
 
 - **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
   byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
-  the enrollment uses (retaining the workspace / mode / read credential so a later
+  the enrollment uses (retaining the workspace / mode so a later
   `follow <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
-  pending, placing it),
+  pending, placing it; the workspace credential stays in `credentials.json`),
   and touches nothing else — never a skill file, never the sync state or a `held` pin, never the currency
   hook (the per-install hook's sweep simply skips an unfollowed skill; `load_enrollment` keeps the pinned
   plane key loaded even with zero active follows, so an enrolled author who unfollowed everything can
@@ -271,8 +280,13 @@ are asserted byte-equal in tests.
 
 ## Planned (lands later)
 
-The next increment owns the **per-workspace credential** redesign (the device private key sits unused
-today — the public key is the device's registered identity, nothing signs). **Multi-reviewer
+The **workspace-credential model is now in place**: enrollment mints ONE Bearer **workspace credential**
+per (workspace × device) that authenticates EVERY plane request — reads AND writes AND governance — and
+authorization server-side is workspace membership. The device keypair remains **keygen-only identity** (the
+non-secret `device_key_id` names the device; nothing signs). `follows.json` is pure subscription state;
+`identity/credentials.json` (a `0600` secret) holds the per-workspace credentials; a first-run migration in
+`read_follows` scrubs any legacy `read_token` field without losing a follow. Still to come:
+**Multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
 setting) + `log --team`'s plane half; harness *selection* in the composition root (v0 constructs Claude

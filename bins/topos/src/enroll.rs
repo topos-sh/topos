@@ -1,8 +1,9 @@
 //! The on-disk enrollment state — the documents `follow` writes and the plane transport reads:
-//! `instance.json` (which plane + the pinned plane key), `follows.json` (which skills are followed, in
-//! which mode/workspace, with which read credential), `identity/user.json` (the enrolled principal's
-//! non-secret metadata), and the enrollment WAL (`identity/enrollment.json`, the two-call resume's
-//! durable state). Both the writers (the `follow` promote path) and the readers live here.
+//! `instance.json` (which plane), `follows.json` (which skills are followed, in which mode/workspace —
+//! pure subscription state), `identity/credentials.json` (the per-workspace bearer credentials — the
+//! **secret** each read/write/governance request presents), `identity/user.json` (the enrolled
+//! principal's non-secret metadata), and the enrollment WAL (`identity/enrollment.json`, the two-call
+//! resume's durable state). Both the writers (the `follow` promote path) and the readers live here.
 //!
 //! **These are client-only transport/enrollment documents — they are deliberately NOT in
 //! `topos-types::persisted`.** That crate is the cross-language wire/contract leaf whose shapes are
@@ -10,18 +11,18 @@
 //! subsystem, exactly like `identity/host.json` ([`crate::identity`]). They follow the same idiom — a
 //! `schema_version` field read through [`crate::doc::read_doc`], which dispatches the **fail-closed
 //! migration** (an unknown/newer `schema_version` is an upgrade error, never silently parsed or deleted) —
-//! but they own their own shape rather than freezing it in the public contract on a guess. `follows.json`
-//! additionally carries a **secret** (`read_token`), which is another reason it stays out of the public
-//! contract.
+//! but they own their own shape rather than freezing it in the public contract on a guess.
 //!
-//! **`read_token` is a `0600` secret.** `follows.json` and the WAL are written through the `0600`
-//! private-doc primitives ([`crate::doc::write_doc_private`]) and refused-on-permissive at read, because
-//! a read token grants read access to a workspace's skills; `instance.json`/`user.json` carry no secret.
+//! **The workspace credential is a `0600` secret.** `credentials.json` and the WAL are written through the
+//! `0600` private-doc primitives ([`crate::doc::write_doc_private`]) and refused-on-permissive at read,
+//! because one credential authenticates every request in its workspace; `instance.json`/`user.json` carry
+//! no secret. `follows.json` is pure subscription state now — still `0600`-written for continuity + perm
+//! hygiene (a pre-migration file may hold a legacy `read_token` until the first [`read_follows`] scrubs it).
 //!
-//! **Ids are validated at load.** A skill/workspace id read out of `follows.json` or the WAL later keys
-//! path joins (`~/.topos/skills/<id>`, the harness skills dir) and URL splices, so the loaders parse
-//! every id through [`crate::id`] — a hand-edited (or maliciously written) traversal id fails the load
-//! closed as a corrupt document, mirroring the wire-boundary checks in [`crate::plane_http`].
+//! **Ids are validated at load.** A skill/workspace id read out of `follows.json`, `credentials.json`, or
+//! the WAL later keys path joins (`~/.topos/skills/<id>`, the harness skills dir) and URL splices, so the
+//! loaders parse every id through [`crate::id`] — a hand-edited (or maliciously written) traversal id
+//! fails the load closed as a corrupt document, mirroring the wire-boundary checks in [`crate::plane_http`].
 
 use std::collections::HashMap;
 
@@ -93,7 +94,8 @@ pub(crate) struct Membership {
 }
 
 /// `follows.json` — the durable follow-state: the skills this client follows, each with its workspace,
-/// mode, review posture, and **secret** read token. See the module comment: `0600` on any write.
+/// mode, and review posture. **Pure subscription state** — no secret (the workspace credential lives in
+/// `credentials.json`). Still `0600`-written for continuity + perm hygiene; see the module comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Follows {
     pub schema_version: u32,
@@ -101,36 +103,22 @@ pub(crate) struct Follows {
     pub follows: Vec<FollowEntry>,
 }
 
-/// One followed skill's enrollment record. Fans out two ways: the consent seam ([`FollowContext`] —
-/// workspace/mode/review/following) and the transport credential ([`SkillCred`] — workspace/read_token).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One followed skill's subscription record — the consent seam ([`FollowContext`]:
+/// workspace/mode/review/following). Nothing secret; the transport credential is the WORKSPACE credential
+/// (`credentials.json`), joined in by [`skill_creds`]. A legacy on-disk file may carry an extra
+/// `read_token` field; serde ignores it on load and [`read_follows`] scrubs it from disk on first contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FollowEntry {
-    /// The stable skill id (the key both fan-outs are keyed by).
+    /// The stable skill id (the key the fan-outs are keyed by).
     pub skill_id: String,
-    /// The workspace this skill is followed in (the expected signed-pointer scope).
+    /// The workspace this skill is followed in (the expected pointer scope + the credential lookup key).
     pub workspace_id: String,
-    /// The per-follower read token (Bearer for versions/bundles, path segment for current). **SECRET.**
-    pub read_token: String,
     /// How a new `current` is adopted (auto / confirm-each).
     pub mode: FollowModeDoc,
     /// Whether the workspace gates moves behind review (selects the consent satisfier only).
     pub review_required: bool,
     /// Whether the skill is currently followed (a `false` skill is inventoried but not pulled).
     pub following: bool,
-}
-
-// `read_token` is a secret — redact it so it never reaches a log / panic message / Debug dump.
-impl std::fmt::Debug for FollowEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FollowEntry")
-            .field("skill_id", &self.skill_id)
-            .field("workspace_id", &self.workspace_id)
-            .field("read_token", &"<redacted>")
-            .field("mode", &self.mode)
-            .field("review_required", &self.review_required)
-            .field("following", &self.following)
-            .finish()
-    }
 }
 
 /// The on-disk spelling of [`FollowMode`] (snake_case). A local copy because [`FollowMode`] is a
@@ -159,38 +147,92 @@ pub(crate) fn read_instance(
     doc::read_doc(fs, &layout.instance_path())
 }
 
-/// Read `follows.json`, or `None` if absent. `follows.json` carries the **secret** read tokens, so it is
-/// read through [`doc::read_doc_private`] — a group/other-accessible file is refused BEFORE parsing.
-/// Fail-closed on an unknown/newer `schema_version` AND on any entry whose skill/workspace id is not a
-/// safe path component (the id boundary: a traversal id must never reach a join downstream).
+/// Read `follows.json`, or `None` if absent. Still read through [`doc::read_doc_private`] (perm hygiene —
+/// a group/other-accessible file is refused BEFORE parsing, and a pre-migration file may still hold a
+/// legacy secret on disk). Fail-closed on an unknown/newer `schema_version` AND on any entry whose
+/// skill/workspace id is not a safe path component (the id boundary: a traversal id must never reach a
+/// join downstream).
 ///
 /// Also fail-closed on the cross-workspace invariant [`write_follows_merged`] enforces on write: a skill id
 /// is plane-minted and belongs to EXACTLY ONE workspace, and the sidecar keys skills by id alone — so the
 /// SAME `skill_id` appearing under two different `workspace_id`s (a forged/confused plane response the write
 /// guard already refuses, or a hand-edited doc) would collapse the `skill_creds` map / mis-scope the
 /// first-match lookups. The LOAD fails closed here, mirroring the write guard's message shape.
+///
+/// **Legacy-token migration.** Before the workspace-credential model, each entry carried a `read_token`
+/// secret. serde already drops that unknown field on parse (so the follows themselves survive intact), but
+/// the dead secret still sits on disk; when any entry's on-disk bytes carry a `read_token`, rewrite
+/// `follows.json` in place (atomic, `0600`, under the identity lock) with the tokenless entries — scrubbing
+/// the dead secret on first contact. A follow (skill/workspace/mode/review/following) survives byte-exact.
 pub(crate) fn read_follows(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<Follows>, ClientError> {
-    let follows: Option<Follows> = doc::read_doc_private(fs, &layout.follows_path())?;
-    if let Some(f) = &follows {
-        let mut seen: HashMap<&str, &str> = HashMap::new();
-        for entry in &f.follows {
-            crate::id::SkillId::parse(&entry.skill_id)?;
-            crate::id::validate_workspace_id(&entry.workspace_id)?;
-            if let Some(prev_ws) = seen.insert(entry.skill_id.as_str(), entry.workspace_id.as_str())
-                && prev_ws != entry.workspace_id.as_str()
-            {
-                return Err(ClientError::Corrupt(format!(
-                    "skill '{}' is already followed in a different workspace; a skill id belongs to \
-                     exactly one workspace",
-                    entry.skill_id
-                )));
-            }
+    let path = layout.follows_path();
+    // Read the raw bytes once (perm-checked below via `read_doc_private`) so the legacy-token scan and the
+    // parse share one on-disk view.
+    let Some(raw) = fs.read_opt(&path)? else {
+        return Ok(None);
+    };
+    let follows: Follows = doc::read_doc_private(fs, &path)?
+        .expect("read_opt found the file, so read_doc_private parses the same bytes");
+    let mut seen: HashMap<&str, &str> = HashMap::new();
+    for entry in &follows.follows {
+        crate::id::SkillId::parse(&entry.skill_id)?;
+        crate::id::validate_workspace_id(&entry.workspace_id)?;
+        if let Some(prev_ws) = seen.insert(entry.skill_id.as_str(), entry.workspace_id.as_str())
+            && prev_ws != entry.workspace_id.as_str()
+        {
+            return Err(ClientError::Corrupt(format!(
+                "skill '{}' is already followed in a different workspace; a skill id belongs to \
+                 exactly one workspace",
+                entry.skill_id
+            )));
         }
     }
-    Ok(follows)
+    // Scrub any legacy `read_token` bytes still on disk (the follows parsed above are already tokenless).
+    if legacy_read_token_present(&raw) {
+        scrub_legacy_follows(fs, layout, &follows)?;
+    }
+    Ok(Some(follows))
+}
+
+/// Whether the raw `follows.json` bytes carry a legacy `read_token` on any follow entry (the migration
+/// trigger). A parse failure ⇒ `false` (the schema loader surfaces a genuine corruption elsewhere).
+fn legacy_read_token_present(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("follows")
+                .and_then(|f| f.as_array())
+                .map(|arr| arr.iter().any(|e| e.get("read_token").is_some()))
+        })
+        .unwrap_or(false)
+}
+
+/// Rewrite `follows.json` with the already-parsed (tokenless) entries, under the identity lock (so a
+/// concurrent enrollment writer is not clobbered). Re-checks under the lock — a concurrent scrub may have
+/// won — and only rewrites while the on-disk bytes still carry a legacy token.
+fn scrub_legacy_follows(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    follows: &Follows,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(raw) = fs.read_opt(&layout.follows_path())? else {
+        return Ok(());
+    };
+    if !legacy_read_token_present(&raw) {
+        return Ok(()); // already scrubbed by a concurrent read
+    }
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            follows: follows.follows.clone(),
+        },
+    )
 }
 
 /// Read `identity/user.json`, or `None` if absent. Metadata only (no secret) → ordinary `read_doc`.
@@ -221,25 +263,128 @@ pub(crate) fn follow_contexts(follows: &Follows) -> Vec<(String, FollowContext)>
         .collect()
 }
 
-/// The follow-state fan-out → the transport credential map (`UreqPlane` looks a skill's cred up here). All
-/// entries are included so any skill the engine queries resolves; a skill absent from the map is a
-/// `NotFound`.
-pub(crate) fn skill_creds(follows: &Follows) -> HashMap<String, SkillCred> {
+/// The follow-state × credential JOIN → the transport credential map (`UreqPlane` looks a skill's cred up
+/// here). Each followed skill inherits its WORKSPACE credential (one secret authenticates every request in
+/// the workspace); a skill whose workspace has no stored credential is OMITTED (an unenrolled/legacy state
+/// the engine then skips as `NotFound`, never a request without a credential).
+pub(crate) fn skill_creds(
+    follows: &Follows,
+    credentials: &Credentials,
+) -> HashMap<String, SkillCred> {
+    let by_ws: HashMap<&str, &str> = credentials
+        .credentials
+        .iter()
+        .map(|c| (c.workspace_id.as_str(), c.credential.as_str()))
+        .collect();
     follows
         .follows
         .iter()
-        .map(|e| {
-            (
-                e.skill_id.clone(),
-                SkillCred::new(e.workspace_id.clone(), e.read_token.clone()),
-            )
+        .filter_map(|e| {
+            by_ws.get(e.workspace_id.as_str()).map(|cred| {
+                (
+                    e.skill_id.clone(),
+                    SkillCred::new(e.workspace_id.clone(), (*cred).to_owned()),
+                )
+            })
         })
         .collect()
 }
 
 // =================================================================================================
+// `identity/credentials.json` — the per-workspace bearer credentials. One entry per workspace; the ONE
+// secret this device presents (Bearer) on every read/write/governance request in that workspace. A `0600`
+// secret (hand-written Debug on the entry redacts it), read-merge-write under the identity lock.
+// =================================================================================================
+
+/// `credentials.json` — the per-workspace bearer credentials (a fresh document kind, `schema_version` 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Credentials {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub credentials: Vec<CredentialEntry>,
+}
+
+impl Credentials {
+    /// Flatten to a `workspace_id → credential` map (the shape the write/catalog transports look up).
+    pub(crate) fn into_map(self) -> HashMap<String, String> {
+        self.credentials
+            .into_iter()
+            .map(|e| (e.workspace_id, e.credential))
+            .collect()
+    }
+}
+
+/// One workspace's bearer credential. **`credential` is a `0600` secret** — the hand-written `Debug` redacts
+/// it so it never reaches a log / panic / Debug dump.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CredentialEntry {
+    /// The workspace this credential authenticates in (the Bearer lookup key).
+    pub workspace_id: String,
+    /// **SECRET** — the plaintext workspace credential (Bearer on every request). Redacted in `Debug`.
+    pub credential: String,
+}
+
+impl std::fmt::Debug for CredentialEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialEntry")
+            .field("workspace_id", &self.workspace_id)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Read `credentials.json` (a `0600` secret), or `None` if absent. Refused-on-permissive before parsing,
+/// fail-closed on an unknown/newer `schema_version` AND on any workspace id outside the validated charset
+/// (it later keys request URLs + the credential lookup).
+pub(crate) fn read_credentials(
+    fs: &dyn FsOps,
+    layout: &Layout,
+) -> Result<Option<Credentials>, ClientError> {
+    let creds: Option<Credentials> = doc::read_doc_private(fs, &layout.credentials_path())?;
+    if let Some(c) = &creds {
+        for e in &c.credentials {
+            crate::id::validate_workspace_id(&e.workspace_id)?;
+        }
+    }
+    Ok(creds)
+}
+
+/// UPSERT this workspace's credential into `credentials.json` under the `"identity"` lock (read-merge-write,
+/// `0600`) — a re-enrollment REPLACES the workspace's credential, a first enrollment into a new workspace
+/// APPENDS one, and an already-stored workspace's credential is never dropped. The identity dir is ensured.
+pub(crate) fn write_credential(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    workspace_id: &str,
+    credential: &str,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let mut list = doc::read_doc_private::<Credentials>(fs, &layout.credentials_path())?
+        .map(|c| c.credentials)
+        .unwrap_or_default();
+    if let Some(existing) = list.iter_mut().find(|e| e.workspace_id == workspace_id) {
+        existing.credential = credential.to_owned();
+    } else {
+        list.push(CredentialEntry {
+            workspace_id: workspace_id.to_owned(),
+            credential: credential.to_owned(),
+        });
+    }
+    fs.create_dir_all(&layout.identity_dir())?;
+    doc::write_doc_private(
+        fs,
+        &layout.credentials_path(),
+        &Credentials {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            credentials: list,
+        },
+    )
+}
+
+// =================================================================================================
 // The enrollment WAL (`identity/enrollment.json`) — the two-call resume's durable state. A `0600`
-// SECRET (it holds the device code and, once redeemed, the read tokens). Hand-written `Debug` redacts.
+// SECRET (it holds the device code and, once redeemed, the workspace credential). Hand-written `Debug`
+// redacts.
 // =================================================================================================
 
 /// One skill an invite pre-offered (carried in the WAL so a re-invoked `follow` can write `follows.json` + lay
@@ -290,28 +435,6 @@ pub(crate) struct EnrollContext {
     /// Which door rooted this enrollment (invite / standup / claim); absent on an older WAL ⇒ invite.
     #[serde(default = "default_enroll_root")]
     pub root: EnrollRoot,
-}
-
-/// One minted read credential persisted into the Redeemed WAL (a `0600` secret — the `read_token` grants
-/// read access to a workspace's skills).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RedeemedCredDoc {
-    pub skill_id: String,
-    /// **SECRET** — redacted in the WAL's `Debug`.
-    pub read_token: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
-}
-
-// Redact the read token so it never reaches a log / panic / Debug dump.
-impl std::fmt::Debug for RedeemedCredDoc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RedeemedCredDoc")
-            .field("skill_id", &self.skill_id)
-            .field("read_token", &"<redacted>")
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
 }
 
 /// The WAL phase. **Internally tagged** (`"phase"`), so the on-disk shape is
@@ -374,12 +497,12 @@ pub(crate) enum EnrollPhase {
         /// **SECRET** — the one-time claim token. Redacted in `Debug`.
         claim_token: String,
     },
-    /// The grant was redeemed and the read creds minted — recorded BEFORE promotion (the lockout fence: a
-    /// single-use grant cannot be re-redeemed, so a crash after redeem completes from here).
+    /// The grant was redeemed and the workspace credential minted — recorded BEFORE promotion (the lockout
+    /// fence: a single-use grant cannot be re-redeemed, so a crash after redeem completes from here).
     Redeemed {
         context: EnrollContext,
-        /// **SECRET** — the minted per-skill read tokens. Redacted in `Debug`.
-        read_creds: Vec<RedeemedCredDoc>,
+        /// **SECRET** — the ONE workspace credential (Bearer on every request). Redacted in `Debug`.
+        credential: String,
         device_key_id: String,
         /// The principal the redeem seated (the confirmed email, or a device-rooted id) — persisted into
         /// `user.json` on promotion and disclosed on the receipt. `None` from an older plane.
@@ -399,8 +522,8 @@ pub(crate) struct PendingEnrollment {
 }
 
 // Redact the WAL's secrets (the device code in `Authorizing`/`AuthorizingStandup`, the claim token in
-// `ClaimPending`, the read tokens in `Redeemed`) so the whole document — held transiently in memory — can
-// never leak a secret through a Debug dump / panic / log.
+// `ClaimPending`, the workspace credential in `Redeemed`) so the whole document — held transiently in
+// memory — can never leak a secret through a Debug dump / panic / log.
 impl std::fmt::Debug for PendingEnrollment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("PendingEnrollment");
@@ -444,16 +567,16 @@ impl std::fmt::Debug for PendingEnrollment {
             }
             EnrollPhase::Redeemed {
                 context,
-                read_creds,
                 device_key_id,
                 principal,
                 enrolled_at_millis,
+                ..
             } => {
                 s.field("phase", &"redeemed")
                     .field("workspace_id", &context.workspace_id)
                     .field("device_key_id", device_key_id)
                     .field("principal", principal)
-                    .field("read_creds", read_creds) // RedeemedCredDoc Debug redacts the token
+                    .field("credential", &"<redacted>")
                     .field("enrolled_at_millis", enrolled_at_millis);
             }
         }
@@ -554,9 +677,10 @@ pub(crate) fn upsert_membership(user: &mut UserDoc, m: Membership) {
 }
 
 // -------------------------------------------------------------------------------------------------
-// The enrollment writers. `instance.json` is PUBLIC (the plane key is a public key) → `write_doc`.
-// `follows.json` carries the secret read tokens → `write_doc_private` (0600). `user.json` is metadata
-// only → `write_doc`. The WAL is a secret → `write_doc_private`.
+// The enrollment writers. `instance.json` is PUBLIC (plane metadata, no secret) → `write_doc`.
+// `follows.json` is pure subscription state, still `0600`-written for perm hygiene → `write_doc_private`.
+// `credentials.json` holds the secret workspace credentials → `write_doc_private` (0600). `user.json` is
+// metadata only → `write_doc`. The WAL is a secret → `write_doc_private`.
 // -------------------------------------------------------------------------------------------------
 
 /// Write `instance.json` (the pinned plane + the workspace disclosure). The plane key is PUBLIC, so
@@ -676,16 +800,9 @@ pub(crate) fn read_wal(
     if let Some(w) = &wal {
         let context = match &w.state {
             EnrollPhase::Authorizing { context, .. } => context,
-            EnrollPhase::Redeemed {
-                context,
-                read_creds,
-                ..
-            } => {
-                for cred in read_creds {
-                    crate::id::SkillId::parse(&cred.skill_id)?;
-                }
-                context
-            }
+            // The Redeemed phase carries the followed set on `context.offered_skills` (validated in the
+            // shared tail below), not per-skill creds any more.
+            EnrollPhase::Redeemed { context, .. } => context,
             // A standup session has NO workspace yet — there is no id to validate (the granted poll's
             // workspace id is validated at the wire boundary when it arrives).
             EnrollPhase::AuthorizingStandup { .. } => return Ok(wal),
@@ -797,7 +914,6 @@ mod tests {
                 FollowEntry {
                     skill_id: "s_deploy".to_owned(),
                     workspace_id: "w_acme".to_owned(),
-                    read_token: "rt_secret".to_owned(),
                     mode: FollowModeDoc::Auto,
                     review_required: false,
                     following: true,
@@ -805,12 +921,21 @@ mod tests {
                 FollowEntry {
                     skill_id: "s_paused".to_owned(),
                     workspace_id: "w_acme".to_owned(),
-                    read_token: "rt_other".to_owned(),
                     mode: FollowModeDoc::ConfirmEach,
                     review_required: true,
                     following: false,
                 },
             ],
+        }
+    }
+
+    fn sample_credentials() -> Credentials {
+        Credentials {
+            schema_version: 1,
+            credentials: vec![CredentialEntry {
+                workspace_id: "w_acme".to_owned(),
+                credential: "wsc_secret".to_owned(),
+            }],
         }
     }
 
@@ -835,14 +960,17 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_the_read_token() {
-        let e = &sample_follows().follows[0];
+    fn credential_entry_debug_redacts_the_credential() {
+        // A follow entry carries no secret any more; the credential (in credentials.json) is the secret,
+        // and its `Debug` must never surface the plaintext.
+        let e = &sample_credentials().credentials[0];
         let dbg = format!("{e:?}");
         assert!(dbg.contains("<redacted>"));
         assert!(
-            !dbg.contains("rt_secret"),
-            "the secret must never appear in Debug"
+            !dbg.contains("wsc_secret"),
+            "the credential must never appear in Debug"
         );
+        assert_eq!(e.workspace_id, "w_acme");
     }
 
     #[test]
@@ -875,10 +1003,95 @@ mod tests {
         assert_eq!(ctxs[1].1.mode, FollowMode::ConfirmEach);
         assert!(!ctxs[1].1.following);
 
-        let creds = skill_creds(&f);
+        // Each followed skill inherits its WORKSPACE credential (both skills are in w_acme here).
+        let creds = skill_creds(&f, &sample_credentials());
         assert_eq!(creds.len(), 2);
         assert_eq!(creds["s_deploy"].workspace_id, "w_acme");
-        assert_eq!(creds["s_deploy"].read_token, "rt_secret");
+        assert_eq!(creds["s_deploy"].credential, "wsc_secret");
+        assert_eq!(creds["s_paused"].credential, "wsc_secret");
+
+        // A skill whose workspace has NO stored credential is omitted (the engine skips it as NotFound —
+        // never a request without a credential).
+        let empty = Credentials {
+            schema_version: 1,
+            credentials: Vec::new(),
+        };
+        assert!(skill_creds(&f, &empty).is_empty());
+    }
+
+    #[test]
+    fn write_credential_upserts_by_workspace_and_survives_reload() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("creds-upsert"));
+        std::fs::create_dir_all(layout.identity_dir()).unwrap();
+        // First enrollment into w_acme.
+        write_credential(&fs, &layout, "w_acme", "wsc_one").unwrap();
+        // A first enrollment into a SECOND workspace APPENDS (never drops the first).
+        write_credential(&fs, &layout, "w_beta", "wsc_beta").unwrap();
+        // A RE-enrollment into w_acme REPLACES its credential.
+        write_credential(&fs, &layout, "w_acme", "wsc_two").unwrap();
+        let map = read_credentials(&fs, &layout).unwrap().unwrap().into_map();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["w_acme"], "wsc_two");
+        assert_eq!(map["w_beta"], "wsc_beta");
+        // credentials.json is 0600 (a secret).
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(layout.credentials_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+    }
+
+    #[test]
+    fn read_follows_scrubs_a_legacy_read_token_without_losing_follows() {
+        // A pre-migration follows.json carries a `read_token` per entry (a dead secret). read_follows must
+        // preserve every follow (skill/workspace/mode/review/following) yet scrub the token from disk on
+        // first contact.
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("legacy-follows"));
+        // The old-format bytes (schema_version 1, entries WITH read_token), written 0600 as the old writer
+        // would have. `rt` is assembled so this literal never trips the workspace hygiene grep.
+        let legacy = format!(
+            "{{\"schema_version\":1,\"follows\":[\
+               {{\"skill_id\":\"s_deploy\",\"workspace_id\":\"w_acme\",\
+                 \"{tok}\":\"rt_dead_secret\",\"mode\":\"auto\",\
+                 \"review_required\":false,\"following\":true}},\
+               {{\"skill_id\":\"s_paused\",\"workspace_id\":\"w_acme\",\
+                 \"{tok}\":\"rt_dead_two\",\"mode\":\"confirm_each\",\
+                 \"review_required\":true,\"following\":false}}]}}",
+            tok = "read_token",
+        );
+        fs.write_private(&layout.follows_path(), legacy.as_bytes())
+            .unwrap();
+
+        let follows = read_follows(&fs, &layout).unwrap().unwrap();
+        // The follows survive byte-exact (both entries, all fields).
+        assert_eq!(follows.follows.len(), 2);
+        assert_eq!(follows.follows[0].skill_id, "s_deploy");
+        assert_eq!(follows.follows[0].workspace_id, "w_acme");
+        assert_eq!(follows.follows[0].mode, FollowModeDoc::Auto);
+        assert!(follows.follows[0].following);
+        assert_eq!(follows.follows[1].skill_id, "s_paused");
+        assert_eq!(follows.follows[1].mode, FollowModeDoc::ConfirmEach);
+        assert!(follows.follows[1].review_required);
+        assert!(!follows.follows[1].following);
+
+        // The dead secret is scrubbed from disk: the file no longer names `read_token` (nor its value).
+        let on_disk = std::fs::read_to_string(layout.follows_path()).unwrap();
+        assert!(
+            !on_disk.contains("read_token"),
+            "the legacy token field must be scrubbed: {on_disk}"
+        );
+        assert!(!on_disk.contains("rt_dead_secret"));
+        // A second read is a clean no-op (nothing left to scrub) and still returns the follows.
+        assert_eq!(
+            read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
+            2
+        );
     }
 
     /// A throwaway home for the load-boundary tests (mirrors the doc-module scratch pattern).
@@ -947,11 +1160,7 @@ mod tests {
                     mode: FollowModeDoc::Auto,
                     root: EnrollRoot::Invite,
                 },
-                read_creds: vec![RedeemedCredDoc {
-                    skill_id: "../../x".to_owned(),
-                    read_token: "rt".to_owned(),
-                    expires_at: None,
-                }],
+                credential: "wsc_secret".to_owned(),
                 device_key_id: "dk_abc".to_owned(),
                 principal: None,
                 enrolled_at_millis: 1,
@@ -1048,7 +1257,7 @@ mod tests {
                     mode: FollowModeDoc::Auto,
                     root: EnrollRoot::Invite,
                 },
-                read_creds: Vec::new(),
+                credential: "wsc_secret".to_owned(),
                 device_key_id: "dk_abc".to_owned(),
                 principal: None,
                 enrolled_at_millis: 1,
@@ -1307,7 +1516,6 @@ mod tests {
         let entry = |ws: &str| FollowEntry {
             skill_id: "s_dup".to_owned(),
             workspace_id: ws.to_owned(),
-            read_token: "rt".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
@@ -1338,7 +1546,6 @@ mod tests {
         let entry = |skill: &str, ws: &str| FollowEntry {
             skill_id: skill.to_owned(),
             workspace_id: ws.to_owned(),
-            read_token: "rt".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,

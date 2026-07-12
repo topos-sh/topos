@@ -1151,7 +1151,6 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         &[FollowEntry {
             skill_id: a.skill_id.clone(),
             workspace_id: "w_acme".to_owned(),
-            read_token: "rt_secret".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
@@ -1170,7 +1169,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
     // The placement bytes are byte-identical — unfollow never touches a skill file (I-KEEP-LOCAL).
     assert_eq!(before, dir_bytes(&root));
 
-    // The entry flipped in place, retaining workspace/token/mode so a later follow resumes.
+    // The entry flipped in place, retaining workspace/mode so a later follow resumes.
     let follows = enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap();
     let e = follows
         .follows
@@ -1178,7 +1177,6 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         .find(|e| e.skill_id == a.skill_id)
         .unwrap();
     assert!(!e.following);
-    assert_eq!(e.read_token, "rt_secret");
     assert_eq!(e.workspace_id, "w_acme");
 
     // Idempotent: a second unfollow is the same clean success, and the doc is unchanged.
@@ -1203,14 +1201,13 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         data.skills
     );
 
-    // A re-follow resumes: the promote path replace-by-skill_id flips `following` back on (with a fresh
-    // token), and the entry is swept again.
+    // A re-follow resumes: the promote path replace-by-skill_id flips `following` back on, and the entry
+    // is swept again.
     enroll::write_follows_merged(
         ctx.fs,
         &ctx.layout,
         &[FollowEntry {
             following: true,
-            read_token: "rt_reminted".to_owned(),
             ..e.clone()
         }],
     )
@@ -1222,7 +1219,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         .find(|e| e.skill_id == a.skill_id)
         .unwrap();
     assert!(r.following);
-    assert_eq!(r.read_token, "rt_reminted");
+    assert_eq!(r.workspace_id, "w_acme");
 }
 
 #[test]
@@ -1306,7 +1303,6 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         &[FollowEntry {
             skill_id: a.skill_id.clone(),
             workspace_id: "w_acme".to_owned(),
-            read_token: "rt_secret".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
@@ -1423,7 +1419,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         &[FollowEntry {
             skill_id: a.skill_id.clone(),
             workspace_id: "w_acme".to_owned(),
-            read_token: "rt_secret".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following: true,
@@ -1467,7 +1462,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         "the resume is disclosed on the TTY: {text}"
     );
 
-    // The durable flag flipped back on, credentials retained.
+    // The durable flag flipped back on, workspace/mode retained.
     let follows = enroll::read_follows(ctx.fs, &ctx.layout).unwrap().unwrap();
     let e = follows
         .follows
@@ -1475,7 +1470,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         .find(|e| e.skill_id == a.skill_id)
         .unwrap();
     assert!(e.following, "the retained entry resumed");
-    assert_eq!(e.read_token, "rt_secret");
+    assert_eq!(e.workspace_id, "w_acme");
 
     // `list` shows (following, mode) again…
     let listed = ops::list(&ctx, None, false, None, None).unwrap();

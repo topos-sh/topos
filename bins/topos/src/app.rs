@@ -13,7 +13,6 @@ use topos_types::HarnessId;
 
 use crate::cli::{Cli, Command, RoleArg};
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
@@ -101,6 +100,23 @@ pub fn run() -> ExitCode {
         harness: harness.as_ref(),
         plane,
         follow,
+    };
+
+    // The credentialed device connectors — the write + governance routes present the workspace Bearer
+    // credential, looked up per request by `workspace_id`. Built as closures so `credentials.json` is
+    // re-read FRESH on each build: a standup publish writes it mid-invocation (during promotion), and the
+    // continued publish must see the freshly-minted credential.
+    let connect_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
+        Box::new(UreqDeviceClient::new(
+            base_url.to_owned(),
+            load_workspace_credentials(ctx.fs, &ctx.layout),
+        ))
+    };
+    let connect_contribute = |base_url: &str| -> Box<dyn ContributeSource> {
+        Box::new(UreqDeviceClient::new(
+            base_url.to_owned(),
+            load_workspace_credentials(ctx.fs, &ctx.layout),
+        ))
     };
 
     match command {
@@ -227,8 +243,9 @@ pub fn run() -> ExitCode {
             remote,
         } => {
             // Under `--remote`, resolve the enrolled plane + memberships (a typed "run follow first" when
-            // there is no enrollment), then build the device-signed catalog transport + signer as locals so
-            // the scope borrows them across the `list()` call.
+            // there is no enrollment), then build the credentialed catalog transport as a local so the
+            // scope borrows it across the `list()` call. The transport holds the per-workspace credential
+            // map (each catalog read presents its workspace's Bearer credential).
             let remote_inputs = if remote {
                 match list_remote_inputs(&fs, &ctx.layout) {
                     Ok(inputs) => Some(inputs),
@@ -238,16 +255,11 @@ pub fn run() -> ExitCode {
                 None
             };
             let catalog_client;
-            let signer;
             let scope = if let Some((base_url, memberships)) = remote_inputs {
-                catalog_client = UreqDeviceClient::new(base_url);
-                signer = match DeviceSigner::load_or_generate(&fs, &ctx.layout) {
-                    Ok(s) => s,
-                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
-                };
+                catalog_client =
+                    UreqDeviceClient::new(base_url, load_workspace_credentials(&fs, &ctx.layout));
                 Some(ops::RemoteScope {
                     catalog: &catalog_client,
-                    signer: &signer,
                     memberships,
                     only: workspace.clone(),
                 })
@@ -411,20 +423,23 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// The shared per-base-URL wire connectors: the enroll / governance / contribute seams all box the SAME
-/// creds-free `ureq` client (`UreqDeviceClient` implements every one of those source traits) — only the trait
-/// object type differs, so each is one coercion of one constructor (a `&connect_*` fn reference coerces
-/// to the seam's `&dyn Fn`).
+/// The ENROLLMENT connector: `UreqDeviceClient` with an EMPTY credential map — the device-flow routes are
+/// unauthenticated (they mint the credential the write/governance connectors then present). The governance
+/// and contribute connectors are closures in [`run`] (they must re-read `credentials.json` fresh so a
+/// standup that just promoted mid-invocation is seen).
 fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
-    Box::new(UreqDeviceClient::new(base_url.to_owned()))
+    Box::new(UreqDeviceClient::new(base_url.to_owned(), HashMap::new()))
 }
 
-fn connect_governance(base_url: &str) -> Box<dyn GovernanceSource> {
-    Box::new(UreqDeviceClient::new(base_url.to_owned()))
-}
-
-fn connect_contribute(base_url: &str) -> Box<dyn ContributeSource> {
-    Box::new(UreqDeviceClient::new(base_url.to_owned()))
+/// Load the per-workspace credential map (`workspace_id → credential`) from `credentials.json`. Best-effort
+/// (absent / corrupt ⇒ empty): a corrupt doc already failed the startup [`load_enrollment`] closed, and a
+/// missing credential surfaces downstream as a clear "not enrolled in this workspace" at POST time.
+fn load_workspace_credentials(fs: &dyn FsOps, layout: &Layout) -> HashMap<String, String> {
+    enroll::read_credentials(fs, layout)
+        .ok()
+        .flatten()
+        .map(enroll::Credentials::into_map)
+        .unwrap_or_default()
 }
 
 /// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the
@@ -912,11 +927,14 @@ struct Enrollment {
 
 /// Load the enrollment docs read-only. Returns `Some` whenever `instance.json` is present — enrollment is
 /// what writes it, so its presence IS the enrolled state; `follows.json` is optional (an empty membership
-/// door, or every follow since flipped off by `unfollow`). The transport stays wired even with zero active
-/// follows: the write verbs (publish/revert/review) still need the plane base, and an enrolled author with
-/// nothing followed is a normal state. The bare `pull` stays an honest no-op either way (the sweep skips a
-/// `following == false` entry, and renders "No followed skills." over an empty set). A corrupt /
-/// newer-schema doc fails closed (propagated), never silently degraded to inert.
+/// door, or every follow since flipped off by `unfollow`). The read transport joins the follow-state with
+/// the per-workspace credentials (`credentials.json`) — a followed skill whose workspace has no stored
+/// credential is simply skipped (never a read without a credential). The transport stays wired even with
+/// zero active follows: the write verbs (publish/revert/review) still need the plane base, and an enrolled
+/// author with nothing followed is a normal state. The bare `pull` stays an honest no-op either way (the
+/// sweep skips a `following == false` entry, and renders "No followed skills." over an empty set). A corrupt
+/// / newer-schema doc (incl. a permissive `credentials.json`) fails closed (propagated), never silently
+/// degraded to inert.
 fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>, ClientError> {
     let Some(instance) = enroll::read_instance(fs, layout)? else {
         return Ok(None);
@@ -925,7 +943,15 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
         follows: Vec::new(),
     });
-    let plane = UreqPlane::new(instance.base_url, enroll::skill_creds(&follows));
+    let credentials =
+        enroll::read_credentials(fs, layout)?.unwrap_or_else(|| enroll::Credentials {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            credentials: Vec::new(),
+        });
+    let plane = UreqPlane::new(
+        instance.base_url,
+        enroll::skill_creds(&follows, &credentials),
+    );
     let follow = FileFollow::new(enroll::follow_contexts(&follows));
     Ok(Some(Enrollment { plane, follow }))
 }

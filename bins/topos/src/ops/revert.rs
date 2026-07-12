@@ -16,7 +16,6 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
 use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
@@ -73,7 +72,6 @@ pub(crate) fn revert(
     })?;
     let good_hex = to_hex(&good_commit);
 
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
     let transport = connect(&instance.base_url);
 
     let kinds = [OpKind::Revert];
@@ -134,7 +132,7 @@ pub(crate) fn revert(
         }
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &signer, &sp, &rec)?;
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
     map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex)
 }
 

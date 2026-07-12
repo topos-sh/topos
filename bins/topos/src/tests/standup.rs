@@ -251,7 +251,7 @@ impl EnrollSource for FakeStandup {
             workspace_id: workspace_id.to_owned(),
             device_key_id: dk,
             principal: Some("robert@example.com".to_owned()),
-            read_creds: Vec::new(),
+            credential: format!("wsc_{workspace_id}"),
         })
     }
     fn admin_claim(&self, _c: &str, _k: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
@@ -830,7 +830,7 @@ impl EnrollSource for FakeClaim {
             workspace_id: "w_acme".to_owned(),
             device_key_id: dk.clone(),
             principal: Some(format!("dev.{dk}")),
-            read_creds: Vec::new(),
+            credential: "wsc_acme".to_owned(),
         })
     }
 }
@@ -1066,7 +1066,7 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
                     mode: enroll::FollowModeDoc::Auto,
                     root: enroll::EnrollRoot::Standup,
                 },
-                read_creds: Vec::new(),
+                credential: "wsc_torn".to_owned(),
                 device_key_id: "dk_torn".to_owned(),
                 principal: Some("robert@example.com".to_owned()),
                 enrolled_at_millis: 1,

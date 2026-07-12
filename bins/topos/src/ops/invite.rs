@@ -1,17 +1,16 @@
 //! `invite` — an OWNER mints an `/i/<token>` invite link by POSTing the governance Invite op.
 //!
-//! Requires prior enrollment: the plane (`base_url`), the workspace (`workspace_id`), and the device key
-//! all come from the sidecar `follow` wrote. The request names the acting `device_key_id`; the plane
-//! resolves the non-revoked registry row for it → its principal → the role matrix (a non-owner is DENIED).
-//! Nothing is signed — the trust level is git/GitHub-level. The role rides the wire body; emails are folded
-//! to the kernel's canonical (ASCII-lowercase) principal form so the roster rows carry one identity per
-//! human; the skill **ids** (never names) are what the invite pre-offers.
+//! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
+//! sidecar `follow` wrote, and the acting device rides the transport's workspace **Bearer credential**; the
+//! plane resolves the non-revoked registry row for that credential → its principal → the role matrix (a
+//! non-owner is DENIED). Nothing is signed — the trust level is git/GitHub-level. The role rides the wire
+//! body; emails are folded to the kernel's canonical (ASCII-lowercase) principal form so the roster rows
+//! carry one identity per human; the skill **ids** (never names) are what the invite pre-offers.
 
 use topos_types::requests::{InviteRequest, InviteSkill, WorkspaceRole};
 use topos_types::results::InviteData;
 
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::GovernanceSource;
@@ -44,12 +43,12 @@ fn validate_skill_tokens(skills: &[String]) -> Result<(), ClientError> {
     Ok(())
 }
 
-/// Mint an `/i/<token>` invite: sign the governance Invite op with this device's key, then POST it.
+/// Mint an `/i/<token>` invite: POST the governance Invite op under the workspace Bearer credential.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a malformed `--skills` token (refused at the argv boundary);
 /// [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the workspace can't be inferred (no
-/// `identity/user.json`); a signing / transport failure otherwise (a role-DENIED surfaces as
+/// `identity/user.json`); a transport failure otherwise (a role-DENIED surfaces as
 /// [`ClientError::Plane`] — "not authorized").
 pub(crate) fn invite(
     ctx: &Ctx<'_>,
@@ -87,10 +86,6 @@ pub(crate) fn invite(
         .workspace_id
         .clone();
 
-    // The device key — its id is the one the plane resolves to the acting registry row (its principal + role
-    // authorize the invite).
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-
     // The client-minted idempotency key: the canonical hyphenated UUID rides the wire (the plane's
     // `parse_op_id` parses it back to the SAME 16 bytes, so a lost-ack retry replays the deterministic
     // link + receipt).
@@ -98,13 +93,13 @@ pub(crate) fn invite(
         .as_hyphenated()
         .to_string();
 
-    // POST the op (naming the acting `device_key_id`). The role rides the body as a `WorkspaceRole` (omitted
-    // ⇒ the plane defaults it to member). The link never carries a role — it is a property of the seeded
-    // roster row. `name: None` — only the skill id pre-offers.
+    // POST the op under the workspace Bearer credential (the transport looks it up by `workspace_id`; the
+    // plane resolves the credential's registry row → principal → role matrix to authorize the invite). The
+    // role rides the body as a `WorkspaceRole` (omitted ⇒ the plane defaults it to member). The link never
+    // carries a role — it is a property of the seeded roster row. `name: None` — only the skill id pre-offers.
     let body = InviteRequest {
         workspace_id,
         op_id,
-        device_key_id: signer.device_key_id().to_owned(),
         emails,
         role,
         skills: skills
@@ -134,7 +129,6 @@ mod tests {
 
     use super::{GovernanceConnect, invite};
     use crate::ctx::Ctx;
-    use crate::device_signer::DeviceSigner;
     use crate::enroll;
     use crate::error::ClientError;
     use crate::fs_seam::RealFs;
@@ -210,7 +204,8 @@ mod tests {
 
     // ---- the fake governance transport: captures the request, returns a canned outcome ----
 
-    /// One captured POST: the wire body (the request names the acting `device_key_id`; nothing is signed).
+    /// One captured POST: the wire body (the acting device rides the transport's Bearer credential — never
+    /// a body field; nothing is signed).
     type CapturedInvite = InviteRequest;
     type Captured = Rc<RefCell<Option<CapturedInvite>>>;
     /// A `run_invite` outcome: the op result + whatever reached the transport (`None` if it never did).
@@ -337,20 +332,13 @@ mod tests {
         (out, cap)
     }
 
-    fn rig_device_key_id(rig: &Rig) -> String {
-        DeviceSigner::load_or_generate(&rig.fs, &rig.layout())
-            .unwrap()
-            .device_key_id()
-            .to_owned()
-    }
-
     // ---- tests ----
 
     #[test]
-    fn posts_the_expected_wire_body_naming_the_acting_device_key() {
-        // The op POSTs a body naming the enrolled workspace, the acting `device_key_id` (the plane resolves
-        // its registry row → principal → role matrix), the chosen role, the canonical hyphenated op_id, and
-        // the skill ids. Nothing is signed.
+    fn posts_the_expected_wire_body_under_the_workspace_credential() {
+        // The op POSTs a body naming the enrolled workspace, the chosen role, the canonical hyphenated
+        // op_id, and the skill ids. The acting device rides the transport's Bearer credential (the plane
+        // resolves its registry row → principal → role matrix), never a body field. Nothing is signed.
         let rig = Rig::new("wire-body");
         rig.seed_enrolled();
         let (out, cap) = run_invite(
@@ -369,9 +357,8 @@ mod tests {
         // The op_id is the canonical hyphenated form (the plane's `parse_op_id` requires it).
         let uuid = uuid::Uuid::parse_str(&body.op_id).expect("op_id is a UUID");
         assert_eq!(uuid.as_hyphenated().to_string(), body.op_id);
-        // Scope + acting device + role ride the body.
+        // Scope + role ride the body (no acting-device field — it is the Bearer credential's row).
         assert_eq!(body.workspace_id, WS);
-        assert_eq!(body.device_key_id, rig_device_key_id(&rig));
         assert_eq!(body.role, Some(WorkspaceRole::Reviewer));
         let skill_ids: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
         assert_eq!(skill_ids, vec!["s_review", "s_deploy"]);

@@ -1,7 +1,7 @@
 //! `unfollow <skill>` — stop following `current`; KEEP the local bytes as a frozen copy.
 //!
-//! Local-only and byte-inert: it flips `following = false` in `follows.json` (retaining the workspace,
-//! mode, and read credential so a later `follow <skill>` resumes) and touches NOTHING else — never the skill
+//! Local-only and byte-inert: it flips `following = false` in `follows.json` (retaining the workspace and
+//! mode so a later `follow <skill>` resumes) and touches NOTHING else — never the skill
 //! bytes, never the sidecar sync state or a `held` pin, never the currency hook (the hook is
 //! per-install; its sweep simply skips an unfollowed skill). "Frozen" means auto-updates stop; an
 //! explicit local `pull <skill>@<hash>` (a user-initiated go-back on their own copy) remains available.

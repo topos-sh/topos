@@ -363,7 +363,6 @@ fn enrolled_publish(
         });
     }
 
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
     let transport = connect(&instance.base_url);
     let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
@@ -428,7 +427,7 @@ fn enrolled_publish(
         )?,
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &signer, &sp, &rec)?;
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
     let mut outcome = map_outcome(
         ctx,
         &sp,
@@ -522,7 +521,7 @@ fn standup_publish(
         // existing follow fence — never re-redeem a spent grant), then continue into the publish.
         Some(enroll::EnrollPhase::Redeemed {
             context,
-            read_creds,
+            credential,
             device_key_id,
             principal,
             enrolled_at_millis,
@@ -531,7 +530,7 @@ fn standup_publish(
             promote_core(
                 ctx,
                 &context,
-                &read_creds,
+                &credential,
                 &device_key_id,
                 principal.as_deref(),
                 enrolled_at_millis,
@@ -715,7 +714,7 @@ fn standup_resume(
                 ClientError::WireInvalid("a granted standup poll carried no workspace".into())
             })?;
             let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            // Redeem the grant (the bearer credential) into per-skill read creds; nothing is signed.
+            // Redeem the grant (the bearer credential) into the workspace credential; nothing is signed.
             let redeem = enroll_src.redeem(
                 &workspace.workspace_id,
                 granted.grant.as_str(),
@@ -738,15 +737,6 @@ fn standup_resume(
                 mode: enroll::FollowModeDoc::Auto,
                 root: enroll::EnrollRoot::Standup,
             };
-            let read_creds: Vec<enroll::RedeemedCredDoc> = redeem
-                .read_creds
-                .iter()
-                .map(|c| enroll::RedeemedCredDoc {
-                    skill_id: c.skill_id.clone(),
-                    read_token: c.read_token.clone(),
-                    expires_at: c.expires_at,
-                })
-                .collect();
             let enrolled_at = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
             // The lockout fence: record the redeemed facts BEFORE promotion, so a crash mid-promote
             // completes from the WAL without re-redeeming the spent grant.
@@ -757,7 +747,7 @@ fn standup_resume(
                     schema_version: PERSISTED_SCHEMA_VERSION,
                     state: enroll::EnrollPhase::Redeemed {
                         context: context.clone(),
-                        read_creds: read_creds.clone(),
+                        credential: redeem.credential.clone(),
                         device_key_id: redeem.device_key_id.clone(),
                         principal: redeem.principal.clone(),
                         enrolled_at_millis: enrolled_at,
@@ -767,7 +757,7 @@ fn standup_resume(
             promote_core(
                 ctx,
                 &context,
-                &read_creds,
+                &redeem.credential,
                 &redeem.device_key_id,
                 redeem.principal.as_deref(),
                 enrolled_at,

@@ -120,9 +120,18 @@ impl Layout {
         self.home.join("instance.json")
     }
 
-    /// `follows.json` — the durable follow-state (a home-level enrollment doc; carries a `0600` secret).
+    /// `follows.json` — the durable follow-state (a home-level enrollment doc). Pure subscription state
+    /// now (no secret), but still `0600`-written for continuity + perm hygiene (a pre-migration file on
+    /// disk may still hold a legacy `read_token` until the first read rewrites it).
     pub(crate) fn follows_path(&self) -> PathBuf {
         self.home.join("follows.json")
+    }
+
+    /// `identity/credentials.json` — the per-workspace bearer credentials (a `0600` secret: one credential
+    /// per workspace authenticates EVERY read / write / governance request in that workspace). Written
+    /// read-merge-write under the identity lock, one entry per workspace.
+    pub(crate) fn credentials_path(&self) -> PathBuf {
+        self.identity_dir().join("credentials.json")
     }
 
     /// `identity/user.json` — the enrolled principal's NON-secret metadata (email / roles / workspace /
@@ -132,8 +141,8 @@ impl Layout {
     }
 
     /// `identity/enrollment.json` — the in-flight enrollment WAL (a `0600` secret: it holds the device
-    /// code and, once redeemed, the read creds). Present only between `follow <link>` and a completed
-    /// a re-invoked `follow`; swept by recovery once expired-and-unredeemed, deleted on promotion.
+    /// code and, once redeemed, the workspace credential). Present only between `follow <link>` and a
+    /// completed re-invoked `follow`; swept by recovery once expired-and-unredeemed, deleted on promotion.
     pub(crate) fn enrollment_path(&self) -> PathBuf {
         self.identity_dir().join("enrollment.json")
     }

@@ -103,9 +103,9 @@ pub(crate) trait PlaneSource {
     ) -> Result<FetchedVersion, PlaneError>;
 
     /// The OPEN proposals' version ids (the `@hash` handles) for a followed skill — the count feeds
-    /// `pull --json`'s `proposals_awaiting`, and the handles drive `list <skill>`. A read: the per-skill
-    /// read token authorizes it. The default is empty (fixtures / the inert source see no
-    /// proposals); the real `UreqPlane` overrides it with the GET, mapping a 404 (no/unknown token or scope
+    /// `pull --json`'s `proposals_awaiting`, and the handles drive `list <skill>`. A read: the workspace
+    /// credential authorizes it. The default is empty (fixtures / the inert source see no
+    /// proposals); the real `UreqPlane` overrides it with the GET, mapping a 404 (no credential or scope
     /// mismatch — indistinguishable) to an empty list rather than an error, so the count is best-effort.
     fn list_open_proposals(&self, _skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
         Ok(Vec::new())
@@ -247,40 +247,34 @@ pub(crate) enum TokenPoll {
     Granted(GrantedToken),
 }
 
-/// One minted per-skill read credential from a redeem (the `read_token` is a `0600` at-rest secret —
-/// redacted `Debug`).
+/// A successful redeem — the registered device key id + the ONE minted **workspace credential** (the Bearer
+/// secret this device presents on every read/write/governance request in the workspace). **NO user token,
+/// no per-skill token.** Hand-written `Debug` redacts the credential.
 #[derive(Clone)]
-pub(crate) struct RedeemedCred {
-    pub skill_id: String,
-    /// **SECRET** — redacted in `Debug`.
-    pub read_token: String,
-    pub expires_at: Option<i64>,
-}
-
-impl std::fmt::Debug for RedeemedCred {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RedeemedCred")
-            .field("skill_id", &self.skill_id)
-            .field("read_token", &"<redacted>")
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
-/// A successful redeem — the registered device key id + the minted per-skill read creds. **NO user token.**
-#[derive(Debug, Clone)]
 pub(crate) struct Redeem {
     pub workspace_id: String,
     pub device_key_id: String,
     /// The principal this device now acts as (the confirmed email, or a device-rooted id) — a disclosure
     /// the client persists and prints so a hijacked standup is visible. `None` from an older plane.
     pub principal: Option<String>,
-    pub read_creds: Vec<RedeemedCred>,
+    /// **SECRET** — the plaintext workspace credential (returned once; redacted in `Debug`).
+    pub credential: String,
+}
+
+impl std::fmt::Debug for Redeem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redeem")
+            .field("workspace_id", &self.workspace_id)
+            .field("device_key_id", &self.device_key_id)
+            .field("principal", &self.principal)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The creds-free enrollment transport (device-flow). The follow op drives it: read the bootstrap,
 /// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
-/// redeem the grant into per-skill read creds. The real impl is `UreqDeviceClient`; the fake is the
+/// redeem the grant into the workspace credential. The real impl is `UreqDeviceClient`; the fake is the
 /// follow tests'.
 pub(crate) trait EnrollSource {
     /// `GET /i/{token}` — the unauthenticated invite bootstrap (the workspace + the plane API base to dial).
@@ -321,9 +315,9 @@ pub(crate) trait EnrollSource {
     /// [`ClientError::Plane`] on a transport fault; [`ClientError::Corrupt`] on a malformed body.
     fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError>;
 
-    /// `POST /v1/workspaces/{ws}/devices` — redeem the grant into a registered device + read creds. The
-    /// grant is the bearer credential; the body's `device_public_key` registers this device (the server
-    /// checks it matches the grant's bound pubkey). Nothing is signed.
+    /// `POST /v1/workspaces/{ws}/devices` — redeem the grant into a registered device + its ONE workspace
+    /// credential. The grant is the bearer credential; the body's `device_public_key` registers this device
+    /// (the server checks it matches the grant's bound pubkey). Nothing is signed.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault or a 200+DENIED redeem (e.g. a device-key mismatch);
@@ -447,29 +441,27 @@ pub(crate) trait ContributeSource {
 
 // ---------------------------------------------------------------------------------------------
 // The catalog-read seam — the WORKSPACE-CATALOG read side (`list --remote`), behind a port so the list
-// tests run against a fake WITHOUT HTTP. The `Topos-Device-Key-Id` header names the acting device (catalog
-// visibility == workspace membership, resolved from the registry row), not a per-skill read token.
+// tests run against a fake WITHOUT HTTP. The read is authenticated by the workspace's Bearer credential
+// (catalog visibility == workspace membership, resolved from the registry row), not a per-skill token.
 // Metadata only (no bytes). The real impl is `crate::plane_http::UreqDeviceClient` (the same client that
-// speaks enrollment / governance / contribute); the fake lives in the `list` tests.
+// speaks enrollment / governance / contribute, holding the per-workspace credential map); the fake lives
+// in the `list` tests.
 // ---------------------------------------------------------------------------------------------
 
 /// The catalog-read transport: `GET /v1/workspaces/{ws}/skills` returns the workspace's discovery metadata
-/// (every skill holding a `current`), so a member can see what to follow next. The `device_key_id` rides
-/// the `Topos-Device-Key-Id` header and selects the registered device server-side.
+/// (every skill holding a `current`), so a member can see what to follow next. The transport presents the
+/// workspace's Bearer credential (looked up by `workspace_id` in its own credential map).
 pub(crate) trait CatalogSource {
     /// Read a workspace's skill catalog (metadata only). The real impl maps a **404** (not a member / no
     /// such workspace — the indistinguishable "no catalog") to an EMPTY index rather than an error, so a
-    /// caller merging several workspaces degrades cleanly; any other non-200 is [`PlaneError::Unavailable`]
-    /// (or [`PlaneError::Unreachable`] on a connect-level fault).
+    /// caller merging several workspaces degrades cleanly; a workspace with no stored credential and any
+    /// other non-200 are [`PlaneError::Unavailable`] (or [`PlaneError::Unreachable`] on a connect-level
+    /// fault) — each degraded to a per-workspace warning by the `list --remote` merge.
     ///
     /// # Errors
-    /// [`PlaneError::Unreachable`] / [`PlaneError::Unavailable`] on a transport / non-200 fault;
-    /// [`PlaneError::Malformed`] on a corrupt body or an unsafe workspace-id path segment.
-    fn fetch_catalog(
-        &self,
-        workspace_id: &str,
-        device_key_id: &str,
-    ) -> Result<WireSkillIndex, PlaneError>;
+    /// [`PlaneError::Unreachable`] / [`PlaneError::Unavailable`] on a transport / non-200 / missing-credential
+    /// fault; [`PlaneError::Malformed`] on a corrupt body or an unsafe workspace-id path segment.
+    fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError>;
 }
 
 /// Compare two wire generations with the epoch-dominant order (epoch first, then seq; the wire type

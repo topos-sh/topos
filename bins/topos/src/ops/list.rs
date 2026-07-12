@@ -20,7 +20,6 @@ use topos_types::results::{
 };
 
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::enroll::{self, FollowEntry, FollowModeDoc};
 use crate::error::ClientError;
 use crate::plane::{CatalogSource, PlaneError};
@@ -54,14 +53,13 @@ pub(crate) struct ListOutcome {
 }
 
 /// The `--remote` scope: what `list` needs to read the followed workspaces' catalogs and annotate each
-/// entry with local follow-state. `pub(crate)` — built by the composition root (real `ureq` transport +
-/// device signer + the memberships from `user.json`) and by the test (a fake transport). Present only
-/// under `--remote`; `None` is the local-only path.
+/// entry with local follow-state. `pub(crate)` — built by the composition root (real `ureq` transport
+/// holding the per-workspace credential map + the memberships from `user.json`) and by the test (a fake
+/// transport). Present only under `--remote`; `None` is the local-only path.
 pub(crate) struct RemoteScope<'a> {
-    /// The catalog transport (`GET /v1/workspaces/{ws}/skills`, naming the acting `device_key_id`).
+    /// The catalog transport (`GET /v1/workspaces/{ws}/skills`, presenting the workspace's Bearer credential
+    /// looked up in its own credential map).
     pub catalog: &'a dyn CatalogSource,
-    /// The device — carries the `device_key_id` the catalog read names (its registry row → confirmed member).
-    pub signer: &'a DeviceSigner,
     /// Every workspace this install has joined, as `(workspace_id, display_label)` (from `user.json`) — the
     /// catalog targets.
     pub memberships: Vec<(String, String)>,
@@ -335,12 +333,10 @@ fn build_remote(
 ) -> Vec<RemoteSkillEntry> {
     let mut out: Vec<RemoteSkillEntry> = Vec::new();
     for (ws_id, ws_label) in scope.target_workspaces() {
-        // Read THIS workspace's catalog — the acting device is named by the `Topos-Device-Key-Id` header
-        // (catalog visibility == workspace membership, resolved from the registry row).
-        let index = match scope
-            .catalog
-            .fetch_catalog(ws_id, scope.signer.device_key_id())
-        {
+        // Read THIS workspace's catalog — authorized by the workspace's Bearer credential (catalog
+        // visibility == workspace membership, resolved from the registry row). A workspace with no stored
+        // credential degrades to the warning below like any other per-workspace fault.
+        let index = match scope.catalog.fetch_catalog(ws_id) {
             Ok(index) => index,
             Err(e) => {
                 warnings.push(format!(
@@ -538,22 +534,16 @@ mod tests {
     }
 
     /// A fake catalog transport: canned per-workspace responses (`Ok` index or a transport fault),
-    /// capturing every `(workspace_id, device_key_id)` so the test can prove the caller named the correct
-    /// per-workspace + this device's key id.
+    /// capturing every `workspace_id` the caller reads (the real transport presents the workspace's Bearer
+    /// credential; the merge logic under test only needs to know which workspaces were read).
     struct FakeCatalog {
         ok: HashMap<String, WireSkillIndex>,
         fail: HashSet<String>,
-        calls: RefCell<Vec<(String, String)>>,
+        calls: RefCell<Vec<String>>,
     }
     impl CatalogSource for FakeCatalog {
-        fn fetch_catalog(
-            &self,
-            workspace_id: &str,
-            device_key_id: &str,
-        ) -> Result<WireSkillIndex, PlaneError> {
-            self.calls
-                .borrow_mut()
-                .push((workspace_id.to_owned(), device_key_id.to_owned()));
+        fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError> {
+            self.calls.borrow_mut().push(workspace_id.to_owned());
             if self.fail.contains(workspace_id) {
                 return Err(PlaneError::Unavailable("boom".into()));
             }
@@ -601,7 +591,6 @@ mod tests {
         FollowEntry {
             skill_id: skill_id.to_owned(),
             workspace_id: workspace_id.to_owned(),
-            read_token: "rt_secret".to_owned(),
             mode: FollowModeDoc::Auto,
             review_required: false,
             following,
@@ -645,7 +634,6 @@ mod tests {
             fail: HashSet::from(["w_beta".to_owned()]),
             calls: RefCell::new(Vec::new()),
         };
-        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
 
         let ids = RealIds;
         let clock = RealClock;
@@ -665,7 +653,6 @@ mod tests {
 
         let scope = RemoteScope {
             catalog: &fake,
-            signer: &signer,
             memberships: vec![
                 ("w_acme".to_owned(), "Acme".to_owned()),
                 ("w_beta".to_owned(), "Beta".to_owned()),
@@ -689,12 +676,10 @@ mod tests {
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
         assert!(out.warnings[0].contains("Beta"), "{:?}", out.warnings);
 
-        // Both workspaces were read; each call named this device's key id (the catalog-visibility selector).
+        // Both workspaces were read (the transport presents each one's Bearer credential internally).
         let calls = fake.calls.borrow();
         assert_eq!(calls.len(), 2);
-        for (_ws, key_id) in calls.iter() {
-            assert_eq!(key_id, signer.device_key_id());
-        }
+        assert!(calls.contains(&"w_acme".to_owned()) && calls.contains(&"w_beta".to_owned()));
     }
 
     #[test]
@@ -702,7 +687,6 @@ mod tests {
         let home = scratch("filter");
         let layout = Layout::new(&home);
         let fs = RealFs;
-        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
 
         let mut ok = HashMap::new();
         ok.insert(
@@ -742,7 +726,6 @@ mod tests {
         // `--workspace w_beta` → only w_beta's catalog is read.
         let scope = RemoteScope {
             catalog: &fake,
-            signer: &signer,
             memberships: vec![
                 ("w_acme".to_owned(), "Acme".to_owned()),
                 ("w_beta".to_owned(), "Beta".to_owned()),
@@ -755,7 +738,7 @@ mod tests {
         assert_eq!(out.data.remote_available[0].workspace_id, "w_beta");
         // Only the filtered workspace was contacted.
         assert_eq!(fake.calls.borrow().len(), 1);
-        assert_eq!(fake.calls.borrow()[0].0, "w_beta");
+        assert_eq!(fake.calls.borrow()[0], "w_beta");
     }
 
     #[test]
@@ -763,7 +746,6 @@ mod tests {
         let home = scratch("narrowed");
         let layout = Layout::new(&home);
         let fs = RealFs;
-        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
         // A tracked skill so the name narrows cleanly (list <skill> requires exactly one match).
         lay_skill(&fs, &layout, "s_docs", "docs", VER_X);
 
@@ -797,7 +779,6 @@ mod tests {
         };
         let scope = RemoteScope {
             catalog: &fake,
-            signer: &signer,
             memberships: vec![("w_acme".to_owned(), "Acme".to_owned())],
             only: None,
         };

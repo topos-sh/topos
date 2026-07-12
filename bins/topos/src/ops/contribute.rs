@@ -1,4 +1,4 @@
-//! Shared orchestration for the device-signed contribute writes (publish / propose / revert / review).
+//! Shared orchestration for the contribute writes (publish / propose / revert / review).
 //!
 //! The per-verb modules (`publish`/`review`/`revert`) build a [`OpRecord`] (the durable bound identity) and
 //! hand it here. [`run_write`] persists the WAL (`0600`, before the first send), sends, and reconciles; on an
@@ -6,8 +6,9 @@
 //! byte-identical receipt (I-OPID-DURABLE). [`send_op`] rebuilds the wire request from the `OpRecord`
 //! (publish/propose: re-rendering the candidate from the local store; revert/review: from the record's
 //! fields), so the fresh send and a crash replay are byte-identical by construction (the op kind rides the
-//! ROUTE — the body names only the acting `device_key_id`). The local-state advances ([`apply_publish_ok`] /
-//! [`apply_light_advance`]) scope-check the served pointer and confirm it names the version the op moved to.
+//! ROUTE; the acting device rides the transport's workspace Bearer credential — never a body field). The
+//! local-state advances ([`apply_publish_ok`] / [`apply_light_advance`]) scope-check the served pointer and
+//! confirm it names the version the op moved to.
 
 use base64::Engine as _;
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
@@ -26,7 +27,6 @@ use core::cmp::Ordering;
 use super::parse_hex32;
 use super::sync_engine;
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::plane::{
     ContributeSource, FetchedVersion, PlaneError, PointerFetch, WriteReceipt, gen_cmp,
@@ -173,12 +173,11 @@ pub(crate) fn verified_version_digest(
 pub(crate) fn run_write(
     ctx: &Ctx<'_>,
     transport: &dyn ContributeSource,
-    signer: &DeviceSigner,
     sp: &SkillPaths,
     rec: &OpRecord,
 ) -> Result<WriteReceipt, ClientError> {
     op_wal::write(ctx.fs, &ctx.layout, rec)?;
-    match send_op(transport, signer, ctx, sp, rec) {
+    match send_op(transport, ctx, sp, rec) {
         Ok(receipt) => {
             // A terminal protocol outcome (any 200): the op is settled — drop the WAL. A subsequent retry
             // is a fresh op (after a rebase, say), never a replay of a settled one.
@@ -218,19 +217,17 @@ pub(crate) fn plane_terminal(receipt: &WriteReceipt) -> ClientError {
     }
 }
 
-/// Rebuild the wire request the [`OpRecord`] binds and POST it (the body names the acting `device_key_id`;
-/// the op kind rides the ROUTE). BOTH the fresh path and a crash replay call this with the SAME record, so a
-/// replayed send is byte-identical.
+/// Rebuild the wire request the [`OpRecord`] binds and POST it (the acting device rides the transport's
+/// workspace Bearer credential; the op kind rides the ROUTE). BOTH the fresh path and a crash replay call
+/// this with the SAME record, so a replayed send is byte-identical.
 fn send_op(
     transport: &dyn ContributeSource,
-    signer: &DeviceSigner,
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
     rec: &OpRecord,
 ) -> Result<WriteReceipt, ClientError> {
     let commit_id = parse_hex32(&rec.candidate_commit)?;
     let bundle_digest = parse_hex32(&rec.bundle_digest)?;
-    let device_key_id = signer.device_key_id().to_owned();
     match rec.op {
         OpKind::PublishDirect | OpKind::PublishPropose => {
             let candidate = render_candidate(sp, commit_id, bundle_digest)?;
@@ -239,7 +236,6 @@ fn send_op(
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
                     op_id: rec.op_id.clone(),
-                    device_key_id,
                     expected: rec.expected_generation,
                     candidate,
                     // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
@@ -250,7 +246,6 @@ fn send_op(
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
                     op_id: rec.op_id.clone(),
-                    device_key_id,
                     expected: rec.expected_generation,
                     candidate,
                     // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
@@ -266,9 +261,10 @@ fn send_op(
                 workspace_id: rec.workspace_id.clone(),
                 skill_id: rec.skill_id.clone(),
                 op_id: rec.op_id.clone(),
-                device_key_id,
                 expected: rec.expected_generation,
                 good,
+                // The commit author is the device's identity id (NOT an auth field) — the forward-revert
+                // commit frame the plane reconstructs, folded into its `commit_id`.
                 author: ctx.device_id.clone(),
                 message: REVERT_MESSAGE.to_owned(),
             })
@@ -283,7 +279,6 @@ fn send_op(
                 workspace_id: rec.workspace_id.clone(),
                 skill_id: rec.skill_id.clone(),
                 op_id: rec.op_id.clone(),
-                device_key_id,
                 expected: rec.expected_generation,
                 proposal: rec.candidate_commit.clone(),
                 decision,
@@ -471,7 +466,6 @@ mod tests {
         CurrencyKind, Generation, HarnessId, Receipt, TerminalOutcome, TriggerReport, TriggerState,
     };
 
-    use crate::device_signer::DeviceSigner;
     use crate::fs_seam::RealFs;
     use crate::ids::test_sources::{FixedClock, SeqIds};
     use crate::plane::{InertFollow, InertPlane};
@@ -598,7 +592,6 @@ mod tests {
         let inert_p = InertPlane;
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
-        let signer = DeviceSigner::load_or_generate(&fs, &layout).unwrap();
         let ctx = Ctx {
             fs: &fs,
             ids: &ids,
@@ -632,7 +625,7 @@ mod tests {
         };
 
         // First attempt: the send is UNCERTAIN — run_write keeps the WAL.
-        let first = run_write(&ctx, &fake, &signer, &sp, &rec);
+        let first = run_write(&ctx, &fake, &sp, &rec);
         assert!(first.is_err(), "an uncertain send surfaces the error");
         assert!(
             crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_some(),
@@ -651,7 +644,7 @@ mod tests {
         .expect("a pending review op to resume");
         assert_eq!(pending.op_id, op_id, "the replay reuses the same op_id");
 
-        let second = run_write(&ctx, &fake, &signer, &sp, &pending);
+        let second = run_write(&ctx, &fake, &sp, &pending);
         assert!(second.is_ok(), "the replay settles");
         assert!(
             crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_none(),
