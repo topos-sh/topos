@@ -129,14 +129,16 @@ async fn a_maintenance_pass_reclaims_a_rejected_proposals_unique_bytes(pool: PgP
 
     let op_r = "90000000-0000-4000-8000-000000000002";
     // No credential in the body — the workspace credential rides the `post` helper's Authorization header.
+    // The reject reason is MANDATORY on the device lane now (an empty reason would be a synthesized denial).
     let body = serde_json::to_vec(&serde_json::json!({
         "workspace_id": WS, "skill_id": SKILL, "op_id": op_r,
         "expected": { "epoch": 1, "seq": 1 },
-        "proposal": hex::encode(prop_vid), "decision": "reject",
+        "proposal": hex::encode(prop_vid), "decision": "reject", "reason": "not this change",
     }))
     .unwrap();
-    let (sr, _, _) = run(&ctx, post("/v1/reviews", body)).await;
+    let (sr, _, rbytes) = run(&ctx, post("/v1/reviews", body)).await;
     assert_eq!(sr, StatusCode::OK);
+    assert!(envelope(&rbytes).ok, "the reject with a reason lands");
 
     // One pass — the same body the spawned scheduler runs each tick (and once at startup).
     let pass = crate::maintenance::run_maintenance_pass(&ctx.state).await;
@@ -244,13 +246,13 @@ async fn an_unconfigured_new_state_refuses_the_genesis_wrappers(pool: PgPool) {
     assert!(err.to_string().contains("not configured"), "got {err}");
     let err = ctx
         .state
-        .create_workspace("req-unconfigured", None, "owner@newco.com")
+        .create_workspace("req-unconfigured", None, None, "owner@newco.com")
         .await
         .expect_err("create_workspace must fail closed with no configured mode");
     assert!(err.to_string().contains("not configured"), "got {err}");
     let err = ctx
         .state
-        .approve_standup("ABCD-EFGH-IJKL-MNOP", "owner@newco.com", None)
+        .approve_standup("ABCD-EFGH-IJKL-MNOP", "owner@newco.com", None, None)
         .await
         .expect_err("approve_standup must fail closed with no configured mode");
     assert!(err.to_string().contains("not configured"), "got {err}");

@@ -17,17 +17,19 @@ use topos_types::bootstrap::{
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
     DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
-    InviteRequest, InviteSkill, PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest,
+    InvitationData, InvitationRequest, LoginData, LoginMembership, LoginRedeemRequest,
+    NoticeAckRequest, PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest,
     PasscodeConfirmResponse, PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest,
-    ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest,
-    RosterRemoveRequest, RosterSetRequest, SessionIntent, VerificationContextResponse,
-    WireAppliedReport, WireAppliedSkill, WireCandidate, WireDelivery, WireDeliverySkill, WireFile,
-    WireFileMode, WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex,
-    WireSkillIndexEntry, WireVersionFile, WireVersionMeta, WireVia, WorkspaceRole,
+    ProposeRequest, ProtectionSetRequest, PublishRequest, RedeemRequest, RedeemResponse,
+    RevertRequest, ReviewRequest, RosterRemoveRequest, RosterSetRequest, SessionIntent,
+    VerificationContextResponse, WireAppliedReport, WireAppliedSkill, WireCandidate,
+    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
+    WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
+    WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
+    WorkspaceRole,
 };
-use topos_types::results::{
-    InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,
-};
+use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
     ActionCode, Affected, CurrentRecord, Generation, JsonEnvelope, NextAction, PointerScope,
     Receipt, TerminalOutcome, WireCurrentRecord, WireError,
@@ -55,9 +57,27 @@ use topos_types::{
         // The per-device currency lane: the delivery read + the applied-state report.
         crate::routes::delivery::get_delivery,
         crate::routes::delivery::put_report,
-        // The unauthenticated invite bootstrap.
-        crate::routes::bootstrap::read_invite_bootstrap,
-        // Enrollment flow.
+        // The member-lane DESCRIBE reads (the two-phase verbs' "before").
+        crate::routes::describe::get_me,
+        crate::routes::describe::get_channels,
+        crate::routes::describe::get_proposals,
+        crate::routes::describe::get_log,
+        crate::routes::describe::get_reach,
+        // The member-lane row-op writes (subscriptions / channels / protection / notices / invitations).
+        crate::routes::subscriptions::follow_skill,
+        crate::routes::subscriptions::unfollow_skill,
+        crate::routes::subscriptions::exclude_device,
+        crate::routes::channels::channel_join,
+        crate::routes::channels::channel_leave,
+        crate::routes::channels::channel_place,
+        crate::routes::channels::channel_unplace,
+        crate::routes::protection::set_skill_protection,
+        crate::routes::protection::set_channel_protection,
+        crate::routes::notices::ack_notices,
+        crate::routes::invitations::invite,
+        // The unauthenticated claim bootstrap.
+        crate::routes::bootstrap::read_bootstrap,
+        // Enrollment flow (+ the login redeem).
         crate::routes::enroll::start_device_auth,
         crate::routes::enroll::poll_device_auth,
         crate::routes::enroll::read_verification_context,
@@ -65,8 +85,8 @@ use topos_types::{
         crate::routes::enroll::complete_passcode,
         crate::routes::enroll::redeem,
         crate::routes::enroll::admin_claim,
+        crate::routes::login::login,
         // Governance mutations.
-        crate::routes::governance::create_invite,
         crate::routes::governance::roster_set,
         crate::routes::governance::roster_remove,
         crate::routes::governance::revoke_device,
@@ -113,6 +133,28 @@ use topos_types::{
         WireNotice,
         WireAppliedReport,
         WireAppliedSkill,
+        // The member-lane DESCRIBE reads.
+        WireMe,
+        WireChannelIndex,
+        WireChannelEntry,
+        WireChannelSkill,
+        WireProposalIndex,
+        WireProposalEntry,
+        WireSkillLog,
+        WireLogVersion,
+        WireLogProposal,
+        WireReach,
+        // The member-lane row-op write bodies.
+        ProtectionSetRequest,
+        NoticeAckRequest,
+        InvitationRequest,
+        InvitationData,
+        // The login redeem.
+        LoginRedeemRequest,
+        LoginData,
+        LoginMembership,
+        // The constant protocol card (the unmatched-path fallback's machine face).
+        WireProtocolCard,
         // Per-verb `data` shapes (the agent's typed payloads).
         PublishData,
         ProposeData,
@@ -146,20 +188,17 @@ use topos_types::{
         RedeemRequest,
         RedeemResponse,
         AdminClaimRequest,
-        // Governance request DTOs (+ the invite `data` shape).
-        InviteRequest,
-        InviteSkill,
+        // Governance request DTOs.
         RosterSetRequest,
         RosterRemoveRequest,
         DeviceRevokeRequest,
         WorkspaceRole,
-        InviteData,
     )),
     tags(
-        (name = "writes", description = "Device-credential writes (publish / propose / revert / review)."),
-        (name = "reads", description = "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery) plus the body-light applied-state report."),
-        (name = "enrollment", description = "Invite bootstrap + the device-auth / passcode / redeem / admin-claim enrollment flow."),
-        (name = "governance", description = "Owner/admin device-credential mutations (invite / roster / revoke)."),
+        (name = "writes", description = "Device-credential writes (publish / propose / revert / review) and the member-lane row ops (follows / channels / exclusions / protection / notices)."),
+        (name = "reads", description = "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery / me / channels / proposals / log / reach) plus the body-light applied-state report."),
+        (name = "enrollment", description = "Claim bootstrap + the device-auth / passcode / redeem / admin-claim / login enrollment flow."),
+        (name = "governance", description = "Owner/admin device-credential mutations (roster / revoke) and the member-lane invitation (a roster write)."),
     ),
 )]
 struct ApiDoc;

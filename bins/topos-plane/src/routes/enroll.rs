@@ -29,9 +29,9 @@ use crate::wire::{self, ApiJson, map};
     tag = "enrollment",
     request_body = DeviceAuthorizeRequest,
     responses(
-        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri(_complete); a standup start also carries the plane block: API base + posture + method, no trust root).", body = topos_types::requests::DeviceAuthorizeResponse),
-        (status = 400, description = "Malformed body, device public key, or intent/invite combination.", body = topos_types::JsonEnvelope),
-        (status = 404, description = "No such invite (or it is revoked/expired), or a standup start on a plane that does not offer it.", body = topos_types::JsonEnvelope),
+        (status = 200, description = "The device-authorization grant (device_code / user_code / verification_uri(_complete)) plus the plane block (API base + posture + method, no trust root) every start now carries.", body = topos_types::requests::DeviceAuthorizeResponse),
+        (status = 400, description = "Malformed body, device public key, workspace name, or intent/workspace combination.", body = topos_types::JsonEnvelope),
+        (status = 404, description = "A standup start on a plane that does not offer it (self-host).", body = topos_types::JsonEnvelope),
         (status = 429, description = "Rate limited.", body = topos_types::JsonEnvelope),
         (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),
     ),
@@ -42,41 +42,58 @@ pub(crate) async fn start_device_auth(
 ) -> Result<Response, PlaneHttpError> {
     let device_public_key = wire::base64url_key(&req.device_public_key)?;
     let (created_at, now) = wire::now_utc();
-    // Dispatch on (intent, invite_token): an explicit intent must be consistent with the invite's presence
-    // (fail closed on a contradictory body); an absent intent defaults from the invite's presence.
-    match (req.intent, req.invite_token.as_deref()) {
-        // ENROLL: the invite-anchored flow (the pre-existing path, byte-identical response fields plus the
-        // additive complete URI).
-        (Some(SessionIntent::Enroll) | None, Some(invite_token)) => {
-            let start = state
+    // Dispatch on (intent, workspace): an explicit intent must be consistent with the workspace's presence
+    // (fail closed on a contradictory body); an absent intent defaults from the workspace's presence
+    // (a named workspace ⇒ enroll; none ⇒ standup). Every start carries the plane block for parity.
+    let start = match (req.intent, req.workspace.as_deref()) {
+        // ENROLL: toward a workspace ADDRESS name (resolution is never disclosed here — an unknown name
+        // runs the same flow to the redeem's one uniform denial; a malformed name is the syntax 400).
+        (Some(SessionIntent::Enroll) | None, Some(workspace)) => {
+            state
                 .authority()
                 .start_device_auth(
-                    invite_token,
+                    workspace,
                     &device_public_key,
                     &req.machine_name,
                     now,
                     &created_at,
                 )
-                .await?;
-            Ok(Json(map::device_auth_to_wire(start, now, None)).into_response())
+                .await?
         }
-        // STANDUP: no invite — the session is born workspace-less; the response carries the plane block
-        // (base URL + posture + enrollment method), which an enroll start leaves to `/i/`.
+        // STANDUP: no workspace — the session is born workspace-less; a signed-in human's approval creates
+        // one (cloud only; self-host ⇒ the uniform 404).
         (Some(SessionIntent::Standup) | None, None) => {
-            let start = state
+            state
                 .authority()
                 .start_standup_device_auth(&device_public_key, &req.machine_name, now, &created_at)
-                .await?;
-            let plane = map::standup_plane_block(&state)?;
-            Ok(Json(map::device_auth_to_wire(start, now, Some(plane))).into_response())
+                .await?
         }
-        (Some(SessionIntent::Standup), Some(_)) => Err(PlaneHttpError::BadBody(
-            "a standup start takes no invite_token".to_owned(),
-        )),
-        (Some(SessionIntent::Enroll), None) => Err(PlaneHttpError::BadBody(
-            "an enroll start requires an invite_token".to_owned(),
-        )),
-    }
+        // LOGIN: no workspace — the session proves the person's identity; its grant redeems at
+        // `POST /v1/login` into one credential per confirmed seat (allowed on BOTH postures).
+        (Some(SessionIntent::Login), None) => {
+            state
+                .authority()
+                .start_login_device_auth(&device_public_key, &req.machine_name, now, &created_at)
+                .await?
+        }
+        (Some(SessionIntent::Enroll), None) => {
+            return Err(PlaneHttpError::BadBody(
+                "an enroll start requires a workspace".to_owned(),
+            ));
+        }
+        (Some(SessionIntent::Standup), Some(_)) => {
+            return Err(PlaneHttpError::BadBody(
+                "a standup start takes no workspace".to_owned(),
+            ));
+        }
+        (Some(SessionIntent::Login), Some(_)) => {
+            return Err(PlaneHttpError::BadBody(
+                "a login start takes no workspace".to_owned(),
+            ));
+        }
+    };
+    let plane = map::plane_block(&state)?;
+    Ok(Json(map::device_auth_to_wire(start, now, Some(plane))).into_response())
 }
 
 #[utoipa::path(
@@ -221,17 +238,20 @@ pub(crate) async fn complete_passcode(
 )]
 pub(crate) async fn redeem(
     State(state): State<PlaneState>,
-    // The path `{ws}` is REST sugar; the grant is the authoritative source of the workspace.
-    Path(_ws): Path<String>,
+    // The path `{ws}` scopes the redeem; the redeem's membership gate checks it against the grant's own
+    // workspace (a wrong-workspace redeem is the ONE uniform denial, never an existence oracle).
+    Path(ws): Path<String>,
     ApiJson(req): ApiJson<RedeemRequest>,
 ) -> Result<Response, PlaneHttpError> {
+    let ws =
+        plane_store::WorkspaceId::parse(&ws).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     // The grant is the bearer credential; the server checks the body's device public key matches the key the
     // grant is bound to (binding consistency, not a possession proof).
     let device_public_key = wire::base64url_key(&req.device_public_key)?;
-    let (created_at, now) = wire::now_utc();
+    let now = wire::now_utc().1;
     let outcome = state
         .authority()
-        .redeem_enrollment(&req.grant, device_public_key, now, &created_at)
+        .redeem_enrollment(&ws, &req.grant, device_public_key, now)
         .await?;
     Ok((
         StatusCode::OK,

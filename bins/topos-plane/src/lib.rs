@@ -19,10 +19,12 @@
 //! - [`PlaneConfig`] + [`PlaneState::open`] — the one construction path: plain/owned config in, a
 //!   serving [`PlaneState`] out, the authority + enrollment config built internally.
 //! - [`PlaneState`] — the shared, cheap-to-clone handle (`Arc<Authority>` + the in-process rate limiter).
-//! - [`router`] — wires the seven routes (4 device-credential writes + 3 token-scoped reads) with the
-//!   rate-limit middleware, request-level tracing (method + matched route template + status + latency —
-//!   never a raw, credential-bearing path), and a body-size limit; every handler is **thin** (parse → call
-//!   the authority → serialize), never a trust decision.
+//! - [`router`] — wires the whole HTTP surface (the device-credential writes + reads, the member-lane verb
+//!   surface — describe reads + guarded row-op writes + invitation, the enrollment + login + governance flow,
+//!   the claim bootstrap, and the constant protocol-card fallback) with the rate-limit middleware,
+//!   request-level tracing (method + matched route template + status + latency — never a raw,
+//!   credential-bearing path), and body-size limits; every handler is **thin** (parse → call the authority →
+//!   serialize), never a trust decision.
 //! - [`PlaneState::set_review_required`] — the `review_required` workspace-policy toggle, set via the public
 //!   API (the off-by-default anti-poisoning gate; a composing admin route calls it).
 //! - [`spawn_maintenance`] / [`run_maintenance_pass`] — the storage-maintenance scheduler (the recovery
@@ -57,10 +59,7 @@ pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use rate_limit::Limits;
 pub use restore_cmd::EpochBumpSummary;
-pub use roster_cmd::{
-    InviteMembersSummary, RemoveMemberSummary, RosterSeatSummary, RosterSummary,
-    RotateJoinLinkSummary,
-};
+pub use roster_cmd::{InviteMembersSummary, RemoveMemberSummary, RosterSeatSummary, RosterSummary};
 pub use router::router;
 pub use session_read_cmd::{
     SessionCurrentSummary, SessionObjectSummary, SessionProposalsSummary, SessionVersionSummary,

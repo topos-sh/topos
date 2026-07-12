@@ -1,46 +1,9 @@
-//! `GET /i/{token}` — the unauthenticated bootstrap.
+//! `GET /i/{token}` — the unauthenticated CLAIM bootstrap (the only kind the door serves now; the tokened
+//! invite door was interred).
 
-use topos_types::bootstrap::{BootstrapData, ConsentMode};
+use topos_types::bootstrap::BootstrapData;
 
 use super::*;
-
-#[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn invite_bootstrap_returns_no_role_and_auto_land_false(pool: PgPool) {
-    let ctx = enroll_setup(pool, "enroll-bootstrap").await;
-    let env = create_invite(
-        &ctx,
-        "aaaaaaaa-0000-4000-8000-000000000001",
-        &[ALICE_EMAIL],
-        SKILL,
-    )
-    .await;
-    let token = token_from_link(env.data["invite_link"].as_str().unwrap());
-
-    let (status, _, bytes) = send(ctx.app(), get(&format!("/i/{token}"), &[])).await;
-    assert_eq!(status, StatusCode::OK);
-    let data: BootstrapData = serde_json::from_slice(&bytes).expect("the body is a BootstrapData");
-    // An INVITE bootstrap still echoes the link token as the non-secret token_id (a shareable link's
-    // own tail) — the claim door, by contrast, must not (see the claim test below).
-    assert_eq!(data.invite.token_id, token);
-    // The plane block carries only the API base + posture + method — no trust root to pin.
-    assert_eq!(data.plane.base_url, ENROLL_BASE_URL);
-    // No role; a first-received skill is never silently landed; the offered skill is disclosed.
-    assert!(!data.invite.first_receive_auto_land);
-    assert_eq!(data.invite.consent, ConsentMode::DirectHumanFirstReceive);
-    assert_eq!(data.workspace.workspace_id, WS);
-    assert_eq!(
-        data.plane.deployment_mode,
-        topos_types::bootstrap::DeploymentMode::Cloud
-    );
-    assert!(data.offered_skills.iter().any(|s| s.skill_id == SKILL));
-    // The bootstrap carries no role anywhere.
-    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(raw.get("role").is_none() && raw["invite"].get("role").is_none());
-
-    // A bad/unknown token ⇒ the indistinguishable 404.
-    let (s404, _, _) = send(ctx.app(), get("/i/not-a-real-token", &[])).await;
-    assert_eq!(s404, StatusCode::NOT_FOUND);
-}
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool: PgPool) {
@@ -101,38 +64,29 @@ async fn a_claim_link_bootstraps_with_the_admin_claim_method_until_redeemed(pool
 
 // ── Content negotiation: one resource, two representations ───────────────────────────────────────────
 
-/// The hosted split, end to end at the route: the minted link rides the PUBLIC link base; an
-/// `Accept: application/json` (the topos client) gets the unchanged machine contract, while curl's bare
-/// `*/*` and a browser's html Accept get the markdown agent-instruction document — which echoes the full
-/// share link (invite tokens are the link's own non-secret tail), the install line, and the consent
-/// floor. Both 200s are `no-store` + `Vary: accept`; a dead token stays the uniform JSON 404 either way.
+/// The hosted split, end to end at the route: the minted CLAIM link rides the PUBLIC link base; an
+/// `Accept: application/json` (the topos client) gets the machine contract, while curl's bare `*/*` and a
+/// browser's html Accept get the markdown agent-instruction document — which NEVER echoes the token/link
+/// (the one-time bearer custody rule), only the install line + the redeem step + the consent floor. Both
+/// 200s are `no-store` + `Vary: accept`; a dead token stays the uniform JSON 404 either way.
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) {
+async fn the_claim_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) {
     const LINK_BASE: &str = "https://links.test";
-    let ctx = enroll_setup_link_base(pool, "nego-bootstrap", LINK_BASE).await;
-    let env = create_invite(
-        &ctx,
-        "aaaaaaaa-0000-4000-8000-000000000021",
-        &[ALICE_EMAIL],
-        SKILL,
-    )
-    .await;
-    let link = env.data["invite_link"].as_str().unwrap().to_owned();
-    // The minted link STRING rides the public link base…
+    let ctx = enroll_setup_link_base(pool, "nego-claim", LINK_BASE).await;
+    // The minted claim link STRING rides the public link base (the bin-side composer path).
+    let link = ctx
+        .state
+        .mint_admin_claim("w_lb", Some("LB"), Some("owner@lb.test"), 3600)
+        .await
+        .expect("mint claim");
     assert!(
         link.starts_with(&format!("{LINK_BASE}/i/")),
         "minted on the link base: {link}"
     );
     let token = token_from_link(&link);
-    // …and so does a bin-side composer (the mint-claim / standup self-invite path).
-    let claim_link = ctx
-        .state
-        .mint_admin_claim("w_lb", Some("LB"), Some("owner@lb.test"), 3600)
-        .await
-        .expect("mint claim");
-    assert!(claim_link.starts_with(&format!("{LINK_BASE}/i/")));
 
-    // The topos client's explicit Accept ⇒ the unchanged JSON contract.
+    // The topos client's explicit Accept ⇒ the JSON contract; the payload declares the API base (the
+    // client re-roots onto it), not the link base.
     let (status, headers, bytes) = send(
         ctx.app(),
         get(&format!("/i/{token}"), &[("accept", "application/json")]),
@@ -140,14 +94,13 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
     .await;
     assert_eq!(status, StatusCode::OK);
     let data: BootstrapData = serde_json::from_slice(&bytes).expect("a BootstrapData");
-    // The bootstrap payload keeps declaring the API base — the client re-roots onto it, so pointing
-    // this field at the link base would route every later call through the web front.
     assert_eq!(data.plane.base_url, ENROLL_BASE_URL);
+    assert_eq!(data.plane.enrollment_method, "admin_claim");
     assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert_eq!(headers.get("vary").unwrap(), "accept");
 
     // curl / an agent's web fetch (bare */*) ⇒ the instruction document (text/plain, so a browser
-    // displays it inline).
+    // displays it inline) — and it NEVER contains the token or a link.
     let (status, headers, bytes) =
         send(ctx.app(), get(&format!("/i/{token}"), &[("accept", "*/*")])).await;
     assert_eq!(status, StatusCode::OK);
@@ -164,16 +117,17 @@ async fn the_bootstrap_content_negotiates_json_and_agent_markdown(pool: PgPool) 
     assert_eq!(headers.get("vary").unwrap(), "accept");
     assert_eq!(headers.get("x-robots-tag").unwrap(), "noindex");
     let doc = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(doc.contains(&format!("topos follow '{link}' --json")));
+    assert!(doc.contains("ONE-TIME workspace claim"));
+    assert!(doc.contains("the link you just fetched"));
     assert!(doc.contains("releases/latest/download/install.sh"));
-    assert!(doc.contains("Acme"));
+    assert!(doc.contains("LB"));
     assert!(!doc.contains("--resume"));
-    assert!(doc.contains("Re-running `topos follow` while an enrollment is pending resumes it"));
-    // The human hand-off rides the same document — this IS the browser face.
-    assert!(doc.contains("paste this link to your agent"));
+    assert!(
+        !doc.contains(&token),
+        "a claim markdown body must never contain the claim token: {doc}"
+    );
 
-    // A browser Accept takes the same document door (there is no HTML face — a hosted web front
-    // relays this same representation).
+    // A browser Accept takes the same document door (there is no HTML face).
     let (_, headers, _) = send(
         ctx.app(),
         get(

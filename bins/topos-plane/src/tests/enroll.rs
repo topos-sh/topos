@@ -58,14 +58,7 @@ async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn full_device_flow_enrolls_and_redeems_a_workspace_credential(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-redeem").await;
-    let (grant, _user_code, device_pk) = enroll_to_grant(
-        &ctx,
-        "bbbbbbbb-0000-4000-8000-000000000001",
-        ALICE_SEED,
-        ALICE_EMAIL,
-        SKILL,
-    )
-    .await;
+    let (grant, _user_code, device_pk) = enroll_to_grant(&ctx, ALICE_SEED, ALICE_EMAIL).await;
 
     let device_key_id = device_key_id_for(&device_pk);
     // The grant is the bearer credential; the body presents the matching device public key. No signature.
@@ -136,14 +129,7 @@ async fn full_device_flow_enrolls_and_redeems_a_workspace_credential(pool: PgPoo
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn a_redeem_with_a_wrong_device_key_is_denied(pool: PgPool) {
     let ctx = enroll_setup(pool, "enroll-wrongkey").await;
-    let (grant, _user_code, _device_pk) = enroll_to_grant(
-        &ctx,
-        "cccccccc-0000-4000-8000-000000000001",
-        ALICE_SEED,
-        ALICE_EMAIL,
-        SKILL,
-    )
-    .await;
+    let (grant, _user_code, _device_pk) = enroll_to_grant(&ctx, ALICE_SEED, ALICE_EMAIL).await;
 
     // Present a DIFFERENT device public key than the grant is bound to → the redeem's binding check fails
     // (the leaked-grant-on-another-device case).
@@ -236,7 +222,7 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
     // The WEB LEG (a composing plane's authenticated route) approves through the leak-free wrapper.
     let approved = ctx
         .state
-        .approve_standup(&auth.user_code, "founder@newco.com", Some("Newco"))
+        .approve_standup(&auth.user_code, "founder@newco.com", Some("Newco"), None)
         .await
         .unwrap();
     let crate::ApproveStandupSummary::Approved {
@@ -294,38 +280,30 @@ async fn standup_authorize_to_redeem_over_the_wire(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn standup_authorize_contradictory_bodies_are_400(pool: PgPool) {
-    let ctx = enroll_setup(pool, "standup-400").await;
+async fn authorize_contradictory_intent_and_workspace_are_400(pool: PgPool) {
+    let ctx = enroll_setup(pool, "authorize-400").await;
     let device_pk = dev_pubkey(22);
-    // intent=enroll with NO invite token.
-    let (s, _, _) = send(
-        ctx.app(),
-        post_nosig(
-            "/v1/device/authorize",
-            serde_json::json!({
-                "intent": "enroll",
-                "device_public_key": b64key(&device_pk),
-                "machine_name": "laptop",
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    // intent=standup WITH an invite token.
-    let (s, _, _) = send(
-        ctx.app(),
-        post_nosig(
-            "/v1/device/authorize",
-            serde_json::json!({
-                "intent": "standup",
-                "invite_token": "tok",
-                "device_public_key": b64key(&device_pk),
-                "machine_name": "laptop",
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Each (intent, workspace) contradiction is a fail-closed 400.
+    let contradictions = [
+        // enroll needs a workspace…
+        serde_json::json!({ "intent": "enroll" }),
+        // …standup takes none…
+        serde_json::json!({ "intent": "standup", "workspace": WS_NAME }),
+        // …and login takes none.
+        serde_json::json!({ "intent": "login", "workspace": WS_NAME }),
+    ];
+    for extra in contradictions {
+        let mut body = serde_json::json!({
+            "device_public_key": b64key(&device_pk),
+            "machine_name": "laptop",
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let shown = body.to_string();
+        let (s, _, _) = send(ctx.app(), post_nosig("/v1/device/authorize", body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "expected 400 for {shown}");
+    }
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]

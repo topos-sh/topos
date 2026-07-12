@@ -1,46 +1,14 @@
-//! The governance mutations (`POST /v1/invites`, `DELETE .../devices`): owner-OK, member-DENIED.
+//! The governance mutations (`PUT/DELETE .../roster/{email}`, `DELETE .../devices`): owner-OK, member-DENIED.
+//! (Invitation is no longer a governance op — it moved to the member-lane `POST .../invitations` route; see
+//! `tests/invitations.rs`.)
 
 use super::*;
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn an_owner_device_invite_returns_invite_data(pool: PgPool) {
-    let ctx = enroll_setup(pool, "enroll-invite-ok").await;
-    let env = create_invite(
-        &ctx,
-        "dddddddd-0000-4000-8000-000000000001",
-        &[ALICE_EMAIL],
-        SKILL,
-    )
-    .await;
-    assert!(env.ok, "an owner invite should be ok: {env:?}");
-    assert_eq!(env.command, "invite");
-    assert!(
-        env.data["invite_link"]
-            .as_str()
-            .is_some_and(|l| l.contains("/i/"))
-    );
-    // The seeded roster + offered skills are echoed.
-    assert!(
-        env.data["roster_added"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p == ALICE_EMAIL)
-    );
-    assert!(
-        env.data["skills"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s == SKILL)
-    );
-}
-
-#[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn a_member_device_invite_is_denied(pool: PgPool) {
-    let ctx = enroll_setup(pool, "enroll-invite-denied").await;
-    // A non-owner member device (governance requires the owner role for invite).
+async fn an_owner_roster_set_is_ok_and_a_member_is_denied(pool: PgPool) {
+    let ctx = enroll_setup(pool, "gov-roster-set").await;
     let ws = WorkspaceId::parse(WS).unwrap();
+    // A member device (a non-owner) to prove the role gate, plus a seat to raise.
     let member_principal = Principal::parse(MEMBER_PRINCIPAL).unwrap();
     ctx.authority()
         .seed_workspace_member(&ws, &member_principal, "member", "confirmed")
@@ -58,26 +26,36 @@ async fn a_member_device_invite_is_denied(pool: PgPool) {
         .await
         .unwrap();
 
-    let op = "eeeeeeee-0000-4000-8000-000000000001";
-    let emails = [ALICE_EMAIL];
-    // The acting device rides the Bearer credential (MEMBER_CRED) — never a body field.
-    let body = serde_json::json!({
-        "workspace_id": WS,
-        "op_id": op,
-        "emails": emails,
-        "role": "member",
-        "skills": [{ "skill_id": SKILL, "name": "Deploy" }],
-    });
-
+    // The owner raises the member to reviewer — a 200 OK envelope.
+    let body = serde_json::json!({ "workspace_id": WS, "op_id": "d0000000-0000-4000-8000-000000000001", "role": "reviewer" });
     let (status, _, bytes) = send(
         ctx.app(),
-        req_json_auth("POST", "/v1/invites", body, MEMBER_CRED),
+        req_json_auth(
+            "PUT",
+            &format!("/v1/workspaces/{WS}/roster/{MEMBER_PRINCIPAL}"),
+            body,
+            OWNER_CRED,
+        ),
     )
     .await;
-    // A role-denial is a 200 + DENIED envelope (the actor is an authenticated member — nothing to hide).
+    assert_eq!(status, StatusCode::OK);
+    assert!(envelope(&bytes).ok, "an owner roster-set is ok");
+
+    // The member attempting the same is a 200 + DENIED (the actor is authenticated — nothing to hide).
+    let body = serde_json::json!({ "workspace_id": WS, "op_id": "d0000000-0000-4000-8000-000000000002", "role": "owner" });
+    let (status, _, bytes) = send(
+        ctx.app(),
+        req_json_auth(
+            "PUT",
+            &format!("/v1/workspaces/{WS}/roster/{OWNER_PRINCIPAL}"),
+            body,
+            MEMBER_CRED,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let env = envelope(&bytes);
-    assert!(!env.ok, "a member's invite must be denied: {env:?}");
+    assert!(!env.ok, "a member's roster-set must be denied: {env:?}");
     assert_eq!(
         env.error.expect("DENIED carries a WireError").outcome,
         TerminalOutcome::Denied

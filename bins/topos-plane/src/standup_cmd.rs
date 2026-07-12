@@ -17,18 +17,19 @@ use crate::state::PlaneState;
 use crate::wire;
 
 /// The outcome of [`PlaneState::create_workspace`] — a created (or idempotently replayed) workspace, or a
-/// typed denial. Plain owned fields only. `Debug` REDACTS `invite_link` — the self-invite is a live
-/// join credential (the same door the session-roster ops rotate), so it must never reach a log.
-#[derive(Clone)]
+/// typed denial. Plain owned fields only. What comes back is the workspace ADDRESS (the share line — a
+/// plain fact, not a credential; the genesis mints no invite link, the roster is the lock), so nothing here
+/// is redacted.
+#[derive(Debug, Clone)]
 pub enum CreateWorkspaceSummary {
-    /// A fresh workspace was created; `invite_link` is the owner's paste-to-agent `/i/` link.
+    /// A fresh workspace was created; `address` is the owner's paste-to-agent share address.
     Created {
         /// The server-minted workspace id.
         workspace_id: String,
         /// The stored display name.
         display_name: String,
-        /// The owner's self-invite link (`<base_url>/i/<token>`, deterministic per request).
-        invite_link: String,
+        /// The workspace's full ADDRESS (`<link_base>/<name>`).
+        address: String,
     },
     /// The SAME request already created a workspace — the identical result, replayed.
     Replayed {
@@ -36,44 +37,14 @@ pub enum CreateWorkspaceSummary {
         workspace_id: String,
         /// The stored display name.
         display_name: String,
-        /// The identical self-invite link, re-derived.
-        invite_link: String,
+        /// The identical workspace ADDRESS, re-derived.
+        address: String,
     },
     /// The request was denied (the per-owner cap, a reused request id, a bad email).
     Denied {
         /// The static, typed reason.
         reason: String,
     },
-}
-
-impl std::fmt::Debug for CreateWorkspaceSummary {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CreateWorkspaceSummary::Created {
-                workspace_id,
-                display_name,
-                ..
-            } => f
-                .debug_struct("Created")
-                .field("workspace_id", workspace_id)
-                .field("display_name", display_name)
-                .field("invite_link", &"<redacted>")
-                .finish(),
-            CreateWorkspaceSummary::Replayed {
-                workspace_id,
-                display_name,
-                ..
-            } => f
-                .debug_struct("Replayed")
-                .field("workspace_id", workspace_id)
-                .field("display_name", display_name)
-                .field("invite_link", &"<redacted>")
-                .finish(),
-            CreateWorkspaceSummary::Denied { reason } => {
-                f.debug_struct("Denied").field("reason", reason).finish()
-            }
-        }
-    }
 }
 
 /// The outcome of [`PlaneState::approve_standup`]. `NotFound` is the UNIFORM miss (an unknown/expired/raced
@@ -175,7 +146,8 @@ impl PlaneState {
 
     /// Create a workspace for an ALREADY-VERIFIED owner email (door 2 — the composing web surface proves
     /// the email; this wrapper never does). Idempotent per `request_id` (same request + same owner replays
-    /// the same workspace and link). `display_name = None` takes the server default.
+    /// the same workspace and address). `display_name = None` takes the server default; `name = Some` is a
+    /// caller-chosen ADDRESS slug (validated + must be free), `None` derives one from the display name.
     ///
     /// # Errors
     /// An unparseable plane mode (typed, fail closed) or a stringified authority fault; a protocol-level
@@ -184,27 +156,33 @@ impl PlaneState {
         &self,
         request_id: &str,
         display_name: Option<&str>,
+        name: Option<&str>,
         owner_email: &str,
     ) -> anyhow::Result<CreateWorkspaceSummary> {
         let mode = self.strict_mode()?;
         let (created_at, _now) = wire::now_utc();
         let outcome = self
             .authority()
-            .create_workspace(request_id, display_name, owner_email, mode, &created_at)
+            .create_workspace(
+                request_id,
+                display_name,
+                name,
+                owner_email,
+                mode,
+                &created_at,
+            )
             .await
             .map_err(|error| anyhow::anyhow!("creating the workspace: {error}"))?;
-        let link_base = self.authority().enrollment_disclosure()?.link_base;
-        let link = |token: &str| format!("{link_base}/i/{token}");
         Ok(match outcome {
             CreateWorkspaceOutcome::Created(c) => CreateWorkspaceSummary::Created {
                 workspace_id: c.workspace_id.as_str().to_owned(),
                 display_name: c.display_name,
-                invite_link: link(&c.invite_token),
+                address: c.address,
             },
             CreateWorkspaceOutcome::Replayed(c) => CreateWorkspaceSummary::Replayed {
                 workspace_id: c.workspace_id.as_str().to_owned(),
                 display_name: c.display_name,
-                invite_link: link(&c.invite_token),
+                address: c.address,
             },
             CreateWorkspaceOutcome::Denied(reason) => CreateWorkspaceSummary::Denied {
                 reason: reason.to_owned(),
@@ -213,7 +191,8 @@ impl PlaneState {
     }
 
     /// Approve a STANDUP session with an ALREADY-VERIFIED email (door 1's human leg). The session CAS is
-    /// the idempotency; every indistinguishable miss is [`ApproveStandupSummary::NotFound`].
+    /// the idempotency; every indistinguishable miss is [`ApproveStandupSummary::NotFound`]. `name = Some`
+    /// is a caller-chosen ADDRESS slug (validated + must be free), `None` derives one from the display name.
     ///
     /// # Errors
     /// An unparseable plane mode (typed, fail closed) or a stringified authority fault.
@@ -222,6 +201,7 @@ impl PlaneState {
         user_code: &str,
         verified_email: &str,
         display_name: Option<&str>,
+        name: Option<&str>,
     ) -> anyhow::Result<ApproveStandupSummary> {
         let mode = self.strict_mode()?;
         let (created_at, now) = wire::now_utc();
@@ -231,6 +211,7 @@ impl PlaneState {
                 user_code,
                 verified_email,
                 display_name,
+                name,
                 mode,
                 now,
                 &created_at,

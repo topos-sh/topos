@@ -40,48 +40,75 @@
   the device's post-reconcile applied snapshot, small-body-capped), and the device-credential writes
   `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (bodies carry NO credential material — the
   Bearer credential is resolved in-transaction by registry-row lookup; keeping the secret out of bodies
-  keeps it out of receipt request identities and the client's persisted op-WAL). Each handler is parse → call
+  keeps it out of receipt request identities and the client's persisted op-WAL; the review body now
+  carries the mandatory reject `reason` and the author-only `withdraw` decision). Each handler is parse → call
   the authority → serialize: **no trust decision, no raw object read, no client-asserted principal** in a
   handler.
-- **The enrollment + governance HTTP surface** (`routes/{bootstrap,enroll,governance,oidc}.rs`): the
-  unauthenticated bootstrap `GET /i/{token}` (the workspace + the plane API base to dial; **no bytes,
-  no role, no trust root**; a dead invite ⇒ 404 — and the route now ALSO serves one-time admin-CLAIM links, probed after
-  the invite table: `enrollment_method: "admin_claim"`, no skills, the same uniform 404 for
-  consumed/expired/unknown; the two live in disjoint tables, so a token never crosses doors). The route
-  **content-negotiates**: an Accept asking for JSON (or no Accept) gets the versioned `BootstrapData`
-  contract; anything else — curl's `*/*`, a browser, an agent's web fetch — gets a markdown
-  **agent-instruction document** served as `text/plain` so browsers display it inline — the document IS
-  the browser face, no HTML page exists (`routes/bootstrap_doc.rs`, a pure renderer over the same
-  authority read: the human paste-this-to-your-agent hand-off first, then install `topos` if missing via
-  the checksummed installer line, `follow` the link, surface the verification URL to the human, land
-  offers per-digest; the CLAIM variant warns first-redeemer-becomes-owner and NEVER echoes the token or
-  link — the same custody rule as the JSON `token_id` placeholder).
-  Both 200s are `Cache-Control: no-store` + `Vary: accept` + `X-Robots-Tag: noindex`; errors stay the
-  uniform JSON envelope on every Accept; the
-  enrollment flow `POST /v1/device/authorize` (now intent-dispatching: an `enroll` start needs its
-  `invite_token`; a `standup` start — explicit intent, or no invite at all — opens a workspace-less session
-  on a hosted plane [self-host ⇒ 404], answers with the high-entropy code + `verification_uri_complete` +
-  the plane block [API base + posture + method, no trust root], and a contradictory intent/invite body is a 400), `POST /v1/device/token`
-  (a granted poll now carries the `{workspace_id, display_name}` context a standup client lacks),
-  `GET /v1/enroll/verify/{user_code}` (now disclosing the session's `intent`, so a web page renders
-  join-copy vs create-copy; a standup session's workspace name is `""` until approval),
-  `POST /v1/enroll/passcode` (the returned code is sent fire-and-forget on
-  `spawn_blocking`, so the constant-shaped ack never leaks whether an address was rostered),
+- **The member-lane VERB surface** (`routes/{describe,subscriptions,channels,protection,notices,invitations}.rs`)
+  — the same ONE Bearer workspace credential + the ONE membership front door (every miss the uniform 404). The
+  DESCRIBE reads render the two-phase verbs' "before" (`no-store`, per-member/hot): `GET
+  /v1/workspaces/{ws}/me` → `WireMe`, `.../channels` → `WireChannelIndex`, `.../proposals` (the workspace-wide
+  review inbox) → `WireProposalIndex`, `.../skills/{skill}/log` → `WireSkillLog`, `.../skills/{skill}/reach`
+  → `WireReach`. The naturally-idempotent row-op WRITES answer a 200 all-outcome envelope carrying a `status`
+  string, or a 200 DENIED with a SPECIFIC code (the actor is an authenticated member — never a 403): `PUT|DELETE
+  /v1/workspaces/{ws}/follows/{skill}` (follow/unfollow), `PUT /v1/workspaces/{ws}/exclusions/{skill}`
+  (this-device exclude), `PUT|DELETE /v1/workspaces/{ws}/channels/{ch}/membership` (join/leave),
+  `PUT|DELETE /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` (curation place/unplace), `PUT
+  /v1/workspaces/{ws}/skills/{skill}/protection` + `PUT /v1/workspaces/{ws}/channels/{ch}/protection` (the
+  kind-polymorphic `protect` setter — the level parsed per kind at the edge, a wrong level a 400), and `POST
+  /v1/workspaces/{ws}/notices/ack`. The ONE consistent code family: `*_ROLE_REQUIRED`
+  (`CURATED`/`REVIEWER`/`OWNER`) · `CHANNEL_BUILTIN` (join/leave on `everyone`) · `SKILL_NOT_ACTIVE` ·
+  `BAD_NAME` · `UNKNOWN_CHANNEL`. And `POST /v1/workspaces/{ws}/invitations` (invitation as a member-lane
+  ROSTER WRITE → `InvitationData`: the workspace ADDRESS + the folded invited set + an honest `mailed` flag;
+  after a seating, one fire-and-forget `spawn_blocking` invitation mail per invitee through the Mailer seam —
+  `mailed:true` only when a real relay is configured, `NoopMailer` ⇒ `false`; an unknown channel is a 200
+  DENIED `UNKNOWN_CHANNEL`).
+- **The enrollment + governance HTTP surface** (`routes/{bootstrap,card,enroll,login,governance,oidc}.rs`): the
+  unauthenticated bootstrap `GET /i/{token}` — now **CLAIMS ONLY** (the tokened invite door was interred;
+  invitations became roster writes with no `/i/` link, and enrollment is by workspace ADDRESS). It serves the
+  one-time admin CLAIM (`enrollment_method: "admin_claim"`, no skills, no bytes, no role, no trust root;
+  consumed/expired/unknown ⇒ the uniform 404). The route **content-negotiates**: an Accept asking for JSON (or
+  no Accept) gets the versioned `BootstrapData` contract; anything else — curl's `*/*`, a browser, an agent's
+  web fetch — gets a markdown **agent-instruction document** served as `text/plain` so browsers display it
+  inline — the document IS the browser face, no HTML page exists (`routes/bootstrap_doc.rs`, a pure renderer:
+  the human paste-this-to-your-agent hand-off first, then install `topos` if missing via the checksummed
+  installer line, then the one-call redeem; a claim NEVER echoes the token or a link — the JSON `token_id` is
+  the empty placeholder and the markdown points at the URL the fetcher already holds). Any UNMATCHED path is
+  the **constant protocol card** (`routes/card.rs`, the router `fallback`): a GET is content-negotiated — JSON
+  `WireProtocolCard{schema_version, card:"topos-protocol-card", api_base_url}` for a JSON Accept, else a
+  constant markdown card (no path echo — an unmatched path is never an existence oracle) — and any non-GET
+  unmatched keeps the uniform JSON 404; both 200s are `no-store` + `Vary:accept` + `noindex`.
+  Both bootstrap 200s carry the same header trio; errors stay the uniform JSON envelope on every Accept; the
+  enrollment flow `POST /v1/device/authorize` (now intent-dispatching on `(intent, workspace)`: an `enroll`
+  start targets a workspace ADDRESS NAME [resolution never disclosed — an unknown name runs to the redeem's
+  one uniform denial, a malformed name is a 400]; a `standup` start — explicit, or no intent + no workspace —
+  opens a workspace-less session on a hosted plane [self-host ⇒ 404]; a `login` start [both postures] opens a
+  workspace-less LOGIN session; a contradictory `(intent, workspace)` body is a 400; EVERY start now carries
+  the plane block [API base + posture + method, no trust root] so the client re-roots without an `/i/` fetch),
+  `POST /v1/device/token` (a granted poll carries the `{workspace_id, display_name, address}` context for a
+  workspace-anchored grant, none for a login grant), `GET /v1/enroll/verify/{user_code}` (disclosing the
+  session's `intent`, now incl. `login`), `POST /v1/enroll/passcode` (the code sent fire-and-forget on
+  `spawn_blocking`, so the constant ack never leaks whether an address was rostered),
   `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the grant is
-  the bearer credential in the body, checked against the device public key it is bound to — no signature;
-  mints the device's ONE **workspace credential**, **never a user token, never a per-skill token**), and
-  `POST /v1/admin-claim`; and the governance
-  mutations `POST /v1/invites`, `PUT|DELETE /v1/workspaces/{ws}/roster/{email}`,
-  `DELETE /v1/workspaces/{ws}/devices` (each the acting Bearer workspace credential + op → ONE authority
-  op; the revoke's TARGET stays named by its non-secret `device_key_id`). A confirmed
-  identity is **never `Principal::parse`d in a handler** (it comes from a server-trusted row in the
-  authority); a target email is op data. The
-  OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off `enroll-oidc` feature (so
-  the committed OpenAPI contract excludes them).
+  the bearer credential in the body, checked against the bound device key — no signature; the `{ws}` path
+  scopes it, checked against the grant's own workspace; mints the device's ONE **workspace credential**,
+  **never a user token, never a per-skill token**), `POST /v1/admin-claim`, and the **LOGIN redeem** `POST
+  /v1/login` (`LoginRedeemRequest` → `redeem_login` → `LoginData`: the proven identity + one re-minted
+  credential — or a `blocked` marker — per confirmed seat; grant-in-body, no Authorization header, like the
+  redeem); and the governance mutations `PUT|DELETE /v1/workspaces/{ws}/roster/{email}` and
+  `DELETE /v1/workspaces/{ws}/devices` (each the acting Bearer workspace credential + op → ONE authority op;
+  the revoke's TARGET stays named by its non-secret `device_key_id`; **`POST /v1/invites` is DELETED** —
+  invitation moved to the member-lane `POST /v1/workspaces/{ws}/invitations`). A confirmed identity is
+  **never `Principal::parse`d in a handler** (it comes from a server-trusted row in the authority); a target
+  email is op data. The OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off
+  `enroll-oidc` feature (so the committed OpenAPI contract excludes them).
 - The wire mapping (`wire/map.rs`): a *read* enrollment step (bootstrap / device-auth / verification /
-  passcode) → a plain typed DTO (a miss is the route's indistinguishable 404); every terminal protocol outcome
-  of an op_id-carrying *write* (publish/propose/revert/review, and the redeem/admin-claim/invite/roster/revoke
-  envelopes) → **HTTP 200** carrying the canonical all-outcome receipt/envelope (a failure adds the flat wire
+  passcode) + the member-lane describe reads (me / channels / proposals / log / reach) → a plain typed DTO
+  (a miss is the route's indistinguishable 404); every terminal protocol outcome
+  of an op_id-carrying *write* (publish/propose/revert/review, and the redeem/admin-claim/login/roster/revoke
+  envelopes) + the naturally-idempotent member-lane row ops (a `status`-string OK or a coded DENIED — the ONE
+  `curation`/`membership`/`subscription`/`protect` envelope family) + the invitation → **HTTP 200** carrying
+  the canonical all-outcome receipt/envelope (a failure adds the flat wire
   error + `next_actions`; a governance role-DENIED is a 200+DENIED — the actor is authenticated, nothing to
   hide). Non-2xx only for transport/auth/integrity (400/404/429/500). `op_id` idempotent retry replays
   byte-identically.
@@ -132,22 +159,23 @@
   subcommand and a downstream composition's authenticated admin routes are the callers):
   `PlaneState::mint_admin_claim` (returns the full one-time `/i/` claim link ONCE — the bearer owner
   capability is never logged and every `Debug` redacts it; a cloud-mode plane requires `--owner-email`),
-  `create_workspace` (a `CreateWorkspaceSummary`: Created/Replayed with the deterministic self-invite
-  link, or a typed Denied — the cap, a reused request id), `approve_standup` (an
-  `ApproveStandupSummary`: Approved / idempotent AlreadyApproved / typed Denied / the uniform NotFound),
-  and `approve_session` (the member/owner web-approve leg over an enroll session, with the
-  first-writer-wins semantics surfaced: same-email re-approve ⇒ Confirmed, anything else ⇒ NotFound).
-  Every wrapper parses the plane's deployment mode STRICTLY — a mode string the constructor could only
-  warn-fallback is a typed refusal here (fail closed), so an operator typo can never decide what mode a
-  workspace is born with.
+  `create_workspace` (gains a `name: Option<&str>` ADDRESS-slug param; a `CreateWorkspaceSummary`:
+  Created/Replayed carrying the workspace ADDRESS — no invite link, the roster is the lock — or a typed
+  Denied), `approve_standup` (also gains the `name` param; an `ApproveStandupSummary`: Approved /
+  idempotent AlreadyApproved / typed Denied / the uniform NotFound), and `approve_session` (the
+  member/owner web-approve leg over an enroll session, with the first-writer-wins semantics surfaced:
+  same-email re-approve ⇒ Confirmed, anything else ⇒ NotFound). Every wrapper parses the plane's deployment
+  mode STRICTLY — a mode string the constructor could only warn-fallback is a typed refusal here (fail
+  closed), so an operator typo can never decide what mode a workspace is born with.
 - **The session-roster wrappers** (`roster_cmd.rs`) — the same leak-free, LIB-ONLY surface for the
   web-session membership ops (a downstream composition's authenticated admin routes call them with a
   session-verified acting email; there is NO OSS HTTP route): `PlaneState::invite_members` (seats
-  emails at `"member"`/`"reviewer"` — anything else is a typed denial — and returns the standing
-  workspace door link), `remove_member` (idempotent; the last-owner lockout denies typed),
-  `rotate_join_link` ("reset link" — future redemption only), and `read_roster` (a `RosterSummary`:
-  the seats + the owner-only door link, or the uniform `NotFound`). Same strict-mode threading as the
-  standup wrappers; the authority ops themselves uniformly deny a self-host plane.
+  emails at `"member"`/`"reviewer"` — anything else is a typed denial — and returns the workspace
+  ADDRESS the invitees join at, never a tokened link), `remove_member` (idempotent; the last-owner
+  lockout denies typed), and `read_roster` (a `RosterSummary`: the seats + the workspace ADDRESS, or the
+  uniform `NotFound`). The tokened standing-door machinery is GONE — links carry nothing, so `rotate_join_link`
+  is deleted (there is nothing to rotate). Same strict-mode threading as the standup wrappers; the authority
+  ops themselves uniformly deny a self-host plane.
 - **The session-read wrappers** (`session_read_cmd.rs`) — the read twin of the roster wrappers, the
   same leak-free, LIB-ONLY surface for the web-session MEMBER-SCOPED reads (no OSS HTTP route):
   `PlaneState::list_skills_session` (the workspace catalog — per skill: the `current` version id,
@@ -191,12 +219,16 @@
 **Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
 issuance decision (every credential/identity decision is `plane-store::Authority`'s):
 
-- **The passcode mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
+- **The mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
   no async-trait: the handler runs the blocking send on `spawn_blocking`, fire-and-forget so neither the body
-  nor its latency leaks whether an address was rostered), with `SmtpMailer` (lettre, blocking SMTP + rustls),
-  `NoopMailer` (the no-SMTP self-host default — silently drops, so the bootstrap won't advertise the passcode
-  method), and a recording `FakeMailer` (test-gated). **Redaction:** the code rides in a `Passcode`
-  whose hand-written `Debug` is `<redacted>`; `SmtpMailer` / `SmtpConfig` `Debug` omit the transport / creds.
+  nor its latency leaks whether an address was rostered): `send_passcode`, plus `send_invitation` (the
+  invitation template "you were added to <display> — paste this address to your agent: <address>") and
+  `can_send` (the honest `mailed` flag an invitation reports — `true` only for a real relay). With `SmtpMailer`
+  (lettre, blocking SMTP + rustls; `can_send=true`), `NoopMailer` (the no-SMTP self-host default — silently
+  drops, `can_send=false`, so the bootstrap won't advertise the passcode method and an invitation reports
+  `mailed:false`), and a recording `FakeMailer` (test-gated — records passcodes AND invitations).
+  **Redaction:** the code rides in a `Passcode` whose hand-written `Debug` is `<redacted>`; `SmtpMailer` /
+  `SmtpConfig` `Debug` omit the transport / creds.
 - **The OIDC connector** (`enroll/oidc.rs`, behind `enroll-oidc`, **DEFAULT-OFF** — a default build resolves
   NO oauth2/openidconnect/reqwest). A minimal single-provider id-token flow: `start` builds the authorize
   redirect (PKCE + CSRF state + nonce, the `user_code` bound into `state`); `callback` runs SERVER-SIDE

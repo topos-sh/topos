@@ -68,8 +68,12 @@ pub fn router(state: PlaneState) -> Router {
             get(routes::proposals::list_proposals),
         );
 
-    // The unauthenticated invite bootstrap — a GET, no body, no body-size belt.
-    let public = Router::new().route("/i/{token}", get(routes::bootstrap::read_invite_bootstrap));
+    // The member-lane VERB surface: the describe reads (no body) + the small guarded row-op writes. Shared
+    // the 64 KiB belt (harmless on the bodyless reads/PUTs) — every op the ONE Bearer workspace credential.
+    let member_verbs = member_verb_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
+
+    // The unauthenticated claim bootstrap — a GET, no body, no body-size belt.
+    let public = Router::new().route("/i/{token}", get(routes::bootstrap::read_bootstrap));
 
     // Enrollment + governance: small JSON bodies behind the 64 KiB belt. The `/v1/workspaces/{ws}/devices`
     // and `/v1/workspaces/{ws}/roster/{email}` paths method-dispatch (redeem vs revoke; set vs remove).
@@ -78,8 +82,12 @@ pub fn router(state: PlaneState) -> Router {
 
     writes
         .merge(reads)
+        .merge(member_verbs)
         .merge(public)
         .merge(enroll_and_governance)
+        // Any UNMATCHED path is the constant protocol card (a GET) or the uniform JSON 404 (any other
+        // method) — a resource address a client can re-root from, with no path echo and no existence signal.
+        .fallback(routes::card::protocol_card)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit::enforce,
@@ -87,6 +95,67 @@ pub fn router(state: PlaneState) -> Router {
         // Outermost (the last layer added), so the rate limiter's 429s are recorded too.
         .layer(axum::middleware::from_fn(trace_requests))
         .with_state(state)
+}
+
+/// The member-lane verb-surface route group (the describe reads + the guarded row-op writes), all
+/// authenticated by the ONE Bearer workspace credential and front-doored by the ONE membership predicate.
+/// Factored out so the body-size belt wraps the whole group in one place.
+fn member_verb_routes() -> Router<PlaneState> {
+    Router::new()
+        // The describe reads (the two-phase verbs' "before").
+        .route("/v1/workspaces/{ws}/me", get(routes::describe::get_me))
+        .route(
+            "/v1/workspaces/{ws}/channels",
+            get(routes::describe::get_channels),
+        )
+        .route(
+            "/v1/workspaces/{ws}/proposals",
+            get(routes::describe::get_proposals),
+        )
+        .route(
+            "/v1/workspaces/{ws}/skills/{skill}/log",
+            get(routes::describe::get_log),
+        )
+        .route(
+            "/v1/workspaces/{ws}/skills/{skill}/reach",
+            get(routes::describe::get_reach),
+        )
+        // Person-scoped subscriptions + this-device exclusion.
+        .route(
+            "/v1/workspaces/{ws}/follows/{skill}",
+            put(routes::subscriptions::follow_skill).delete(routes::subscriptions::unfollow_skill),
+        )
+        .route(
+            "/v1/workspaces/{ws}/exclusions/{skill}",
+            put(routes::subscriptions::exclude_device),
+        )
+        // Channel membership (join/leave) + curation (place/unplace).
+        .route(
+            "/v1/workspaces/{ws}/channels/{ch}/membership",
+            put(routes::channels::channel_join).delete(routes::channels::channel_leave),
+        )
+        .route(
+            "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}",
+            put(routes::channels::channel_place).delete(routes::channels::channel_unplace),
+        )
+        // The `protect` setter (kind-polymorphic: a skill bundle, or a channel mode).
+        .route(
+            "/v1/workspaces/{ws}/skills/{skill}/protection",
+            put(routes::protection::set_skill_protection),
+        )
+        .route(
+            "/v1/workspaces/{ws}/channels/{ch}/protection",
+            put(routes::protection::set_channel_protection),
+        )
+        // Notices ack (person-scoped read-state) + invitation (a roster WRITE, member-level).
+        .route(
+            "/v1/workspaces/{ws}/notices/ack",
+            post(routes::notices::ack_notices),
+        )
+        .route(
+            "/v1/workspaces/{ws}/invitations",
+            post(routes::invitations::invite),
+        )
 }
 
 /// Request-level tracing, wired into [`router`] so every composition gets it (no new dependency): ONE
@@ -137,13 +206,15 @@ fn enroll_and_governance_routes() -> Router<PlaneState> {
             post(routes::enroll::complete_passcode),
         )
         .route("/v1/admin-claim", post(routes::enroll::admin_claim))
+        // The LOGIN redeem (a login-intent grant → one credential per confirmed seat); grant-in-body, no
+        // Authorization header, like the redeem.
+        .route("/v1/login", post(routes::login::login))
         // `/v1/workspaces/{ws}/devices`: POST redeems (enrollment), DELETE revokes (governance).
         .route(
             "/v1/workspaces/{ws}/devices",
             post(routes::enroll::redeem).delete(routes::governance::revoke_device),
         )
         // Governance (device-credential authenticated; owner/admin).
-        .route("/v1/invites", post(routes::governance::create_invite))
         // `/v1/workspaces/{ws}/roster/{email}`: PUT sets a role, DELETE removes the principal.
         .route(
             "/v1/workspaces/{ws}/roster/{email}",

@@ -64,9 +64,25 @@ pub(crate) async fn review(
                 op: DeviceOp::ReviewReject,
                 expected: req.expected,
             };
+            // The reject reason is MANDATORY on the device lane now (an empty/absent reason is the
+            // authority's SYNTHESIZED REASON_REQUIRED denial — never persisted, so a corrected retry
+            // proceeds fresh under the same op_id).
+            let reason = req.reason.as_deref().unwrap_or("");
             state
                 .authority()
-                .review_reject(&ws, &skill, proposal, auth, &op_id, &created_at)
+                .review_reject(&ws, &skill, proposal, auth, reason, &op_id, &created_at)
+                .await?
+        }
+        ReviewDecision::Withdraw => {
+            // The AUTHOR retracting their own open proposal — a status flip, no pointer move, no reason.
+            let auth = DeviceOpAuth {
+                credential,
+                op: DeviceOp::ReviewWithdraw,
+                expected: req.expected,
+            };
+            state
+                .authority()
+                .review_withdraw(&ws, &skill, proposal, auth, &op_id, &created_at)
                 .await?
         }
     };

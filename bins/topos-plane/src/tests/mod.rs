@@ -15,9 +15,13 @@
 
 mod bootstrap;
 mod bundles;
+mod card;
 mod current;
 mod enroll;
 mod governance;
+mod invitations;
+mod login;
+mod member_verbs;
 mod misc;
 mod policy;
 mod proposals;
@@ -52,6 +56,9 @@ use crate::{PlaneState, router};
 
 // ── constants ──────────────────────────────────────────────────────────────────────────────────────
 const WS: &str = "w_acme";
+/// The seeded workspace's ADDRESS name — `seed_workspace` slugifies the id (`w_acme` → `w-acme`), and a
+/// device enrolls by this name now (the tokened invite door is gone).
+const WS_NAME: &str = "w-acme";
 const SKILL: &str = "s_deploy";
 const DKID: &str = "dk_a";
 const PRINCIPAL: &str = "p_dev";
@@ -476,46 +483,40 @@ fn wait_for_passcode(fake: &FakeMailer) -> String {
     panic!("no passcode mailed within the timeout");
 }
 
-/// Drive `POST /v1/invites` as the owner (the owner device credential rides the `Authorization: Bearer`
-/// header); return the success envelope (asserts a 200).
-async fn create_invite(ctx: &EnrollCtx, op_id: &str, emails: &[&str], skill: &str) -> JsonEnvelope {
-    let body = serde_json::json!({
-        "workspace_id": WS,
-        "op_id": op_id,
-        "emails": emails,
-        "role": "member",
-        "skills": [{ "skill_id": skill, "name": "Deploy" }],
-    });
-    let (status, _, bytes) = send(
-        ctx.app(),
-        req_json_auth("POST", "/v1/invites", body, OWNER_CRED),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    envelope(&bytes)
+/// Seat `email` as an INVITED member of the seeded workspace (the redeem's membership gate flips it to
+/// confirmed). Enrollment is by ADDRESS now, and the roster is the lock, so a device only redeems if its
+/// proven identity holds a seat — this is the roster row a real invitation writes.
+async fn seat_invited(ctx: &EnrollCtx, email: &str) {
+    ctx.authority()
+        .seed_workspace_member(
+            &WorkspaceId::parse(WS).unwrap(),
+            &Principal::parse(email).unwrap(),
+            "member",
+            "invited",
+        )
+        .await
+        .unwrap();
 }
 
-/// Run the full cloud device-auth flow (authorize → poll → passcode → confirm → poll) to a `Granted` grant.
-/// Returns `(grant, user_code, device_public_key)`.
+/// Run the full cloud device-auth flow BY ADDRESS (authorize toward `WS_NAME` → poll → passcode → confirm
+/// → poll) to a `Granted` grant. Seats `email` as an invited member first (the redeem gate). Returns
+/// `(grant, user_code, device_public_key)`.
 async fn enroll_to_grant(
     ctx: &EnrollCtx,
-    invite_op: &str,
     device_seed: u8,
     email: &str,
-    skill: &str,
 ) -> (String, String, [u8; 32]) {
-    let invite = create_invite(ctx, invite_op, &[email], skill).await;
-    let token = token_from_link(invite.data["invite_link"].as_str().unwrap());
+    seat_invited(ctx, email).await;
 
     let device_pk = dev_pubkey(device_seed);
 
-    // authorize.
+    // authorize toward the workspace ADDRESS name (no invite token — the tokened door is gone).
     let (s, _, b) = send(
         ctx.app(),
         post_nosig(
             "/v1/device/authorize",
             serde_json::json!({
-                "invite_token": token,
+                "workspace": WS_NAME,
                 "device_public_key": b64key(&device_pk),
                 "machine_name": "alice-laptop",
             }),
