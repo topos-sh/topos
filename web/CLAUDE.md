@@ -79,7 +79,8 @@ secret names).
 bun install
 bun run dev          # needs DATABASE_URL + PLANE_INTERNAL_URL/PLANE_INTERNAL_TOKEN + BETTER_AUTH_SECRET/URL
 bun run db:migrate   # DATABASE_URL=… apply the web-schema migrations
-bun test             # vitest unit
+bun run test         # vitest unit — NOT `bun test`, which runs BUN's own runner and writes
+                     # snapshot entries vitest then reports as obsolete (CI fails on those)
 bun run test:e2e     # playwright
 bun run check        # biome + the boundary/token/contract gates + typecheck
 ```
