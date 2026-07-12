@@ -30,6 +30,7 @@ async fn seat(fx: &Fixture, w: &WorkspaceId, dkid: &str, seed: u8, principal: &s
         .unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn gpub(
     fx: &Fixture,
     w: &WorkspaceId,

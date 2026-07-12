@@ -126,6 +126,7 @@ pub(crate) async fn delete_skill_session(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn purge_version_session(
     authority: &Authority,
     ws: &WorkspaceId,

@@ -642,7 +642,7 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
         true,
         &[("SKILL.md", false, b"placeholder\n")],
     );
-    author.pull(); // land v1
+    let _ = author.pull(); // land v1
     let v2: &[(&str, bool, &[u8])] = &[
         ("SKILL.md", false, b"# deploy v2\n"),
         ("run.sh", true, b"#!/bin/sh\necho v2\n"),
@@ -755,9 +755,9 @@ fn the_reconcile_reports_applied_state_to_the_fleet() {
 
     let rig = ReconcileHarness::new("chn-s7");
     rig.enroll_member(&plane.base_url, WS, FOL_CRED);
-    rig.reconcile(); // offer
-    rig.accept("deploy"); // land v1 (map.applied_commit = v1)
-    rig.reconcile(); // the reconcile that reports v1 as applied
+    let _ = rig.reconcile(); // offer
+    let _ = rig.accept("deploy"); // land v1 (map.applied_commit = v1)
+    let _ = rig.reconcile(); // the reconcile that reports v1 as applied
 
     plane.rt.block_on(async {
         // The fleet row names the applied version, live (detached 0), keyed by the seeded device.

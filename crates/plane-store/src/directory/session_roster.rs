@@ -283,6 +283,7 @@ pub(crate) async fn invite_members_session(
 /// [`Authority::roster_remove_session`]). Reuses the device lane's last-owner-lockout guard and
 /// its exact instant-revoke transaction shape (membership + per-skill roster + read tokens dropped
 /// in one txn).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn roster_remove_session(
     authority: &Authority,
     ws: &WorkspaceId,

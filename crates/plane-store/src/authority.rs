@@ -1212,6 +1212,7 @@ impl Authority {
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    #[allow(clippy::too_many_arguments)]
     pub async fn roster_remove_session(
         &self,
         ws: &WorkspaceId,
