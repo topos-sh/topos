@@ -968,8 +968,8 @@ SELECT workspace_id, 'everyone', skill_id, 'migration-0015', 'migration-0015'
 FROM catalog
 ON CONFLICT (workspace_id, channel_id, skill_id) DO NOTHING;
 
--- The inc-2 → inc-3 handoff: the per-skill `roster` rows (interim follow-state since the
--- workspace-credential increment — they gated nothing) become person-scoped DIRECT follows; rows
+-- The LIFT: the per-skill `roster` rows (interim follow-state since the
+-- workspace credential landed — they gated nothing) become person-scoped DIRECT follows; rows
 -- for skills that never published (no catalog entry) carry no deliverable state and are dropped
 -- with the table.
 INSERT INTO skill_follows (workspace_id, principal, skill_id, created_at)

@@ -143,9 +143,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   `notices` with read-state, the fleet `device_skill_state` (+ `device_registry.last_report_at`), version
   purge tombstone columns on `skill_commit`, the `closed` proposal status, the guarded `topos_*` POLICY
   FUNCTIONS (curation, membership, subscriptions, protect, lifecycle, the lapse-detach/re-attach
-  reconciles) + the `topos_person_entitled`/`topos_entitled_skills` entitlement SRFs — and the inc-2→inc-3
-  handoff: the interim per-skill `roster` rows lifted into person-scoped direct follows, then
-  **`DROP TABLE roster`**.
+  reconciles) + the `topos_person_entitled`/`topos_entitled_skills` entitlement SRFs — and the LIFT: the
+  interim per-skill `roster` rows moved into person-scoped direct follows, then **`DROP TABLE roster`**.
 - **`Authority::read_object`** — the skill-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
@@ -562,7 +561,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   tests in `src/tests/enrollment_governance.rs` + `src/tests/session_roster.rs` and the
   migration-logic probe in `src/tests/canonical_migration.rs`.
 
-- **The channels model (increment 3): the catalog + channels + person-scoped subscriptions + the
+- **The channels model: the catalog + channels + person-scoped subscriptions + the
   delivery predicate + the skill lifecycle.** Migration `0015` (see the schema bullet) puts EVERY policy
   decision in guarded `topos_*` SQL functions — the one implementation Rust calls today and the web tier
   calls at the door cutover — with the channel audit TRIGGER-emitted so no write path can skip it, and
@@ -614,8 +613,8 @@ re-enroll IS the rotation; an in-place rotate-without-re-enroll op is later work
 domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest encryption / KMS of the enrollment secret** (a plaintext `0600` seed for
 now); the `purge`/lifecycle WEB CEREMONIES (the authority ops + guarded functions are BUILT; the step-up
-pages are increment 5's); notices ACK (the read-state column exists; the fetch-without-ack rides
-delivery; the ack write is increment 4's route); two-parent author merges; per-skill encryption-at-rest.
+pages are the web tier's); notices ACK (the read-state column exists; the fetch-without-ack rides
+delivery; the ack write is a later surface); two-parent author merges; per-skill encryption-at-rest.
 
 ## Build note
 

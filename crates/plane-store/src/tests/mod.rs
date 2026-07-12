@@ -303,7 +303,7 @@ async fn register(
         .await
         .unwrap();
     // Every device write gates on a CONFIRMED workspace member (any role); seat one. The per-skill
-    // `roster` table is gone (increment 3 lifted follow-state into person-scoped `skill_follows`);
+    // `roster` table is gone (its follow-state was lifted into person-scoped `skill_follows`);
     // membership alone authorizes reads AND writes, so no per-skill seeding is needed here.
     fx.authority
         .db()

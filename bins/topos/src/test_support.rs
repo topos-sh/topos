@@ -1940,7 +1940,7 @@ impl ReconcileHarness {
             .len()
     }
 
-    /// Simulate the LOCAL half of the (inc-4) `remove` verb: flip `following = false` in `follows.json`
+    /// Simulate the LOCAL half of the `remove` verb (the verb itself lands later): flip `following = false` in `follows.json`
     /// and delete the agent placement dir — so the next reconcile sees an already-frozen entry (the
     /// server exclusion is driven separately via `Authority::exclude_device`).
     pub fn simulate_local_remove(&self, skill_id: &str) {

@@ -256,7 +256,7 @@ pub(crate) async fn protect(
 /// The person-scoped variants the SESSION tier (a hosted composition's pages) calls with an
 /// already-verified email instead of a credential — the same guarded functions, the same membership
 /// front door; self-host is NOT denied here (unlike the roster/review session legs) because these
-/// are the increment-5 web app's row ops and the policy functions are the contract. Deliberately
+/// are the web app's row ops and the policy functions are the contract. Deliberately
 /// minimal: join/leave only (the web "join channel" button); curation and protection stay on the
 /// device lane until the web surfaces land.
 pub(crate) async fn channel_join_session(
