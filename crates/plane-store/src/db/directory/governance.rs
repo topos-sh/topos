@@ -360,24 +360,26 @@ async fn governance_mutation_run(
                 // principal's access the moment this commits (their devices'
                 // credentials still authenticate, and then every gate denies — fail closed, nothing
                 // cached; re-adding the member re-enables the same devices, the git/GitHub model).
-                // Then the LAPSE-DETACH reconcile: with the seat gone the person's entitlement union
-                // is empty, so every one of their devices' fleet rows gets its final detach record
-                // ("removed — last known state" — audit-retained, the fleet page's blind-spot list).
+                // The LAPSE-DETACH reconcile runs FIRST — the entitlement union is membership-gated,
+                // so it reads empty once the seat is gone: everything the person received lapses at
+                // once, writing their detachment records + freezing their devices' fleet rows at
+                // last-applied ("removed — last known state", the fleet page's blind-spot list).
+                sqlx::query!(
+                    r#"SELECT topos_detach_on_removal($1, $2, $3, $4) AS "n!""#,
+                    ws_s,
+                    tgt,
+                    input.now,
+                    input.created_at,
+                )
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(AuthorityError::internal)?;
                 sqlx::query!(
                     "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
                     ws_s,
                     tgt,
                 )
                 .execute(&mut **tx)
-                .await
-                .map_err(AuthorityError::internal)?;
-                sqlx::query!(
-                    r#"SELECT topos_detach_lapsed($1, $2, $3) AS "n!""#,
-                    ws_s,
-                    tgt,
-                    input.now,
-                )
-                .fetch_one(&mut **tx)
                 .await
                 .map_err(AuthorityError::internal)?;
                 GovernanceOutcome::Ok

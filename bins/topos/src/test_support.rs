@@ -1700,6 +1700,273 @@ impl ContributeHarness {
     }
 }
 
+/// The RECONCILE rig (Leg G): an ENROLLED member home (instance/user/credentials + a possibly-empty
+/// `follows.json`) over a real `~/.topos/` + a work root where delivered skills land through the REAL
+/// `WorkHarness` adapter. Drives the GENUINE delivery-driven reconcile
+/// ([`ops::pull_reconcile`]) over the REAL `ureq` [`crate::plane::DeliverySource`] against a loopback
+/// plane — so an external e2e proves the whole "one delivery call answers what to have, the engine
+/// converges" loop (new-arrival OFFER, update, withdraw, freeze, access-gone) without reaching the
+/// client's `pub(crate)` internals. Mirrors [`FollowHarness`]/[`ContributeHarness`] conventions.
+#[derive(Debug)]
+pub struct ReconcileHarness {
+    home: Scratch,
+    work: Scratch,
+    fs: RealFs,
+    ids: RealIds,
+    clock: RealClock,
+    harness: WorkHarness,
+}
+
+impl ReconcileHarness {
+    /// A fresh rig over unique temp dirs (cleaned on drop).
+    #[must_use]
+    pub fn new(tag: &str) -> Self {
+        let work = Scratch::new(&format!("{tag}-rwork"));
+        let harness = WorkHarness {
+            work: work.0.clone(),
+        };
+        Self {
+            home: Scratch::new(&format!("{tag}-rhome")),
+            work,
+            fs: RealFs,
+            ids: RealIds,
+            clock: RealClock,
+            harness,
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::new(&self.home.0)
+    }
+
+    /// Enroll a member EXACTLY as `follow` would leave it, but with ZERO followed skills: write
+    /// `instance.json` (the plane base), `user.json` (the workspace membership), and
+    /// `credentials.json` (the workspace Bearer credential); the `follows.json` is EMPTY so the first
+    /// reconcile installs whatever the delivery delivers as a fresh arrival. Additional workspaces are
+    /// added with [`add_workspace`](Self::add_workspace).
+    pub fn enroll_member(&self, base_url: &str, workspace_id: &str, credential: &str) {
+        let layout = self.layout();
+        enroll::write_instance(
+            &self.fs,
+            &layout,
+            &Instance {
+                schema_version: 1,
+                base_url: base_url.to_owned(),
+                deployment_mode: DeploymentMode::Cloud,
+                enrollment_method: "device_code".to_owned(),
+            },
+        )
+        .expect("write instance.json");
+        enroll::write_user(
+            &self.fs,
+            &layout,
+            &UserDoc {
+                schema_version: 1,
+                email: None,
+                principal: None,
+                workspaces: vec![Membership {
+                    workspace_id: workspace_id.to_owned(),
+                    display_name: Some("Test".to_owned()),
+                    roles: Vec::new(),
+                    verified_domain: None,
+                    verified_domain_status: VerifiedDomainStatus::Unverified,
+                    invite_rooted: true,
+                    enrolled_at: 1,
+                }],
+            },
+        )
+        .expect("write user.json");
+        std::fs::create_dir_all(layout.identity_dir()).expect("create identity dir");
+        doc::write_doc_private(
+            &self.fs,
+            &layout.credentials_path(),
+            &Credentials {
+                schema_version: 1,
+                credentials: vec![CredentialEntry {
+                    workspace_id: workspace_id.to_owned(),
+                    credential: credential.to_owned(),
+                }],
+            },
+        )
+        .expect("write credentials.json");
+        doc::write_doc_private(
+            &self.fs,
+            &layout.follows_path(),
+            &Follows {
+                schema_version: 1,
+                follows: Vec::new(),
+            },
+        )
+        .expect("write empty follows.json");
+    }
+
+    /// The workspace credential map (`workspace_id → credential`) from `credentials.json`.
+    fn ws_creds(&self) -> HashMap<String, String> {
+        creds_map(&self.fs, &self.layout())
+    }
+
+    fn base_url(&self) -> String {
+        enroll::read_instance(&self.fs, &self.layout())
+            .expect("read instance.json")
+            .expect("instance.json exists after enroll")
+            .base_url
+    }
+
+    /// The wired transport (per-skill read creds from the on-disk follow-state × credentials) + the
+    /// on-disk follow seam — rebuilt each call so a reconcile that just wrote `follows.json` is seen.
+    fn transport(&self) -> (UreqPlane, FileFollow) {
+        let follows = enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .unwrap_or(Follows {
+                schema_version: 1,
+                follows: Vec::new(),
+            });
+        let creds = creds_doc(&self.fs, &self.layout());
+        let plane = UreqPlane::new(self.base_url(), enroll::skill_creds(&follows, &creds))
+            .with_workspace_credentials(self.ws_creds());
+        let follow = FileFollow::new(enroll::follow_contexts(&follows));
+        (plane, follow)
+    }
+
+    /// Run the REAL delivery-driven reconcile over the loopback plane (one `GET …/delivery` per
+    /// enrolled workspace + the `PUT …/report` fleet write). Returns `(PullData, warnings)` — the
+    /// per-workspace faults (`ACCESS_GONE`, `PLANE_UNAVAILABLE`) ride the warnings.
+    ///
+    /// # Panics
+    /// If the reconcile errors (a hard wiring fault — per-skill/per-workspace faults are isolated).
+    #[must_use]
+    pub fn reconcile(&self) -> (PullData, Vec<String>) {
+        let (plane, follow) = self.transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("device id");
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            follow: &follow,
+        };
+        let out = ops::pull_reconcile(&ctx, &plane)
+            .unwrap_or_else(|e| panic!("test_support: reconcile failed: {e}"));
+        (out.data, out.warnings)
+    }
+
+    /// Accept an OFFERED first-receive (or land a pending update) for one skill by its catalog NAME —
+    /// the explicit `topos pull <name>` consent that lands the bytes a reconcile only offered.
+    ///
+    /// # Panics
+    /// If the targeted pull errors.
+    #[must_use]
+    pub fn accept(&self, name: &str) -> PullData {
+        let (plane, follow) = self.transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("device id");
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            follow: &follow,
+        };
+        ops::pull(
+            &ctx,
+            ops::PullScope::One {
+                name: name.to_owned(),
+                mode: ops::TargetMode::AcceptPending,
+            },
+        )
+        .unwrap_or_else(|e| panic!("test_support: accept failed: {e}"))
+        .data
+    }
+
+    /// Where the `WorkHarness` places `skill_id` (`<work>/<skill_id>`) — the agent dir a reconcile
+    /// installs into and withdraws from.
+    fn placement_dir(&self, skill_id: &str) -> PathBuf {
+        self.work.0.join(skill_id)
+    }
+
+    /// The placed bundle for `skill_id`: `(relative path, mode & 0o777, bytes)`, sorted — a byte-exact
+    /// witness of what landed.
+    #[must_use]
+    pub fn placement_files(&self, skill_id: &str) -> Vec<(String, u32, Vec<u8>)> {
+        snapshot_dir(&self.placement_dir(skill_id))
+    }
+
+    /// Whether the agent placement dir for `skill_id` exists (present after an accept; GONE after an
+    /// upstream withdrawal, INTACT after a person-level detach / freeze).
+    #[must_use]
+    pub fn placement_exists(&self, skill_id: &str) -> bool {
+        self.placement_dir(skill_id).exists()
+    }
+
+    /// The followed skill's `sync.json` (the floor/applied state), or `None` before its baseline exists.
+    #[must_use]
+    pub fn sync_state(&self, skill_id: &str) -> Option<SyncState> {
+        doc::read_doc(&self.fs, &self.layout().published(&sid(skill_id)).sync)
+            .expect("read sync.json")
+    }
+
+    /// The follow-state `follows.json` holds, as `(skill_id, workspace_id, following)` in stored order.
+    #[must_use]
+    pub fn follows(&self) -> Vec<(String, String, bool)> {
+        enroll::read_follows(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|f| {
+                f.follows
+                    .into_iter()
+                    .map(|e| (e.skill_id, e.workspace_id, e.following))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The number of versions (commits) the sidecar store for `skill_id` holds — a fetched version plus
+    /// any snapshotted draft. The withdrawal-with-a-draft scenario asserts the draft commit was retained
+    /// (the store keeps the bytes even as the agent dir is cleaned).
+    #[must_use]
+    pub fn store_version_count(&self, skill_id: &str) -> usize {
+        let store_dir = self.layout().published(&sid(skill_id)).store;
+        topos_gitstore::Store::open(&store_dir)
+            .expect("open sidecar store")
+            .list_versions()
+            .expect("list sidecar versions")
+            .len()
+    }
+
+    /// Simulate the LOCAL half of the (inc-4) `remove` verb: flip `following = false` in `follows.json`
+    /// and delete the agent placement dir — so the next reconcile sees an already-frozen entry (the
+    /// server exclusion is driven separately via `Authority::exclude_device`).
+    pub fn simulate_local_remove(&self, skill_id: &str) {
+        enroll::set_following(&self.fs, &self.layout(), skill_id, false)
+            .expect("set following false");
+        let dir = self.placement_dir(skill_id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("remove placement dir");
+        }
+    }
+
+    /// Resume following a locally-frozen skill (the LOCAL half of `follow <skill>`): flip
+    /// `following = true` so the next reconcile re-attaches it (paired with the server-side
+    /// `Authority::follow_skill` that lifts the device exclusion).
+    pub fn resume_local_following(&self, skill_id: &str) {
+        enroll::set_following(&self.fs, &self.layout(), skill_id, true)
+            .expect("set following true");
+    }
+
+    /// Overwrite the placement with `files` — a local draft ahead of `current`, so a subsequent
+    /// upstream withdrawal snapshots it into the sidecar store.
+    pub fn edit_placement(&self, skill_id: &str, files: &[(&str, bool, &[u8])]) {
+        write_tree(&self.placement_dir(skill_id), files);
+    }
+}
+
 /// Read a rig's `credentials.json` (empty if absent) — the per-workspace credentials `skill_creds` joins.
 fn creds_doc(fs: &RealFs, layout: &Layout) -> Credentials {
     enroll::read_credentials(fs, layout)

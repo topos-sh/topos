@@ -603,6 +603,9 @@ async fn member_read_scope(
 // ── the split suites (most `use super::*;` for the shared fixtures/helpers above;
 //    canonical_migration is self-contained — it probes raw migration SQL, not the Authority) ──
 mod canonical_migration;
+mod channels_delivery;
+mod channels_lifecycle;
+mod channels_protect;
 mod contribute;
 mod display_name;
 mod enrollment_governance;

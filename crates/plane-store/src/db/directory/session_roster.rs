@@ -522,25 +522,27 @@ async fn session_remove_run(
     // The device lane's exact removal shape: drop the membership — the row every read/write gate
     // joins against, so access dies the moment this commits (the person's devices and their
     // credentials stay: re-adding the member re-enables them, the git/GitHub model) — and, in the
-    // same transaction, the lapse-detach reconcile: with the seat gone the entitlement union is
-    // empty, so every one of their devices' fleet rows gets its final detach record ("removed —
-    // last known state", audit-retained for the fleet page's blind-spot list).
+    // same transaction, the lapse-detach reconcile — which runs FIRST, since the entitlement union
+    // is membership-gated and reads empty once the seat is gone: everything the person received
+    // lapses at once, writing their detachment records + freezing their devices' fleet rows at
+    // last-applied ("removed — last known state", the fleet page's blind-spot list).
     let (ws_s, tgt) = (input.ws.as_str(), target.as_str());
+    sqlx::query!(
+        r#"SELECT topos_detach_on_removal($1, $2, $3, $4) AS "n!""#,
+        ws_s,
+        tgt,
+        input.now,
+        input.created_at,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
     sqlx::query!(
         "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
         ws_s,
         tgt,
     )
     .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    sqlx::query!(
-        r#"SELECT topos_detach_lapsed($1, $2, $3) AS "n!""#,
-        ws_s,
-        tgt,
-        input.now,
-    )
-    .fetch_one(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
     record_session_event(

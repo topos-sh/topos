@@ -6,6 +6,8 @@
 //! reads it. The report write is a snapshot upsert that NEVER touches a detach record (the frozen
 //! "last applied" the fleet page shows).
 
+use sqlx::{Acquire, Postgres};
+
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, Principal, SkillId, WorkspaceId};
@@ -44,11 +46,33 @@ pub(crate) struct NoticeDbRow {
 }
 
 impl Db {
-    /// The entitled set for `(principal, device)` — a pool read over the ONE entitlement function.
+    /// Open the delivery read's ONE snapshot transaction. The entitled set, the detached set, and the
+    /// notices MUST be read from a single consistent snapshot: a subscription change landing between
+    /// two independent reads could leave a skill in NEITHER list, and the client reads
+    /// "delivered nowhere, detached nowhere" as an UPSTREAM withdrawal — cleaning agent dirs for a
+    /// skill the person still subscribes to. `REPEATABLE READ` is exactly the guarantee needed (the
+    /// read mints nothing durable, so no serialization retry is required).
+    pub(crate) async fn begin_delivery_snapshot(
+        &self,
+    ) -> Result<sqlx::Transaction<'_, Postgres>> {
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(AuthorityError::internal)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .map_err(AuthorityError::internal)?;
+        Ok(tx)
+    }
+
+    /// The entitled set for `(principal, device)` — read over the ONE entitlement function.
     /// The caller's membership gate has already run (the function's own membership join is
     /// defense-in-depth, not the front door).
     pub(crate) async fn entitled_skills(
         &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
         ws: &WorkspaceId,
         principal: &Principal,
         device_key_id: &str,
@@ -65,7 +89,7 @@ impl Db {
             principal.as_str(),
             device_key_id,
         )
-        .fetch_all(self.pool())
+        .fetch_all(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
@@ -93,11 +117,19 @@ impl Db {
             .collect()
     }
 
-    /// The skills this person DETACHED (freeze-in-place on every device): the unfollow masks ∪ the
-    /// detach records across the person's devices — minus anything currently entitled again
-    /// (entitlement wins: presence in the delivered set re-attaches). Skill ids, sorted.
+    /// The skills this person DETACHED — the who-acts signal every device freezes on: the
+    /// person-scoped DETACHMENT RECORDS (written by their own unfollow / channel leave / membership
+    /// removal, scoped to exactly what that event lapsed) ∪ their standing unfollow masks, minus
+    /// anything currently entitled again (entitlement always wins — a re-follow, a curator's
+    /// re-placement, an unarchive all revive delivery). Skill ids, sorted.
+    ///
+    /// PERSON-scoped by construction: it never consults `device_skill_state`, so a device that has
+    /// never reported still learns the person detached a skill (a fleet row need not exist), and a
+    /// skill an UPSTREAM act removed — an unplace, an archive — is deliberately absent here, which
+    /// is what tells the client to CLEAN rather than freeze.
     pub(crate) async fn detached_skills(
         &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
         ws: &WorkspaceId,
         principal: &Principal,
         device_key_id: &str,
@@ -109,10 +141,8 @@ impl Db {
                    SELECT u.skill_id FROM skill_unfollows u
                    WHERE u.workspace_id = $1 AND u.principal = $2
                    UNION
-                   SELECT st.skill_id FROM device_skill_state st
-                   JOIN device_registry dr ON dr.workspace_id = st.workspace_id
-                                          AND dr.device_key_id = st.device_key_id
-                   WHERE st.workspace_id = $1 AND dr.principal = $2 AND st.detached = 1
+                   SELECT dt.skill_id FROM skill_detachments dt
+                   WHERE dt.workspace_id = $1 AND dt.principal = $2
                ) d
                WHERE NOT EXISTS (
                    SELECT 1 FROM topos_entitled_skills($1, $2, $3) e WHERE e.skill_id = d.skill_id
@@ -122,7 +152,7 @@ impl Db {
             principal.as_str(),
             device_key_id,
         )
-        .fetch_all(self.pool())
+        .fetch_all(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
         Ok(rows.into_iter().map(|r| r.skill_id).collect())
@@ -132,6 +162,7 @@ impl Db {
     /// is a later surface).
     pub(crate) async fn unacked_notices(
         &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
         ws: &WorkspaceId,
         principal: &Principal,
     ) -> Result<Vec<NoticeDbRow>> {
@@ -148,7 +179,7 @@ impl Db {
             ws_s,
             principal.as_str(),
         )
-        .fetch_all(self.pool())
+        .fetch_all(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
@@ -171,10 +202,14 @@ impl Db {
 
     /// The applied-state report: ONE snapshot upsert per device — refresh the reported rows, drop
     /// the non-detached rows the snapshot no longer names (the device no longer holds them), stamp
-    /// the device's `last_report_at` (the dashboard's staleness clock). DETACH RECORDS ARE IMMUTABLE
-    /// HERE: a detached row is neither updated nor deleted (it is the frozen "last applied" the
-    /// fleet page shows); re-attach happens through the subscription reconciles, never a report.
-    /// Rows for skill ids the catalog does not know are dropped (a report is client-asserted data).
+    /// the device's `last_report_at` (the dashboard's staleness clock). Rows for skill ids the
+    /// catalog does not know are dropped (a report is client-asserted data).
+    ///
+    /// A REPORTED skill REVIVES its row (`detached = 0`): the client only ever reports what the
+    /// delivery DELIVERED to it and it actually holds, so a report proves the subscription is live
+    /// again — that is what heals a fleet row a lapse froze before a curator re-placed the skill.
+    /// A frozen (detached) row the client no longer reports is never touched: it stays as the final
+    /// "last known state" the fleet page names as its blind spot.
     pub(crate) async fn report_applied_txn(
         &self,
         ws: &WorkspaceId,
@@ -202,8 +237,8 @@ impl Db {
                  FROM UNNEST($4::TEXT[], $5::BYTEA[]) AS r(skill_id, applied_commit) \
                  JOIN catalog cat ON cat.workspace_id = $1 AND cat.skill_id = r.skill_id \
                  ON CONFLICT (workspace_id, device_key_id, skill_id) DO UPDATE \
-                   SET applied_commit = excluded.applied_commit, reported_at = excluded.reported_at \
-                   WHERE device_skill_state.detached = 0",
+                   SET applied_commit = excluded.applied_commit, reported_at = excluded.reported_at, \
+                       detached = 0, detached_at = NULL",
                 ws_s,
                 device_key_id,
                 now,

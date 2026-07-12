@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT d.skill_id AS \"skill_id!\"\n               FROM (\n                   SELECT u.skill_id FROM skill_unfollows u\n                   WHERE u.workspace_id = $1 AND u.principal = $2\n                   UNION\n                   SELECT dt.skill_id FROM skill_detachments dt\n                   WHERE dt.workspace_id = $1 AND dt.principal = $2\n               ) d\n               WHERE NOT EXISTS (\n                   SELECT 1 FROM topos_entitled_skills($1, $2, $3) e WHERE e.skill_id = d.skill_id\n               )\n               ORDER BY d.skill_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "skill_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "74f13eacdb26ab90e8729eda36cedecb509ca848d6d21aaf56640b35787a38ac"
+}

@@ -32,6 +32,10 @@ CREATE TABLE catalog (
     display_name TEXT,
     status       TEXT   NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived', 'deleted')),
     protection   TEXT            CHECK (protection IS NULL OR protection IN ('open', 'reviewed')),
+    -- The name the skill carried before an archive renamed it — recorded so unarchive restores it
+    -- EXACTLY, with no name parsing (a skill legitimately named `foo-archived-2026-07-11` would
+    -- defeat any suffix-stripping regex). NULL unless archived.
+    base_name    TEXT,
     archived_at  BIGINT,
     deleted_at   BIGINT,
     created_at   TEXT   NOT NULL,
@@ -133,6 +137,23 @@ CREATE TABLE skill_unfollows (
     workspace_id TEXT NOT NULL,
     principal    TEXT NOT NULL CHECK (principal = lower(principal COLLATE "C")),
     skill_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, principal, skill_id),
+    FOREIGN KEY (workspace_id, skill_id) REFERENCES catalog (workspace_id, skill_id)
+);
+
+-- PERSON-SCOPED DETACHMENT RECORDS — the who-acts signal the delivery response carries. A row here
+-- means "this PERSON's own act stopped delivering this skill to them" (an explicit unfollow, a
+-- channel they left, a membership that was removed), so every device FREEZES the copy in place
+-- rather than cleaning it. Distinct from `skill_unfollows` (the standing negative MASK subtracted
+-- from the union): a detachment is a RECORD of a lapse, never a mask — a later channel join or
+-- curation placement re-entitles the skill and the record is cleared (entitlement always wins).
+-- Person-scoped, so it is correct for a device that has never reported (a fleet row need not exist).
+CREATE TABLE skill_detachments (
+    workspace_id TEXT NOT NULL,
+    principal    TEXT NOT NULL CHECK (principal = lower(principal COLLATE "C")),
+    skill_id     TEXT NOT NULL,
+    cause        TEXT NOT NULL CHECK (cause IN ('unfollow', 'channel_leave', 'membership_removed')),
     created_at   TEXT NOT NULL,
     PRIMARY KEY (workspace_id, principal, skill_id),
     FOREIGN KEY (workspace_id, skill_id) REFERENCES catalog (workspace_id, skill_id)
@@ -412,14 +433,33 @@ CREATE FUNCTION topos_effective_protection(p_ws TEXT, p_skill TEXT) RETURNS TEXT
         'open')
 $$;
 
--- LAPSE-DETACH — the reconcile behind every entitlement-losing person event (channel leave, skill
--- unfollow, member removal): writes the FINAL DETACH RECORD (detached = 1, freezing last-applied)
--- on every device row of this person whose skill is no longer in the person's union. Never touches
--- other people's rows; never un-detaches (re-attach is the inverse below).
-CREATE FUNCTION topos_detach_lapsed(p_ws TEXT, p_principal TEXT, p_now BIGINT) RETURNS BIGINT LANGUAGE plpgsql AS $$
+-- The person's currently-entitled skill ids, as an array — the before/after snapshots every
+-- person-scoped event takes so the lapse reconcile below detaches EXACTLY what that event lapsed
+-- (never what an unrelated upstream act — a curator's unplace, an archive — removed: those are
+-- UPSTREAM withdrawals, whose contract is that the client CLEANS the agent dirs, not freezes them;
+-- misrecording one as a person detach would freeze withdrawn bytes on the fleet forever).
+CREATE FUNCTION topos_entitled_ids(p_ws TEXT, p_principal TEXT) RETURNS TEXT[] LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(array_agg(e.skill_id ORDER BY e.skill_id), '{}')
+    FROM topos_person_entitled(p_ws, p_principal) e
+$$;
+
+-- LAPSE-DETACH — the reconcile behind every entitlement-losing PERSON event (unfollow, channel
+-- leave, membership removal). `p_lapsed` is the EXACT set that event lapsed (the caller's
+-- before − after), so an unrelated skill the person still receives — or one an UPSTREAM act
+-- removed — is never mislabelled a person detach. Writes the person-scoped detachment RECORD (the
+-- who-acts signal the delivery response carries; correct even for a device that never reported) and
+-- freezes the matching fleet rows at their last-applied version (the dashboard's blind-spot list).
+CREATE FUNCTION topos_detach_lapsed(p_ws TEXT, p_principal TEXT, p_lapsed TEXT[], p_cause TEXT,
+                                    p_now BIGINT, p_created_at TEXT) RETURNS BIGINT LANGUAGE plpgsql AS $$
 DECLARE
     n BIGINT;
 BEGIN
+    IF p_lapsed IS NULL OR cardinality(p_lapsed) = 0 THEN
+        RETURN 0;
+    END IF;
+    INSERT INTO skill_detachments (workspace_id, principal, skill_id, cause, created_at)
+    SELECT p_ws, p_principal, s, p_cause, p_created_at FROM unnest(p_lapsed) AS s
+    ON CONFLICT (workspace_id, principal, skill_id) DO NOTHING;
     UPDATE device_skill_state st
     SET detached = 1, detached_at = p_now
     FROM device_registry dr
@@ -427,18 +467,23 @@ BEGIN
       AND dr.workspace_id = st.workspace_id AND dr.device_key_id = st.device_key_id
       AND dr.principal = p_principal
       AND st.detached = 0
-      AND NOT EXISTS (SELECT 1 FROM topos_person_entitled(p_ws, p_principal) e WHERE e.skill_id = st.skill_id);
+      AND st.skill_id = ANY(p_lapsed);
     GET DIAGNOSTICS n = ROW_COUNT;
     RETURN n;
 END
 $$;
 
--- RE-ATTACH — the inverse: any entitlement-adding person event (follow, channel join) revives the
--- detach records of skills that are entitled again ("follow re-attaches and resumes").
+-- RE-ATTACH — the inverse, and the SELF-HEAL: any skill the person is entitled to again (their own
+-- follow/join, but equally a curator re-placing it or their membership being restored) has its
+-- detachment record dropped and its fleet rows revived. Entitlement always wins over a stale
+-- detachment — so no record can strand a live subscription.
 CREATE FUNCTION topos_reattach(p_ws TEXT, p_principal TEXT) RETURNS BIGINT LANGUAGE plpgsql AS $$
 DECLARE
     n BIGINT;
 BEGIN
+    DELETE FROM skill_detachments d
+    WHERE d.workspace_id = p_ws AND d.principal = p_principal
+      AND EXISTS (SELECT 1 FROM topos_person_entitled(p_ws, p_principal) e WHERE e.skill_id = d.skill_id);
     UPDATE device_skill_state st
     SET detached = 0, detached_at = NULL
     FROM device_registry dr
@@ -449,6 +494,42 @@ BEGIN
       AND EXISTS (SELECT 1 FROM topos_person_entitled(p_ws, p_principal) e WHERE e.skill_id = st.skill_id);
     GET DIAGNOSTICS n = ROW_COUNT;
     RETURN n;
+END
+$$;
+
+-- SELF-HEAL, skill-scoped — the inverse of a lapse for ONE skill, across everyone who had detached
+-- it: any principal now entitled to it again (a curator re-placed it, an owner unarchived it) has
+-- its detachment record dropped and its fleet rows revived. Entitlement always wins over a stale
+-- record, so no upstream re-entitlement can strand a subscription behind a detach the person never
+-- meant to be permanent.
+CREATE FUNCTION topos_heal_detachments(p_ws TEXT, p_skill TEXT) RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE
+    n BIGINT;
+BEGIN
+    DELETE FROM skill_detachments d
+    WHERE d.workspace_id = p_ws AND d.skill_id = p_skill
+      AND EXISTS (SELECT 1 FROM topos_person_entitled(p_ws, d.principal) e WHERE e.skill_id = p_skill);
+    UPDATE device_skill_state st
+    SET detached = 0, detached_at = NULL
+    FROM device_registry dr
+    WHERE st.workspace_id = p_ws AND st.skill_id = p_skill AND st.detached = 1
+      AND dr.workspace_id = st.workspace_id AND dr.device_key_id = st.device_key_id
+      AND EXISTS (SELECT 1 FROM topos_person_entitled(p_ws, dr.principal) e WHERE e.skill_id = p_skill);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n;
+END
+$$;
+
+-- MEMBERSHIP REMOVAL's lapse reconcile — called by the roster-removal transactions BEFORE the seat
+-- is deleted (the entitlement union is membership-gated, so it reads empty once the seat is gone).
+-- Everything the person received lapses at once: their devices freeze the copies in place and the
+-- fleet page names the blind spot ("removed — last known state"). The credential rows stay: re-adding
+-- the member re-enables the same devices (the git/GitHub model), and `topos_reattach` revives them.
+CREATE FUNCTION topos_detach_on_removal(p_ws TEXT, p_principal TEXT, p_now BIGINT, p_created_at TEXT)
+RETURNS BIGINT LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN topos_detach_lapsed(p_ws, p_principal, topos_entitled_ids(p_ws, p_principal),
+                               'membership_removed', p_now, p_created_at);
 END
 $$;
 
@@ -490,6 +571,10 @@ BEGIN
     INSERT INTO channel_skills (workspace_id, channel_id, skill_id, added_by, added_at)
     VALUES (p_ws, v_channel_id, p_skill, p_actor, p_created_at)
     ON CONFLICT (workspace_id, channel_id, skill_id) DO NOTHING;
+    -- SELF-HEAL: this placement re-entitles the skill for everyone the channel reaches, so no stale
+    -- detachment record may strand it (entitlement always wins). Skill-scoped, so the sweep is
+    -- bounded by the people who had actually detached THIS skill.
+    PERFORM topos_heal_detachments(p_ws, p_skill);
     RETURN CASE WHEN v_created THEN 'created' ELSE 'placed' END;
 END
 $$;
@@ -554,6 +639,7 @@ RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_channel_id TEXT;
     v_builtin BIGINT;
+    v_before TEXT[];
     n BIGINT;
 BEGIN
     PERFORM set_config('topos.actor', p_principal, true);
@@ -562,11 +648,19 @@ BEGIN
     WHERE workspace_id = p_ws AND name = p_channel_name;
     IF v_channel_id IS NULL THEN RETURN 'unknown_channel'; END IF;
     IF v_builtin = 1 THEN RETURN 'builtin'; END IF;
+    -- The BEFORE snapshot: the lapse reconcile below detaches exactly (before − after), so leaving
+    -- a channel freezes only the skills THIS leave cost the person — a skill another followed
+    -- channel still delivers stays live (reference counting via the union), and a skill an upstream
+    -- act removed is NOT mislabelled a person detach.
+    v_before := topos_entitled_ids(p_ws, p_principal);
     DELETE FROM channel_members
     WHERE workspace_id = p_ws AND channel_id = v_channel_id AND principal = p_principal;
     GET DIAGNOSTICS n = ROW_COUNT;
     IF n = 0 THEN RETURN 'not_member'; END IF;
-    PERFORM topos_detach_lapsed(p_ws, p_principal, p_now);
+    PERFORM topos_detach_lapsed(
+        p_ws, p_principal,
+        ARRAY(SELECT unnest(v_before) EXCEPT SELECT unnest(topos_entitled_ids(p_ws, p_principal))),
+        'channel_leave', p_now, p_created_at);
     RETURN 'left';
 END
 $$;
@@ -599,15 +693,23 @@ $$;
 -- devices, whatever channels still reference it) + the final detach records. `follow` re-attaches.
 CREATE FUNCTION topos_unfollow_skill(p_ws TEXT, p_principal TEXT, p_skill TEXT, p_now BIGINT, p_created_at TEXT)
 RETURNS TEXT LANGUAGE plpgsql AS $$
+DECLARE
+    v_before TEXT[];
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM catalog WHERE workspace_id = p_ws AND skill_id = p_skill) THEN
         RETURN 'unknown_skill';
     END IF;
+    v_before := topos_entitled_ids(p_ws, p_principal);
     INSERT INTO skill_unfollows (workspace_id, principal, skill_id, created_at)
     VALUES (p_ws, p_principal, p_skill, p_created_at)
     ON CONFLICT (workspace_id, principal, skill_id) DO NOTHING;
     DELETE FROM skill_follows WHERE workspace_id = p_ws AND principal = p_principal AND skill_id = p_skill;
-    PERFORM topos_detach_lapsed(p_ws, p_principal, p_now);
+    -- Exactly what THIS unfollow lapsed (the mask subtracts the skill from every source at once);
+    -- an unrelated skill an upstream act removed keeps its upstream-withdrawal semantics.
+    PERFORM topos_detach_lapsed(
+        p_ws, p_principal,
+        ARRAY(SELECT unnest(v_before) EXCEPT SELECT unnest(topos_entitled_ids(p_ws, p_principal))),
+        'unfollow', p_now, p_created_at);
     RETURN 'unfollowed';
 END
 $$;
@@ -698,7 +800,9 @@ BEGIN
         v_counter := v_counter + 1;
         v_new_name := v_name || '-archived-' || p_date || '-' || v_counter::TEXT;
     END LOOP;
-    UPDATE catalog SET status = 'archived', name = v_new_name, archived_at = p_now
+    -- `base_name` records the pre-archive name EXACTLY, so unarchive restores it without parsing
+    -- (a skill legitimately named `<x>-archived-<date>` would defeat any suffix-stripping regex).
+    UPDATE catalog SET status = 'archived', name = v_new_name, base_name = v_name, archived_at = p_now
     WHERE workspace_id = p_ws AND skill_id = p_skill;
     DELETE FROM channel_skills WHERE workspace_id = p_ws AND skill_id = p_skill;
     -- Auto-close open proposals, notifying each author (no verdict — circumstances closed them).
@@ -720,20 +824,21 @@ RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_role TEXT;
     v_status TEXT;
-    v_name TEXT;
     v_base TEXT;
 BEGIN
     v_role := topos_member_role(p_ws, p_actor);
     IF v_role IS DISTINCT FROM 'owner' THEN RETURN 'owner_role_required'; END IF;
-    SELECT status, name INTO v_status, v_name FROM catalog WHERE workspace_id = p_ws AND skill_id = p_skill;
+    SELECT status, base_name INTO v_status, v_base FROM catalog WHERE workspace_id = p_ws AND skill_id = p_skill;
     IF v_status IS NULL THEN RETURN 'unknown_skill'; END IF;
     IF v_status <> 'archived' THEN RETURN 'not_archived'; END IF;
-    v_base := regexp_replace(v_name, '-archived-.*$', '');
+    -- The RECORDED pre-archive name (never parsed back out of the archived spelling).
+    IF v_base IS NULL THEN RETURN 'not_archived'; END IF;
     IF EXISTS (SELECT 1 FROM catalog WHERE workspace_id = p_ws AND name = v_base) THEN
         RETURN 'name_taken';
     END IF;
-    UPDATE catalog SET status = 'active', name = v_base, archived_at = NULL
+    UPDATE catalog SET status = 'active', name = v_base, base_name = NULL, archived_at = NULL
     WHERE workspace_id = p_ws AND skill_id = p_skill;
+    PERFORM topos_heal_detachments(p_ws, p_skill);
     RETURN 'unarchived';
 END
 $$;

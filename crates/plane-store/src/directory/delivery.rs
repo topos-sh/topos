@@ -96,13 +96,29 @@ pub(crate) async fn delivery(
     if !authority.db().read_gate(ws, &identity.principal).await? {
         return Err(AuthorityError::NotFound);
     }
+    // ONE snapshot for the three semantic reads: a subscription change landing between the entitled
+    // read and the detached read could leave a skill in NEITHER list, which the client reads as an
+    // upstream withdrawal — cleaning agent dirs for a skill the person still subscribes to.
+    let mut tx = authority.db().begin_delivery_snapshot().await?;
     let entitled = authority
         .db()
-        .entitled_skills(ws, &identity.principal, &identity.device_key_id)
+        .entitled_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
         .await?;
+    let detached = authority
+        .db()
+        .detached_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
+        .await?;
+    let notice_rows = authority
+        .db()
+        .unacked_notices(&mut tx, ws, &identity.principal)
+        .await?;
+    // The snapshot has served its purpose; the read minted nothing durable, so the commit only
+    // releases it (a rollback would be equally correct).
+    tx.commit().await.map_err(AuthorityError::internal)?;
     // The open-proposal count delegates per entitled skill to the SAME listing statement every
     // other surface uses (count == list by construction; the staleness predicate keeps its one
-    // home) — the same deliberate O(skills) fan-out as the catalog index.
+    // home) — the same deliberate O(skills) fan-out as the catalog index. Deliberately OUTSIDE the
+    // snapshot: it is a disclosure gauge, not a semantic signal the client acts on with bytes.
     let mut proposals_awaiting: u64 = 0;
     let mut skills = Vec::with_capacity(entitled.len());
     for row in entitled {
@@ -133,14 +149,7 @@ pub(crate) async fn delivery(
             direct,
         });
     }
-    let detached = authority
-        .db()
-        .detached_skills(ws, &identity.principal, &identity.device_key_id)
-        .await?;
-    let notices = authority
-        .db()
-        .unacked_notices(ws, &identity.principal)
-        .await?
+    let notices = notice_rows
         .into_iter()
         .map(
             |NoticeDbRow {

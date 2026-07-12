@@ -238,11 +238,12 @@ pub(crate) fn pull_reconcile(
             delivered_ids.insert(ds.skill_id.as_str());
             let entry = followed.iter().find(|(id, _)| *id == ds.skill_id);
             let row = match entry {
-                // A locally-frozen entry (an explicit local unfollow this plane still delivers —
-                // the legacy local-only verb, or a freeze this sweep applied earlier): respect the
-                // freeze, exactly as the bare sweep skips a `following = false` entry. The server
-                // rows are the subscription truth; re-attaching is `follow`'s move, never a silent
-                // sweep flip.
+                // An entry the LOCAL `unfollow` verb paused, which the plane still delivers: respect
+                // the local pause (that verb is byte-inert and offline-capable, and its server half
+                // — the person-scoped unfollow row — is the verb-reshape increment's; until then a
+                // local pause is honoured here and `follow <skill>` resumes it, exactly as before).
+                // Nothing this sweep does ever writes `following = false`, so this arm only ever
+                // sees a deliberate local pause — a server-side detach freezes by touching nothing.
                 Some((_, f)) if !f.following => continue,
                 Some((_, f)) => sync_delivered(ctx, &ws, ds, f),
                 None => install_new_arrival(ctx, &ws, ds),
@@ -285,8 +286,11 @@ pub(crate) fn pull_reconcile(
         }
 
         // The applied-state report — the fleet page's truth, POST-reconcile (the acceptance bar:
-        // after an update, the fleet reflects applied versions). Best-effort: a failure warns.
-        match applied_snapshot(ctx, &ws) {
+        // after an update, the fleet reflects applied versions). Scoped to the DELIVERED set: a
+        // skill this sweep just withdrew (or froze) must not be reported as held — reporting it
+        // would re-create a live fleet row for bytes the device no longer serves, and would revive
+        // a detach record the plane is deliberately holding. Best-effort: a failure warns.
+        match applied_snapshot(ctx, &delivered_ids) {
             Ok(applied) => {
                 if let Err(e) = delivery.report_applied(&ws, &applied) {
                     let m = match e {
@@ -335,6 +339,12 @@ fn sync_delivered(
 /// bytes (I-TOFU), never silently lands them.
 fn install_new_arrival(ctx: &Ctx<'_>, ws: &str, ds: &DeliverySkill) -> Result<PullSkill, ClientError> {
     let sid = SkillId::parse(&ds.skill_id)?;
+    // The BASELINE FIRST, the follow entry second — the same ordering `follow`'s promote uses. A
+    // crash between them leaves a baseline with no entry, which the NEXT reconcile treats as a
+    // fresh arrival again (the baseline layer is idempotent: it returns early if the skill dir
+    // exists). The reverse order would leave an entry whose sidecar docs do not exist, and every
+    // later sweep would fail that skill on a missing-doc read — a permanent wedge.
+    super::follow::lay_first_receive_baseline(ctx, &sid, ds.name.clone(), ws)?;
     enroll::write_follows_merged(
         ctx.fs,
         &ctx.layout,
@@ -346,7 +356,6 @@ fn install_new_arrival(ctx: &Ctx<'_>, ws: &str, ds: &DeliverySkill) -> Result<Pu
             following: true,
         }],
     )?;
-    super::follow::lay_first_receive_baseline(ctx, &sid, ds.name.clone(), ws)?;
     let follow = FollowContext {
         workspace_id: ws.to_owned(),
         mode: FollowMode::Auto,
@@ -378,7 +387,12 @@ fn delivered_record(ws: &str, ds: &DeliverySkill) -> WireCurrentRecord {
 /// place: delivery ends, every byte stays exactly where it is, `follow` re-attaches.
 fn freeze_detached(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
     let sync = read_sync(ctx, sid)?;
-    enroll::set_following(ctx.fs, &ctx.layout, sid.as_str(), false)?;
+    // NOTE: no follow-state flip either. The person's subscription rows on the plane ARE the truth
+    // (that is the whole point of person-scoped subscriptions); flipping the local flag would make
+    // the freeze STICKY — a later re-follow (from any device, or the web) re-delivers the skill,
+    // and this device must resume. Freezing is simply: touch nothing. The plane keeps the skill out
+    // of `skills[]` for as long as the detachment stands, so every subsequent sweep re-freezes it
+    // (a no-op), and the sweep that finally sees it delivered again syncs it.
     Ok(undelivered_row(sid, sync.as_ref(), PullAction::Detached))
 }
 
@@ -396,14 +410,30 @@ fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientEr
         let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
         let map: Option<PlacementMap> = doc::read_doc(ctx.fs, &sp.map)?;
         if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
-            // A draft delta is retained before any byte leaves the agent dir.
-            if let WorkState::Present {
-                eq_base: false,
-                scanned,
-                ..
-            } = sync_engine::compute_work(ctx, map, lock)?
-            {
-                sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
+            match sync_engine::compute_work(ctx, map, lock)? {
+                // A draft delta is retained in the sidecar store BEFORE any byte leaves the agent
+                // dir — nothing is ever lost.
+                WorkState::Present {
+                    eq_base: false,
+                    scanned,
+                    ..
+                } => {
+                    sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
+                }
+                // Pristine (or absent) — nothing local to retain beyond what the store already has.
+                WorkState::Present { .. } | WorkState::Absent => {}
+                // UNSCANNABLE — the placement exists but cannot be read safely (a symlink/device
+                // node/non-UTF-8 name someone put there). We CANNOT snapshot what we cannot scan, so
+                // we must not delete it: FAIL CLOSED, exactly as the sync engine refuses to
+                // fast-forward over an unreadable placement. The skill freezes with a typed refusal
+                // instead of a silent, unrecoverable delete.
+                WorkState::Unscannable => {
+                    return Err(ClientError::PlacementUnsupported {
+                        reason: "upstream withdrew this skill, but its placement cannot be read; \
+                                 refusing to remove it — inspect or move the directory by hand"
+                            .into(),
+                    });
+                }
             }
             for placement in &map.placements {
                 let p = Path::new(placement);
@@ -412,11 +442,11 @@ fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientEr
                 }
             }
         }
-        // The skill lock drops BEFORE the identity-locked follow flip below — the promote path
-        // takes identity → skill, and holding both in the opposite order here would be an
-        // inversion.
     }
-    enroll::set_following(ctx.fs, &ctx.layout, sid.as_str(), false)?;
+    // NOTE: no follow-state flip. The entry stays live: the sidecar keeps the bytes + the draft, the
+    // placements are gone (so `compute_work` sees ABSENT), and if upstream ever delivers the skill
+    // again — a curator re-places it, an owner unarchives it — the very next reconcile installs it
+    // clean. A withdrawal is not a subscription change; it is a delivery change.
     Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
 }
 
@@ -446,26 +476,34 @@ fn read_sync(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<SyncState>, ClientEr
     doc::read_doc(ctx.fs, &sp.sync)
 }
 
-/// What this device HOLDS after the reconcile, per followed skill of `ws`: the materialized
-/// version from `map.json` (the honest "applied"; an offered-but-unaccepted first receive has
-/// none and is skipped). Read-only.
-fn applied_snapshot(ctx: &Ctx<'_>, ws: &str) -> Result<Vec<(String, [u8; 32])>, ClientError> {
+/// What this device HOLDS after the reconcile, over the skills the delivery actually DELIVERED:
+/// the materialized version from `map.json` (the honest "applied" — an offered-but-unaccepted first
+/// receive has none and is skipped, as is any skill whose placement this sweep removed). Read-only.
+///
+/// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
+/// the fleet page this device still serves bytes it does not, and would revive the very detach
+/// record the plane wrote.
+fn applied_snapshot(
+    ctx: &Ctx<'_>,
+    delivered: &HashSet<&str>,
+) -> Result<Vec<(String, [u8; 32])>, ClientError> {
     let mut out = Vec::new();
-    for (skill_id, follow) in ctx.follow.followed() {
-        if follow.workspace_id != ws || !follow.following {
-            continue;
-        }
-        let Ok(sid) = SkillId::parse(&skill_id) else {
+    for skill_id in delivered {
+        let Ok(sid) = SkillId::parse(skill_id) else {
             continue;
         };
         let sp = ctx.layout.published(&sid);
         let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)? else {
             continue;
         };
+        // A placement the sweep removed (or never laid) is not held, whatever the doc says.
+        if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
+            continue;
+        }
         if let Ok(commit) = super::parse_hex32(&map.applied_commit)
             && commit != [0u8; 32]
         {
-            out.push((skill_id, commit));
+            out.push(((*skill_id).to_owned(), commit));
         }
     }
     Ok(out)
