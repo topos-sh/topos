@@ -18,12 +18,12 @@
 //! hang the harness.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::{Lock, PlacementMap, SyncState};
-use topos_types::results::{PullAction, PullData, PullSkill};
+use topos_types::results::{PullAction, PullData, PullSkill, WorkspaceSyncReport};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::ctx::Ctx;
@@ -34,9 +34,10 @@ use crate::plane::{
     DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, KnownCurrent,
     PlaneError, PlaneSource, PointerFetch,
 };
+use crate::sync_status::{self, WorkspaceSync};
 use crate::{doc, sidecar};
 
-use super::sync_engine::{self, WorkState};
+use super::sync_engine::{self, Invocation, WorkState};
 
 /// The never-received sentinel the first-receive baseline carries (and an upstream withdrawal
 /// restores, so a later re-delivery installs afresh instead of reading as already-current).
@@ -69,10 +70,53 @@ pub(crate) enum TargetMode {
 /// A `pull` run's typed result: the per-skill rows PLUS the per-skill hard failures the sweep isolated.
 /// `data` is the schema-pinned envelope payload; `warnings` ride the envelope's existing `warnings` field
 /// (one stable-shape line per failed skill), so an isolated failure is machine-visible under `--json`
-/// instead of stderr-only.
+/// instead of stderr-only. `access_gone` / `unreachable` are the STRUCTURED workspace-level signals the
+/// hook's quiet posture reads (a freeze line; the staleness warning) — the warnings carry the same facts
+/// as prose, but the hook must not parse prose.
 pub(crate) struct PullOutcome {
     pub data: PullData,
     pub warnings: Vec<String>,
+    /// Workspaces whose whole delivery answered the uniform 404 THIS run (removed / revoked) — every
+    /// copy froze in place.
+    pub access_gone: Vec<String>,
+    /// Workspaces whose delivery could not be fetched THIS run (transport-level) — state kept, retry
+    /// next session; the quiet hook warns only once the staleness window is blown.
+    pub unreachable: Vec<String>,
+}
+
+impl PullOutcome {
+    /// Wrap the schema payload with no workspace-level signals (the targeted paths).
+    fn plain(data: PullData, warnings: Vec<String>) -> Self {
+        Self {
+            data,
+            warnings,
+            access_gone: Vec::new(),
+            unreachable: Vec::new(),
+        }
+    }
+}
+
+/// How a delivery-driven reconcile behaves — the `follow --yes` apply and the hook differ only here.
+/// The default (the bare enrolled sweep) accepts nothing silently, declines nothing, renames nothing,
+/// reconciles every enrolled workspace, and fetches notices WITHOUT acking.
+#[derive(Default)]
+pub(crate) struct ReconcileOpts {
+    /// Accept first-receive offers THIS invocation (the `follow --yes` batch consent: the describe
+    /// disclosed the install set, so the never-received arrivals land instead of staying offers).
+    /// Already-received skills keep their normal consent path — this never releases a hold or
+    /// auto-applies a confirm-each update.
+    pub accept_first_receive: bool,
+    /// Skill ids NOT to install (declined dirname collisions): a declined NEW arrival is skipped
+    /// wholesale — no follow entry, no baseline, no bytes.
+    pub decline: HashSet<String>,
+    /// skill_id → the dirname to install a NEW arrival under (the `--prefix-dirname` `<ws>.<name>`
+    /// choice for a colliding name). Only a fresh install consults it.
+    pub rename: HashMap<String, String>,
+    /// Reconcile only this workspace (a `follow --yes` targets one); `None` = every enrolled one.
+    pub only_workspace: Option<String>,
+    /// Ack the delivered notices after collecting them (the interactive / `--json` update); the
+    /// quiet hook fetches WITHOUT acking, so nothing is marked read that no one narrated.
+    pub ack_notices: bool,
 }
 
 /// Run the currency check for `scope`.
@@ -130,13 +174,15 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             } else {
                 sum_open_proposals(&sweep_ctx)
             };
-            Ok(PullOutcome {
-                data: PullData {
+            Ok(PullOutcome::plain(
+                PullData {
                     skills,
                     proposals_awaiting,
+                    notices: Vec::new(),
+                    sync: Vec::new(),
                 },
                 warnings,
-            })
+            ))
         }
         PullScope::One { name, mode } => {
             let (skill_id, _lock) = super::resolve_skill(ctx, &name)?;
@@ -172,13 +218,15 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             } else {
                 sum_open_proposals(ctx)
             };
-            Ok(PullOutcome {
-                data: PullData {
+            Ok(PullOutcome::plain(
+                PullData {
                     skills: vec![row],
                     proposals_awaiting,
+                    notices: Vec::new(),
+                    sync: Vec::new(),
                 },
-                warnings: Vec::new(),
-            })
+                Vec::new(),
+            ))
         }
     }
 }
@@ -200,19 +248,44 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
 /// with a warning — never a clean (the copies are yours; re-adding re-enables). Afterwards each
 /// workspace gets this device's applied-state report — best-effort fleet visibility, never a sync
 /// blocker.
-pub(crate) fn pull_reconcile(
+/// The reconcile with explicit [`ReconcileOpts`] — the `follow --yes` apply (one workspace,
+/// batch-accepted first receives, declined/renamed collisions) and the interactive `update` (acked
+/// notices) drive the non-default forms; `&ReconcileOpts::default()` is the bare sweep.
+pub(crate) fn pull_reconcile_with(
     ctx: &Ctx<'_>,
     delivery: &dyn DeliverySource,
+    opts: &ReconcileOpts,
 ) -> Result<PullOutcome, ClientError> {
     let mut skills = Vec::new();
     let mut warnings = Vec::new();
     let mut proposals_awaiting: u32 = 0;
+    let mut notices = Vec::new();
+    let mut access_gone = Vec::new();
+    let mut unreachable = Vec::new();
+    // The prior freshness doc (best-effort: a corrupt one degrades to empty with a warning — the
+    // hook must never wedge on an advisory file) — a failed report keeps its last-report time.
+    let prior_sync = match sync_status::read(ctx.fs, &ctx.layout) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("SYNC_STATUS_UNREADABLE: {}", e.detail()));
+            crate::sync_status::SyncStatus::default()
+        }
+    };
+    let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
+    let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
 
     // The follow-state snapshot this sweep classifies against (per-skill mutations below re-read
     // under the identity lock, so a stale entry here costs at most one extra row next sweep).
     let followed = ctx.follow.followed();
 
     for ws in delivery.workspaces() {
+        if opts
+            .only_workspace
+            .as_deref()
+            .is_some_and(|only| only != ws)
+        {
+            continue;
+        }
         let snapshot = match delivery.fetch_delivery(&ws) {
             Ok(s) => s,
             Err(PlaneError::NotFound) => {
@@ -223,11 +296,13 @@ pub(crate) fn pull_reconcile(
                     "ACCESS_GONE {ws}: this device no longer has access; its skills stay frozen in \
                      place (re-adding the member re-enables them)"
                 ));
+                access_gone.push(ws.clone());
                 continue;
             }
             Err(PlaneError::Unreachable(m) | PlaneError::Unavailable(m)) => {
                 // Transient: keep state, retry next session — the hook must never block a session.
                 warnings.push(format!("PLANE_UNAVAILABLE {ws}: {m}"));
+                unreachable.push(ws.clone());
                 continue;
             }
             Err(PlaneError::Malformed(m)) => {
@@ -240,6 +315,13 @@ pub(crate) fn pull_reconcile(
 
         let mut delivered_ids: HashSet<&str> = HashSet::with_capacity(snapshot.skills.len());
         for ds in &snapshot.skills {
+            // A DECLINED new arrival (a dirname collision the follow describe listed and `--yes`
+            // did not opt into) is skipped WHOLESALE — no follow entry, no baseline, no bytes, and
+            // no delivered-id mark (the undelivered classifier below must not treat it as detached:
+            // it is not followed, so the filter never selects it anyway).
+            if opts.decline.contains(&ds.skill_id) {
+                continue;
+            }
             delivered_ids.insert(ds.skill_id.as_str());
             // Teach the READ transport this skill's credential before anything fetches its bytes.
             // The per-skill credential map is derived from `follows.json`, which cannot yet name a
@@ -249,14 +331,14 @@ pub(crate) fn pull_reconcile(
             let entry = followed.iter().find(|(id, _)| *id == ds.skill_id);
             let row = match entry {
                 // An entry the LOCAL `unfollow` verb paused, which the plane still delivers: respect
-                // the local pause (that verb is byte-inert and offline-capable, and its server half
-                // — the person-scoped unfollow row — is the verb-reshape increment's; until then a
-                // local pause is honoured here and `follow <skill>` resumes it, exactly as before).
-                // Nothing this sweep does ever writes `following = false`, so this arm only ever
-                // sees a deliberate local pause — a server-side detach freezes by touching nothing.
+                // the local pause (that verb is byte-inert and offline-capable; its server row is
+                // written by the unfollow apply, but a plane that still delivers is honoured locally
+                // and `follow <skill>` resumes it, exactly as before). Nothing this sweep does ever
+                // writes `following = false`, so this arm only ever sees a deliberate local pause —
+                // a server-side detach freezes by touching nothing.
                 Some((_, f)) if !f.following => continue,
-                Some((_, f)) => sync_delivered(ctx, &ws, ds, f),
-                None => install_new_arrival(ctx, &ws, ds),
+                Some((_, f)) => sync_delivered(ctx, &ws, ds, f, accept_for(ctx, ds, opts)),
+                None => install_new_arrival(ctx, &ws, ds, opts),
             };
             match row {
                 Ok(mut row) => {
@@ -316,9 +398,11 @@ pub(crate) fn pull_reconcile(
         // skill this sweep just withdrew (or froze) must not be reported as held — reporting it
         // would re-create a live fleet row for bytes the device no longer serves, and would revive
         // a detach record the plane is deliberately holding. Best-effort: a failure warns.
+        let mut report_ok = false;
         match applied_snapshot(ctx, &delivered_ids) {
-            Ok(applied) => {
-                if let Err(e) = delivery.report_applied(&ws, &applied) {
+            Ok(applied) => match delivery.report_applied(&ws, &applied) {
+                Ok(()) => report_ok = true,
+                Err(e) => {
                     let m = match e {
                         PlaneError::NotFound => "access gone".to_owned(),
                         PlaneError::Unreachable(m)
@@ -327,28 +411,107 @@ pub(crate) fn pull_reconcile(
                     };
                     warnings.push(format!("REPORT_FAILED {ws}: {m}"));
                 }
-            }
+            },
             Err(e) => warnings.push(format!("REPORT_FAILED {ws}: {}", e.detail())),
         }
+
+        // The freshness record this delivery earns: the delivery time always advances (the fetch
+        // succeeded to get here); the report time advances only when the report landed (a failed
+        // one keeps its prior stamp, so `auth status` stays honest about the fleet's view).
+        sync_updates.push((
+            ws.clone(),
+            WorkspaceSync {
+                last_delivery_at: Some(now_millis),
+                last_report_at: if report_ok {
+                    Some(now_millis)
+                } else {
+                    prior_sync
+                        .workspaces
+                        .get(&ws)
+                        .and_then(|e| e.last_report_at)
+                },
+                staleness_window_ms: snapshot.staleness_window_ms,
+            },
+        ));
+
+        // The notices feed, LAST for this workspace (an ack marks person-scoped read-state, so it
+        // fires only once the reconcile that surfaces them has actually run). The quiet hook fetches
+        // without acking; the interactive/`--json` update acks exactly the ids it returns.
+        if !snapshot.notices.is_empty() {
+            if opts.ack_notices {
+                let ids: Vec<String> = snapshot.notices.iter().map(|n| n.id.clone()).collect();
+                if let Err(e) = delivery.ack_notices(&ws, &ids) {
+                    let m = match e {
+                        PlaneError::NotFound => "access gone".to_owned(),
+                        PlaneError::Unreachable(m)
+                        | PlaneError::Unavailable(m)
+                        | PlaneError::Malformed(m) => m,
+                    };
+                    warnings.push(format!("ACK_FAILED {ws}: {m}"));
+                }
+            }
+            notices.extend(snapshot.notices);
+        }
     }
+
+    // Persist the freshness doc (best-effort — advisory state must never fail a sync) and mirror it
+    // onto the payload for the `--json` surface.
+    if let Err(e) = sync_status::record(ctx.fs, &ctx.layout, &sync_updates) {
+        warnings.push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
+    }
+    let sync = sync_updates
+        .into_iter()
+        .map(|(workspace_id, e)| WorkspaceSyncReport {
+            workspace_id,
+            last_delivery_at: e.last_delivery_at,
+            last_report_at: e.last_report_at,
+            staleness_window_ms: e.staleness_window_ms,
+        })
+        .collect();
 
     Ok(PullOutcome {
         data: PullData {
             skills,
             proposals_awaiting,
+            notices,
+            sync,
         },
         warnings,
+        access_gone,
+        unreachable,
     })
+}
+
+/// The invocation an already-followed DELIVERED skill syncs under: the `follow --yes` batch consent
+/// accepts a still-pending FIRST RECEIVE (the baseline exists, nothing ever landed), and nothing
+/// else — an already-received skill keeps its normal consent path (a hold stays held, a confirm-each
+/// update stays an offer).
+fn accept_for(ctx: &Ctx<'_>, ds: &DeliverySkill, opts: &ReconcileOpts) -> Invocation {
+    if !opts.accept_first_receive {
+        return Invocation::Sweep;
+    }
+    let never_received = SkillId::parse(&ds.skill_id)
+        .ok()
+        .and_then(|sid| read_sync(ctx, &sid).ok().flatten())
+        .as_ref()
+        .is_some_and(sync_engine::is_never_received);
+    if never_received {
+        Invocation::Accept
+    } else {
+        Invocation::Sweep
+    }
 }
 
 /// Sync one already-followed delivered skill, feeding the engine the delivery's resolved target
 /// (no second pointer GET) and the FRESH per-bundle protection posture (the stored doc's flag may
-/// lag; the runtime context never does).
+/// lag; the runtime context never does). `inv` is [`Invocation::Accept`] only for the `follow
+/// --yes` batch consent on a still-pending first receive (see [`accept_for`]).
 fn sync_delivered(
     ctx: &Ctx<'_>,
     ws: &str,
     ds: &DeliverySkill,
     follow: &FollowContext,
+    inv: Invocation,
 ) -> Result<PullSkill, ClientError> {
     let sid = SkillId::parse(&ds.skill_id)?;
     let follow = FollowContext {
@@ -356,31 +519,33 @@ fn sync_delivered(
         ..follow.clone()
     };
     let rec = delivered_record(ws, ds);
-    sync_engine::sync_one_with(
-        ctx,
-        &sid,
-        &follow,
-        sync_engine::Invocation::Sweep,
-        Some(&rec),
-    )
+    sync_engine::sync_one_with(ctx, &sid, &follow, inv, Some(&rec))
 }
 
 /// A brand-new delivered skill this device has never held: record the follow entry (person-scoped
 /// truth lives on the plane; the local entry is install-state), lay the first-receive baseline
-/// under the skill's CATALOG name, and run the engine — whose kernel consent OFFERS the first
-/// bytes (I-TOFU), never silently lands them.
+/// under the skill's CATALOG name (or the caller's `--prefix-dirname` rename), and run the engine —
+/// whose kernel consent OFFERS the first bytes (I-TOFU) on a bare sweep, and PLACES them under the
+/// `follow --yes` batch consent ([`ReconcileOpts::accept_first_receive`], where the describe already
+/// disclosed the install set).
 fn install_new_arrival(
     ctx: &Ctx<'_>,
     ws: &str,
     ds: &DeliverySkill,
+    opts: &ReconcileOpts,
 ) -> Result<PullSkill, ClientError> {
     let sid = SkillId::parse(&ds.skill_id)?;
+    let dirname = opts
+        .rename
+        .get(&ds.skill_id)
+        .cloned()
+        .unwrap_or_else(|| ds.name.clone());
     // The BASELINE FIRST, the follow entry second — the same ordering `follow`'s promote uses. A
     // crash between them leaves a baseline with no entry, which the NEXT reconcile treats as a
     // fresh arrival again (the baseline layer is idempotent: it returns early if the skill dir
     // exists). The reverse order would leave an entry whose sidecar docs do not exist, and every
     // later sweep would fail that skill on a missing-doc read — a permanent wedge.
-    super::follow::lay_first_receive_baseline(ctx, &sid, ds.name.clone(), ws)?;
+    super::follow::lay_first_receive_baseline(ctx, &sid, dirname, ws)?;
     enroll::write_follows_merged(
         ctx.fs,
         &ctx.layout,
@@ -399,13 +564,12 @@ fn install_new_arrival(
         following: true,
     };
     let rec = delivered_record(ws, ds);
-    sync_engine::sync_one_with(
-        ctx,
-        &sid,
-        &follow,
-        sync_engine::Invocation::Sweep,
-        Some(&rec),
-    )
+    let inv = if opts.accept_first_receive {
+        Invocation::Accept
+    } else {
+        Invocation::Sweep
+    };
+    sync_engine::sync_one_with(ctx, &sid, &follow, inv, Some(&rec))
 }
 
 /// The wire pointer record a delivery row resolves to — the engine's sync target (scope-checked
@@ -602,9 +766,66 @@ fn note_skill_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, skill_id: &str,
     warnings.push(skill_warning(skill_id, e));
 }
 
-/// A shallow copy of `ctx` with the plane source swapped (the breaker wraps the real transport for the
-/// duration of one sweep; every other seam is shared).
-fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -> Ctx<'a> {
+/// The quiet hook's stdout lines — the ONLY bytes `update --quiet` may emit on stdout (which the
+/// session-start hook injects into the session), and only for the two facts a person must not miss:
+///
+/// - a workspace whose access is GONE this run (removed / revoked) — one line naming the freeze;
+/// - a workspace that was UNREACHABLE this run AND whose last successful delivery is older than its
+///   staleness window — one line with the age (a fresh miss stays silent: transient blips must not
+///   spam every session).
+///
+/// Reads the freshness doc best-effort (an unreadable one warns nowhere — the hook stays silent
+/// rather than noisy).
+pub(crate) fn quiet_hook_lines(
+    fs: &dyn crate::fs_seam::FsOps,
+    layout: &crate::sidecar::Layout,
+    now_millis: i64,
+    out: &PullOutcome,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for ws in &out.access_gone {
+        lines.push(format!(
+            "topos: {ws} — this device no longer has access; its skills are frozen in place"
+        ));
+    }
+    if out.unreachable.is_empty() {
+        return lines;
+    }
+    let status = sync_status::read(fs, layout).unwrap_or_default();
+    for ws in &out.unreachable {
+        let entry = status.workspaces.get(ws);
+        if sync_status::is_stale(entry, now_millis) {
+            let last = entry.and_then(|e| e.last_delivery_at).unwrap_or(now_millis);
+            lines.push(format!(
+                "topos: {ws} last synced {} ago — server unreachable",
+                sync_status::human_duration(now_millis.saturating_sub(last))
+            ));
+        }
+    }
+    lines
+}
+
+/// Whether a failed `update --quiet` exits 0 with a one-line warning instead of nonzero: the hook
+/// posture — an AUTH or TRANSPORT failure must never fail the session start (the harness would
+/// surface a scary error for a network blip), while a genuinely local failure (corrupt sidecar,
+/// io) still exits nonzero so it is not silently swallowed forever.
+pub(crate) fn quiet_soft_failure(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::Plane(_)
+            | ClientError::Enrollment(_)
+            | ClientError::PlaneRejected(_)
+            | ClientError::PlaneTerminal { .. }
+            | ClientError::Denied(_)
+            | ClientError::RedeemDenied { .. }
+            | ClientError::TargetNotFound { .. }
+    )
+}
+
+/// A shallow copy of `ctx` with the plane source swapped (the breaker wraps the real transport for
+/// the duration of one sweep; the `follow --yes` reconcile swaps its own delivery transport in; every
+/// other seam is shared).
+pub(super) fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -> Ctx<'a> {
     Ctx {
         fs: ctx.fs,
         ids: ctx.ids,

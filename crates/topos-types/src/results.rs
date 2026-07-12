@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 // PINNED — `pull` (the four-state currency machine, per skill).
 // =================================================================================================
 
-/// `pull` result — per-skill currency state plus the reviewer-queue count. **PINNED.**
+/// `pull` result — per-skill currency state plus the reviewer-queue count. **PINNED** (the original
+/// fields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent
+/// on a targeted pull and from an older producer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullData {
@@ -24,6 +26,30 @@ pub struct PullData {
     /// Open proposals on your followed skills (v0 is single-approver — any rostered member may review, so
     /// the count is all open-non-stale proposals across what you follow, not a reviewer-assignment queue).
     pub proposals_awaiting: u32,
+    /// The unacked, person-scoped notices the delivery answered (verdicts first) — narrated by an
+    /// interactive `update`, which then acks exactly these ids; the quiet hook fetches without
+    /// acking. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<crate::requests::WireNotice>,
+    /// Per-workspace delivery/report freshness after the sweep — the staleness clock the hook
+    /// warning and `auth status` read. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync: Vec<WorkspaceSyncReport>,
+}
+
+/// One workspace's sync freshness in a [`PullData`]. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct WorkspaceSyncReport {
+    pub workspace_id: String,
+    /// When the last successful delivery answered (epoch millis; absent if never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_at: Option<i64>,
+    /// When the last successful applied-state report landed (epoch millis; absent if never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_at: Option<i64>,
+    /// The workspace's staleness window (ms).
+    pub staleness_window_ms: u64,
 }
 
 /// One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by
@@ -637,11 +663,15 @@ mod tests {
                 merge: None,
             }],
             proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
         };
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["skills"][0]["action"], "up_to_date");
         assert_eq!(v["skills"][0]["workspace_id"], "w_acme");
         assert_eq!(v["proposals_awaiting"], 0);
+        // The additive fields OMIT when empty (an older consumer sees the unchanged pinned shape).
+        assert!(v.get("notices").is_none() && v.get("sync").is_none());
         let back: PullData = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].action, PullAction::UpToDate);
     }

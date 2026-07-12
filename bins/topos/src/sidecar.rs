@@ -147,6 +147,18 @@ impl Layout {
         self.identity_dir().join("enrollment.json")
     }
 
+    /// `state/` — plain (non-secret) operational state documents.
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        self.home.join("state")
+    }
+
+    /// `state/sync_status.json` — the per-workspace delivery/report freshness the delivery-driven
+    /// reconcile writes and the hook's staleness warning + `auth status` read. A plain doc — it
+    /// carries timestamps and the staleness window, never a secret.
+    pub(crate) fn sync_status_path(&self) -> PathBuf {
+        self.state_dir().join("sync_status.json")
+    }
+
     /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A
     /// home-level dir (outside `skills/<id>/`, so a publish rename never disturbs an in-flight record), it
     /// is covered by the footprint walk + uninstall like any other `~/.topos/` path.

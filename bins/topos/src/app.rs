@@ -16,7 +16,10 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
-use crate::plane::{ContributeSource, EnrollSource, GovernanceSource, PlaneSource};
+use crate::plane::{
+    ContributeSource, DirectorySource, EnrollSource, GovernanceSource, PlaneSource,
+    ReconcileTransport,
+};
 use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, logfile, ops, render};
@@ -80,12 +83,18 @@ pub fn run() -> ExitCode {
         // `follow` also loads (and on first use mints) the device identity: the device-key signer it drives
         // requires `host.json` to exist, and the skill path authors a draft snapshot through the pull engine.
         // `publish` authors the candidate commit and `revert` the forward-revert commit, so both load (and
-        // on first use mint) the device id.
+        // on first use mint) the device id. `auth login` registers the device key at its redeem.
         Command::Add { .. }
         | Command::Update { .. }
         | Command::Follow { .. }
         | Command::Publish { .. }
         | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
+            Ok(d) => d,
+            Err(e) => return emit_err(json, cmd_name, &e, &diag),
+        },
+        Command::Auth {
+            cmd: AuthCmd::Login { .. },
+        } => match identity::load_or_create_device_id(&fs, &layout) {
             Ok(d) => d,
             Err(e) => return emit_err(json, cmd_name, &e, &diag),
         },
@@ -118,6 +127,42 @@ pub fn run() -> ExitCode {
             load_workspace_credentials(ctx.fs, &ctx.layout),
         ))
     };
+    // The DIRECTORY connector (describe reads + subscription/curation/notice row ops) and the
+    // RECONCILE connector (delivery + fleet report + the per-skill read lane on one object) — both
+    // re-read the on-disk credentials fresh per build, for the same mid-invocation reason as above
+    // (a `follow <address>` enrolls, then describes, in ONE invocation).
+    let connect_directory = |base_url: &str| -> Box<dyn DirectorySource> {
+        Box::new(UreqDeviceClient::new(
+            base_url.to_owned(),
+            load_workspace_credentials(ctx.fs, &ctx.layout),
+        ))
+    };
+    let connect_delivery = |base_url: &str| -> Box<dyn ReconcileTransport> {
+        let follows = enroll::read_follows(ctx.fs, &ctx.layout)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| enroll::Follows {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                follows: Vec::new(),
+            });
+        let credentials = enroll::read_credentials(ctx.fs, &ctx.layout)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| enroll::Credentials {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                credentials: Vec::new(),
+            });
+        Box::new(
+            UreqPlane::new(
+                base_url.to_owned(),
+                enroll::skill_creds(&follows, &credentials),
+            )
+            .with_workspace_credentials(credentials.into_map()),
+        )
+    };
+    // The default WEB origin the token-less doors dial on a fresh install (`follow <bare-ws>`,
+    // `auth login`): the env override, else the hosted web origin (the card re-roots onto the API).
+    let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
     match command {
         Command::Add {
@@ -186,20 +231,13 @@ pub fn run() -> ExitCode {
             channel,
             skill,
             yes,
+            prefix_dirname,
             manual,
             wait,
         } => {
-            // The two-phase describe/`--yes` flow lands later; today `follow` applies directly.
-            let _ = yes;
-            // Multi-target + `--channel`/`--skill` selectors resolve with the full grammar in a later leg.
-            // Today the single-positional path stays wired: >1 target or any selector is a marked seam.
-            let target = match single_target(targets, &channel, &skill, "follow") {
-                Ok(t) => t,
-                Err(e) => return finish_follow(json, cmd_name, Err(e), &diag),
-            };
-            // The transports are built per-base-URL (known only after the op parses the link / reads the
-            // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer
-            // disclosure (the one connector that carries per-skill creds, so it stays a local closure).
+            // The transports are built per-base-URL (known only after the op parses the target /
+            // the card / the WAL): the shared creds-free `ureq` enroll connector, the read transport
+            // for the offer disclosure, the directory (describe + rows) and the reconcile transport.
             let plane_connect =
                 |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
                     Box::new(UreqPlane::new(base_url.to_owned(), creds))
@@ -207,29 +245,30 @@ pub fn run() -> ExitCode {
             let connectors = ops::FollowConnectors {
                 enroll: &connect_enroll,
                 plane: &plane_connect,
+                directory: &connect_directory,
+                delivery: &connect_delivery,
+                web_origin: web_origin.clone(),
             };
-            let opts = ops::FollowOpts {
+            let mk_opts = || ops::FollowOpts {
                 manual,
                 // The global `--workspace` disambiguates a positional skill name shared across the
                 // workspaces this install follows on one plane (the enrollment motions ignore it).
                 workspace: workspace.clone(),
+                yes,
+                prefix_dirname,
+                channels: channel.clone(),
+                skills: skill.clone(),
             };
-            let first = ops::follow(&ctx, &connectors, target, opts);
+            let first = ops::follow(&ctx, &connectors, targets, mk_opts());
             // Block on a pending device-authorization until the human approves (so a person never re-invokes
             // `follow` by hand), unless this is a headless `--json` run without `--wait` (which must not
-            // hang). The interactive block only ever RESUMES (target = None + the pending WAL drives it).
+            // hang). The interactive block only ever RESUMES (no targets + the pending WAL drives it) —
+            // and the resumed invocation keeps THIS invocation's flags, so a `--yes` carries through
+            // the wait into the apply.
             let policy = WaitPolicy::resolve(json, wait, &clock);
             let result =
                 block_on_pending(&clock, &policy, first, follow_pending_disclosure, || {
-                    ops::follow(
-                        &ctx,
-                        &connectors,
-                        None,
-                        ops::FollowOpts {
-                            manual,
-                            workspace: None,
-                        },
-                    )
+                    ops::follow(&ctx, &connectors, Vec::new(), mk_opts())
                 });
             finish_follow(json, cmd_name, result, &diag)
         }
@@ -239,15 +278,12 @@ pub fn run() -> ExitCode {
             skill,
             yes,
         } => {
-            let _ = yes;
-            let result = match single_target(targets, &channel, &skill, "unfollow") {
-                Ok(Some(name)) => ops::unfollow(&ctx, &name),
-                Ok(None) => Err(ClientError::InvalidArgument(
-                    "unfollow needs a skill name".into(),
-                )),
-                Err(e) => Err(e),
+            let connectors = ops::UnfollowConnectors {
+                directory: &connect_directory,
+                delivery: &connect_delivery,
             };
-            finish(json, cmd_name, result, render::unfollow_tty, &diag)
+            let result = ops::unfollow(&ctx, &connectors, &targets, &channel, &skill, yes);
+            finish_unfollow(json, cmd_name, result, &diag)
         }
         Command::Invite {
             email,
@@ -444,22 +480,47 @@ pub fn run() -> ExitCode {
             let delivery = enrollment
                 .as_ref()
                 .map(|e| &e.plane as &dyn crate::plane::DeliverySource);
+            // The notices posture: an interactive or `--json` update ACKS what it returns (the
+            // narration/data carries them); the quiet hook fetches WITHOUT acking — nothing is
+            // marked read that no one saw.
+            let reconcile_opts = ops::ReconcileOpts {
+                ack_notices: !quiet,
+                ..ops::ReconcileOpts::default()
+            };
             let result = if reset {
                 Err(ops::not_yet("update --reset"))
             } else {
                 match single_target(targets, &channel, &skill, "update") {
-                    Ok(target) => pull_with_name_fallback(&ctx, target, onto_current, delivery),
+                    Ok(target) => pull_with_name_fallback(
+                        &ctx,
+                        target,
+                        onto_current,
+                        delivery,
+                        &reconcile_opts,
+                    ),
                     Err(e) => Err(e),
                 }
             };
             if quiet {
-                // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
-                // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
-                // stdout, even under `--json` (which `--quiet` overrides for the hook path — hence the
-                // forced TTY presentation below). Isolated per-skill failures already reached stderr
-                // inside the sweep; the exit stays 0 (isolation).
+                // NEAR-byte-silent stdout (the session-start hook injects stdout into the session):
+                // a clean sweep emits nothing; the two facts a person must not miss — an access-gone
+                // freeze, and unreachable-AND-stale — emit ONE line each. An auth/transport failure
+                // warns and exits 0 (the hook must never fail a session start for a network blip);
+                // a genuinely local failure still surfaces on stderr with a non-zero exit.
+                let now = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
                 match result {
-                    Ok(_) => ExitCode::SUCCESS,
+                    Ok(out) => {
+                        for line in ops::quiet_hook_lines(&fs, &ctx.layout, now, &out) {
+                            println!("{line}");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) if ops::quiet_soft_failure(&e) => {
+                        // The detail still lands in the diagnostics log; stdout gets one honest line.
+                        let _ = diag.note(cmd_name, &e);
+                        println!("topos: update skipped — {}", render::safe_message(&e));
+                        ExitCode::SUCCESS
+                    }
                     Err(e) => emit_err(false, cmd_name, &e, &diag),
                 }
             } else {
@@ -494,12 +555,46 @@ pub fn run() -> ExitCode {
             finish(json, cmd_name, result, render::self_update_tty, &diag)
         }
         Command::Auth { cmd } => {
-            let what = match cmd {
-                AuthCmd::Login { .. } => "auth login",
-                AuthCmd::Logout => "auth logout",
-                AuthCmd::Status => "auth status",
+            let connect_auth_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
+                Box::new(UreqDeviceClient::new(
+                    base_url.to_owned(),
+                    load_workspace_credentials(ctx.fs, &ctx.layout),
+                ))
             };
-            emit_err(json, cmd_name, &ops::not_yet(what), &diag)
+            let connectors = ops::AuthConnectors {
+                enroll: &connect_enroll,
+                directory: &connect_directory,
+                governance: &connect_auth_governance,
+                web_origin: web_origin.clone(),
+            };
+            match cmd {
+                AuthCmd::Login {
+                    server_url,
+                    yes,
+                    wait,
+                } => {
+                    let first = ops::login(&ctx, &connectors, server_url.as_deref(), yes);
+                    // The same blocking idiom as `follow`/`publish`: interactive (or `--wait`) runs
+                    // re-poll until the browser sign-in settles; a headless `--json` run without
+                    // `--wait` returns the pending state and never hangs.
+                    let policy = WaitPolicy::resolve(json, wait, &clock);
+                    let result =
+                        block_on_pending(&clock, &policy, first, login_pending_disclosure, || {
+                            ops::login(&ctx, &connectors, server_url.as_deref(), yes)
+                        });
+                    finish_login(json, cmd_name, result, &diag)
+                }
+                AuthCmd::Logout { yes } => {
+                    finish_logout(json, cmd_name, ops::logout(&ctx, &connectors, yes), &diag)
+                }
+                AuthCmd::Status => finish(
+                    json,
+                    cmd_name,
+                    ops::status(&ctx, &connectors),
+                    render::auth_status_tty,
+                    &diag,
+                ),
+            }
         }
         // `topos upgrade` is ambiguous — the disambiguation refusal points skills → `topos update`, the CLI
         // → `topos self-update`, so the retired spelling never silently does the wrong thing.
@@ -588,6 +683,19 @@ pub(crate) fn resolve_standup_base(env_override: Option<String>) -> String {
     match env_override {
         Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
         _ => DEFAULT_HOSTED_BASE_URL.to_owned(),
+    }
+}
+
+/// The hosted WEB origin the token-less doors default to (`follow <bare-workspace>`, `auth login`) —
+/// the card fetch re-roots it onto the declared API base, so pasting the human-facing origin works.
+pub(crate) const DEFAULT_WEB_ORIGIN: &str = "https://topos.sh";
+
+/// Resolve the default web origin: a non-empty `TOPOS_PLANE_URL` override wins (a self-host plane
+/// serves the card at its own base), else the hosted web origin. Pure, like [`resolve_standup_base`].
+pub(crate) fn resolve_web_origin(env_override: Option<String>) -> String {
+    match env_override {
+        Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
+        _ => DEFAULT_WEB_ORIGIN.to_owned(),
     }
 }
 
@@ -697,10 +805,10 @@ fn list_remote_inputs(
     Ok((instance.base_url, memberships))
 }
 
-/// `follow`'s finisher — like [`finish`], but it carries the success-path `next_actions` (run
-/// re-invoke `follow` while pending; `pull` once offers are disclosed) on the envelope. The `--json`
-/// payload is exactly the schema-pinned `FollowData`; the resume disclosure the outcome carries
-/// alongside is TTY-only (the pinned shape has no resume field).
+/// `follow`'s finisher — the three surfaces: the classic wire payload (with the success-path
+/// `next_actions` — re-invoke `follow` while pending; `update` once offers are disclosed), the
+/// two-phase DESCRIBE (`data.describe` + the paste-ready `--yes` argvs), and the apply report
+/// (its reconcile warnings ride the envelope's `warnings`).
 fn finish_follow(
     json: bool,
     command: &str,
@@ -708,14 +816,136 @@ fn finish_follow(
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(out) => {
+        Ok(ops::FollowOutcome::Data { data, resumed }) => {
             if json {
-                let value = serde_json::to_value(&out.data).unwrap_or_default();
+                let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::follow_next_actions(&out.data);
+                envelope.next_actions = render::follow_next_actions(&data);
                 println!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::follow_tty(&out));
+                println!("{}", render::follow_tty(&data, &resumed));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::Described {
+            describe,
+            next_argvs,
+        }) => {
+            if json {
+                let value = serde_json::json!({ "describe": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(next_argvs);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::follow_describe_tty(&describe, &next_argvs));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::Applied(applied)) => {
+            if json {
+                let warnings = applied.warnings.clone();
+                let value = serde_json::to_value(&applied).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = warnings;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::follow_applied_tty(&applied));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `unfollow`'s finisher — the two-phase pair (describe / applied).
+fn finish_unfollow(
+    json: bool,
+    command: &str,
+    result: Result<ops::UnfollowOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::UnfollowOutcome::Described { describe, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::unfollow_describe_tty(&describe, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::UnfollowOutcome::Applied(applied)) => {
+            if json {
+                let value = serde_json::to_value(&applied).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::unfollow_applied_tty(&applied));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `auth login`'s finisher — pending (the device-flow wait) or done (the per-workspace report).
+fn finish_login(
+    json: bool,
+    command: &str,
+    result: Result<ops::AuthLoginOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::AuthLoginOutcome::Pending(p)) => {
+            if json {
+                let value = serde_json::json!({ "pending": p });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::login_pending_next_actions();
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::login_pending_tty(&p));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AuthLoginOutcome::Done(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::login_done_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `auth logout`'s finisher — the two-phase pair.
+fn finish_logout(
+    json: bool,
+    command: &str,
+    result: Result<ops::AuthLogoutOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::AuthLogoutOutcome::Described { describe, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::logout_describe_tty(&describe, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AuthLogoutOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::logout_applied_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -740,10 +970,24 @@ struct PendingDisclosure {
 
 /// The pending disclosure for a `follow` outcome (None ⇒ not a pending device-auth).
 fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosure> {
-    out.data.pending.as_ref().map(|p| PendingDisclosure {
-        verification_uri_complete: p.verification_uri_complete.clone(),
-        device_fingerprint: p.device_fingerprint.clone(),
-    })
+    match out {
+        ops::FollowOutcome::Data { data, .. } => data.pending.as_ref().map(|p| PendingDisclosure {
+            verification_uri_complete: p.verification_uri_complete.clone(),
+            device_fingerprint: p.device_fingerprint.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// The pending disclosure for an `auth login` outcome (None ⇒ the sign-in settled).
+fn login_pending_disclosure(out: &ops::AuthLoginOutcome) -> Option<PendingDisclosure> {
+    match out {
+        ops::AuthLoginOutcome::Pending(p) => Some(PendingDisclosure {
+            verification_uri_complete: p.verification_uri_complete.clone(),
+            device_fingerprint: p.device_fingerprint.clone(),
+        }),
+        ops::AuthLoginOutcome::Done(_) => None,
+    }
 }
 
 /// The pending disclosure for a `publish` outcome (only the un-enrolled standup branch is ever pending).
@@ -1025,10 +1269,11 @@ pub(crate) fn pull_with_name_fallback(
     skill: Option<String>,
     onto_current: bool,
     delivery: Option<&dyn crate::plane::DeliverySource>,
+    reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
     let first = build_pull_scope(skill, onto_current).and_then(|scope| match (&scope, delivery) {
-        (ops::PullScope::AllFollowed, Some(d)) => ops::pull_reconcile(ctx, d),
+        (ops::PullScope::AllFollowed, Some(d)) => ops::pull_reconcile_with(ctx, d, reconcile),
         _ => ops::pull(ctx, scope),
     });
     match first {

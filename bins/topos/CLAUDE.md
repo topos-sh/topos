@@ -60,44 +60,46 @@ renderer over the SAME typed outcomes (one value, two presentations).
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
   `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).
-- **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqDeviceClient`) — the two-call device-flow
-  enrollment + first-receive. `follow <link>` reads the unauthenticated `/i/` **TOFU bootstrap** (fetched
-  with an explicit `Accept: application/json` — the same URL serves an agent-instruction markdown to
-  everything else), **re-roots onto the bootstrap's declared `plane.base_url`** (a share link may ride the
-  team's web origin; the declared API base — normalized, same URL gate, https-may-never-downgrade — is
-  what the device flow, the redeem, every pull, and `instance.json` ride; disclosed as
-  `FollowData.plane_base_url`), guards one-plane-per-install (a bootstrap declaring a DIFFERENT plane than
-  the one already enrolled is refused; there is **no trust root to pin** — the `current` pointer is
-  unsigned, its authority the database row and its integrity the content-addressed version id), starts a
-  device authorization, writes a **`0600` WAL** (`identity/enrollment.json`), and
-  returns `ENROLLMENT_PENDING` + the SERVER-built verification URL with the verified-domain provenance
-  (the relay-phishing guard; there is no client-side URL reconstruction — a WAL without the persisted
-  URL restarts typed). Re-invoking `follow` while a pending WAL exists (with any target, or none) polls
-  once — the "re-invoking IS the resume" idiom (the BIN re-invokes it automatically on a cadence for an
-  interactive run or a `--wait [<seconds>]` run, so a person never re-runs by hand; a headless `--json` run
-  without `--wait` returns the pending state and never hangs); on a granted poll it **redeems** the grant
-  (the bearer credential — the redeem body carries `device_public_key`, which the server checks against the
-  grant's bound pubkey; nothing is signed) into the ONE **workspace credential**, records it in the WAL
-  **before promotion** (the lockout
-  fence — a single-use grant can't be re-redeemed; a re-invoked `follow` over a `Redeemed` WAL re-promotes without
-  re-redeeming), then PROMOTES: `instance.json` (the plane), `identity/credentials.json` (the workspace
-  credential, `0600`, upsert under the `identity` lock), `follows.json` (the followed set from the WAL's
-  offered skills — read-merge-write under the `identity` lock, `0600`; pure subscription state, no secret),
-  and `identity/user.json` (metadata, no secret), records the device key in `host.json`, and lays the
-  **first-receive baseline** per offered skill. The agent only ever holds the opaque grant + the workspace
-  credential — never a user token (I-NO-USER-TOKEN); the device code / grant / workspace credential are
-  redacted from every `Debug` and
-  never reach a URL / log / error. The promote also **arms the session-start currency hook** — best-effort
-  + idempotent, mirroring `add` (a pure follower never runs `add`, so enrollment is their one arm point; a
-  degraded config edit is disclosed on the result's `currency` field, never a rolled-back enrollment).
-  A KNOWN followed-skill positional — `follow <skill>[@<hash>]` — drives the existing pull engine to
-  place a disclosed first-receive offer (the I-TOFU "one accept"), and RESUMES a retained entry
-  `unfollow` paused (flips `following` back on; a still-pending first-receive offer is placed, else the
-  next `pull` lands current). The positional is dispatched by shape (a pending WAL wins; `@` forces the
-  skill path; a known skill name is the skill path; else it is an `/i/` link or a bare invite token). The enrollment transports (`UreqDeviceClient`
-  + the read transport for the offer disclosure) are built per-base-URL behind an injectable factory, so the
-  whole flow is tested over a **fake** with no HTTP (the real loopback proof lives in
-  `tests/tests/follow_e2e.rs`).
+- **The resolution grammar** (`resolve`) — the ONE grammar every verb turns an argv token through:
+  full addresses (`https://topos.sh/acme[/channels|skills/<name>]`), qualified paths
+  (`acme/channels/eng` — three segments with the literal middle), bare names, the `<name>@<agent>`
+  local domain, and the `owner/repo` `add`-lookalike (exactly TWO segments — refused toward `topos
+  add`, never half-resolved). Resolution runs against the enrolled universe (address names from
+  `/me`, channel names, catalog skills); a name with several meanings is a typed `AMBIGUOUS_NAME`
+  carrying PASTE-READY qualified paths (machine-readable as the envelope's `data.candidates`); an
+  out-of-scope kind refuses toward the right spelling; a batch resolves ALL-OR-NONE
+  (`--channel`/`--skill` selectors force kinds); and the ONE uniform not-found mirrors the plane's
+  non-answer ("not found, or is not visible to you…" — no enumeration oracle on either side).
+  Unit-tested against a fixture universe (cross-workspace collisions, kind collisions, kind
+  mismatches, the all-or-none batch).
+- **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqDeviceClient`) — enrollment + the
+  TWO-PHASE subscribe. Three doors, dispatched by shape (a pending WAL always wins — "re-invoking IS
+  the resume"; a KNOWN followed skill name wins over the address grammar):
+  - **the `/i/` admin-CLAIM door** (claims-only now): pin → pre-send `ClaimPending` WAL → POST
+    `/v1/admin-claim` → promote, with the same re-root + one-plane guard as ever (an `/i/` link still
+    declaring the retired invite methods answers "join by the workspace ADDRESS instead");
+  - **the ADDRESS flow** (`follow <workspace>`, `<server>/<ws>`, `acme/channels/eng`, bare
+    channel/skill names): an unresolved workspace-shaped single target fetches the constant
+    **protocol card** at the address (`Accept: application/json` → `WireProtocolCard`; no existence
+    signal), re-roots onto its declared `api_base_url` (same URL gate, https-never-downgrades),
+    guards one-plane-per-install (the wrong-server refusal NAMES the `TOPOS_HOME` second-install
+    hatch), starts `device/authorize {workspace: <address-name>, intent: enroll}`, and persists an
+    `AuthorizingAddress` WAL carrying the FOLLOW INTENT; the granted poll's workspace context is the
+    authoritative id the redeem rides (an unknown/not-yours name dies at the redeem's uniform
+    denial); the `Redeemed` fence + promote are the shared machinery, and the promoted flow
+    CONTINUES into the intent's describe/apply in the same invocation;
+  - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
+    resume, unchanged.
+  The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
+  → workspace/role/invited-by, the install list with digests + `via` attribution, the all-devices +
+  fleet-reporting disclosures, pre-placed channels, dirname collisions with the `--prefix-dirname`
+  `<ws>.<name>` choice, freed-name new-identity notes, the direct-follow explanation) + `next_actions`
+  carrying the paste-ready `--yes` argv (NOTHING mutates before `--yes` except the enrollment itself
+  — identity, reversible, disclosed as `enrolled_now`); `--yes` = the row ops (`channel_join` /
+  `follow_skill`) then the delivery-driven reconcile landing the set THIS invocation
+  (batch-accepting first-receive offers through the SAME engine — never a fork; collisions decline
+  by default or install prefixed), then the fleet report. The transports are built per-base-URL
+  behind injectable factories, so the whole flow is tested over fakes with no HTTP.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
   by POSTing the governance Invite op. Requires prior enrollment: the plane (`base_url` from `instance.json`)
   and the workspace (`workspace_id` from `identity/user.json`) come from what `follow`
@@ -269,19 +271,44 @@ are asserted byte-equal in tests.
   typed ask-an-owner error (`REQUEST_ACCESS`), and the invite follow now persists + re-emits the
   server-built `verification_uri_complete` verbatim (reconstruction is only the older-plane fallback).
 
-- **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. STILL LOCAL-ONLY
-  and byte-inert (the plane's person-scoped `skill_unfollows` rows + `Authority::unfollow_skill` exist —
-  the verb's server half is the verb-reshape increment's; until then a local unfollow freezes THIS
-  install and the reconcile respects it, while other devices keep receiving): it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
-  the enrollment uses (retaining the workspace / mode so a later
-  `follow <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
-  pending, placing it; the workspace credential stays in `credentials.json`),
-  and touches nothing else — never a skill file, never the sync state or a `held` pin, never the currency
-  hook (the per-install hook's sweep simply skips an unfollowed skill; `load_enrollment` keeps the pinned
-  plane key loaded even with zero active follows, so an enrolled author who unfollowed everything can
-  still publish/revert/review). Idempotent: not-followed / already-unfollowed is the same clean success;
-  an explicit local `pull <skill>@<hash>` (a user-initiated go-back) remains available on an unfollowed
-  copy. Golden `--json` fixture + a byte-identity test (the placement bytes hash equal across unfollow).
+- **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, two-phase and byte-inert.
+  Resolves dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
+  the web (leaving is a roster change); the structural `everyone` refuses with the alternatives
+  spelled; a channel target describes what STOPS (delivered via this channel alone) vs what KEEPS
+  arriving (another channel / a direct follow), then `--yes` DELETEs the membership; a skill target
+  describes the everywhere-stop (the unfollow row subtracts the skill from the WHOLE entitlement,
+  channels included), then `--yes` DELETEs `follows/{skill}` AND flips the local `follows.json`
+  pause in the same identity-locked write (so `list`'s cause column reads the frozen copy offline).
+  The describe names the three constants: every device of yours, bytes frozen in place, the final
+  detach record. Un-enrolled (or a purely local skill) keeps the graceful local path — the pause
+  flag flips, nothing dials. Idempotent; never a skill file, never a `held` pin, never the currency
+  hook; an explicit local `update <skill>@<hash>` remains available on an unfollowed copy.
+- **The `auth` group** (`ops/auth`) — `login` / `logout` / `status`. **`login [server]`** (default
+  `https://topos.sh`, `TOPOS_PLANE_URL` override, or the enrolled plane): card → re-root → the same
+  wrong-server `TOPOS_HOME` refusal → `device/authorize {intent: login}` → the shared WAL/poll/
+  resume idiom (an `AuthorizingLogin` phase; the BIN blocks interactively / under `--wait`) →
+  `POST /v1/login` re-mints ONE workspace credential per confirmed seat (a revoked device's seat
+  reports `blocked` instead) → writes `instance.json` / `credentials.json` / `user.json`. A
+  DIFFERENT account than `user.json`'s principal is a typed `CONFIRM_REQUIRED` without `--yes`;
+  `--yes` replaces the stored credentials + memberships WHOLESALE; a same-account re-login is an
+  idempotent re-mint. **`logout`** is two-phase: describe, then best-effort self device-revoke per
+  enrolled workspace (the governance `DELETE …/devices` with this device's own key id) and delete
+  `identity/credentials.json` — skills, follows, drafts, and the principal stay (no credentials IS
+  signed-out). **`status`** is side-effect-free: whoami, per-workspace credential health via a
+  `GET /me` probe (healthy / "no access — revoked or removed" on the uniform 404 / unreachable / no
+  credential), hook health (the adapter's config-entry probe), and the reporting posture from
+  `state/sync_status.json`.
+- **The hook posture + notices** (`ops/pull`, `sync_status`) — the delivery-driven reconcile writes
+  `state/sync_status.json` (`{workspaces: {ws: {last_delivery_at, last_report_at,
+  staleness_window_ms}}}` — a plain doc, no secret) on every successful delivery/report and mirrors
+  it onto `PullData.sync`; the delivered NOTICES ride `PullData.notices` — an interactive or
+  `--json` `update` ACKS exactly the ids it returns (`POST …/notices/ack`), the quiet hook fetches
+  WITHOUT acking. `update --quiet` stays byte-silent EXCEPT two one-liners a person must not miss:
+  the removed-from-roster freeze, and unreachable-AND-stale ("last synced <age> ago — server
+  unreachable", read against the recorded window); an auth/transport failure warns and exits 0 (the
+  hook never fails a session start for a network blip) while a genuinely local failure still exits
+  nonzero. `follow --yes` reuses the same reconcile with explicit `ReconcileOpts`
+  (batch-accepted first receives, declined/renamed collisions, one workspace, no ack).
 
 - **The `upgrade` maintenance command** (`ops/upgrade`, `release`, `plane_http::UreqReleases`) — the native
   self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin — which allows a

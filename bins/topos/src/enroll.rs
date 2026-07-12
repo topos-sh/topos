@@ -384,6 +384,27 @@ pub(crate) fn write_credential(
     )
 }
 
+/// REPLACE the credential set WHOLESALE (the `auth login --yes` account switch: the old account's
+/// credentials must not linger under a new principal) — and the login re-mint writes its whole seat
+/// set in one atomic pass. Written `0600` under the identity lock. An EMPTY set writes an empty
+/// document (signed in as no-workspace is a real state), never deletes the file.
+pub(crate) fn replace_credentials(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    entries: Vec<CredentialEntry>,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    fs.create_dir_all(&layout.identity_dir())?;
+    doc::write_doc_private(
+        fs,
+        &layout.credentials_path(),
+        &Credentials {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            credentials: entries,
+        },
+    )
+}
+
 // =================================================================================================
 // The enrollment WAL (`identity/enrollment.json`) — the two-call resume's durable state. A `0600`
 // SECRET (it holds the device code and, once redeemed, the workspace credential). Hand-written `Debug`
@@ -399,10 +420,11 @@ pub(crate) struct OfferedSkill {
     pub name: Option<String>,
 }
 
-/// How an enrollment was rooted — an `/i/` invite (the original door), a workspace-standup sign-in, or a
-/// one-time admin claim. Persisted in the WAL context so the promotion writes an honest
-/// `user.json.invite_rooted` and the standup publish can disclose its receipt; a missing field on an older
-/// WAL reads as `invite` (the only root that existed before this field).
+/// How an enrollment was rooted — an `/i/` invite (the original door), a workspace-standup sign-in, a
+/// one-time admin claim, or a workspace-ADDRESS follow (the token-less join). Persisted in the WAL
+/// context so the promotion writes an honest `user.json.invite_rooted` and the standup publish can
+/// disclose its receipt; a missing field on an older WAL reads as `invite` (the only root that existed
+/// before this field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EnrollRoot {
@@ -412,6 +434,30 @@ pub(crate) enum EnrollRoot {
     Standup,
     /// Rooted in a one-time admin-claim link (the self-host bearer door).
     Claim,
+    /// Rooted in a `follow <workspace-address>` (the token-less join: the address carries nothing —
+    /// the roster is the lock; identity is proven at the verification page).
+    Address,
+}
+
+/// The kind half of a persisted follow intent (a doc-local copy — the resolver's `ResourceKind`
+/// carries no serde derives, and the workspace case exists only here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FollowKindDoc {
+    Workspace,
+    Channel,
+    Skill,
+}
+
+/// The follow INTENT an address enrollment carries across the device-flow wait: what the original
+/// `follow` targeted, so a resumed invocation continues into that target's describe/apply after the
+/// promote (the enrollment itself is identity — reversible, disclosed; the subscription + bytes are
+/// the consented effect and never land without the `--yes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FollowTargetDoc {
+    pub kind: FollowKindDoc,
+    /// The resource name (or the workspace ADDRESS name for `kind: workspace`).
+    pub name: String,
 }
 
 /// The serde default for [`EnrollRoot`] — invite (the pre-existing WALs were all invite-rooted).
@@ -435,9 +481,14 @@ pub(crate) struct EnrollContext {
     pub offered_skills: Vec<OfferedSkill>,
     /// How a followed skill adopts a new `current` (`--manual` ⇒ confirm-each, else auto).
     pub mode: FollowModeDoc,
-    /// Which door rooted this enrollment (invite / standup / claim); absent on an older WAL ⇒ invite.
+    /// Which door rooted this enrollment (invite / standup / claim / address); absent on an older
+    /// WAL ⇒ invite.
     #[serde(default = "default_enroll_root")]
     pub root: EnrollRoot,
+    /// The follow intent an ADDRESS enrollment continues into after the promote (its describe /
+    /// `--yes` apply). Absent on every other root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_target: Option<FollowTargetDoc>,
 }
 
 /// The WAL phase. **Internally tagged** (`"phase"`), so the on-disk shape is
@@ -482,6 +533,44 @@ pub(crate) enum EnrollPhase {
         verification_uri_complete: String,
         /// The session expiry as epoch-millis — the recovery sweep abandons an expired standup WAL
         /// exactly like an expired `Authorizing` one.
+        expires_at_millis: i64,
+    },
+    /// A live workspace-ADDRESS enrollment session (`follow <workspace-address>`), awaiting the
+    /// human's verification. There is NO workspace id yet — only the requested ADDRESS name (whether
+    /// it exists is never disclosed pre-verification; the granted poll carries the authoritative
+    /// workspace context, and an unknown/not-yours name dies at the redeem's uniform denial).
+    AuthorizingAddress {
+        /// The plane API base (the card's declared base, re-root-gated).
+        base_url: String,
+        /// The requested workspace ADDRESS name (the `device/authorize` body's `workspace`).
+        workspace_name: String,
+        /// The follow intent to continue into after the promote (workspace / channel / skill).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_target: Option<FollowTargetDoc>,
+        /// How followed skills adopt a new `current` (the original `--manual`).
+        mode: FollowModeDoc,
+        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
+        device_code: String,
+        /// The short user code (the session handle shown on the verification page).
+        user_code: String,
+        /// The SERVER-built verification URL with the code embedded — re-emitted verbatim while pending.
+        verification_uri_complete: String,
+        /// The session expiry as epoch-millis — the recovery sweep abandons an expired one.
+        expires_at_millis: i64,
+    },
+    /// A live LOGIN device session (`auth login`), awaiting the human's verification. Workspace-less
+    /// by design: the granted poll's grant redeems at `POST /v1/login`, which re-mints one workspace
+    /// credential per confirmed seat.
+    AuthorizingLogin {
+        /// The plane API base the login runs against (the card's declared base, re-root-gated).
+        base_url: String,
+        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
+        device_code: String,
+        /// The short user code (the session handle shown on the verification page).
+        user_code: String,
+        /// The SERVER-built verification URL with the code embedded — re-emitted verbatim while pending.
+        verification_uri_complete: String,
+        /// The session expiry as epoch-millis — the recovery sweep abandons an expired one.
         expires_at_millis: i64,
     },
     /// A one-time admin-CLAIM redeem about to be (or uncertainly) sent — written BEFORE the first POST so
@@ -553,6 +642,32 @@ impl std::fmt::Debug for PendingEnrollment {
                 ..
             } => {
                 s.field("phase", &"authorizing_standup")
+                    .field("base_url", base_url)
+                    .field("device_code", &"<redacted>")
+                    .field("user_code", user_code)
+                    .field("expires_at_millis", expires_at_millis);
+            }
+            EnrollPhase::AuthorizingAddress {
+                base_url,
+                workspace_name,
+                user_code,
+                expires_at_millis,
+                ..
+            } => {
+                s.field("phase", &"authorizing_address")
+                    .field("base_url", base_url)
+                    .field("workspace_name", workspace_name)
+                    .field("device_code", &"<redacted>")
+                    .field("user_code", user_code)
+                    .field("expires_at_millis", expires_at_millis);
+            }
+            EnrollPhase::AuthorizingLogin {
+                base_url,
+                user_code,
+                expires_at_millis,
+                ..
+            } => {
+                s.field("phase", &"authorizing_login")
                     .field("base_url", base_url)
                     .field("device_code", &"<redacted>")
                     .field("user_code", user_code)
@@ -809,6 +924,20 @@ pub(crate) fn read_wal(
             // A standup session has NO workspace yet — there is no id to validate (the granted poll's
             // workspace id is validated at the wire boundary when it arrives).
             EnrollPhase::AuthorizingStandup { .. } => return Ok(wal),
+            // A login session is workspace-less by design (the redeem's per-seat ids are validated at
+            // the wire boundary when they arrive).
+            EnrollPhase::AuthorizingLogin { .. } => return Ok(wal),
+            // An address session carries the requested ADDRESS name — a slug, not an id. It rides
+            // request BODIES only (never a path join), but a hand-edited traversal shape still fails
+            // the load closed (the same boundary discipline as every other persisted identifier).
+            EnrollPhase::AuthorizingAddress { workspace_name, .. } => {
+                if !crate::resolve::is_workspace_name(workspace_name) {
+                    return Err(ClientError::Corrupt(
+                        "the enrollment WAL's workspace name is not a valid address name".into(),
+                    ));
+                }
+                return Ok(wal);
+            }
             // A claim WAL carries the workspace-to-be's id (it later keys user.json + URL splices).
             EnrollPhase::ClaimPending { workspace_id, .. } => {
                 crate::id::validate_workspace_id(workspace_id)?;
@@ -864,6 +993,12 @@ pub(crate) fn sweep_expired_wal(
             expires_at_millis, ..
         }
         | EnrollPhase::AuthorizingStandup {
+            expires_at_millis, ..
+        }
+        | EnrollPhase::AuthorizingAddress {
+            expires_at_millis, ..
+        }
+        | EnrollPhase::AuthorizingLogin {
             expires_at_millis, ..
         } => now_millis > *expires_at_millis,
         EnrollPhase::ClaimPending { .. } | EnrollPhase::Redeemed { .. } => false,
@@ -1193,6 +1328,7 @@ mod tests {
                     }],
                     mode: FollowModeDoc::Auto,
                     root: EnrollRoot::Invite,
+                    follow_target: None,
                 },
                 credential: "wsc_secret".to_owned(),
                 device_key_id: "dk_abc".to_owned(),
@@ -1290,6 +1426,7 @@ mod tests {
                     offered_skills: Vec::new(),
                     mode: FollowModeDoc::Auto,
                     root: EnrollRoot::Invite,
+                    follow_target: None,
                 },
                 credential: "wsc_secret".to_owned(),
                 device_key_id: "dk_abc".to_owned(),

@@ -7,7 +7,7 @@ use topos_types::requests::InvitationData;
 use topos_types::results::{
     AddData, AddedNote, DiffData, FollowData, LogData, ProposeData, PublishData, PullData,
     PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData, ReviewDecision,
-    SkillEntry, UnfollowData, UntrackedEntry,
+    SkillEntry, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -31,7 +31,10 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
     }
 }
 
-/// A failure envelope carrying the stable code, outcome, and machine-actionable next steps.
+/// A failure envelope carrying the stable code, outcome, and machine-actionable next steps. An
+/// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified paths as
+/// `data.candidates` — the machine-readable half of the ambiguity refusal (the human list rides
+/// the message).
 pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     let outcome = err.outcome();
     let next_actions = next_actions(err);
@@ -39,11 +42,17 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
         outcome,
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
     );
+    let data = match err {
+        ClientError::AmbiguousTarget { candidates, .. } => {
+            serde_json::json!({ "candidates": candidates })
+        }
+        _ => serde_json::json!({}),
+    };
     JsonEnvelope {
         schema_version: WIRE_SCHEMA_VERSION,
         command: command.to_owned(),
         ok: false,
-        data: serde_json::json!({}),
+        data,
         warnings: Vec::new(),
         next_actions: next_actions.clone(),
         receipt: None,
@@ -554,8 +563,7 @@ pub(crate) fn self_update_tty(o: &crate::ops::SelfUpdateOutcome) -> String {
     s
 }
 
-pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
-    let data = &out.data;
+pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
     // A pending enrollment: surface the verification URL WITH the workspace + verified-domain provenance
     // (the relay-phishing guard — the human checks the domain before approving).
     if let Some(pending) = &data.pending {
@@ -611,10 +619,321 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
     };
     // The resume disclosure: a skill-path follow flipped a paused entry back on (TTY-only; the pinned
     // `FollowData` shape has no resume field).
-    for name in &out.resumed {
+    for name in resumed {
         s.push_str(&format!(
             "\nResumed following {name} — auto-updates are back on; the next `topos update` lands the \
              team's current."
+        ));
+    }
+    s
+}
+
+/// The generic next-actions for a two-phase DESCRIBE: each argv is the ready-to-exec apply command
+/// (`… --yes`, plus alternatives like the `--prefix-dirname` variant).
+pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> {
+    argvs
+        .into_iter()
+        .map(|argv| NextAction {
+            code: ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv,
+        })
+        .collect()
+}
+
+/// One argv as a paste-ready shell line (the TTY's spelling of a next action).
+fn argv_line(argv: &[String]) -> String {
+    argv.join(" ")
+}
+
+/// The follow DESCRIBE's TTY: the workspace story, the install list with digests + via, the
+/// collision choice, the standing disclosures, and the `--yes` argvs. Nothing has changed yet.
+pub(crate) fn follow_describe_tty(
+    d: &crate::ops::FollowDescribe,
+    next_argvs: &[Vec<String>],
+) -> String {
+    let mut s = format!(
+        "{} ({}) — {}",
+        d.workspace.display_name, d.workspace.name, d.workspace.address
+    );
+    if d.enrolled_now {
+        s.push_str("\nEnrolled this device (identity only — nothing is installed yet).");
+    }
+    s.push_str(&format!("\nYour role: {}", d.role));
+    if let Some(by) = &d.invited_by {
+        s.push_str(&format!(" — invited by {by}"));
+    }
+    if !d.preplaced_channels.is_empty() {
+        s.push_str(&format!(
+            "\nPre-placed channels: #{}",
+            d.preplaced_channels.join(", #")
+        ));
+    }
+    let target_list: Vec<String> = d
+        .targets
+        .iter()
+        .map(|t| format!("{} {}", t.kind, t.name))
+        .collect();
+    s.push_str(&format!("\nFollowing: {}", target_list.join(", ")));
+    if d.installs.is_empty() {
+        s.push_str("\nNothing new would install on this device.");
+    } else {
+        s.push_str("\nWould install:");
+        for i in &d.installs {
+            let via = if i.via_channels.is_empty() {
+                if i.via_direct {
+                    "direct".to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                let mut v = format!("#{}", i.via_channels.join(", #"));
+                if i.via_direct {
+                    v.push_str(", direct");
+                }
+                v
+            };
+            let digest = i.bundle_digest.as_deref().map(short).unwrap_or("?");
+            s.push_str(&format!("\n  {}  @{}  via {}", i.name, digest, via));
+        }
+    }
+    if let Some(note) = &d.direct_follow_note {
+        s.push_str(&format!("\nnote: {note}"));
+    }
+    for note in &d.freed_name_notes {
+        s.push_str(&format!("\nnote: {note}"));
+    }
+    if !d.collisions.is_empty() {
+        s.push_str("\nName collisions (declined by default):");
+        for c in &d.collisions {
+            s.push_str(&format!(
+                "\n  {} — a different skill already lives at {}; `--prefix-dirname` installs it \
+                 as {}",
+                c.name, c.existing, c.prefixed_dirname
+            ));
+        }
+    }
+    s.push_str(&format!("\n{}", d.all_devices_note));
+    s.push_str(&format!("\n{}", d.reporting_note));
+    s.push_str("\nNothing has changed yet — apply with:");
+    for argv in next_argvs {
+        s.push_str(&format!("\n  {}", argv_line(argv)));
+    }
+    s
+}
+
+/// The follow APPLY's TTY: what was subscribed, what landed, what was declined.
+pub(crate) fn follow_applied_tty(a: &crate::ops::FollowApplied) -> String {
+    let mut s = format!("Following in {} ({}).", a.workspace_name, a.workspace_id);
+    if a.enrolled_now {
+        s = format!(
+            "Enrolled into {} ({}).\n{s}",
+            a.workspace_name, a.workspace_id
+        );
+    }
+    for t in &a.subscribed {
+        s.push_str(&format!("\nSubscribed: {} {}", t.kind, t.name));
+    }
+    if a.installed.is_empty() {
+        s.push_str("\nNothing new installed on this device.");
+    } else {
+        s.push_str("\nInstalled:");
+        for i in &a.installed {
+            let digest = i.bundle_digest.as_deref().map(short).unwrap_or("?");
+            s.push_str(&format!("\n  {}  @{digest}", i.name));
+        }
+    }
+    for c in &a.declined {
+        s.push_str(&format!(
+            "\nDeclined {} (name collision with {}); re-run with `--prefix-dirname` to install it \
+             as {}",
+            c.name, c.existing, c.prefixed_dirname
+        ));
+    }
+    for w in &a.warnings {
+        s.push_str(&format!("\nwarning: {w}"));
+    }
+    s
+}
+
+/// The unfollow DESCRIBE's TTY: what stops where, what never changes, and the `--yes` argv.
+pub(crate) fn unfollow_describe_tty(
+    d: &crate::ops::UnfollowDescribe,
+    yes_argv: &[String],
+) -> String {
+    let mut s = String::new();
+    for item in &d.items {
+        s.push_str(&format!("Unfollowing {} {}:", item.kind, item.name));
+        if item.stops.is_empty() {
+            s.push_str("\n  nothing currently delivered stops");
+        } else {
+            s.push_str(&format!("\n  stops: {}", item.stops.join(", ")));
+        }
+        if !item.keeps.is_empty() {
+            s.push_str(&format!(
+                "\n  keeps arriving (other channels / direct): {}",
+                item.keeps.join(", ")
+            ));
+        }
+        s.push('\n');
+    }
+    s.push_str(&d.all_devices_note);
+    s.push_str(&format!("\n{}", d.bytes_note));
+    s.push_str(&format!("\n{}", d.record_note));
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The unfollow APPLY's TTY.
+pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
+    let mut s = String::new();
+    for item in &a.items {
+        s.push_str(&format!(
+            "Stopped following {} {} — delivery ends on every device; the local copy stays as a \
+             frozen copy.\n",
+            item.kind, item.name
+        ));
+    }
+    s.push_str("`topos follow` re-attaches.");
+    s
+}
+
+/// The pending login's TTY (the device-flow wait — same shape as the follow/publish waits).
+pub(crate) fn login_pending_tty(p: &crate::ops::AuthLoginPending) -> String {
+    format!(
+        "Signing in to {}\nOpen this URL to approve, then re-run `topos auth login`:\n  {}\n  \
+         fingerprint: {} (confirm it matches the page before approving)",
+        p.server,
+        p.verification_uri_complete,
+        group_fingerprint(&p.device_fingerprint),
+    )
+}
+
+/// The completed login's TTY: the per-workspace minted/blocked report.
+pub(crate) fn login_done_tty(d: &crate::ops::AuthLoginData) -> String {
+    let mut s = format!("Signed in to {} as {}.", d.server, d.principal);
+    if let Some(old) = &d.replaced_principal {
+        s.push_str(&format!("\nReplaced the previous account {old}."));
+    }
+    if d.memberships.is_empty() {
+        s.push_str("\nNo workspace seats yet — follow a workspace address to join one.");
+    }
+    for m in &d.memberships {
+        if m.minted {
+            s.push_str(&format!(
+                "\n  {} ({}) — credential minted ({})",
+                m.display_name, m.name, m.role
+            ));
+        } else {
+            s.push_str(&format!(
+                "\n  {} ({}) — blocked: {}",
+                m.display_name,
+                m.name,
+                m.blocked.as_deref().unwrap_or("no credential minted")
+            ));
+        }
+    }
+    s
+}
+
+/// The pending login's next action — re-invoke `auth login` (re-invoking IS the resume).
+pub(crate) fn login_pending_next_actions() -> Vec<NextAction> {
+    vec![NextAction {
+        code: ActionCode::from("ENROLL_RESUME".to_owned()),
+        argv: vec![
+            "topos".into(),
+            "auth".into(),
+            "login".into(),
+            "--json".into(),
+        ],
+    }]
+}
+
+/// The logout DESCRIBE's TTY.
+pub(crate) fn logout_describe_tty(
+    d: &crate::ops::AuthLogoutDescribe,
+    yes_argv: &[String],
+) -> String {
+    let mut s = match &d.principal {
+        Some(p) => format!("Signing out {p}."),
+        None => "Signing out.".to_owned(),
+    };
+    if d.workspaces.is_empty() {
+        s.push_str("\nNo stored workspace credentials — already signed out.");
+    } else {
+        s.push_str(&format!(
+            "\nWould revoke this device (best-effort) and delete its credential in: {}",
+            d.workspaces.join(", ")
+        ));
+    }
+    s.push_str(&format!("\n{}", d.keeps_note));
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The applied logout's TTY.
+pub(crate) fn logout_applied_tty(d: &crate::ops::AuthLogoutData) -> String {
+    let mut s = if d.credentials_deleted {
+        "Signed out — the stored credentials are deleted.".to_owned()
+    } else {
+        "Already signed out — no credentials were stored.".to_owned()
+    };
+    if !d.revoked.is_empty() {
+        s.push_str(&format!(
+            "\nRevoked this device in: {}",
+            d.revoked.join(", ")
+        ));
+    }
+    if !d.revoke_failed.is_empty() {
+        s.push_str(&format!(
+            "\nCould not reach the server to revoke in: {} (the credential is deleted locally \
+             either way; an owner can revoke the device on the web)",
+            d.revoke_failed.join(", ")
+        ));
+    }
+    s.push_str(&format!("\n{}", d.keeps_note));
+    s
+}
+
+/// `auth status`'s TTY — whoami, per-workspace health, hook health, reporting posture.
+pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
+    let mut s = match (&d.principal, d.signed_in) {
+        (Some(p), true) => format!("Signed in as {p}"),
+        (Some(p), false) => format!("Signed out (last account: {p})"),
+        (None, _) => "Not signed in.".to_owned(),
+    };
+    if let Some(server) = &d.server {
+        s.push_str(&format!("\nserver: {server}"));
+    }
+    for ws in &d.workspaces {
+        let label = ws.display_name.as_deref().unwrap_or(&ws.workspace_id);
+        s.push_str(&format!("\n  {label}: {}", ws.health));
+        if let Some(role) = &ws.role {
+            s.push_str(&format!(" ({role})"));
+        }
+    }
+    s.push_str(&format!(
+        "\ncurrency hook: {}",
+        if d.hook_armed {
+            "armed"
+        } else {
+            "not installed"
+        }
+    ));
+    for r in &d.reporting {
+        let last = r
+            .last_report_at
+            .map(|t| format!("last report at {t}"))
+            .unwrap_or_else(|| "never reported".to_owned());
+        s.push_str(&format!(
+            "\n  reporting {}: {last}{}",
+            r.workspace_id,
+            if r.stale { " — STALE" } else { "" }
         ));
     }
     s
@@ -634,14 +953,6 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
         data.address, data.address,
     ));
     out
-}
-
-pub(crate) fn unfollow_tty(data: &UnfollowData) -> String {
-    format!(
-        "Stopped following {} — auto-updates stop; your local copy is kept, nothing was deleted. \
-         `topos follow {}` resumes.",
-        data.skill_id, data.skill_id,
-    )
 }
 
 /// The one-line disclosure that a `publish` ADDED the skill to topos first (the auto-add convenience) —
@@ -1061,6 +1372,8 @@ mod tests {
                 row("pinned", PullAction::Held),
             ],
             proposals_awaiting: 2,
+            notices: Vec::new(),
+            sync: Vec::new(),
         };
         let out = pull_tty(&data, &[]);
 
@@ -1117,6 +1430,8 @@ mod tests {
                 row("b", PullAction::UpToDate),
             ],
             proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
         };
         assert_eq!(
             pull_tty(&clean, &[]),
@@ -1126,6 +1441,8 @@ mod tests {
         let empty = PullData {
             skills: Vec::new(),
             proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
         };
         assert_eq!(pull_tty(&empty, &[]), "No followed skills.");
         // A failed skill renders visibly and is counted (even when every synced row was current).
@@ -1345,29 +1662,24 @@ mod tests {
     fn follow_tty_pending_discloses_the_grouped_fingerprint() {
         use topos_types::results::{EnrollmentPending, FollowData};
 
-        use crate::ops::FollowOutcome;
-
-        let out = FollowOutcome {
-            data: FollowData {
-                workspace_id: "w_acme".to_owned(),
-                enrolled: false,
-                skills: Vec::new(),
-                deployment_mode: None,
-                workspace_display_name: Some("Acme Inc".to_owned()),
-                verified_domain: None,
-                verified_domain_status: None,
-                plane_base_url: Some("https://api.topos.sh".to_owned()),
-                pending: Some(EnrollmentPending {
-                    verification_uri_complete: "https://topos.sh/verify/WXYZ-1234".to_owned(),
-                    user_code: "WXYZ-1234".to_owned(),
-                    device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
-                    expires_at: None,
-                }),
-                currency: None,
-            },
-            resumed: Vec::new(),
+        let data = FollowData {
+            workspace_id: "w_acme".to_owned(),
+            enrolled: false,
+            skills: Vec::new(),
+            deployment_mode: None,
+            workspace_display_name: Some("Acme Inc".to_owned()),
+            verified_domain: None,
+            verified_domain_status: None,
+            plane_base_url: Some("https://api.topos.sh".to_owned()),
+            pending: Some(EnrollmentPending {
+                verification_uri_complete: "https://topos.sh/verify/WXYZ-1234".to_owned(),
+                user_code: "WXYZ-1234".to_owned(),
+                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
+                expires_at: None,
+            }),
+            currency: None,
         };
-        let text = follow_tty(&out);
+        let text = follow_tty(&data, &[]);
         // The fingerprint prints GROUPED in fours for eyeball comparison against the verification page.
         assert!(text.contains("e4aa f52f 5c39 1ce9"), "{text}");
         assert!(text.contains("confirm it matches the page"), "{text}");

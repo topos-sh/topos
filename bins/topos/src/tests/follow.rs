@@ -455,17 +455,39 @@ fn run_follow(
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
         Box::new(plane.clone())
     };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("the classic follow flows never build a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("the classic follow flows never build a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
-    ops::follow(&ctx, &connectors, link.map(str::to_owned), opts).map(|o| o.data)
+    let outcome = ops::follow(
+        &ctx,
+        &connectors,
+        link.map(str::to_owned).into_iter().collect(),
+        opts,
+    )?;
+    match outcome {
+        ops::FollowOutcome::Data { data, .. } => Ok(data),
+        _ => panic!("the classic follow flows answer the wire payload"),
+    }
 }
 
 fn opts(manual: bool) -> ops::FollowOpts {
     ops::FollowOpts {
         manual,
         workspace: None,
+        yes: false,
+        prefix_dirname: false,
+        channels: Vec::new(),
+        skills: Vec::new(),
     }
 }
 
@@ -500,6 +522,7 @@ fn enroll_via_redeemed_wal(
         mode: enroll::FollowModeDoc::Auto,
         // Joining an existing workspace is invite-rooted (the address-follow leg drives this path live).
         root: enroll::EnrollRoot::Invite,
+        follow_target: None,
     };
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
@@ -646,6 +669,7 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
         }],
         mode: enroll::FollowModeDoc::Auto,
         root: enroll::EnrollRoot::Invite,
+        follow_target: None,
     };
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
@@ -668,13 +692,23 @@ fn a_redeemed_wal_resume_promotes_without_re_redeeming() {
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
         Box::new(plane.clone())
     };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("an invite-rooted promote never builds a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("an invite-rooted promote never builds a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
-    let data = ops::follow(&ctx, &connectors, None, opts(false))
-        .unwrap()
-        .data;
+    let data = match ops::follow(&ctx, &connectors, Vec::new(), opts(false)).unwrap() {
+        ops::FollowOutcome::Data { data, .. } => data,
+        _ => panic!("an invite-rooted promote answers the wire payload"),
+    };
 
     assert!(data.enrolled);
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
@@ -815,19 +849,31 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
         Box::new(plane.clone())
     };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("this flow never builds a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("this flow never builds a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
     // The claim door enrolls in ONE call, re-rooting first.
-    let data = ops::follow(
+    let data = match ops::follow(
         &ctx,
         &connectors,
-        Some("https://links.example/i/tok_abc".to_owned()),
+        vec!["https://links.example/i/tok_abc".to_owned()],
         opts(false),
     )
     .expect("the claim door enrolls in one call after re-rooting")
-    .data;
+    {
+        ops::FollowOutcome::Data { data, .. } => data,
+        _ => panic!("the claim door answers the wire payload"),
+    };
 
     assert!(data.enrolled);
     // The receipt disclosed the plane the device actually enrolls against (not the share host).
@@ -895,6 +941,7 @@ fn tiny_context() -> enroll::EnrollContext {
         offered_skills: Vec::new(),
         mode: enroll::FollowModeDoc::Auto,
         root: enroll::EnrollRoot::Invite,
+        follow_target: None,
     }
 }
 
@@ -1010,16 +1057,29 @@ fn approve_places_the_named_first_receive_offer() {
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
         Box::new(plane.clone())
     };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("the skill path never builds a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("the skill path never builds a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
-    let out = ops::follow(&ctx, &connectors, Some("deploy".to_owned()), opts(false)).unwrap();
+    let (data, resumed) =
+        match ops::follow(&ctx, &connectors, vec!["deploy".to_owned()], opts(false)).unwrap() {
+            ops::FollowOutcome::Data { data, resumed } => (data, resumed),
+            _ => panic!("the skill path answers the wire payload"),
+        };
 
-    assert!(out.data.enrolled);
-    assert_eq!(out.data.skills.len(), 1);
+    assert!(data.enrolled);
+    assert_eq!(data.skills.len(), 1);
     assert!(
-        out.resumed.is_empty(),
+        resumed.is_empty(),
         "an active follow's approve is not a resume"
     );
     // The named bytes were placed.
@@ -1125,6 +1185,7 @@ fn write_workspace_b_redeemed_wal(rig: &Rig) {
         }],
         mode: enroll::FollowModeDoc::Auto,
         root: enroll::EnrollRoot::Invite,
+        follow_target: None,
     };
     let wal = enroll::PendingEnrollment {
         schema_version: 1,
@@ -1154,11 +1215,23 @@ fn resume_over_fs(
     let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
         Box::new(plane.clone())
     };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("an invite-rooted promote never builds a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("an invite-rooted promote never builds a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
-    ops::follow(&ctx, &connectors, None, opts(false)).map(|o| o.data)
+    match ops::follow(&ctx, &connectors, Vec::new(), opts(false))? {
+        ops::FollowOutcome::Data { data, .. } => Ok(data),
+        _ => panic!("an invite-rooted promote answers the wire payload"),
+    }
 }
 
 /// Assert the fully converged state: BOTH memberships (each with the right id + display name), BOTH follows

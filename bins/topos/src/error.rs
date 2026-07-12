@@ -298,6 +298,32 @@ pub(crate) enum ClientError {
          to update the topos CLI itself"
     )]
     UpgradeAmbiguous,
+    /// The ONE uniform not-found: a workspace / channel / skill address that resolved to nothing — locally
+    /// AND on the plane, whose 404 deliberately does not distinguish "does not exist" from "not yours".
+    /// The client mirrors that non-answer (no enumeration oracle on either side); the guidance is the
+    /// fixed dual reading. `target` is the user's own argv token, shown verbatim.
+    #[error(
+        "'{target}' was not found, or is not visible to you — check the address; if you were invited, \
+         confirm with your inviter"
+    )]
+    TargetNotFound { target: String },
+    /// A name resolved to MORE than one workspace resource (across workspaces, or across the channel/skill
+    /// kinds). Carries the paste-ready qualified paths (`<workspace>/channels/<name>` /
+    /// `<workspace>/skills/<name>`) — the human list rides the message, and the envelope surfaces them
+    /// machine-readably as `data.candidates`.
+    #[error(
+        "'{name}' is ambiguous here — it matches {}; use one of those qualified paths",
+        candidates.join(", ")
+    )]
+    AmbiguousTarget {
+        name: String,
+        candidates: Vec<String>,
+    },
+    /// A mutating verb outside `revert` needs `--yes` to proceed (the two-phase consent gate): the
+    /// message IS the describe of what `--yes` would change — nothing has changed yet. Shown VERBATIM
+    /// (usage guidance this code wrote; never wire/document bytes).
+    #[error("{0}")]
+    ConfirmFirst(String),
 }
 
 impl ClientError {
@@ -359,6 +385,12 @@ impl ClientError {
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
+            ClientError::TargetNotFound { .. } => "NOT_FOUND",
+            // The address-grammar ambiguity shares the tracked-name ambiguity's code (agents branch the
+            // same); the candidates additionally ride the envelope's `data.candidates`.
+            ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
+            // The two-phase consent gate shares `revert`'s code (both mean "re-run with --yes").
+            ClientError::ConfirmFirst(_) => "CONFIRM_REQUIRED",
         }
     }
 
@@ -371,9 +403,10 @@ impl ClientError {
             | ClientError::AmbiguousHarness { .. }
             | ClientError::AmbiguousScope { .. }
             // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
-            // retry" class.
+            // retry" class — as is a workspace-resource name matching across workspaces or kinds.
             | ClientError::AmbiguousSkillInRepo { .. }
-            | ClientError::DuplicateSkillName { .. } => TerminalOutcome::AmbiguousName,
+            | ClientError::DuplicateSkillName { .. }
+            | ClientError::AmbiguousTarget { .. } => TerminalOutcome::AmbiguousName,
             // A network fetch fault is transient — the agent may retry the same import.
             ClientError::RemoteFetch(_) => TerminalOutcome::RetryableFailure,
             // A transient filesystem or plane-read failure is retryable — whether it surfaced

@@ -23,24 +23,30 @@
 //! workspace credential) live only in the `0600` WAL / `credentials.json`, are redacted in `Debug`, and
 //! never reach a URL / log / error.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
 use topos_core::digest::{self, ManifestEntry, to_hex};
 use topos_gitstore::Store;
-use topos_types::bootstrap::VerifiedDomainStatus;
+use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
-use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer};
+use topos_types::requests::{WireChannelIndex, WireMe, WireSkillIndex};
+use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer, PullAction};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::identity::{self, DeviceKeyRef};
-use crate::ops::not_yet;
-use crate::plane::{EnrollSource, FollowContext, PlaneSource, PointerFetch, TokenPoll};
+use crate::plane::{
+    Card, DeliverySnapshot, DeliverySource, DirectorySource, EnrollSource, FollowContext,
+    PlaneError, PlaneSource, PointerFetch, ReconcileTransport, TokenPoll,
+};
 use crate::plane_http::SkillCred;
+use crate::resolve::{self, ParsedTarget, Resolution, ResourceKind};
 use crate::{doc, enroll, sidecar};
 
+use super::pull::ReconcileOpts;
 use super::sync_engine::{self, Invocation};
 
 /// The 64-char all-zero hex sentinel a never-received baseline uses for its (absent) base commit / digest.
@@ -48,13 +54,23 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 /// The genesis generation sentinel — `(0,0)` means "nothing authenticated / applied yet".
 const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 
-/// `follow`'s flags, parsed from argv (the single positional rides separately).
+/// `follow`'s flags, parsed from argv (the positional targets ride separately).
+#[derive(Clone)]
 pub(crate) struct FollowOpts {
     /// `--manual` ⇒ confirm-each adoption (else auto).
     pub manual: bool,
     /// The global `--workspace <id>` filter — disambiguates a positional skill NAME shared across the
     /// workspaces this install follows on the same plane. Ignored by the enrollment motions.
     pub workspace: Option<String>,
+    /// `--yes` — apply the described subscription (the one-shot consent). Bare = describe only.
+    pub yes: bool,
+    /// `--prefix-dirname` — install a dirname-colliding skill under `<workspace>.<name>` instead of
+    /// declining it (the collision choice the describe offers).
+    pub prefix_dirname: bool,
+    /// `--channel` selectors — kind-forced channel targets (join).
+    pub channels: Vec<String>,
+    /// `--skill` selectors — kind-forced skill targets (direct follow).
+    pub skills: Vec<String>,
 }
 
 /// Builds the creds-free enrollment transport for a plane base URL.
@@ -62,85 +78,233 @@ pub(crate) type EnrollConnect<'a> = dyn Fn(&str) -> Box<dyn EnrollSource> + 'a;
 /// Builds the read transport (the offer-disclosure source) for a base URL + the minted workspace credential.
 pub(crate) type PlaneConnect<'a> =
     dyn Fn(&str, HashMap<String, SkillCred>) -> Box<dyn PlaneSource> + 'a;
+/// Builds the credentialed DIRECTORY transport (describe reads + subscription rows) for a base URL.
+/// Re-reads `credentials.json` per build, so a mid-invocation enrollment's fresh mint is seen.
+pub(crate) type DirectoryConnect<'a> = dyn Fn(&str) -> Box<dyn DirectorySource> + 'a;
+/// Builds the credentialed RECONCILE transport (delivery + fleet report + the per-skill read lane,
+/// on one object — the reconcile binds a new arrival's credential onto the read side). Re-reads the
+/// on-disk credentials per build, for the same mid-invocation reason.
+pub(crate) type DeliveryConnect<'a> = dyn Fn(&str) -> Box<dyn ReconcileTransport> + 'a;
 
 /// The network seams the op needs, as factories — the base URL is known only after the op parses the
-/// `/i/` link (call 1) or reads the WAL (resume), so the transports can't be pre-built in the composition
-/// root. Production wires the `ureq` transports; the tests wire fakes (no HTTP).
+/// target / the card / the WAL, so the transports can't be pre-built in the composition root.
+/// Production wires the `ureq` transports; the tests wire fakes (no HTTP).
 pub(crate) struct FollowConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
     pub plane: &'a PlaneConnect<'a>,
+    pub directory: &'a DirectoryConnect<'a>,
+    pub delivery: &'a DeliveryConnect<'a>,
+    /// The default WEB origin the token-less doors dial when nothing is pinned yet (`follow <bare
+    /// workspace>` on a fresh install) — the composition root resolves `TOPOS_PLANE_URL`, else the
+    /// hosted default; the card fetch re-roots it onto the declared API base.
+    pub web_origin: String,
 }
 
-/// The verb's outcome: the schema-pinned wire payload, plus TTY-only disclosure (`FollowData`'s pinned
-/// shape has no resume field, so the resumed names ride alongside it — never on the `--json` surface).
-pub(crate) struct FollowOutcome {
-    pub data: FollowData,
-    /// Display names of skills whose retained `following == false` entry this skill-path follow flipped on.
-    pub resumed: Vec<String>,
+/// The verb's outcome — one of the three surfaces `follow` can answer with.
+// One value exists per invocation (the size gap between the inline wire payload and the boxed
+// describe/apply is irrelevant here, and boxing `FollowData` would noise every classic-path match).
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub(crate) enum FollowOutcome {
+    /// The classic wire payload: a pending device-flow, a claim/invite enrollment, or the
+    /// skill-path accept. `resumed` is TTY-only disclosure (display names of skills whose retained
+    /// `following == false` entry this skill-path follow flipped on).
+    Data {
+        data: FollowData,
+        resumed: Vec<String>,
+    },
+    /// The two-phase DESCRIBE (a bare subscribe) — nothing mutated beyond the enrollment itself;
+    /// `next_argvs` carry the ready-to-exec apply commands (`--yes`, and the `--prefix-dirname`
+    /// variant when collisions exist).
+    Described {
+        describe: Box<FollowDescribe>,
+        next_argvs: Vec<Vec<String>>,
+    },
+    /// The `--yes` apply report.
+    Applied(Box<FollowApplied>),
 }
 
-/// Dispatch the `follow` verb over the single positional `target`, in this precedence order:
+impl FollowOutcome {
+    /// Wrap a classic wire payload with no resumed disclosure.
+    fn plain(data: FollowData) -> Self {
+        FollowOutcome::Data {
+            data,
+            resumed: Vec::new(),
+        }
+    }
+}
+
+/// The workspace block a describe/apply carries.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DescribedWorkspace {
+    pub workspace_id: String,
+    /// The ADDRESS name.
+    pub name: String,
+    pub display_name: String,
+    /// The full address (the share link — server-built).
+    pub address: String,
+}
+
+/// One subscribe target, echoed on the describe/apply (`kind` is `workspace`/`channel`/`skill`).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DescribedTarget {
+    pub kind: String,
+    pub name: String,
+}
+
+/// One install `--yes` would land: the catalog identity, the consent digest, and WHY it arrives.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DescribedInstall {
+    pub skill_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_digest: Option<String>,
+    /// The channels delivering it (`everyone` included when it delivers).
+    pub via_channels: Vec<String>,
+    /// Whether it arrives as a direct follow (this invocation's, or a standing one).
+    pub via_direct: bool,
+}
+
+/// One dirname collision: an incoming install whose name a DIFFERENT local skill already holds. The
+/// default `--yes` DECLINES it; `--prefix-dirname` installs it under the prefixed dirname instead.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DescribedCollision {
+    pub skill_id: String,
+    pub name: String,
+    /// Where the existing same-named copy lives (its placement dir, or its tracked identity).
+    pub existing: String,
+    /// The `--prefix-dirname` alternative (`<workspace>.<name>`).
+    pub prefixed_dirname: String,
+}
+
+/// The two-phase DESCRIBE a bare subscribe answers — everything `--yes` would change, and nothing
+/// changed yet (except the enrollment itself, when this invocation enrolled: identity, reversible,
+/// disclosed via `enrolled_now`).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FollowDescribe {
+    pub workspace: DescribedWorkspace,
+    /// The caller's role on the roster.
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invited_by: Option<String>,
+    /// Whether THIS invocation enrolled the device (the identity step already happened; the
+    /// subscription + bytes are what `--yes` consents to).
+    pub enrolled_now: bool,
+    /// What this follow subscribes (workspace / channels / skills).
+    pub targets: Vec<DescribedTarget>,
+    /// The installs `--yes` would land on this device (pending first-receives included).
+    pub installs: Vec<DescribedInstall>,
+    /// Channels the person is already placed into (an inviter's pre-placement; `everyone` excluded).
+    pub preplaced_channels: Vec<String>,
+    /// Dirname collisions — declined by default; `--prefix-dirname` opts into the prefixed paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub collisions: Vec<DescribedCollision>,
+    /// A colliding name in THIS workspace whose skill id changed — a freed name reassigned to a NEW
+    /// skill (the old copy stays retained locally).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub freed_name_notes: Vec<String>,
+    /// Present when a targeted skill already arrives via a followed channel — a direct follow keeps
+    /// it even if the channel drops it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_follow_note: Option<String>,
+    /// Following is person-scoped: every enrolled device of this person receives the same set.
+    pub all_devices_note: String,
+    /// This device reports its applied versions to the workspace's fleet view after each update.
+    pub reporting_note: String,
+}
+
+/// The `--yes` apply report: the rows written, the installs landed, the collisions declined.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FollowApplied {
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub workspace_name: String,
+    /// Whether THIS invocation enrolled the device first.
+    pub enrolled_now: bool,
+    /// The subscription rows this apply wrote (channel joins / direct follows).
+    pub subscribed: Vec<DescribedTarget>,
+    /// The installs the reconcile landed (batch-accepted first receives + refreshed knowns).
+    pub installed: Vec<DescribedInstall>,
+    /// The dirname collisions the apply DECLINED (absent under `--prefix-dirname`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<DescribedCollision>,
+    /// The reconcile's isolated warnings (ride the envelope's `warnings` too).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Dispatch the `follow` verb over its positional targets + selectors, in this precedence order:
 ///
-/// 1. a pending enrollment WAL exists → RESUME it (poll/promote/retry), regardless of `target` — the
-///    "re-invoking IS the resume" path;
-/// 2. `target` contains `@` → the skill path `<skill>@<hash>` — the name-part MUST be a known followed
-///    skill (else a typed usage error);
-/// 3. `target` is URL-shaped (`://` or `/i/`) → start enrollment (an `/i/` invite or claim link);
-/// 4. `target` is a bare word matching a KNOWN followed skill → the skill path (place offer / resume a
-///    paused entry);
-/// 5. `target` is a bare word that is NOT a known skill → treat it as a bare invite token → start
-///    enrollment (pre-enrollment its only meaning; post-enrollment it redeems a new invite on the plane);
-/// 6. no `target`, no pending WAL → a typed usage error (nothing to do).
-///
-/// Rule summary: **known-skill-name wins; `@` forces the skill path; otherwise it is a link/token.**
+/// 1. a pending enrollment WAL exists → RESUME it (poll/promote/retry/continue), regardless of the
+///    targets — the "re-invoking IS the resume" path;
+/// 2. a single `/i/` link → the admin-CLAIM door (unchanged; `/i/` is claims-only);
+/// 3. a single bare `<skill>@<digest>` — the name-part MUST be a known followed skill — or a bare
+///    word matching a KNOWN followed skill → the classic skill path (place offer / resume a paused
+///    entry). **Known-skill-name wins** over the address grammar;
+/// 4. everything else is the ADDRESS/SUBSCRIBE grammar ([`crate::resolve`]): full addresses,
+///    qualified paths, bare channel/skill names, `--channel`/`--skill` selectors — resolved
+///    all-or-none; a single unresolved workspace-shaped target folds the ENROLL flow in; then the
+///    two-phase describe / `--yes` apply.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] for a missing target / denied / expired session; [`ClientError::InvalidArgument`]
-/// for an `@`-pinned unknown skill; [`ClientError::PlacementUnsupported`] for a follow against a different
-/// plane than the one enrolled; otherwise a transport / io / store failure.
+/// [`ClientError::Enrollment`] for a missing target / denied / expired session;
+/// [`ClientError::InvalidArgument`] for an `@`-pinned unknown skill or a malformed address;
+/// [`ClientError::TargetNotFound`] (the uniform not-found) for an unresolvable target;
+/// [`ClientError::AmbiguousTarget`] for a name with several meanings;
+/// [`ClientError::PlacementUnsupported`] for a follow against a different plane than the one
+/// enrolled; otherwise a transport / io / store failure.
 pub(crate) fn follow(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
-    target: Option<String>,
+    targets: Vec<String>,
     opts: FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
     // 1) A pending enrollment WAL: re-invoking `follow` (with any target, or none) resumes it. `resume`
     // routes each WAL phase (Authorizing poll / Redeemed promote / ClaimPending retry / a standup owned by
-    // `publish`) — so a second follow while one is in flight never clobbers the in-flight session's
-    // single-use secrets; it advances it.
+    // `publish` / a login owned by `auth login`) — so a second follow while one is in flight never
+    // clobbers the in-flight session's single-use secrets; it advances it.
     if enroll::read_wal(ctx.fs, &ctx.layout)?.is_some() {
-        return Ok(plain(resume(ctx, connectors)?));
+        return resume(ctx, connectors, &opts);
     }
     let ws = opts.workspace.as_deref();
-    let Some(target) = target else {
-        // 6) Nothing to do: no pending enrollment and no target.
+    if targets.is_empty() && opts.channels.is_empty() && opts.skills.is_empty() {
         return Err(ClientError::Enrollment(
-            "follow needs an /i/ link or a followed-skill name (or a pending enrollment to resume)"
+            "follow needs a target — a workspace address, a channel or skill name, or an /i/ claim \
+             link (or a pending enrollment to resume)"
                 .into(),
         ));
-    };
-    // 2) A URL-shaped target starts enrollment. Checked BEFORE `@` so an `/i/` link carrying userinfo
-    // (`https://u@host/i/tok`) or a query param (`?x=a@b`) is never misread as a `<skill>@<hash>` token.
-    if target.contains("://") || target.contains("/i/") {
-        return Ok(plain(begin(ctx, connectors, &target, opts.manual)?));
     }
-    // 3) `@` forces the skill path; the name-part MUST be a known followed skill.
-    if target.contains('@') {
-        let name = strip_digest(&target).to_owned();
-        if !is_known_followed(ctx, &name, ws)? {
-            return Err(ClientError::InvalidArgument(format!(
-                "'{name}' is not a followed skill; pass a followed skill name, `<skill>@<hash>`, or an \
-                 /i/ link"
-            )));
+    if opts.channels.is_empty()
+        && opts.skills.is_empty()
+        && let [single] = targets.as_slice()
+    {
+        // 2) The `/i/` claim door. Checked BEFORE `@` so an `/i/` link carrying userinfo
+        // (`https://u@host/i/tok`) or a query param (`?x=a@b`) is never misread as `<skill>@<hash>`.
+        if single.contains("/i/") {
+            return begin(ctx, connectors, single, opts.manual).map(FollowOutcome::plain);
         }
-        return approve(ctx, &[target], ws);
+        if !single.contains("://") && !single.contains('/') {
+            // 3a) A `@<digest>` suffix forces the skill path; the name-part MUST be followed.
+            let name = strip_digest(single);
+            if name != single.as_str() {
+                if !is_known_followed(ctx, name, ws)? {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "'{name}' is not a followed skill; pass a followed skill name, \
+                         `<skill>@<hash>`, or a workspace address"
+                    )));
+                }
+                return approve(ctx, std::slice::from_ref(single), ws);
+            }
+            // 3b) A bare word matching a KNOWN followed skill wins (the classic accept/resume).
+            if is_known_followed(ctx, single, ws)? {
+                return approve(ctx, std::slice::from_ref(single), ws);
+            }
+        }
     }
-    // 4) A bare word matching a known followed skill is the skill path.
-    if is_known_followed(ctx, &target, ws)? {
-        return approve(ctx, &[target], ws);
-    }
-    // 5) A bare word that is not a known skill is a bare invite token → enrollment.
-    Ok(plain(begin(ctx, connectors, &target, opts.manual)?))
+    // 4) The address / subscribe grammar.
+    subscribe_dispatch(ctx, connectors, &targets, &opts)
 }
 
 /// Whether `name` resolves to a tracked skill that has a follow entry (following OR `unfollow`-paused) — the
@@ -164,16 +328,8 @@ fn is_known_followed(
     }
 }
 
-/// Wrap a non-skill-path result (the enrollment paths never resume a paused follow).
-fn plain(data: FollowData) -> FollowOutcome {
-    FollowOutcome {
-        data,
-        resumed: Vec::new(),
-    }
-}
-
 // =================================================================================================
-// Call 1 — `follow <link>`: bootstrap → one-plane guard → device-authorize → WAL → ENROLLMENT_PENDING.
+// Call 1 — `follow <//i/ link>`: bootstrap → one-plane guard → the claim door (claims-only now).
 // =================================================================================================
 
 fn begin(
@@ -182,12 +338,6 @@ fn begin(
     link: &str,
     _manual: bool,
 ) -> Result<FollowData, ClientError> {
-    // Only the `/i/` door is wired today. A non-`/i/` URL — and a bare word that reached here — is an
-    // ADDRESS follow (`topos follow <workspace-address>`), whose enroll-intent device flow lands in a later
-    // leg; refuse it as a marked seam so nothing half-enrolls under an unwired posture.
-    if !link.contains("/i/") {
-        return Err(not_yet("address follow"));
-    }
     let (link_base, token) = parse_link(ctx, link)?;
 
     // `begin` is only reached with NO pending enrollment WAL on disk: the [`follow`] dispatch resumes an
@@ -212,9 +362,13 @@ fn begin(
     match bootstrap.plane.enrollment_method.as_str() {
         // The one-shot admin-claim door (self-host bearer): no device-auth session, enrolls in one call.
         "admin_claim" => claim_follow(ctx, connectors, &base_url, &token, &bootstrap),
-        // The old invite-link device/passcode enrollment is retired — joining an existing workspace is an
-        // ADDRESS follow now (a later leg). An `/i/` link that still declares one of these is a seam.
-        "device_code" | "passcode" => Err(not_yet("invite-link enrollment")),
+        // The old invite-link device/passcode enrollment is retired — joining an existing workspace
+        // is a workspace-ADDRESS follow (invites are roster rows now; the address carries nothing).
+        "device_code" | "passcode" => Err(ClientError::Enrollment(
+            "invite links are retired — join by the workspace ADDRESS instead: `topos follow \
+             <server>/<workspace>` (ask your inviter for it)"
+                .into(),
+        )),
         other => Err(ClientError::Enrollment(format!(
             "this plane offers enrollment method '{other}', which this topos build does not \
              support; upgrade topos"
@@ -232,26 +386,40 @@ pub(super) fn guard_one_plane(ctx: &Ctx<'_>, base_url: &str) -> Result<(), Clien
     if let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
         && instance.base_url != base_url
     {
-        return Err(ClientError::PlacementUnsupported {
-            reason: "v0 is one plane per install; this client is enrolled with a different plane"
-                .into(),
-        });
+        return Err(wrong_server_refusal(&instance.base_url));
     }
     Ok(())
+}
+
+/// The wrong-server refusal every pre-enrollment door shares (`follow <address>`, `auth login`): one
+/// plane per install, and the escape hatch is a SECOND install home — named explicitly, because
+/// "use another machine" is not an answer an agent can act on.
+pub(crate) fn wrong_server_refusal(enrolled_base: &str) -> ClientError {
+    ClientError::PlacementUnsupported {
+        reason: format!(
+            "this install is enrolled with {enrolled_base} (one plane per install) — to use a \
+             different server, run under a second install home: TOPOS_HOME=<dir> topos …"
+        ),
+    }
 }
 
 // =================================================================================================
 // Call 2 — re-invoking `follow` with a pending WAL: poll → (granted) redeem → Redeemed WAL → promote.
 // =================================================================================================
 
-fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData, ClientError> {
+fn resume(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
     let wal = enroll::read_wal(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("no enrollment in progress; run `follow <link>` first".into())
     })?;
 
     match wal.state {
         // A Redeemed-but-unpromoted WAL: PROMOTE without re-redeeming (the single-use grant is spent;
-        // recovery completes from the persisted workspace credential).
+        // recovery completes from the persisted workspace credential). An ADDRESS-rooted redeem then
+        // CONTINUES into its recorded follow intent (the describe / `--yes` apply).
         enroll::EnrollPhase::Redeemed {
             context,
             credential,
@@ -260,6 +428,18 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
             enrolled_at_millis,
         } => {
             let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            if let Some(target) = context.follow_target.clone() {
+                promote_core(
+                    ctx,
+                    &context,
+                    &credential,
+                    &device_key_id,
+                    principal.as_deref(),
+                    enrolled_at_millis,
+                    &signer,
+                )?;
+                return continue_into_target(ctx, connectors, &context, &target, opts);
+            }
             promote(
                 ctx,
                 connectors,
@@ -270,6 +450,7 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                 enrolled_at_millis,
                 &signer,
             )
+            .map(FollowOutcome::plain)
         }
         // A standup session belongs to `publish` — its resume is the ORIGINAL publish command (the
         // optional `@<digest>` pin re-derives from that command each invocation, which `follow` cannot
@@ -278,14 +459,43 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
             "a workspace standup is in progress; re-run the `topos publish …` command that started it"
                 .into(),
         )),
+        // A login session belongs to `auth login` — same ownership rule as the standup.
+        enroll::EnrollPhase::AuthorizingLogin { .. } => Err(ClientError::Enrollment(
+            "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
+        )),
         // An unsettled claim redeem: retry the POST directly (never refetch the possibly-consumed /i/).
         state @ enroll::EnrollPhase::ClaimPending { .. } => {
             let wal = enroll::PendingEnrollment {
                 schema_version: PERSISTED_SCHEMA_VERSION,
                 state,
             };
-            retry_claim(ctx, connectors, &wal)
+            retry_claim(ctx, connectors, &wal).map(FollowOutcome::plain)
         }
+        // A live ADDRESS enrollment: poll; granted ⇒ redeem into the workspace the grant names,
+        // fence, promote, and continue into the recorded follow intent.
+        enroll::EnrollPhase::AuthorizingAddress {
+            base_url,
+            workspace_name,
+            follow_target,
+            mode,
+            device_code,
+            user_code,
+            verification_uri_complete,
+            ..
+        } => resume_address(
+            ctx,
+            connectors,
+            opts,
+            AddressWal {
+                base_url,
+                workspace_name,
+                follow_target,
+                mode,
+                device_code,
+                user_code,
+                verification_uri_complete,
+            },
+        ),
         enroll::EnrollPhase::Authorizing {
             context,
             device_code,
@@ -311,12 +521,12 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                     // The device key is deterministic (load-or-generate returns the same key), so the
                     // re-surfaced pending discloses the same fingerprint the human sees on the page.
                     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-                    Ok(pending_followdata(
+                    Ok(FollowOutcome::plain(pending_followdata(
                         &context,
                         &user_code,
                         complete,
                         device_fingerprint(&signer),
-                    ))
+                    )))
                 }
                 // A terminal denial / expiry — sweep the WAL, surface a typed error.
                 TokenPoll::Denied => {
@@ -363,9 +573,289 @@ fn resume(ctx: &Ctx<'_>, connectors: &FollowConnectors<'_>) -> Result<FollowData
                         enrolled_at,
                         &signer,
                     )
+                    .map(FollowOutcome::plain)
                 }
             }
         }
+    }
+}
+
+// =================================================================================================
+// The ADDRESS flow — `follow <workspace>[/channels|skills/<name>]`: card → re-root guard →
+// device-authorize (intent enroll, the workspace named by ADDRESS) → WAL → poll/resume → redeem at
+// the granted workspace → promote → the two-phase subscribe (describe / `--yes` apply).
+// =================================================================================================
+
+/// The `AuthorizingAddress` WAL fields, destructured once (mirrors `publish`'s `StandupWal`).
+struct AddressWal {
+    base_url: String,
+    workspace_name: String,
+    follow_target: Option<enroll::FollowTargetDoc>,
+    mode: enroll::FollowModeDoc,
+    device_code: String,
+    user_code: String,
+    verification_uri_complete: String,
+}
+
+/// The enroll intent an unresolved single target may fold in: the workspace ADDRESS name, the
+/// follow intent to continue into, and the explicit host when the target was a full URL.
+struct EnrollIntent {
+    host: Option<String>,
+    workspace_name: String,
+    target: enroll::FollowTargetDoc,
+}
+
+/// Whether an UNRESOLVED parsed target is shaped like a workspace address this install could enroll
+/// toward. Only address shapes qualify — a bare word must be a valid ADDRESS name; anything else
+/// stays the uniform not-found.
+fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
+    match parsed {
+        ParsedTarget::Address {
+            host,
+            workspace,
+            resource,
+        } => {
+            if !resolve::is_workspace_name(workspace) {
+                return None;
+            }
+            let target = match resource {
+                Some((ResourceKind::Channel, name)) => enroll::FollowTargetDoc {
+                    kind: enroll::FollowKindDoc::Channel,
+                    name: name.clone(),
+                },
+                Some((ResourceKind::Skill, name)) => enroll::FollowTargetDoc {
+                    kind: enroll::FollowKindDoc::Skill,
+                    name: name.clone(),
+                },
+                None => enroll::FollowTargetDoc {
+                    kind: enroll::FollowKindDoc::Workspace,
+                    name: workspace.clone(),
+                },
+            };
+            Some(EnrollIntent {
+                host: host.clone(),
+                workspace_name: workspace.clone(),
+                target,
+            })
+        }
+        ParsedTarget::Bare(name) if resolve::is_workspace_name(name) => Some(EnrollIntent {
+            host: None,
+            workspace_name: name.clone(),
+            target: enroll::FollowTargetDoc {
+                kind: enroll::FollowKindDoc::Workspace,
+                name: name.clone(),
+            },
+        }),
+        _ => None,
+    }
+}
+
+/// Start the ADDRESS enrollment: card fetch at the workspace's own address (the card is constant at
+/// every path — no existence signal), re-root onto the declared API base, guard one-plane (the
+/// wrong-server refusal names the `TOPOS_HOME` second-install hatch), device-authorize toward the
+/// named workspace, and persist the `AuthorizingAddress` WAL with the follow intent.
+fn begin_address(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    intent: EnrollIntent,
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
+    // The card origin: the address's own host, else the already-pinned plane, else the default web
+    // origin the composition root resolved (`TOPOS_PLANE_URL`, else the hosted default).
+    let origin = match &intent.host {
+        Some(h) => h.trim_end_matches('/').to_owned(),
+        None => match enroll::read_instance(ctx.fs, &ctx.layout)? {
+            Some(i) => i.base_url,
+            None => connectors.web_origin.trim_end_matches('/').to_owned(),
+        },
+    };
+    let card_url = format!("{origin}/{}", intent.workspace_name);
+    let base_url = match (connectors.enroll)(&origin).fetch_card(&card_url)? {
+        Card::Protocol(card) => resolve_api_base(&origin, &card.api_base_url)?,
+        // A claim bootstrap only ever lives on an `/i/` link, which the dispatch routes to the claim
+        // door before this flow — an ADDRESS answering one is a mis-pasted link.
+        Card::Claim(bootstrap) => {
+            return Err(ClientError::Enrollment(format!(
+                "this address answered a claim bootstrap (workspace '{}') — pass the full /i/ \
+                 claim link to `topos follow` instead",
+                bootstrap.workspace.display_name
+            )));
+        }
+    };
+    guard_one_plane(ctx, &base_url)?;
+
+    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+    let auth = (connectors.enroll)(&base_url).device_authorize(
+        &intent.workspace_name,
+        signer.public_key(),
+        &machine_name(&signer),
+    )?;
+    let complete = auth
+        .verification_uri_complete
+        .clone()
+        .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
+    let expires_at = now_millis(ctx)
+        .saturating_add(i64::try_from(auth.expires_in.saturating_mul(1000)).unwrap_or(i64::MAX));
+    enroll::write_wal(
+        ctx.fs,
+        &ctx.layout,
+        &enroll::PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            state: enroll::EnrollPhase::AuthorizingAddress {
+                base_url: base_url.clone(),
+                workspace_name: intent.workspace_name.clone(),
+                follow_target: Some(intent.target),
+                mode: if opts.manual {
+                    enroll::FollowModeDoc::ConfirmEach
+                } else {
+                    enroll::FollowModeDoc::Auto
+                },
+                device_code: auth.device_code.clone(),
+                user_code: auth.user_code.clone(),
+                verification_uri_complete: complete.clone(),
+                expires_at_millis: expires_at,
+            },
+        },
+    )?;
+    Ok(FollowOutcome::plain(pending_address_followdata(
+        &intent.workspace_name,
+        &base_url,
+        &auth.user_code,
+        complete,
+        device_fingerprint(&signer),
+    )))
+}
+
+/// Resume a live ADDRESS enrollment: poll once; granted ⇒ redeem at the workspace the grant names
+/// (the authoritative id — the address name was never trusted to exist), fence, promote, continue.
+fn resume_address(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    opts: &FollowOpts,
+    wal: AddressWal,
+) -> Result<FollowOutcome, ClientError> {
+    let enroll_src = (connectors.enroll)(&wal.base_url);
+    match enroll_src.poll_token(&wal.device_code)? {
+        TokenPoll::Pending | TokenPoll::SlowDown => {
+            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            Ok(FollowOutcome::plain(pending_address_followdata(
+                &wal.workspace_name,
+                &wal.base_url,
+                &wal.user_code,
+                wal.verification_uri_complete,
+                device_fingerprint(&signer),
+            )))
+        }
+        TokenPoll::Denied => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the enrollment was denied at the verification page".into(),
+            ))
+        }
+        TokenPoll::Expired => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the enrollment session expired; start over with `topos follow <address>`".into(),
+            ))
+        }
+        TokenPoll::Granted(granted) => {
+            // The granted poll carries the AUTHORITATIVE workspace context (the requested name was
+            // only ever a request; unknown/not-yours dies at the redeem's uniform denial).
+            let workspace = granted.workspace.ok_or_else(|| {
+                ClientError::WireInvalid("a granted enroll poll carried no workspace".into())
+            })?;
+            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+            let redeem = enroll_src.redeem(
+                &workspace.workspace_id,
+                granted.grant.as_str(),
+                signer.public_key(),
+            )?;
+            if redeem.workspace_id != workspace.workspace_id {
+                return Err(ClientError::Enrollment(
+                    "the redeemed workspace does not match the granted session".into(),
+                ));
+            }
+            // The deployment posture is unknowable from the constant card — keep whatever an earlier
+            // enrollment recorded, else the conservative self-host default (disclosure only).
+            let deployment_mode = enroll::read_instance(ctx.fs, &ctx.layout)?
+                .map(|i| i.deployment_mode)
+                .unwrap_or(DeploymentMode::SelfHost);
+            let context = enroll::EnrollContext {
+                base_url: wal.base_url,
+                deployment_mode,
+                enrollment_method: "device_code".to_owned(),
+                workspace_id: workspace.workspace_id,
+                workspace_display_name: workspace.display_name,
+                verified_domain: None,
+                verified_domain_status: VerifiedDomainStatus::Unverified,
+                offered_skills: Vec::new(),
+                mode: wal.mode,
+                root: enroll::EnrollRoot::Address,
+                follow_target: wal.follow_target.clone(),
+            };
+            let enrolled_at = now_millis(ctx);
+            // The lockout fence, exactly as the invite flow: the redeemed facts land BEFORE
+            // promotion, so a crash mid-promote completes from the WAL without re-redeeming.
+            enroll::write_wal(
+                ctx.fs,
+                &ctx.layout,
+                &enroll::PendingEnrollment {
+                    schema_version: PERSISTED_SCHEMA_VERSION,
+                    state: enroll::EnrollPhase::Redeemed {
+                        context: context.clone(),
+                        credential: redeem.credential.clone(),
+                        device_key_id: redeem.device_key_id.clone(),
+                        principal: redeem.principal.clone(),
+                        enrolled_at_millis: enrolled_at,
+                    },
+                },
+            )?;
+            promote_core(
+                ctx,
+                &context,
+                &redeem.credential,
+                &redeem.device_key_id,
+                redeem.principal.as_deref(),
+                enrolled_at,
+                &signer,
+            )?;
+            let target = context
+                .follow_target
+                .clone()
+                .unwrap_or(enroll::FollowTargetDoc {
+                    kind: enroll::FollowKindDoc::Workspace,
+                    name: wal.workspace_name,
+                });
+            continue_into_target(ctx, connectors, &context, &target, opts)
+        }
+    }
+}
+
+/// The pending `FollowData` an ADDRESS enrollment surfaces (there is no workspace ID yet — the
+/// requested ADDRESS name rides the disclosure slot; the id arrives with the grant).
+fn pending_address_followdata(
+    workspace_name: &str,
+    base_url: &str,
+    user_code: &str,
+    verification_uri_complete: String,
+    device_fingerprint: String,
+) -> FollowData {
+    FollowData {
+        workspace_id: workspace_name.to_owned(),
+        enrolled: false,
+        skills: Vec::new(),
+        deployment_mode: None,
+        workspace_display_name: None,
+        verified_domain: None,
+        verified_domain_status: None,
+        plane_base_url: Some(base_url.to_owned()),
+        pending: Some(EnrollmentPending {
+            verification_uri_complete,
+            user_code: user_code.to_owned(),
+            device_fingerprint,
+            expires_at: None,
+        }),
+        currency: None,
     }
 }
 
@@ -460,6 +950,7 @@ fn retry_claim(
         offered_skills: Vec::new(),
         mode: enroll::FollowModeDoc::Auto,
         root: enroll::EnrollRoot::Claim,
+        follow_target: None,
     };
     let enrolled_at = now_millis(ctx);
     // The same lockout fence as the grant flow: the claim is consumed server-side, so the redeemed facts
@@ -507,6 +998,601 @@ fn redeem_grant(
         ));
     }
     Ok(redeem)
+}
+
+// =================================================================================================
+// The two-phase SUBSCRIBE — resolve (all-or-none) → describe (bare) → apply (`--yes`): the row ops,
+// then the delivery-driven reconcile landing the set THIS invocation (batch-accepted first
+// receives), then the fleet report. Nothing mutates before `--yes` except the enrollment itself.
+// =================================================================================================
+
+/// The address/subscribe dispatch: build the target specs (positionals + selectors), resolve them
+/// all-or-none against the enrolled universe, fold the ENROLL flow in for a single unresolved
+/// workspace-shaped target, and run the one-workspace describe/apply.
+fn subscribe_dispatch(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    targets: &[String],
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
+    let mut specs: Vec<resolve::TargetSpec> = targets
+        .iter()
+        .map(|t| resolve::TargetSpec::free(t))
+        .collect();
+    specs.extend(
+        opts.channels
+            .iter()
+            .map(|c| resolve::TargetSpec::kinded(c, ResourceKind::Channel)),
+    );
+    specs.extend(
+        opts.skills
+            .iter()
+            .map(|s| resolve::TargetSpec::kinded(s, ResourceKind::Skill)),
+    );
+
+    let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
+
+    let mut resolutions = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let parsed = resolve::parse_target(&spec.token)?;
+        let scope = match spec.forced {
+            Some(ResourceKind::Channel) => resolve::KindScope::CHANNELS,
+            Some(ResourceKind::Skill) => resolve::KindScope::SKILLS,
+            None => resolve::KindScope::ALL,
+        };
+        match resolve::resolve_one(&universe, &parsed, scope)? {
+            Some(r) => resolutions.push(r),
+            None => {
+                // Unresolved. A SINGLE free-kind, workspace-shaped target folds the enroll flow in;
+                // a workspace this install is ALREADY enrolled in never re-enrolls (its unknown
+                // resource is the uniform not-found), and a batch resolves all-or-none.
+                if specs.len() == 1
+                    && spec.forced.is_none()
+                    && let Some(intent) = enroll_intent(&parsed)
+                {
+                    if universe.iter().any(|w| w.name == intent.workspace_name) {
+                        return Err(resolve::not_found(&spec.token));
+                    }
+                    return begin_address(ctx, connectors, intent, opts);
+                }
+                return Err(resolve::not_found(&spec.token));
+            }
+        }
+    }
+
+    // One workspace per invocation: the describe is one workspace's story, and the apply's
+    // reconcile+report scope one workspace's delivery.
+    let ws_id = resolutions[0].workspace_id().to_owned();
+    if resolutions.iter().any(|r| r.workspace_id() != ws_id) {
+        return Err(ClientError::InvalidArgument(
+            "these targets span more than one workspace — follow one workspace per invocation"
+                .into(),
+        ));
+    }
+    let base_url = base_url.ok_or_else(|| {
+        // Unreachable in practice (a resolution implies an enrolled universe) — fail closed anyway.
+        ClientError::Enrollment("not enrolled; follow a workspace address first".into())
+    })?;
+    subscribe(
+        ctx,
+        connectors,
+        &base_url,
+        &ws_id,
+        &resolutions,
+        opts,
+        false,
+    )
+}
+
+/// Assemble the resolver universe over the enrolled workspaces: the pinned plane base + one
+/// [`resolve::WorkspaceNames`] per membership (address name from `/me`, channel names, catalog
+/// skills). A workspace whose reads answer the uniform not-found (revoked / removed) is skipped —
+/// its names must not resolve; a transport fault propagates (resolution must not silently narrow).
+/// Shared with `unfollow` (and any later dual-kind verb), hence the connector-level parameter.
+pub(super) fn build_universe_via(
+    ctx: &Ctx<'_>,
+    directory_connect: &DirectoryConnect<'_>,
+) -> Result<(Option<String>, Vec<resolve::WorkspaceNames>), ClientError> {
+    let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)? else {
+        return Ok((None, Vec::new()));
+    };
+    let memberships: Vec<String> = enroll::read_user(ctx.fs, &ctx.layout)?
+        .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+        .unwrap_or_default();
+    // No memberships ⇒ nothing to read (and no transport to build — an enrolled-but-memberless
+    // install must stay on the offline-graceful paths).
+    if memberships.is_empty() {
+        return Ok((Some(instance.base_url), Vec::new()));
+    }
+    let directory = (directory_connect)(&instance.base_url);
+    let mut universe = Vec::with_capacity(memberships.len());
+    for ws in memberships {
+        match universe_for(&*directory, &ws) {
+            Ok(names) => universe.push(names),
+            Err(ClientError::TargetNotFound { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((Some(instance.base_url), universe))
+}
+
+/// One workspace's resolver names, from the directory reads.
+fn universe_for(
+    directory: &dyn DirectorySource,
+    workspace_id: &str,
+) -> Result<resolve::WorkspaceNames, ClientError> {
+    let me = directory.me(workspace_id)?;
+    let channels = directory.channels_index(workspace_id)?;
+    let skills = directory.skills_index(workspace_id)?;
+    Ok(resolve::WorkspaceNames::from_wire(
+        workspace_id,
+        &me.name,
+        &channels,
+        &skills,
+    ))
+}
+
+/// Continue a just-promoted ADDRESS enrollment into its recorded follow intent: resolve the intent
+/// WITHIN the newly-joined workspace, then describe/apply per this invocation's flags. A bare
+/// resumed `follow` therefore lands on the DESCRIBE (with the `--yes` argv as its next action) —
+/// the enrollment happened, the subscription still waits for consent.
+fn continue_into_target(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    context: &enroll::EnrollContext,
+    target: &enroll::FollowTargetDoc,
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
+    let directory = (connectors.directory)(&context.base_url);
+    let names = universe_for(&*directory, &context.workspace_id)?;
+    let resolution = match target.kind {
+        enroll::FollowKindDoc::Workspace => Resolution::Workspace {
+            workspace_id: context.workspace_id.clone(),
+            workspace_name: names.name.clone(),
+        },
+        enroll::FollowKindDoc::Channel => {
+            let universe = std::slice::from_ref(&names);
+            resolve::resolve_one(
+                universe,
+                &ParsedTarget::Bare(target.name.clone()),
+                resolve::KindScope::CHANNELS,
+            )?
+            .ok_or_else(|| resolve::not_found(&target.name))?
+        }
+        enroll::FollowKindDoc::Skill => {
+            let universe = std::slice::from_ref(&names);
+            resolve::resolve_one(
+                universe,
+                &ParsedTarget::Bare(target.name.clone()),
+                resolve::KindScope::SKILLS,
+            )?
+            .ok_or_else(|| resolve::not_found(&target.name))?
+        }
+    };
+    subscribe(
+        ctx,
+        connectors,
+        &context.base_url,
+        &context.workspace_id,
+        std::slice::from_ref(&resolution),
+        opts,
+        true,
+    )
+}
+
+/// The two-phase subscribe over ONE workspace's resolved targets: assemble the describe from the
+/// member-scoped reads; bare = return it (nothing mutated); `--yes` = the row ops, the reconcile
+/// (batch-accepted first receives, collisions declined or prefixed), and the report.
+fn subscribe(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    base_url: &str,
+    ws_id: &str,
+    resolutions: &[Resolution],
+    opts: &FollowOpts,
+    enrolled_now: bool,
+) -> Result<FollowOutcome, ClientError> {
+    let directory = (connectors.directory)(base_url);
+    let me = directory.me(ws_id)?;
+    let channels = directory.channels_index(ws_id)?;
+    let catalog = directory.skills_index(ws_id)?;
+    let delivery = (connectors.delivery)(base_url);
+    let snapshot = delivery.fetch_delivery(ws_id).map_err(|e| match e {
+        PlaneError::NotFound => resolve::not_found(&me.name),
+        PlaneError::Unreachable(m) | PlaneError::Unavailable(m) => ClientError::Plane(m),
+        PlaneError::Malformed(m) => ClientError::WireInvalid(m),
+    })?;
+    let describe = build_describe(
+        ctx,
+        &me,
+        &channels,
+        &catalog,
+        &snapshot,
+        resolutions,
+        enrolled_now,
+    )?;
+
+    if !opts.yes {
+        // The paste-ready apply argvs: the canonical qualified paths + `--yes` (and the
+        // `--prefix-dirname` variant when collisions exist).
+        let mut base_argv = vec!["topos".to_owned(), "follow".to_owned()];
+        for r in resolutions {
+            base_argv.push(match r {
+                Resolution::Workspace { workspace_name, .. } => workspace_name.clone(),
+                Resolution::Resource {
+                    workspace_name,
+                    kind,
+                    name,
+                    ..
+                } => format!("{workspace_name}/{}/{name}", kind.segment()),
+            });
+        }
+        let mut yes = base_argv.clone();
+        yes.push("--yes".to_owned());
+        let mut next_argvs = vec![yes];
+        if !describe.collisions.is_empty() {
+            let mut prefixed = base_argv;
+            prefixed.push("--prefix-dirname".to_owned());
+            prefixed.push("--yes".to_owned());
+            next_argvs.push(prefixed);
+        }
+        return Ok(FollowOutcome::Described {
+            describe: Box::new(describe),
+            next_argvs,
+        });
+    }
+
+    // ---- APPLY (`--yes`) ----
+    // 1) The subscription rows — the consented change (a workspace target needs none: membership
+    //    itself entitles `everyone`).
+    let mut subscribed = Vec::new();
+    for r in resolutions {
+        if let Resolution::Resource {
+            kind,
+            name,
+            skill_id,
+            ..
+        } = r
+        {
+            match kind {
+                ResourceKind::Channel => directory.channel_join(ws_id, name)?,
+                ResourceKind::Skill => {
+                    let id = skill_id.as_deref().ok_or_else(|| {
+                        ClientError::WireInvalid("a resolved skill carried no id".into())
+                    })?;
+                    directory.follow_skill(ws_id, id)?;
+                }
+            }
+            subscribed.push(DescribedTarget {
+                kind: kind.noun().to_owned(),
+                name: name.clone(),
+            });
+        }
+    }
+
+    // 2) The reconcile lands the set THIS invocation — batch-accepting first receives (the describe
+    //    disclosed them), declining or prefixing the collisions, one workspace only. The notices
+    //    stay unacked (they belong to `update`'s narration).
+    let mut rec_opts = ReconcileOpts {
+        accept_first_receive: true,
+        only_workspace: Some(ws_id.to_owned()),
+        ack_notices: false,
+        ..ReconcileOpts::default()
+    };
+    for c in &describe.collisions {
+        if opts.prefix_dirname {
+            rec_opts
+                .rename
+                .insert(c.skill_id.clone(), c.prefixed_dirname.clone());
+        } else {
+            rec_opts.decline.insert(c.skill_id.clone());
+        }
+    }
+    // The reconcile's byte fetches ride the SAME transport as the delivery (the engine ctx's plane
+    // is swapped onto it) — a mid-invocation enrollment's ctx still carries the inert startup
+    // plane, and `bind_skill` must land on the object the fetches use.
+    let plane_ref: &dyn PlaneSource = &*delivery;
+    let sweep_ctx = super::pull::ctx_with_plane(ctx, plane_ref);
+    let delivery_ref: &dyn DeliverySource = &*delivery;
+    let out = super::pull::pull_reconcile_with(&sweep_ctx, delivery_ref, &rec_opts)?;
+
+    // 3) The apply report: which of the described installs actually landed (an isolated per-skill
+    //    failure stays a warning — the reconcile's isolation semantics hold here too). The rows key
+    //    by the skill's local NAME (its dirname), so a `--prefix-dirname` install matches under the
+    //    prefixed spelling.
+    let landed: HashMap<&str, PullAction> = out
+        .data
+        .skills
+        .iter()
+        .map(|row| (row.skill.as_str(), row.action))
+        .collect();
+    let installed = describe
+        .installs
+        .iter()
+        .filter(|i| {
+            let prefixed = format!("{}.{}", me.name, i.name);
+            let action = landed
+                .get(i.name.as_str())
+                .or_else(|| landed.get(prefixed.as_str()));
+            matches!(
+                action,
+                Some(PullAction::FastForwarded | PullAction::UpToDate | PullAction::Merged)
+            )
+        })
+        .cloned()
+        .collect();
+    let declined = if opts.prefix_dirname {
+        Vec::new()
+    } else {
+        describe.collisions.clone()
+    };
+    Ok(FollowOutcome::Applied(Box::new(FollowApplied {
+        workspace_id: ws_id.to_owned(),
+        workspace_name: me.name,
+        enrolled_now,
+        subscribed,
+        installed,
+        declined,
+        warnings: out.warnings,
+    })))
+}
+
+/// Assemble the DESCRIBE: everything a `--yes` would land (the pending first-receives already
+/// delivered, plus the targets' additions), who you are here, the pre-placements, the dirname
+/// collisions with the prefixed choice, and the standing disclosures.
+fn build_describe(
+    ctx: &Ctx<'_>,
+    me: &WireMe,
+    channels: &WireChannelIndex,
+    catalog: &WireSkillIndex,
+    snapshot: &DeliverySnapshot,
+    resolutions: &[Resolution],
+    enrolled_now: bool,
+) -> Result<FollowDescribe, ClientError> {
+    let mut installs: Vec<DescribedInstall> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut direct_follow_note = None;
+
+    // The delivered-but-not-yet-received set: `--yes` batch-accepts these pending first receives,
+    // so the describe must list them (they land with everything else).
+    for ds in &snapshot.skills {
+        if locally_received(ctx, &ds.skill_id)? {
+            continue;
+        }
+        seen.insert(ds.skill_id.clone());
+        installs.push(DescribedInstall {
+            skill_id: ds.skill_id.clone(),
+            name: ds.name.clone(),
+            version_id: Some(to_hex(&ds.version_id)),
+            bundle_digest: Some(to_hex(&ds.bundle_digest)),
+            via_channels: ds.via_channels.clone(),
+            via_direct: ds.via_direct,
+        });
+    }
+
+    // The targets' additions (what the subscription would NEWLY entitle).
+    for r in resolutions {
+        let Resolution::Resource {
+            kind,
+            name,
+            skill_id,
+            ..
+        } = r
+        else {
+            continue; // A workspace target adds nothing beyond the delivered set above.
+        };
+        match kind {
+            ResourceKind::Channel => {
+                let Some(entry) = channels.channels.iter().find(|c| &c.name == name) else {
+                    continue; // Resolved a moment ago; a raced deletion surfaces at apply.
+                };
+                for skill in &entry.skills {
+                    if locally_received(ctx, &skill.skill_id)? {
+                        continue;
+                    }
+                    if seen.contains(&skill.skill_id) {
+                        // Already delivered (e.g. via `everyone`) — attribute this channel too.
+                        if let Some(i) = installs.iter_mut().find(|i| i.skill_id == skill.skill_id)
+                            && !i.via_channels.contains(name)
+                        {
+                            i.via_channels.push(name.clone());
+                        }
+                        continue;
+                    }
+                    seen.insert(skill.skill_id.clone());
+                    let cat = catalog.skills.iter().find(|s| s.skill_id == skill.skill_id);
+                    installs.push(DescribedInstall {
+                        skill_id: skill.skill_id.clone(),
+                        name: skill.name.clone(),
+                        version_id: cat.map(|c| c.version_id.clone()),
+                        bundle_digest: cat.map(|c| c.bundle_digest.clone()),
+                        via_channels: vec![name.clone()],
+                        via_direct: false,
+                    });
+                }
+            }
+            ResourceKind::Skill => {
+                // A skill already delivered via channels: the direct follow still adds a row — the
+                // explanation is WHY it is not redundant.
+                if let Some(ds) = snapshot.skills.iter().find(|s| &s.name == name)
+                    && !ds.via_channels.is_empty()
+                {
+                    direct_follow_note = Some(format!(
+                        "'{name}' already arrives via #{} — a direct follow keeps it even if the \
+                         channel drops it",
+                        ds.via_channels.join(", #")
+                    ));
+                }
+                if seen.contains(skill_id.as_deref().unwrap_or_default()) {
+                    if let Some(i) = installs
+                        .iter_mut()
+                        .find(|i| Some(i.skill_id.as_str()) == skill_id.as_deref())
+                    {
+                        i.via_direct = true;
+                    }
+                    continue;
+                }
+                let Some(cat) = catalog
+                    .skills
+                    .iter()
+                    .find(|s| Some(s.skill_id.as_str()) == skill_id.as_deref())
+                else {
+                    continue;
+                };
+                if locally_received(ctx, &cat.skill_id)? {
+                    continue;
+                }
+                seen.insert(cat.skill_id.clone());
+                installs.push(DescribedInstall {
+                    skill_id: cat.skill_id.clone(),
+                    name: cat.name.clone(),
+                    version_id: Some(cat.version_id.clone()),
+                    bundle_digest: Some(cat.bundle_digest.clone()),
+                    via_channels: Vec::new(),
+                    via_direct: true,
+                });
+            }
+        }
+    }
+
+    // Dirname collisions + the freed-name notes, over the would-land set.
+    let tracked = tracked_names(ctx)?;
+    let mut collisions = Vec::new();
+    let mut freed_name_notes = Vec::new();
+    for inst in &installs {
+        let Some(existing) = tracked
+            .iter()
+            .find(|t| t.name == inst.name && t.skill_id != inst.skill_id)
+        else {
+            continue;
+        };
+        collisions.push(DescribedCollision {
+            skill_id: inst.skill_id.clone(),
+            name: inst.name.clone(),
+            existing: existing
+                .placement
+                .clone()
+                .unwrap_or_else(|| format!("tracked skill {}", existing.skill_id)),
+            prefixed_dirname: format!("{}.{}", me.name, inst.name),
+        });
+        if existing.workspace_id.as_deref() == Some(me.workspace_id.as_str()) {
+            freed_name_notes.push(format!(
+                "'{}' is a NEW skill under a previously-used name in this workspace — your \
+                 existing copy ({}) stays retained and is NOT this skill's history",
+                inst.name, existing.skill_id
+            ));
+        }
+    }
+
+    let targets = resolutions
+        .iter()
+        .map(|r| match r {
+            Resolution::Workspace { workspace_name, .. } => DescribedTarget {
+                kind: "workspace".to_owned(),
+                name: workspace_name.clone(),
+            },
+            Resolution::Resource { kind, name, .. } => DescribedTarget {
+                kind: kind.noun().to_owned(),
+                name: name.clone(),
+            },
+        })
+        .collect();
+    let preplaced_channels = channels
+        .channels
+        .iter()
+        .filter(|c| c.member && !c.builtin)
+        .map(|c| c.name.clone())
+        .collect();
+
+    Ok(FollowDescribe {
+        workspace: DescribedWorkspace {
+            workspace_id: me.workspace_id.clone(),
+            name: me.name.clone(),
+            display_name: me.display_name.clone(),
+            address: me.address.clone(),
+        },
+        role: me.role.clone(),
+        invited_by: me.invited_by.clone(),
+        enrolled_now,
+        targets,
+        installs,
+        preplaced_channels,
+        collisions,
+        freed_name_notes,
+        direct_follow_note,
+        all_devices_note: format!(
+            "following is person-scoped: every device enrolled as {} receives this set",
+            me.principal
+        ),
+        reporting_note: "this device reports its applied versions to the workspace's fleet view \
+                         after each update"
+            .to_owned(),
+    })
+}
+
+/// Whether this device has RECEIVED a skill (a sidecar dir exists past the never-received
+/// baseline). A never-received baseline, or no sidecar at all, is an install candidate.
+fn locally_received(ctx: &Ctx<'_>, skill_id: &str) -> Result<bool, ClientError> {
+    let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+        return Ok(false);
+    };
+    if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+        return Ok(false);
+    }
+    let sync: Option<SyncState> = doc::read_doc(ctx.fs, &ctx.layout.published(&sid).sync)?;
+    Ok(sync
+        .as_ref()
+        .is_some_and(|s| !sync_engine::is_never_received(s)))
+}
+
+/// One locally-tracked skill's naming facts — the collision detector's input.
+struct TrackedName {
+    name: String,
+    skill_id: String,
+    /// Its first placement dir, when the map records one.
+    placement: Option<String>,
+    /// The workspace its follow entry names, when followed.
+    workspace_id: Option<String>,
+}
+
+/// Every tracked skill's `(name, id, placement, workspace)` — read from the sidecar walk + the
+/// follow-state (directly from `follows.json`, so it is correct even under an inert `ctx.follow`).
+fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
+    let followed: HashMap<String, String> = enroll::read_follows(ctx.fs, &ctx.layout)?
+        .map(|f| {
+            f.follows
+                .into_iter()
+                .map(|e| (e.skill_id, e.workspace_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if !ctx.fs.exists(&ctx.layout.skills_dir()) {
+        return Ok(out);
+    }
+    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if id.starts_with('.') || !entry.is_dir() {
+            continue;
+        }
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)? else {
+            continue;
+        };
+        let placement = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(&sid).map)?
+            .and_then(|m| m.placements.first().cloned());
+        out.push(TrackedName {
+            name: lock.name,
+            workspace_id: followed.get(sid.as_str()).cloned(),
+            skill_id: sid.into_string(),
+            placement,
+        });
+    }
+    Ok(out)
 }
 
 // =================================================================================================
@@ -927,7 +2013,7 @@ fn approve(
         });
     }
 
-    Ok(FollowOutcome {
+    Ok(FollowOutcome::Data {
         data: FollowData {
             workspace_id,
             enrolled: true,

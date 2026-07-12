@@ -1,10 +1,11 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
 //!
 //! The behavior verbs are grouped by SCOPE — self-scoped (affect only your machine), team-scoped (change
-//! shared state), and maintenance. Many of the reshaped verbs accept a richer grammar (multi-target
-//! positionals, `--channel`/`--skill` selectors, a two-phase describe/`--yes` flow) whose full resolution
-//! lands in a later leg; those extra shapes parse here and refuse with a marked seam at dispatch (see
-//! `ops::not_yet`), so the argv surface is frozen ahead of the semantics.
+//! shared state), and maintenance. `follow`/`unfollow`/`auth` run the FULL resolution grammar + the
+//! two-phase describe/`--yes` flow (`crate::resolve`); the remaining reshaped verbs (`remove`,
+//! `channel add/remove`, `protect`, the review inbox/describe, `update --reset` + the `update`/`list`
+//! selectors) still parse here and refuse with a marked seam at dispatch (see `ops::not_yet`), so the
+//! argv surface stays frozen ahead of their semantics.
 
 use clap::{Parser, Subcommand};
 
@@ -30,23 +31,29 @@ pub(crate) struct Cli {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
-    /// Follow skills or channels — enroll if needed, then subscribe. `follow <link>` (an `/i/` admin CLAIM
-    /// link, or a bare token once enrolled) enrolls; `follow <skill>` places a disclosed first-receive
-    /// offer (or resumes a skill `unfollow` paused). While a device-flow enrollment is pending, re-invoking
-    /// `follow` RESUMES it. Multi-target + `--channel`/`--skill` selectors parse but land later.
+    /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
+    /// invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address
+    /// (`https://topos.sh/acme`, or a bare workspace name), a qualified path
+    /// (`acme/channels/eng`, `acme/skills/deploy`), a bare channel/skill name, or an `/i/` admin
+    /// CLAIM link. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive
+    /// offer (or resumes a skill `unfollow` paused). While a device-flow enrollment is pending,
+    /// re-invoking `follow` RESUMES it.
     Follow {
-        /// One or more follow targets — a claim link, a workspace address, or a followed skill name.
-        /// Omitted, it resumes a pending enrollment.
+        /// The follow targets (addresses, qualified paths, or names). Omitted, it resumes a
+        /// pending enrollment.
         targets: Vec<String>,
-        /// Follow a channel by name (repeatable). Lands with the full resolution grammar.
+        /// Follow a channel by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         channel: Vec<String>,
-        /// Follow a specific skill by name (repeatable). Lands with the full resolution grammar.
+        /// Follow a specific skill by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
-        /// Apply the described changes (the one-shot consent). Parses today; the two-phase describe lands later.
+        /// Apply the described subscription (the one-shot consent). Bare = describe only.
         #[arg(long)]
         yes: bool,
+        /// Install a dirname-colliding skill under `<workspace>.<name>` instead of declining it.
+        #[arg(long)]
+        prefix_dirname: bool,
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
         #[arg(long)]
         manual: bool,
@@ -55,18 +62,20 @@ pub(crate) enum Command {
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
-    /// Stop following a skill (or channel). Your local copy is KEPT as a frozen copy (nothing is deleted);
-    /// auto-updates stop, and `follow <skill>` resumes. Local-only.
+    /// Stop following a skill or channel — two-phase (bare describes what stops; `--yes` applies).
+    /// Delivery ends on EVERY device of yours; local copies are KEPT as frozen copies (nothing is
+    /// deleted) and `follow` re-attaches. A workspace cannot be left here (that is a web action),
+    /// and the structural `everyone` cannot be left at all.
     Unfollow {
-        /// The skill name(s) to stop following.
+        /// The channel/skill name(s) (or qualified paths) to stop following.
         targets: Vec<String>,
-        /// Unfollow a channel by name (repeatable). Lands with the full resolution grammar.
+        /// Unfollow a channel by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         channel: Vec<String>,
-        /// Unfollow a specific skill by name (repeatable). Lands with the full resolution grammar.
+        /// Unfollow a specific skill by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Apply the described detach (the one-shot consent). Bare = describe only.
         #[arg(long)]
         yes: bool,
     },
@@ -287,7 +296,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
-    /// Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth status`. Lands later.
+    /// Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth status`.
     Auth {
         #[command(subcommand)]
         cmd: AuthCmd,
@@ -303,15 +312,31 @@ pub(crate) enum Command {
 /// The `auth` sign-in subcommands.
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCmd {
-    /// Sign in to a plane (device flow). An optional `<server>` names the plane's URL.
+    /// Sign in to a plane (device flow): prove who you are in the browser, and every workspace
+    /// where you hold a confirmed seat re-mints this device's credential. An optional `<server>`
+    /// names the server (default https://topos.sh; TOPOS_PLANE_URL overrides).
     Login {
-        /// The plane URL to sign in to (optional; the enrolled plane otherwise).
+        /// The server URL to sign in to (optional; the enrolled plane, else the hosted default).
         #[arg(value_name = "SERVER_URL")]
         server_url: Option<String>,
+        /// Replace a DIFFERENT signed-in account's credentials wholesale (refused without it).
+        #[arg(long)]
+        yes: bool,
+        /// Block until the browser sign-in settles in ONE command. Bare `--wait` waits until the
+        /// code expires; `--wait <seconds>` caps the wait.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
+        wait: Option<Option<u64>>,
     },
-    /// Sign out of this install (revoke this device best-effort, delete credentials; keep skills).
-    Logout,
+    /// Sign out of this install: revoke this device in each workspace (best-effort), delete the
+    /// stored credentials — skills, follows, and drafts stay. Two-phase (bare describes; `--yes`
+    /// applies).
+    Logout {
+        /// Apply the described sign-out.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show who you are, per-workspace credential health, hook health, and reporting posture.
+    /// Side-effect-free.
     Status,
 }
 
@@ -474,6 +499,49 @@ mod tests {
             Command::Follow {
                 wait: Some(None),
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn follow_takes_the_two_phase_and_collision_flags() {
+        let out = Cli::try_parse_from([
+            "topos",
+            "follow",
+            "acme/channels/eng",
+            "--prefix-dirname",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            out.command,
+            Command::Follow {
+                yes: true,
+                prefix_dirname: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn auth_login_takes_yes_and_wait_and_logout_takes_yes() {
+        let login =
+            Cli::try_parse_from(["topos", "auth", "login", "--yes", "--wait", "60"]).unwrap();
+        assert!(matches!(
+            login.command,
+            Command::Auth {
+                cmd: super::AuthCmd::Login {
+                    yes: true,
+                    wait: Some(Some(60)),
+                    ..
+                }
+            }
+        ));
+        let logout = Cli::try_parse_from(["topos", "auth", "logout", "--yes"]).unwrap();
+        assert!(matches!(
+            logout.command,
+            Command::Auth {
+                cmd: super::AuthCmd::Logout { yes: true }
             }
         ));
     }

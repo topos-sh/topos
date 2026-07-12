@@ -551,9 +551,38 @@ impl FollowHarness {
             |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
                 Box::new(UreqPlane::new(base_url.to_owned(), creds))
             };
+        // The directory/reconcile connectors, built exactly as the composition root builds them
+        // (fresh credential reads per build) — the classic e2e flows here never exercise them, but
+        // the address-follow continuation would.
+        let fs = &self.fs;
+        let layout = self.layout();
+        let directory_connect = move |base_url: &str| -> Box<dyn crate::plane::DirectorySource> {
+            Box::new(UreqDeviceClient::new(
+                base_url.to_owned(),
+                creds_map(fs, &layout),
+            ))
+        };
+        let layout2 = self.layout();
+        let delivery_connect = move |base_url: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+            let follows = enroll::read_follows(fs, &layout2)
+                .ok()
+                .flatten()
+                .unwrap_or(Follows {
+                    schema_version: 1,
+                    follows: Vec::new(),
+                });
+            let creds = creds_doc(fs, &layout2);
+            Box::new(
+                UreqPlane::new(base_url.to_owned(), enroll::skill_creds(&follows, &creds))
+                    .with_workspace_credentials(creds_map(fs, &layout2)),
+            )
+        };
         let connectors = ops::FollowConnectors {
             enroll: &enroll_connect,
             plane: &plane_connect,
+            directory: &directory_connect,
+            delivery: &delivery_connect,
+            web_origin: "https://topos.sh".to_owned(),
         };
         // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op, so the
         // enrollment writer can record the device key into it; mirror that here.
@@ -569,7 +598,17 @@ impl FollowHarness {
                 plane,
                 follow,
             };
-            ops::follow(&ctx, &connectors, link, opts).map(|o| o.data)
+            match ops::follow(
+                &ctx,
+                &connectors,
+                link.clone().into_iter().collect(),
+                opts.clone(),
+            )? {
+                ops::FollowOutcome::Data { data, .. } => Ok(data),
+                _ => Err(crate::error::ClientError::InvalidArgument(
+                    "test_support: the facade drives only the classic follow flows".into(),
+                )),
+            }
         })
     }
 
@@ -595,6 +634,10 @@ impl FollowHarness {
         let opts = ops::FollowOpts {
             manual,
             workspace: None,
+            yes: false,
+            prefix_dirname: false,
+            channels: Vec::new(),
+            skills: Vec::new(),
         };
         self.run_follow(&inert_plane, &inert_follow, Some(link.to_owned()), opts)
             .map_err(|e| e.to_string())
@@ -611,6 +654,10 @@ impl FollowHarness {
         let opts = ops::FollowOpts {
             manual: false,
             workspace: None,
+            yes: false,
+            prefix_dirname: false,
+            channels: Vec::new(),
+            skills: Vec::new(),
         };
         self.run_follow(&inert_plane, &inert_follow, None, opts)
             .map_err(|e| e.to_string())
@@ -629,6 +676,10 @@ impl FollowHarness {
         let opts = ops::FollowOpts {
             manual: false,
             workspace: None,
+            yes: false,
+            prefix_dirname: false,
+            channels: Vec::new(),
+            skills: Vec::new(),
         };
         match self.run_follow(&inert_plane, &inert_follow, None, opts) {
             Ok(_) => panic!("test_support: expected the resume to be denied"),
@@ -673,6 +724,10 @@ impl FollowHarness {
         let opts = ops::FollowOpts {
             manual: false,
             workspace: None,
+            yes: false,
+            prefix_dirname: false,
+            channels: Vec::new(),
+            skills: Vec::new(),
         };
         let target = targets.first().cloned();
         self.run_follow(&plane, &follow, target, opts)
@@ -959,12 +1014,6 @@ impl FollowHarness {
                 creds_map(&self.fs, &self.layout()),
             ))
         };
-        let governance = |b: &str| -> Box<dyn GovernanceSource> {
-            Box::new(UreqDeviceClient::new(
-                b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
-            ))
-        };
         let standup_enroll = |b: &str| -> Box<dyn EnrollSource> {
             Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
         };
@@ -1002,13 +1051,13 @@ impl FollowHarness {
             match ops::publish(
                 &ctx,
                 &contribute,
-                &governance,
                 &standup,
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 false,
                 None,
                 workspace,
+                None,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1537,8 +1586,9 @@ impl ContributeHarness {
                 enroll: &standup_enroll,
                 base_url: "http://127.0.0.1:0".to_owned(),
             };
+            let _ = governance;
             match ops::publish(
-                ctx, contribute, governance, &standup, None, approve, propose, None, None,
+                ctx, contribute, &standup, None, approve, propose, None, None, None,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1557,7 +1607,14 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn review(&self, target: &str, approve: bool) -> Result<ReviewData, String> {
         self.with_write_ctx(|ctx, contribute, _gov| {
-            ops::review(ctx, contribute, target, approve, None).map_err(|e| e.to_string())
+            let verdict = if approve {
+                ops::ReviewVerdict::Approve
+            } else {
+                ops::ReviewVerdict::Reject {
+                    reason: Some("test_support: rejected".to_owned()),
+                }
+            };
+            ops::review(ctx, contribute, target, verdict, None).map_err(|e| e.to_string())
         })
     }
 
@@ -1845,7 +1902,7 @@ impl ReconcileHarness {
             plane: &plane,
             follow: &follow,
         };
-        let out = ops::pull_reconcile(&ctx, &plane)
+        let out = ops::pull_reconcile_with(&ctx, &plane, &ops::ReconcileOpts::default())
             .unwrap_or_else(|e| panic!("test_support: reconcile failed: {e}"));
         (out.data, out.warnings)
     }

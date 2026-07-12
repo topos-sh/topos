@@ -527,6 +527,14 @@ fn standup_publish(
         Some(enroll::EnrollPhase::Authorizing { .. }) => Err(ClientError::Enrollment(
             "an invite enrollment is in progress; re-run `topos follow` to finish it first".into(),
         )),
+        Some(enroll::EnrollPhase::AuthorizingAddress { .. }) => Err(ClientError::Enrollment(
+            "a workspace-address enrollment is in progress; re-run `topos follow` to finish it \
+             first"
+                .into(),
+        )),
+        Some(enroll::EnrollPhase::AuthorizingLogin { .. }) => Err(ClientError::Enrollment(
+            "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
+        )),
         Some(enroll::EnrollPhase::ClaimPending { .. }) => Err(ClientError::Enrollment(
             "a claim enrollment is in progress; re-run `topos follow` to finish it first".into(),
         )),
@@ -718,6 +726,7 @@ fn standup_resume(
                 offered_skills: Vec::new(),
                 mode: enroll::FollowModeDoc::Auto,
                 root: enroll::EnrollRoot::Standup,
+                follow_target: None,
             };
             let enrolled_at = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
             // The lockout fence: record the redeemed facts BEFORE promotion, so a crash mid-promote

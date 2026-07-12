@@ -12,7 +12,8 @@
 
 use topos_core::digest::FileMode;
 use topos_types::requests::{
-    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireSkillIndex,
+    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireMe,
+    WireNotice, WireProposalIndex, WireProtocolCard, WireReach, WireSkillIndex, WireSkillLog,
 };
 use topos_types::{Generation, Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
@@ -165,6 +166,13 @@ pub(crate) struct DeliverySkill {
     /// The pinned current version (the sync target — the engine re-verifies bytes by digest).
     pub version_id: [u8; 32],
     pub generation: Generation,
+    /// The `current` byte-exact consent hash — what a follow describe DISCLOSES per install (the
+    /// engine still re-derives it from the fetched bytes; this copy is disclosure, not trust).
+    pub bundle_digest: [u8; 32],
+    /// The channels delivering the skill (the `via` attribution a describe narrates).
+    pub via_channels: Vec<String>,
+    /// Whether the person also follows the skill directly.
+    pub via_direct: bool,
 }
 
 /// The per-workspace delivery snapshot: what to have, and what the PERSON detached (freeze in
@@ -180,6 +188,12 @@ pub(crate) struct DeliverySnapshot {
     pub excluded: Vec<String>,
     /// OPEN proposals across the delivered set (the `proposals_awaiting` gauge).
     pub proposals_awaiting: u64,
+    /// The unacked, person-scoped notices feed (verdicts, proposal closures, …). An interactive
+    /// `update` narrates then ACKS them; the quiet hook fetches without acking.
+    pub notices: Vec<WireNotice>,
+    /// The workspace's staleness window (ms) — the ONE clock the fleet page and the client's hook
+    /// warning both read: a device whose last delivery is older than this is stale.
+    pub staleness_window_ms: u64,
 }
 
 /// The delivery + fleet transport, per enrolled workspace. The production impl rides the workspace
@@ -209,6 +223,179 @@ pub(crate) trait DeliverySource {
     /// binding is a lookup, never a new secret. Default: a no-op (the fixture transports carry
     /// their creds up front).
     fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
+
+    /// `POST /v1/workspaces/{ws}/notices/ack` — acknowledge notices by id (person-scoped
+    /// read-state). The interactive `update` acks exactly what it narrated; the quiet hook NEVER
+    /// calls this (fetch-without-ack). Best-effort at the call site (a failed ack warns, never
+    /// blocks a sync). Default: a clean no-op, so fixtures that never exercise notices need no impl.
+    fn ack_notices(&self, _workspace_id: &str, _ids: &[String]) -> Result<(), PlaneError> {
+        Ok(())
+    }
+}
+
+/// The reconcile-capable transport: the DELIVERY lane and the per-skill READ lane on ONE object.
+/// The pairing is load-bearing — the reconcile teaches the read side a brand-new arrival's
+/// credential (`bind_skill`), so the two lanes must share state; the production impl is one
+/// `UreqPlane`. Callers upcast to either supertrait (`&dyn PlaneSource` for the engine ctx,
+/// `&dyn DeliverySource` for the reconcile).
+pub(crate) trait ReconcileTransport: PlaneSource + DeliverySource {}
+impl<T: PlaneSource + DeliverySource> ReconcileTransport for T {}
+
+// ---------------------------------------------------------------------------------------------
+// The directory seam — the member-scoped describe reads plus the person/device ROW OPS the
+// two-phase verbs run (subscription / curation / protection / notices), all under the workspace
+// Bearer credential. Behind a port so the verbs unit-test over a fake with no HTTP; the production
+// impl is `crate::plane_http::UreqDeviceClient`. Every row-op response is the standard all-outcome
+// **200 envelope**, parsed LENIENTLY: `ok: true` is success (whatever `data` carries), `ok: false`
+// surfaces as the typed [`ClientError::PlaneTerminal`] carrying the wire error's `code`/`outcome`
+// verbatim; a pre-gate miss is the uniform 404 → [`ClientError::TargetNotFound`].
+// ---------------------------------------------------------------------------------------------
+
+/// The member-scoped directory transport: the describe reads + the subscription / curation /
+/// protection / notice row ops. One method per route; the workspace id keys the credential lookup
+/// AND rides the URL path (the body carries no credential material, ever).
+pub(crate) trait DirectorySource {
+    /// `GET /v1/workspaces/{ws}/me` — the caller's own membership describe.
+    ///
+    /// # Errors
+    /// [`ClientError::TargetNotFound`] on the uniform 404; [`ClientError::Plane`] on a transport
+    /// fault; [`ClientError::WireInvalid`] on a malformed body.
+    fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/channels` — the channel index with the caller's membership marked.
+    ///
+    /// # Errors
+    /// As [`me`](Self::me).
+    fn channels_index(&self, workspace_id: &str) -> Result<WireChannelIndex, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/skills` — the workspace catalog (name → skill id + digests), the
+    /// resolver's and the describe's name source. The same route `list --remote` reads through
+    /// [`CatalogSource`]; this typed twin keeps the verb paths on ONE connector.
+    ///
+    /// # Errors
+    /// As [`me`](Self::me).
+    fn skills_index(&self, workspace_id: &str) -> Result<WireSkillIndex, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/proposals` — the workspace review inbox (author-message first).
+    ///
+    /// # Errors
+    /// As [`me`](Self::me).
+    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
+    // methods so every verb shares ONE connector.
+    #[allow(dead_code)]
+    fn proposals_index(&self, workspace_id: &str) -> Result<WireProposalIndex, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/skills/{skill}/log` — the skill's history (purge tombstones + the
+    /// archived-successor hint included).
+    ///
+    /// # Errors
+    /// As [`me`](Self::me).
+    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
+    // methods so every verb shares ONE connector.
+    #[allow(dead_code)]
+    fn skill_log(&self, workspace_id: &str, skill_id: &str) -> Result<WireSkillLog, ClientError>;
+
+    /// `GET /v1/workspaces/{ws}/skills/{skill}/reach` — the audience a change reaches.
+    ///
+    /// # Errors
+    /// As [`me`](Self::me).
+    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
+    // methods so every verb shares ONE connector.
+    #[allow(dead_code)]
+    fn reach(&self, workspace_id: &str, skill_id: &str) -> Result<WireReach, ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/follows/{skill}` — the person-scoped direct follow row (also lifts
+    /// a standing unfollow of the same skill, server-side).
+    ///
+    /// # Errors
+    /// [`ClientError::PlaneTerminal`] on an `ok: false` refusal; [`ClientError::TargetNotFound`] on
+    /// the uniform 404; [`ClientError::Plane`] / [`ClientError::PlaneRejected`] on transport faults.
+    fn follow_skill(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError>;
+
+    /// `DELETE /v1/workspaces/{ws}/follows/{skill}` — the person-scoped unfollow (delivery stops on
+    /// every device; bytes freeze in place).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    fn unfollow_skill(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/channels/{ch}/membership` — join a channel (person-scoped).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill) (the structural `everyone` refuses typed).
+    fn channel_join(&self, workspace_id: &str, channel: &str) -> Result<(), ClientError>;
+
+    /// `DELETE /v1/workspaces/{ws}/channels/{ch}/membership` — leave a channel (person-scoped).
+    ///
+    /// # Errors
+    /// As [`channel_join`](Self::channel_join).
+    fn channel_leave(&self, workspace_id: &str, channel: &str) -> Result<(), ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — place a skill's reference into a
+    /// channel (created on first placement; a curated channel gates by role).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn channel_place(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        skill_id: &str,
+    ) -> Result<(), ClientError>;
+
+    /// `DELETE /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — remove a skill's reference.
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn channel_unplace(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        skill_id: &str,
+    ) -> Result<(), ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/exclusions/{skill}` — the per-DEVICE "not on this device" row (the
+    /// `remove` verb's server half; the person keeps receiving the skill everywhere else).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn exclude_device(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/skills/{skill}/protection` — set a bundle's protection level
+    /// (`reviewed` / `open`; tightening takes reviewer+, loosening an owner — the server decides).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn protect_skill(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+        level: &str,
+    ) -> Result<(), ClientError>;
+
+    /// `PUT /v1/workspaces/{ws}/channels/{ch}/protection` — set a channel's mode (`curated` / `open`).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn protect_channel(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        level: &str,
+    ) -> Result<(), ClientError>;
+
+    /// `POST /v1/workspaces/{ws}/notices/ack` — mark the caller's own notices read, by id (the
+    /// verb-lane twin of [`DeliverySource::ack_notices`] — same route, the verbs' connector).
+    ///
+    /// # Errors
+    /// As [`follow_skill`](Self::follow_skill).
+    #[allow(dead_code)]
+    fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -341,11 +528,117 @@ impl std::fmt::Debug for Redeem {
     }
 }
 
+/// What an unauthenticated `GET <address>` with `Accept: application/json` answered — the ONE
+/// machine bootstrap read. Every plane resource address serves the constant protocol card (no
+/// content, no existence signal — just enough to re-root onto the API); an `/i/` claim link serves
+/// its bootstrap instead.
+pub(crate) enum Card {
+    /// The constant protocol card — re-root onto `api_base_url` and speak `/v1`.
+    Protocol(WireProtocolCard),
+    /// The URL was an `/i/` claim link — its bootstrap (the admin-claim door's input).
+    Claim(Box<topos_types::BootstrapData>),
+}
+
+/// One workspace seat a LOGIN redeem re-minted (or could not re-mint) a credential for — the client
+/// mirror of the wire `LoginMembership`. Hand-written `Debug` redacts the credential.
+#[derive(Clone)]
+pub(crate) struct LoginSeat {
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub name: String,
+    pub display_name: String,
+    /// The person's role on the seat (`owner` / `reviewer` / `member`).
+    pub role: String,
+    /// The device's non-secret key id in this workspace (server-derived).
+    pub device_key_id: String,
+    /// **SECRET** — the freshly minted workspace credential; `None` when the mint was refused.
+    pub credential: Option<String>,
+    /// Why no credential was minted (e.g. this device is revoked there); `None` on success.
+    pub blocked: Option<String>,
+}
+
+impl std::fmt::Debug for LoginSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginSeat")
+            .field("workspace_id", &self.workspace_id)
+            .field("name", &self.name)
+            .field("role", &self.role)
+            .field("device_key_id", &self.device_key_id)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "<redacted>"),
+            )
+            .field("blocked", &self.blocked)
+            .finish()
+    }
+}
+
+/// A successful login redeem: the proven principal + one entry per confirmed seat.
+#[derive(Debug, Clone)]
+pub(crate) struct LoginRedeem {
+    pub principal: String,
+    pub seats: Vec<LoginSeat>,
+}
+
 /// The creds-free enrollment transport (device-flow). The follow op drives it: read the bootstrap,
 /// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
 /// redeem the grant into the workspace credential. The real impl is `UreqDeviceClient`; the fake is the
 /// follow tests'.
+///
+/// The CARD read and the LOGIN pair carry default erroring bodies: they are optional facets a
+/// transport (or a test fake that never exercises them) need not serve; the production
+/// `UreqDeviceClient` overrides all three.
 pub(crate) trait EnrollSource {
+    /// `GET <url>` with `Accept: application/json` — the unauthenticated CARD read of any resource
+    /// address: the constant protocol card (re-root onto its `api_base_url`), or a claim link's
+    /// bootstrap. The URL is the user's pasted address (never a secret, unlike an `/i/` token —
+    /// which the caller routes to [`fetch_bootstrap`](Self::fetch_bootstrap) instead).
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault / non-2xx; [`ClientError::WireInvalid`] on a body
+    /// that is neither a protocol card nor a claim bootstrap.
+    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
+        let _ = url;
+        Err(ClientError::Plane(
+            "this transport serves no protocol card".into(),
+        ))
+    }
+
+    /// `POST /v1/device/authorize` with `intent = "login"` — begin a workspace-less LOGIN device
+    /// flow whose grant redeems at `POST /v1/login`.
+    ///
+    /// # Errors
+    /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
+    /// malformed body.
+    fn device_authorize_login(
+        &self,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<DeviceAuthorize, ClientError> {
+        let _ = (device_public_key, machine_name);
+        Err(ClientError::Plane(
+            "this transport serves no login flow".into(),
+        ))
+    }
+
+    /// `POST /v1/login` — redeem a LOGIN grant into the proven principal + one freshly-minted
+    /// workspace credential per confirmed seat (a revoked device's seat comes back `blocked`
+    /// instead). The grant is the bearer credential; nothing is signed.
+    ///
+    /// # Errors
+    /// [`ClientError::Enrollment`] on a 200+refused login; [`ClientError::Plane`] on a transport
+    /// fault; [`ClientError::WireInvalid`] on a malformed body.
+    fn login_redeem(
+        &self,
+        grant: &str,
+        device_public_key: [u8; 32],
+    ) -> Result<LoginRedeem, ClientError> {
+        let _ = (grant, device_public_key);
+        Err(ClientError::Plane(
+            "this transport serves no login flow".into(),
+        ))
+    }
+
     /// `GET /i/{token}` — the unauthenticated invite bootstrap (the workspace + the plane API base to dial).
     ///
     /// # Errors
@@ -354,13 +647,11 @@ pub(crate) trait EnrollSource {
     fn fetch_bootstrap(&self, token: &str) -> Result<topos_types::BootstrapData, ClientError>;
 
     /// `POST /v1/device/authorize` with `intent = "enroll"` — begin a device-authorization to join the
-    /// workspace named by its ADDRESS. Built ahead of its caller: the address-follow dispatch that drives
-    /// it is a marked seam in `ops::follow` (an `/i/` link is claims-only now), so no production path calls
-    /// this yet — the later leg wires the `follow <address>` grammar onto it.
+    /// workspace named by its ADDRESS (the `follow <address>` flow's start; whether the name exists is
+    /// never disclosed here — an unknown name runs the same flow to the same uniform denial).
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::Corrupt`] on a malformed body.
-    #[allow(dead_code)]
     fn device_authorize(
         &self,
         workspace: &str,
@@ -446,6 +737,26 @@ pub(crate) trait GovernanceSource {
         workspace_id: &str,
         body: topos_types::requests::InvitationRequest,
     ) -> Result<topos_types::requests::InvitationData, ClientError>;
+
+    /// `DELETE /v1/workspaces/{ws}/devices` — revoke a registered device (an owner, or the device's
+    /// own principal — `auth logout`'s best-effort self-revoke). The target rides the body by its
+    /// non-secret key id; the actor is the credential's registry row. Default: an erroring body, so
+    /// fakes that never exercise governance need no impl.
+    ///
+    /// # Errors
+    /// [`ClientError::PlaneTerminal`] on an `ok: false` refusal; [`ClientError::TargetNotFound`] on
+    /// the uniform 404; [`ClientError::Plane`] on a transport fault.
+    fn revoke_device(
+        &self,
+        workspace_id: &str,
+        target_device_key_id: &str,
+        op_id: &str,
+    ) -> Result<(), ClientError> {
+        let _ = (workspace_id, target_device_key_id, op_id);
+        Err(ClientError::Plane(
+            "this transport serves no device revoke".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

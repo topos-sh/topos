@@ -26,18 +26,20 @@ use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest,
-    DeviceTokenResponse, DeviceTokenStatus, InvitationData, InvitationRequest, ProposeRequest,
-    PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent,
-    WireFileMode, WireProposalList, WireSkillIndex, WireVersionMeta,
+    DeviceTokenResponse, DeviceTokenStatus, InvitationData, InvitationRequest, LoginData,
+    LoginRedeemRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
+    RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent, WireChannelIndex,
+    WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
+    WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
-use topos_types::{BootstrapData, JsonEnvelope, WireCurrentRecord};
+use topos_types::{BootstrapData, JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    CatalogSource, ContributeSource, DeviceAuthorize, EnrollSource, FetchedFile, FetchedVersion,
-    FollowContext, FollowSource, GovernanceSource, Grant, GrantedToken, GrantedWorkspace,
-    KnownCurrent, PlaneError, PlaneSource, PointerFetch, Redeem, StandupAuthorize, TokenPoll,
-    WriteReceipt,
+    Card, CatalogSource, ContributeSource, DeviceAuthorize, DirectorySource, EnrollSource,
+    FetchedFile, FetchedVersion, FollowContext, FollowSource, GovernanceSource, Grant,
+    GrantedToken, GrantedWorkspace, KnownCurrent, LoginRedeem, LoginSeat, PlaneError, PlaneSource,
+    PointerFetch, Redeem, StandupAuthorize, TokenPoll, WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -295,10 +297,13 @@ impl crate::plane::DeliverySource for UreqPlane {
         for ds in wire.skills {
             skills.push(crate::plane::DeliverySkill {
                 version_id: parse_id(&ds.version_id)?,
+                bundle_digest: parse_id(&ds.bundle_digest)?,
                 review_required: ds.protection == "reviewed",
                 skill_id: ds.skill_id,
                 name: ds.name,
                 generation: ds.generation,
+                via_channels: ds.via.channels,
+                via_direct: ds.via.direct,
             });
         }
         Ok(crate::plane::DeliverySnapshot {
@@ -306,7 +311,39 @@ impl crate::plane::DeliverySource for UreqPlane {
             detached: wire.detached,
             excluded: wire.excluded,
             proposals_awaiting: wire.proposals_awaiting,
+            notices: wire.notices,
+            staleness_window_ms: wire.staleness_window_ms,
         })
+    }
+
+    fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), PlaneError> {
+        let cred = self
+            .ws_creds
+            .get(workspace_id)
+            .ok_or(PlaneError::NotFound)?;
+        ensure_url_safe_ids("ack", workspace_id)?;
+        let url = format!(
+            "{}/v1/workspaces/{}/notices/ack",
+            self.base_url, workspace_id
+        );
+        let body =
+            serde_json::to_vec(&topos_types::requests::NoticeAckRequest { ids: ids.to_vec() })
+                .map_err(|e| PlaneError::Malformed(format!("ack body: {e}")))?;
+        let resp = self
+            .agent
+            .post(&url)
+            .header("authorization", format!("Bearer {cred}"))
+            .header("content-type", "application/json")
+            .send(&body[..])
+            .map_err(|e| PlaneError::Unreachable(format!("POST {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => Ok(()),
+            HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(format!(
+                "POST {url}: HTTP {status}"
+            ))),
+        }
     }
 
     fn report_applied(
@@ -706,6 +743,58 @@ impl EnrollSource for UreqDeviceClient {
         })
     }
 
+    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
+        // The URL is a pasted address, but it MAY be an `/i/` claim link (whose token is a bearer
+        // secret) — so no error on this path ever echoes the URL.
+        let resp = self
+            .agent
+            .get(url)
+            .header("Accept", "application/json")
+            .call()
+            .map_err(|e| ClientError::Plane(format!("fetch protocol card: {e}")))?;
+        let status = resp.status().as_u16();
+        if classify(status) != HttpClass::Ok {
+            return Err(ClientError::Plane(format!(
+                "fetch protocol card: HTTP {status} — the address did not answer the topos \
+                 protocol card"
+            )));
+        }
+        let bytes = read_body(resp).map_err(plane_err)?;
+        parse_card(&bytes)
+    }
+
+    fn device_authorize_login(
+        &self,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<DeviceAuthorize, ClientError> {
+        let resp = self.post_device_authorize(
+            DeviceAuthorizeRequest {
+                workspace: None,
+                intent: Some(SessionIntent::Login),
+                device_public_key: b64(&device_public_key),
+                machine_name: machine_name.to_owned(),
+            },
+            "login authorize",
+        )?;
+        Ok(device_authorize_from_wire(resp))
+    }
+
+    fn login_redeem(
+        &self,
+        grant: &str,
+        device_public_key: [u8; 32],
+    ) -> Result<LoginRedeem, ClientError> {
+        let body = serde_json::to_value(LoginRedeemRequest {
+            grant: grant.to_owned(),
+            device_public_key: b64(&device_public_key),
+        })
+        .map_err(|_| ClientError::Corrupt("login body: could not serialize".to_owned()))?;
+        let url = format!("{}/v1/login", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, "login")?;
+        map_login_envelope(status, &bytes)
+    }
+
     fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError> {
         let body = serde_json::to_value(DeviceTokenRequest {
             device_code: device_code.to_owned(),
@@ -901,6 +990,46 @@ impl GovernanceSource for UreqDeviceClient {
         let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invitation")?;
         map_invite_envelope(status, &bytes)
     }
+
+    fn revoke_device(
+        &self,
+        workspace_id: &str,
+        target_device_key_id: &str,
+        op_id: &str,
+    ) -> Result<(), ClientError> {
+        crate::id::validate_workspace_id(workspace_id).map_err(crate::id::wire_flavor)?;
+        let credential = self.credential_for(workspace_id)?;
+        let body = serde_json::to_vec(&topos_types::requests::DeviceRevokeRequest {
+            workspace_id: workspace_id.to_owned(),
+            op_id: op_id.to_owned(),
+            target_device_key_id: target_device_key_id.to_owned(),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("revoke body: {e}")))?;
+        let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
+        // A DELETE with a JSON body (the governance op names its target there) — `force_send_body`
+        // converts the bodyless builder.
+        let resp = self
+            .agent
+            .delete(&url)
+            .header("authorization", format!("Bearer {credential}"))
+            .header("content-type", "application/json")
+            .force_send_body()
+            .send(&body[..])
+            .map_err(|e| ClientError::Plane(format!("device revoke: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                map_row_envelope(&bytes)
+            }
+            HttpClass::NotFound => Err(ClientError::TargetNotFound {
+                target: workspace_id.to_owned(),
+            }),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(ClientError::Plane(format!("device revoke: HTTP {status}")))
+            }
+        }
+    }
 }
 
 /// Map an invitation response — the all-outcome **200 envelope** — to the typed result. A non-200 is a
@@ -1000,6 +1129,458 @@ impl CatalogSource for UreqDeviceClient {
             ))),
         }
     }
+}
+
+// =================================================================================================
+// The directory side of `UreqDeviceClient` — the member-scoped describe reads + the person/device
+// row ops (subscription / curation / protection / notices), each under the workspace Bearer
+// credential looked up by `workspace_id`. Reads map the uniform 404 to the ONE not-found error;
+// row ops map the all-outcome 200 envelope LENIENTLY (`ok: true` — or a non-envelope 2xx body — is
+// success; `ok: false` is the typed refusal carrying the wire error's code/outcome verbatim).
+// =================================================================================================
+
+/// The HTTP method a directory row op rides (the routes are REST-shaped: PUT creates/asserts the
+/// row, DELETE removes it, POST carries a batch body).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowMethod {
+    Put,
+    Delete,
+    Post,
+}
+
+impl UreqDeviceClient {
+    /// A member-scoped typed GET under the workspace Bearer credential. `what` names the step for a
+    /// transport-fault message; `target` is the user-facing token the uniform not-found echoes.
+    fn get_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        what: &str,
+        target: &str,
+    ) -> Result<T, ClientError> {
+        let credential = self.credential_for(workspace_id)?;
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .agent
+            .get(&url)
+            .header("authorization", format!("Bearer {credential}"))
+            .call()
+            .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| ClientError::WireInvalid(format!("{what} body is malformed: {e}")))
+            }
+            // The plane's pre-gate miss is deliberately uniform (no existence signal); mirror it.
+            HttpClass::NotFound => Err(ClientError::TargetNotFound {
+                target: target.to_owned(),
+            }),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(ClientError::Plane(format!("{what}: HTTP {status}")))
+            }
+        }
+    }
+
+    /// One directory ROW OP: send under the workspace Bearer credential, map the response. A 404 is
+    /// the uniform not-found (echoing `target`); a definitive 4xx drops through as
+    /// [`ClientError::PlaneRejected`]; a 2xx maps through [`map_row_envelope`].
+    fn row_op(
+        &self,
+        method: RowMethod,
+        workspace_id: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        what: &str,
+        target: &str,
+    ) -> Result<(), ClientError> {
+        let credential = self.credential_for(workspace_id)?;
+        let url = format!("{}{path}", self.base_url);
+        let auth = format!("Bearer {credential}");
+        let send = |req: ureq::RequestBuilder<ureq::typestate::WithBody>| match body {
+            Some(v) => {
+                // The body carries no secret (row ops name resources, never credentials), but a
+                // serialize failure message still never echoes it.
+                let payload = serde_json::to_vec(v).map_err(|_| {
+                    ClientError::Corrupt(format!("{what}: could not serialize the request"))
+                })?;
+                req.header("content-type", "application/json")
+                    .send(payload.as_slice())
+                    .map_err(|e| ClientError::Plane(format!("{what}: {e}")))
+            }
+            None => req
+                .send_empty()
+                .map_err(|e| ClientError::Plane(format!("{what}: {e}"))),
+        };
+        let resp = match method {
+            RowMethod::Put => send(self.agent.put(&url).header("authorization", &auth))?,
+            RowMethod::Post => send(self.agent.post(&url).header("authorization", &auth))?,
+            // A row DELETE carries no body (the row IS the path).
+            RowMethod::Delete => self
+                .agent
+                .delete(&url)
+                .header("authorization", &auth)
+                .call()
+                .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?,
+        };
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                map_row_envelope(&bytes)
+            }
+            HttpClass::NotFound => Err(ClientError::TargetNotFound {
+                target: target.to_owned(),
+            }),
+            HttpClass::NotModified | HttpClass::Other => {
+                // Mirror the contribute writes: a definitive 4xx (≠429) provably did not land.
+                Err(if (400..500).contains(&status) && status != 429 {
+                    ClientError::PlaneRejected(status)
+                } else {
+                    ClientError::Plane(format!("{what}: HTTP {status}"))
+                })
+            }
+        }
+    }
+}
+
+/// Map a directory row-op 2xx body — the standard all-outcome **200 envelope** — LENIENTLY: a body
+/// that is not an envelope (or is empty) still counts as success (the status said the row landed;
+/// the envelope is the richer shape, not a requirement), `ok: true` is success, and `ok: false` is
+/// the typed refusal carrying the wire error's `code`/`outcome`/`retryable` verbatim so the verb
+/// (and the agent) branch on the TRUE refusal. **Pure**, unit-tested with canned bytes.
+fn map_row_envelope(bytes: &[u8]) -> Result<(), ClientError> {
+    let Ok(env) = serde_json::from_slice::<JsonEnvelope>(bytes) else {
+        return Ok(());
+    };
+    if env.ok {
+        return Ok(());
+    }
+    Err(match env.error {
+        Some(e) => ClientError::PlaneTerminal {
+            outcome: e.outcome,
+            code: e.code,
+            retryable: e.retryable,
+        },
+        // An ok:false envelope without an error block still refuses — closed, with the generic code.
+        None => ClientError::PlaneTerminal {
+            outcome: TerminalOutcome::Denied,
+            code: "DENIED".to_owned(),
+            retryable: false,
+        },
+    })
+}
+
+/// Refuse a channel name that is not URL-path-safe before splicing it into a request path (channels
+/// are addressed by NAME — user-chosen, so this boundary is stricter than trusting the argv). The
+/// fixed message never echoes the hostile bytes.
+fn ensure_url_safe_channel(name: &str) -> Result<(), ClientError> {
+    let ok = !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidArgument(
+            "the channel name is not a safe address segment (letters, digits, '-', '_', '.')"
+                .into(),
+        ))
+    }
+}
+
+/// The skill/workspace id gate in the [`ClientError`] flavor (the [`PlaneError`] twin is
+/// [`ensure_url_safe_ids`]) — the directory routes splice both into paths.
+fn ensure_safe_ids_client(skill_id: &str, workspace_id: &str) -> Result<(), ClientError> {
+    ensure_url_safe_ids(skill_id, workspace_id).map_err(plane_err)
+}
+
+impl DirectorySource for UreqDeviceClient {
+    fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError> {
+        ensure_safe_ids_client("me", workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/me"),
+            "membership describe",
+            workspace_id,
+        )
+    }
+
+    fn channels_index(&self, workspace_id: &str) -> Result<WireChannelIndex, ClientError> {
+        ensure_safe_ids_client("channels", workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels"),
+            "channel index",
+            workspace_id,
+        )
+    }
+
+    fn skills_index(&self, workspace_id: &str) -> Result<WireSkillIndex, ClientError> {
+        ensure_safe_ids_client("skills", workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/skills"),
+            "skill catalog",
+            workspace_id,
+        )
+    }
+
+    fn proposals_index(&self, workspace_id: &str) -> Result<WireProposalIndex, ClientError> {
+        ensure_safe_ids_client("proposals", workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/proposals"),
+            "proposal index",
+            workspace_id,
+        )
+    }
+
+    fn skill_log(&self, workspace_id: &str, skill_id: &str) -> Result<WireSkillLog, ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/log"),
+            "skill log",
+            skill_id,
+        )
+    }
+
+    fn reach(&self, workspace_id: &str, skill_id: &str) -> Result<WireReach, ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        self.get_typed(
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/reach"),
+            "reach",
+            skill_id,
+        )
+    }
+
+    fn follow_skill(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/follows/{skill_id}"),
+            None,
+            "follow",
+            skill_id,
+        )
+    }
+
+    fn unfollow_skill(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        self.row_op(
+            RowMethod::Delete,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/follows/{skill_id}"),
+            None,
+            "unfollow",
+            skill_id,
+        )
+    }
+
+    fn channel_join(&self, workspace_id: &str, channel: &str) -> Result<(), ClientError> {
+        ensure_safe_ids_client("join", workspace_id)?;
+        ensure_url_safe_channel(channel)?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/membership"),
+            None,
+            "channel join",
+            channel,
+        )
+    }
+
+    fn channel_leave(&self, workspace_id: &str, channel: &str) -> Result<(), ClientError> {
+        ensure_safe_ids_client("leave", workspace_id)?;
+        ensure_url_safe_channel(channel)?;
+        self.row_op(
+            RowMethod::Delete,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/membership"),
+            None,
+            "channel leave",
+            channel,
+        )
+    }
+
+    fn channel_place(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        skill_id: &str,
+    ) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        ensure_url_safe_channel(channel)?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/skills/{skill_id}"),
+            None,
+            "channel place",
+            skill_id,
+        )
+    }
+
+    fn channel_unplace(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        skill_id: &str,
+    ) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        ensure_url_safe_channel(channel)?;
+        self.row_op(
+            RowMethod::Delete,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/skills/{skill_id}"),
+            None,
+            "channel unplace",
+            skill_id,
+        )
+    }
+
+    fn exclude_device(&self, workspace_id: &str, skill_id: &str) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/exclusions/{skill_id}"),
+            None,
+            "exclude",
+            skill_id,
+        )
+    }
+
+    fn protect_skill(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+        level: &str,
+    ) -> Result<(), ClientError> {
+        ensure_safe_ids_client(skill_id, workspace_id)?;
+        let body = serde_json::to_value(ProtectionSetRequest {
+            level: level.to_owned(),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("protection body: {e}")))?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/protection"),
+            Some(&body),
+            "protect",
+            skill_id,
+        )
+    }
+
+    fn protect_channel(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        level: &str,
+    ) -> Result<(), ClientError> {
+        ensure_safe_ids_client("protect", workspace_id)?;
+        ensure_url_safe_channel(channel)?;
+        let body = serde_json::to_value(ProtectionSetRequest {
+            level: level.to_owned(),
+        })
+        .map_err(|e| ClientError::Corrupt(format!("protection body: {e}")))?;
+        self.row_op(
+            RowMethod::Put,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/protection"),
+            Some(&body),
+            "protect",
+            channel,
+        )
+    }
+
+    fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), ClientError> {
+        ensure_safe_ids_client("ack", workspace_id)?;
+        let body = serde_json::to_value(NoticeAckRequest { ids: ids.to_vec() })
+            .map_err(|e| ClientError::Corrupt(format!("ack body: {e}")))?;
+        self.row_op(
+            RowMethod::Post,
+            workspace_id,
+            &format!("/v1/workspaces/{workspace_id}/notices/ack"),
+            Some(&body),
+            "ack notices",
+            workspace_id,
+        )
+    }
+}
+
+/// Dispatch an unauthenticated card-read body: the constant protocol card (its `card` discriminant
+/// decides), else an `/i/` claim link's bootstrap. **Pure**, unit-tested with canned bytes.
+fn parse_card(bytes: &[u8]) -> Result<Card, ClientError> {
+    if let Ok(card) = serde_json::from_slice::<WireProtocolCard>(bytes)
+        && card.card == "topos-protocol-card"
+    {
+        if card.api_base_url.trim().is_empty() {
+            return Err(ClientError::WireInvalid(
+                "the protocol card declares no API base URL".into(),
+            ));
+        }
+        return Ok(Card::Protocol(card));
+    }
+    parse_bootstrap(bytes)
+        .map(|b| Card::Claim(Box::new(b)))
+        .map_err(|_| {
+            ClientError::WireInvalid(
+                "the address answered neither a protocol card nor a claim bootstrap — is it a \
+                 topos plane?"
+                    .into(),
+            )
+        })
+}
+
+/// Map a `POST /v1/login` response to the typed [`LoginRedeem`]: the all-outcome **200 envelope**
+/// (mirroring the redeem), parsed leniently — a bare `LoginData` body also lands. Every seat's
+/// workspace id is validated at this wire boundary (it later keys credential lookups + URL splices).
+/// **Pure** (status + bytes in), unit-tested without a socket.
+fn map_login_envelope(status: u16, bytes: &[u8]) -> Result<LoginRedeem, ClientError> {
+    if classify(status) != HttpClass::Ok {
+        return Err(ClientError::Plane(format!("login: HTTP {status}")));
+    }
+    let data: LoginData = match serde_json::from_slice::<JsonEnvelope>(bytes) {
+        Ok(env) => {
+            if !env.ok {
+                let code = env
+                    .error
+                    .map(|e| e.code)
+                    .unwrap_or_else(|| "DENIED".to_owned());
+                return Err(ClientError::Enrollment(format!(
+                    "the login was refused ({code}) — complete the sign-in at the verification \
+                     page, then re-run `topos auth login`"
+                )));
+            }
+            serde_json::from_value(env.data)
+                .map_err(|e| ClientError::WireInvalid(format!("login data is malformed: {e}")))?
+        }
+        Err(_) => serde_json::from_slice(bytes)
+            .map_err(|e| ClientError::WireInvalid(format!("login response is malformed: {e}")))?,
+    };
+    let mut seats = Vec::with_capacity(data.memberships.len());
+    for m in data.memberships {
+        crate::id::validate_workspace_id(&m.workspace_id).map_err(crate::id::wire_flavor)?;
+        seats.push(LoginSeat {
+            workspace_id: m.workspace_id,
+            name: m.name,
+            display_name: m.display_name,
+            role: m.role,
+            device_key_id: m.device_key_id,
+            credential: m.credential,
+            blocked: m.blocked,
+        });
+    }
+    Ok(LoginRedeem {
+        principal: data.principal,
+        seats,
+    })
 }
 
 /// Map a contribute-write response — the all-outcome **200 envelope** — to a typed [`WriteReceipt`]. EVERY

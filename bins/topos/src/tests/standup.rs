@@ -845,15 +845,36 @@ fn run_claim_follow(
         |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn crate::plane::PlaneSource> {
             panic!("a skill-less claim follow discloses no offers")
         };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("the claim door never builds a directory transport")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("the claim door never builds a delivery transport")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
     let opts = ops::FollowOpts {
         manual: false,
         workspace: None,
+        yes: false,
+        prefix_dirname: false,
+        channels: Vec::new(),
+        skills: Vec::new(),
     };
-    ops::follow(&ctx, &connectors, target.map(str::to_owned), opts).map(|o| o.data)
+    match ops::follow(
+        &ctx,
+        &connectors,
+        target.map(str::to_owned).into_iter().collect(),
+        opts,
+    )? {
+        ops::FollowOutcome::Data { data, .. } => Ok(data),
+        _ => panic!("the claim door answers the wire payload"),
+    }
 }
 
 #[test]
@@ -991,9 +1012,18 @@ fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_toke
         |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn crate::plane::PlaneSource> {
             panic!("no offers on a refused link")
         };
+    let dir_connect = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+        panic!("no directory transport on a refused link")
+    };
+    let del_connect = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        panic!("no delivery transport on a refused link")
+    };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
         plane: &plane_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
     };
     for bad in [
         "http://[bad]/i/claim_secret_token",
@@ -1003,13 +1033,17 @@ fn a_malformed_link_base_is_refused_before_any_network_and_never_echoes_the_toke
         let err = ops::follow(
             &ctx,
             &connectors,
-            Some(bad.to_owned()),
+            vec![bad.to_owned()],
             ops::FollowOpts {
                 manual: false,
                 workspace: None,
+                yes: false,
+                prefix_dirname: false,
+                channels: Vec::new(),
+                skills: Vec::new(),
             },
         )
-        .map(|o| o.data)
+        .map(|_| ())
         .unwrap_err();
         assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
         for surface in [err.to_string(), err.detail()] {
@@ -1063,6 +1097,7 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
                     offered_skills: Vec::new(),
                     mode: enroll::FollowModeDoc::Auto,
                     root: enroll::EnrollRoot::Standup,
+                    follow_target: None,
                 },
                 credential: "wsc_torn".to_owned(),
                 device_key_id: "dk_torn".to_owned(),

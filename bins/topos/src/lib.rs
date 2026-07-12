@@ -35,9 +35,11 @@ pub(crate) mod plane;
 pub(crate) mod plane_http;
 pub(crate) mod release;
 pub(crate) mod render;
+pub(crate) mod resolve;
 pub(crate) mod scan;
 pub(crate) mod sidecar;
 pub(crate) mod source;
+pub(crate) mod sync_status;
 
 /// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real
 /// pull engine over the real transport without reaching the `pub(crate)` internals. Never compiled into a

@@ -17,6 +17,7 @@
 //! short-version-prefix resolver.
 
 mod add;
+mod auth;
 mod contribute;
 mod diff;
 mod follow;
@@ -36,10 +37,17 @@ pub(crate) use add::{
     AddRemoteOpts, add, add_remote, add_with_name, resolve_add_target, split_target,
     tracked_skill_at,
 };
+pub(crate) use auth::{
+    AuthConnectors, AuthLoginData, AuthLoginOutcome, AuthLoginPending, AuthLogoutData,
+    AuthLogoutDescribe, AuthLogoutOutcome, AuthStatusData, login, logout, status,
+};
 pub(crate) use diff::diff;
-pub(crate) use follow::{FollowConnectors, FollowOpts, FollowOutcome, follow};
+pub(crate) use follow::{
+    FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, follow,
+};
 pub(crate) use invite::invite;
 pub(crate) use list::{DiscoveryRoots, ListOutcome, RemoteScope, list};
+pub(crate) use unfollow::{UnfollowApplied, UnfollowDescribe};
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
 #[cfg(test)]
@@ -49,11 +57,14 @@ pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
-pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull, pull_reconcile};
+pub(crate) use pull::{
+    PullOutcome, PullScope, ReconcileOpts, TargetMode, pull, pull_reconcile_with, quiet_hook_lines,
+    quiet_soft_failure,
+};
 pub(crate) use revert::revert;
 pub(crate) use review::{ReviewVerdict, review};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
-pub(crate) use unfollow::unfollow;
+pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;
