@@ -13,7 +13,7 @@ use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
 use topos_types::{Generation, WireCurrentRecord};
 
 use crate::authority::{Authority, run_blocking};
-use crate::db::{Location, ReadLane};
+use crate::db::Location;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -23,18 +23,17 @@ pub(crate) async fn read_object(
     ws: &WorkspaceId,
     skill: &SkillId,
     object_id: ObjectId,
-    lane: ReadLane,
 ) -> Result<Vec<u8>> {
     // Step one (async DB): authorize. The witness commit proves BOTH facts at once — the principal is
-    // rostered for the skill, and that skill reaches the object. The borrow on the database is released
-    // before the store read below (no git borrow ever crosses an await).
+    // a confirmed workspace member, and the skill reaches the object. The borrow on the database is
+    // released before the store read below (no git borrow ever crosses an await).
     let witness = match authority
         .db()
-        .authorize_object_read(ws, skill, principal, object_id, lane)
+        .authorize_object_read(ws, skill, principal, object_id)
         .await?
     {
         Some(witness) => witness,
-        // Not rostered, the skill does not reach the object, or the object does not exist — all one
+        // Not a member, the skill does not reach the object, or the object does not exist — all one
         // indistinguishable not-found.
         None => return Err(AuthorityError::NotFound),
     };
@@ -87,7 +86,7 @@ pub(crate) async fn read_object(
     if let Err(AuthorityError::Integrity(_)) = &fetched
         && authority
             .db()
-            .authorize_object_read(ws, skill, principal, object_id, lane)
+            .authorize_object_read(ws, skill, principal, object_id)
             .await?
             .is_none()
     {
@@ -102,20 +101,20 @@ struct GitLocatorMismatch;
 
 // ── the authenticated read surface (resolve a read token → an opaque scope → the bound reads) ───────────
 
-/// An **opaque read capability** — the (workspace, skill, principal) a presented read token resolves to.
+/// An **opaque read capability** — the (workspace, skill, principal) an authenticated read resolves to.
 ///
 /// The fields are private on purpose: a consumer (the HTTP layer) holds this as a token and passes it back to
 /// the bound reads (`serve_object` / `read_current` / `read_version_metadata`); it never inspects the
-/// principal (no public accessor exposes it), so the credential cannot be re-used to forge a different scope.
-/// Built ONLY by the two trusted constructors — `resolve_read_token` (from a trusted database row; the
-/// skill-roster lane) and `ReadScope::for_member` (by `session_read`, strictly AFTER its confirmed-member
-/// probe; the workspace-member lane) — never by parsing a client value.
+/// principal (no public accessor exposes it), so the capability cannot be re-used to forge a different scope.
+/// Built ONLY by the one trusted constructor — `ReadScope::for_member`, called by the directory's two
+/// authenticated entries (`resolve_read_scope`, the device lane's credential resolution, and
+/// `session_read`'s member gate), each strictly AFTER its confirmed-member probe — never by parsing a
+/// client value. Both lanes share the ONE membership gate; the scope's reads re-gate per statement.
 #[derive(Debug, Clone)]
 pub struct ReadScope {
     ws: WorkspaceId,
     skill: SkillId,
     principal: Principal,
-    lane: ReadLane,
 }
 
 impl ReadScope {
@@ -131,30 +130,13 @@ impl ReadScope {
     pub(crate) fn principal(&self) -> &Principal {
         &self.principal
     }
-    /// The gate lane this scope authorizes through (`pub(crate)` — set only by the trusted constructors).
-    pub(crate) fn lane(&self) -> ReadLane {
-        self.lane
-    }
-    /// The workspace-member-lane constructor — called ONLY by `session_read`, strictly AFTER its
-    /// confirmed-member probe admitted `principal` (the session preamble is the one entry; this fn does no
-    /// checking of its own). The scope's reads then re-gate on the member lane per statement.
+    /// The one trusted constructor — called strictly AFTER a confirmed-member probe admitted
+    /// `principal` (this fn does no checking of its own).
     pub(crate) fn for_member(ws: WorkspaceId, skill: SkillId, principal: Principal) -> Self {
         Self {
             ws,
             skill,
             principal,
-            lane: ReadLane::WorkspaceMember,
-        }
-    }
-    /// The skill-roster-lane constructor — called ONLY by the directory's read-token resolver, from the
-    /// trusted token row's own `(workspace, skill, principal)` (never a caller-asserted id). The scope's
-    /// reads then re-gate on the roster lane per statement.
-    pub(crate) fn for_skill_roster(ws: WorkspaceId, skill: SkillId, principal: Principal) -> Self {
-        Self {
-            ws,
-            skill,
-            principal,
-            lane: ReadLane::SkillRoster,
         }
     }
 }
@@ -268,7 +250,6 @@ pub(crate) async fn serve_object(
         scope.ws(),
         scope.skill(),
         ObjectId(object_id),
-        scope.lane(),
     )
     .await
 }
@@ -300,16 +281,10 @@ pub(crate) async fn read_version_metadata(
         return Err(AuthorityError::NotFound);
     };
     let commit = CommitId(version_id);
-    // R1: rostered ∧ (accepted-trunk OR open-non-stale proposal). Unauthorized/unreachable → the one not-found.
+    // R1: member ∧ (accepted-trunk OR open-non-stale proposal). Unauthorized/unreachable → the one not-found.
     if !authority
         .db()
-        .authorize_version_read(
-            scope.ws(),
-            scope.skill(),
-            scope.principal(),
-            commit,
-            scope.lane(),
-        )
+        .authorize_version_read(scope.ws(), scope.skill(), scope.principal(), commit)
         .await?
     {
         return Err(AuthorityError::NotFound);
@@ -399,7 +374,7 @@ pub(crate) async fn list_open_proposals(
     }
     let rows = authority
         .db()
-        .list_open_proposals(scope.ws(), scope.skill(), scope.principal(), scope.lane())
+        .list_open_proposals(scope.ws(), scope.skill(), scope.principal())
         .await?;
     Ok(rows
         .into_iter()

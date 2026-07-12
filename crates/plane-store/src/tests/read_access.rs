@@ -2,12 +2,16 @@
 use super::*;
 
 #[sqlx::test]
-async fn a_rostered_member_reads_the_bytes_of_a_version(pool: PgPool) {
+async fn a_member_reads_the_bytes_of_a_version(pool: PgPool) {
     let fx = Fixture::new(pool, "read-ok").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let reader = prin("dev_read");
-    a.db().seed_roster(&w, &s, &reader).await.unwrap();
+    // The read gate is now a CONFIRMED workspace member (the per-skill roster no longer scopes reads).
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
+        .await
+        .unwrap();
 
     let body = b"# PR describe\nrun the thing\n";
     let script = b"#!/bin/sh\necho hi\n";
@@ -20,7 +24,7 @@ async fn a_rostered_member_reads_the_bytes_of_a_version(pool: PgPool) {
     )
     .await;
 
-    // A rostered member reads each of the version's objects (the read path resolves via the access join).
+    // A confirmed member reads each of the version's objects (the read path resolves via the access join).
     assert_eq!(
         a.read_object(&reader, &w, &s, object_id(body))
             .await
@@ -36,16 +40,15 @@ async fn a_rostered_member_reads_the_bytes_of_a_version(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn unrostered_reader_gets_notfound_for_a_real_object(pool: PgPool) {
-    let fx = Fixture::new(pool, "read-unrostered").await;
+async fn non_member_reader_gets_notfound_for_a_real_object(pool: PgPool) {
+    let fx = Fixture::new(pool, "read-nonmember").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let uploader = prin("dev_up");
-    a.db().seed_roster(&w, &s, &uploader).await.unwrap();
     let body = b"secret bytes";
-    stage_committed(a, &w, &s, "unrostered", vec![file("SKILL.md", body)]).await;
+    stage_committed(a, &w, &s, "nonmember", vec![file("SKILL.md", body)]).await;
 
-    // A principal with no roster row gets the uniform not-found (never the bytes, never a 403).
+    // A principal who is not a confirmed workspace member gets the uniform not-found (never the bytes,
+    // never a 403) — membership is the read gate now.
     let outsider = prin("dev_outsider");
     assert!(matches!(
         a.read_object(&outsider, &w, &s, object_id(body)).await,
@@ -54,12 +57,15 @@ async fn unrostered_reader_gets_notfound_for_a_real_object(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn revocation_by_roster_deletion_stops_reads(pool: PgPool) {
+async fn revocation_of_membership_stops_reads(pool: PgPool) {
     let fx = Fixture::new(pool, "revoke").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
     let p = prin("dev_x");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
+        .await
+        .unwrap();
     let body = b"body";
     stage_committed(a, &w, &s, "revoke", vec![file("SKILL.md", body)]).await;
     assert_eq!(
@@ -67,8 +73,13 @@ async fn revocation_by_roster_deletion_stops_reads(pool: PgPool) {
         body
     );
 
-    // Membership = a row exists; deleting it (the revocation mechanism) stops the read immediately.
-    a.db().delete_roster(&w, &s, &p).await.unwrap();
+    // The read gate is a CONFIRMED workspace_member row; revoking confirmation (a remove/downgrade)
+    // stops the read immediately — the same row-write-is-effective-immediately property the deleted
+    // per-skill roster had.
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "invited")
+        .await
+        .unwrap();
     assert!(matches!(
         a.read_object(&p, &w, &s, object_id(body)).await,
         Err(AuthorityError::NotFound)
@@ -83,13 +94,16 @@ async fn cross_workspace_object_is_unreadable_under_another_scope(pool: PgPool) 
     let p = prin("dev_p");
 
     // Stage a real object into workspace B.
-    a.db().seed_roster(&wb, &s, &p).await.unwrap();
     let secret = b"workspace B private bytes";
     stage_committed(a, &wb, &s, "xws", vec![file("SKILL.md", secret)]).await;
 
-    // The same principal, rostered for the same skill id in workspace A, cannot read B's object by
-    // supplying B's object id under A's scope — the workspace_id binding makes it a uniform not-found.
-    a.db().seed_roster(&wa, &s, &p).await.unwrap();
+    // The same principal, a confirmed member of workspace A, cannot read B's object by supplying B's
+    // object id under A's scope — the workspace_id binding makes it a uniform not-found (reachability
+    // isolation, distinct from the membership gate, which A's seat passes).
+    a.db()
+        .seed_workspace_member(&wa, &p, "member", "confirmed")
+        .await
+        .unwrap();
     assert!(matches!(
         a.read_object(&p, &wa, &s, object_id(secret)).await,
         Err(AuthorityError::NotFound)
@@ -105,13 +119,17 @@ async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent(pool
     let p = prin("dev_p");
 
     // An object reachable only via skill Y, in the shared per-workspace store.
-    a.db().seed_roster(&w, &y, &p).await.unwrap();
     let y_bytes = b"skill Y only";
     stage_committed(a, &w, &y, "xskill", vec![file("SKILL.md", y_bytes)]).await;
 
-    // A reader rostered for X (not Y) gets not-found for Y's object — byte-for-byte identical to asking
-    // for an object that exists in no skill at all.
-    a.db().seed_roster(&w, &x, &p).await.unwrap();
+    // A confirmed member (the gate passes) reading under skill X's scope gets not-found for Y's object —
+    // per-skill REACHABILITY still isolates: skill X does not reach Y's bytes, so it is byte-for-byte
+    // identical to asking for an object that exists in no skill at all. (Membership gates WHO may ask; the
+    // skill-scoped witness still gates WHAT that skill reaches.)
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
+        .await
+        .unwrap();
     let cross = a.read_object(&p, &w, &x, object_id(y_bytes)).await;
     let absent = a
         .read_object(&p, &w, &x, object_id(b"never uploaded"))
@@ -121,8 +139,8 @@ async fn cross_skill_object_is_unreadable_and_indistinguishable_from_absent(pool
 }
 
 /// Exercise the access join + the pointer table directly from staged rows (no upload), isolating the
-/// authorization logic. The witness resolves only on the full rostered ∧ reachable match; every
-/// mismatch — wrong principal, skill, workspace, or object — collapses to no witness.
+/// authorization logic. The witness resolves only on the full member ∧ reachable match; every
+/// mismatch — wrong principal (non-member), skill, workspace, or object — collapses to no witness.
 #[sqlx::test]
 async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis(pool: PgPool) {
     let fx = Fixture::new(pool, "seed-join").await;
@@ -131,22 +149,24 @@ async fn seeded_access_join_resolves_a_witness_and_isolates_every_axis(pool: PgP
     let commit = CommitId([0x33; 32]);
     let obj = ObjectId([0x44; 32]);
 
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
+    // The gate is now a CONFIRMED workspace member (workspace-scoped); the reachability half stays
+    // skill-scoped.
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
+        .await
+        .unwrap();
     a.db().seed_commit(&w, &s, commit, &[obj]).await.unwrap();
     a.db().seed_current(&w, &s, commit, 1, 1).await.unwrap(); // exercises the pointer table + its FK
 
     let read = |w: WorkspaceId, s: SkillId, p: Principal, o: ObjectId| async move {
-        a.db()
-            .authorize_object_read(&w, &s, &p, o, crate::db::ReadLane::SkillRoster)
-            .await
-            .unwrap()
+        a.db().authorize_object_read(&w, &s, &p, o).await.unwrap()
     };
     // Full match → the witness commit.
     assert_eq!(
         read(w.clone(), s.clone(), p.clone(), obj).await,
         Some(commit)
     );
-    // Each axis broken in isolation → no witness.
+    // A non-member principal → gate denies → no witness.
     assert_eq!(
         read(w.clone(), s.clone(), prin("dev_other"), obj).await,
         None

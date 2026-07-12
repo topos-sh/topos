@@ -14,7 +14,7 @@ use topos_core::digest;
 use crate::db::{Db, blob32};
 use crate::enroll::{
     self, ConfirmOutcome, DeploymentMode, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued,
-    MintedReadToken, PasscodeComplete, RedeemInput, RedeemOutcome,
+    PasscodeComplete, RedeemInput, RedeemOutcome,
 };
 use crate::error::{AuthorityError, Result};
 use crate::id::{Principal, SkillId, WorkspaceId};
@@ -303,8 +303,10 @@ async fn poll_run(
 
 /// Issue (or re-derive) the single-use grant for a confirmed/issued session. The grant token is
 /// deterministic in `(device_code_sha256, ws)`, so a re-poll re-derives it and the `ON CONFLICT DO NOTHING` is a
-/// no-op — naturally idempotent. On the FIRST issue it binds the proven identity (principal, device, offered
-/// skills) and flips the session to `issued`.
+/// no-op — naturally idempotent. On the FIRST issue it binds the proven identity (principal, device)
+/// and flips the session to `issued`. (The invite's offered skills are DISCLOSURE, not grant state:
+/// the bootstrap and the verification page read them from `invite_skill` directly; the redeem mints
+/// one workspace credential regardless of skills, so the grant carries none.)
 async fn issue_grant(
     tx: &mut Transaction<'_, Postgres>,
     device_code_sha256: &[u8; 32],
@@ -336,24 +338,6 @@ async fn issue_grant(
     );
     let grant_sha256 = enroll::sha256_token(&grant_token);
 
-    // The offered skills = the session invite's offered skills (copied into the grant on first issue).
-    let offered: Vec<SkillId> = match &session.invite_sha256 {
-        Some(inv) => {
-            let inv = inv.as_slice();
-            let rows = sqlx::query!(
-                r#"SELECT skill_id AS "skill_id!" FROM invite_skill WHERE token_sha256 = $1 ORDER BY skill_id"#,
-                inv,
-            )
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(AuthorityError::internal)?;
-            rows.into_iter()
-                .map(|r| SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity))
-                .collect::<Result<Vec<_>>>()?
-        }
-        None => Vec::new(),
-    };
-
     let device_auth_id = session.user_code.clone();
     let device_key_id = session.device_key_id.clone();
     let expires_at = now.saturating_add(enroll::GRANT_TTL_MS);
@@ -384,19 +368,6 @@ async fn issue_grant(
     .await
     .map_err(AuthorityError::internal)?;
 
-    for skill in &offered {
-        let sk = skill.as_str();
-        sqlx::query!(
-            "INSERT INTO enrollment_grant_skill (grant_sha256, skill_id) VALUES ($1, $2) \
-             ON CONFLICT (grant_sha256, skill_id) DO NOTHING",
-            gs,
-            sk,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-    }
-
     let dc = device_code_sha256.as_slice();
     sqlx::query!(
         "UPDATE device_auth_sessions SET status = 'issued' WHERE device_code_sha256 = $1",
@@ -412,7 +383,6 @@ async fn issue_grant(
         workspace_display_name,
         device_auth_id,
         device_key_id,
-        offered_skills: offered,
         expires_at,
     })
 }
@@ -717,10 +687,11 @@ struct GrantRow {
 }
 
 impl Db {
-    /// Redeem a grant into a registered device + minted read tokens. ONE `SERIALIZABLE` (`run_serializable!`) txn (the
-    /// pointer-move's discipline). All `Denied` checks run BEFORE any write, so a denial has no side effect;
-    /// only an all-checks-passed redeem confirms membership, registers the device, rosters the skills, and
-    /// mints the (deterministic) read tokens — so a replay re-derives identical tokens with no extra creds.
+    /// Redeem a grant into a registered device + its ONE minted workspace credential. ONE `SERIALIZABLE`
+    /// (`run_serializable!`) txn (the pointer-move's discipline). All `Denied` checks run BEFORE any write,
+    /// so a denial has no side effect; only an all-checks-passed redeem confirms membership and registers
+    /// the credentialed device — the credential is deterministic in the grant, so a replay re-derives the
+    /// identical value with no extra creds.
     pub(crate) async fn redeem_txn(
         &self,
         input: &RedeemInput<'_>,
@@ -750,8 +721,6 @@ async fn redeem_run(
     {
         return Ok(RedeemOutcome::Denied("device key mismatch"));
     }
-    // The grant's offered skills (the mint loop's set).
-    let offered = read_grant_skills(tx, gs).await?;
 
     // (4) THE GATE (deployment mode from the workspace row). The stored mode is parsed STRICTLY — an
     // unknown/corrupted value is an Integrity fault (fail closed, matching start_device_auth and
@@ -780,8 +749,8 @@ async fn redeem_run(
 
     // (5) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
     // AND must NOT be revoked. Without the revoked check, a revoked device could re-redeem its still-live
-    // grant (a ~12-min TTL) and the deterministic mint loop below would RE-CREATE the read tokens the revoke
-    // just deleted — undoing the kill switch within the grant window. A revoked device cannot re-enroll.
+    // grant (a ~12-min TTL) and the mint below would re-credential the row the revoke just killed —
+    // undoing the kill switch within the grant window. A revoked device cannot re-enroll.
     if let Some((existing_pk, existing_principal, revoked)) =
         read_device(tx, &grant.workspace_id, input.server_device_key_id).await?
     {
@@ -825,64 +794,31 @@ async fn redeem_run(
         .map_err(AuthorityError::internal)?;
     }
 
-    // (4'') REGISTER the device (idempotent — step 5 proved no conflicting row).
+    // (4'' + 5') REGISTER the device WITH its one workspace credential (idempotent — step 5 proved no
+    // conflicting row). The credential is deterministic in the grant (`derive_token(b"wscred", [gs])`),
+    // so a lost-ack replay re-derives the IDENTICAL value; only its sha256 is stored, ON the registry
+    // row — one row, one device, one credential. A re-redeem through a FRESH grant (re-invite after a
+    // member removal) derives a NEW credential, and the upsert rotates the column: the old plaintext
+    // stops resolving the moment this commits. No per-skill roster rows and no per-skill tokens are
+    // written — access is the membership join from here on (the per-skill `roster` table remains only
+    // as the genesis self-seat's interim follow-state).
+    let credential = enroll::derive_token(secret, b"wscred", &[gs]);
+    let credential_sha = enroll::sha256_token(&credential);
+    let cs = credential_sha.as_slice();
     let pk = input.device_public_key.as_slice();
     sqlx::query!(
-        "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
-         VALUES ($1, $2, $3, $4, 0) \
-         ON CONFLICT (workspace_id, device_key_id) DO NOTHING",
+        "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked, credential_sha256) \
+         VALUES ($1, $2, $3, $4, 0, $5) \
+         ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET credential_sha256 = excluded.credential_sha256",
         ws_s,
         input.server_device_key_id,
         pk,
         prin,
+        cs,
     )
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-
-    // (5') Per offered skill: roster the principal + mint the deterministic read token (store only its sha256).
-    let mut read_tokens = Vec::with_capacity(offered.len());
-    for skill in &offered {
-        let sk = skill.as_str();
-        sqlx::query!(
-            "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, skill_id, principal) DO NOTHING",
-            ws_s,
-            sk,
-            prin,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-
-        let token = enroll::derive_token(secret, b"readtoken", &[gs, sk.as_bytes()]);
-        let token_sha = enroll::sha256_token(&token);
-        let ts = token_sha.as_slice();
-        // Non-expiring (NULL) — the per-device revoke (DELETE these on revoke) is the kill switch. Bound to
-        // the enrolling device so that revoke can find them. Deterministic ⇒ a replay re-derives the same row.
-        sqlx::query!(
-            "INSERT INTO read_token (workspace_id, skill_id, principal, token_sha256, device_key_id, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, NULL) \
-             ON CONFLICT (token_sha256) DO UPDATE SET \
-               workspace_id = excluded.workspace_id, skill_id = excluded.skill_id, \
-               principal = excluded.principal, device_key_id = excluded.device_key_id, \
-               expires_at = excluded.expires_at",
-            ws_s,
-            sk,
-            prin,
-            ts,
-            input.server_device_key_id,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-
-        read_tokens.push(MintedReadToken {
-            skill_id: skill.clone(),
-            token,
-            expires_at: None,
-        });
-    }
 
     // (6) Audit marker (idempotent — a replay re-stamps, harmless).
     sqlx::query!(
@@ -898,7 +834,7 @@ async fn redeem_run(
         workspace_id: grant.workspace_id,
         principal,
         device_key_id: input.server_device_key_id.to_owned(),
-        read_tokens,
+        credential,
     }))
 }
 
@@ -923,19 +859,6 @@ async fn read_grant(tx: &mut Transaction<'_, Postgres>, gs: &[u8]) -> Result<Opt
             expires_at: r.expires_at,
         })),
     }
-}
-
-async fn read_grant_skills(tx: &mut Transaction<'_, Postgres>, gs: &[u8]) -> Result<Vec<SkillId>> {
-    let rows = sqlx::query!(
-        r#"SELECT skill_id AS "skill_id!" FROM enrollment_grant_skill WHERE grant_sha256 = $1 ORDER BY skill_id"#,
-        gs,
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    rows.into_iter()
-        .map(|r| SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity))
-        .collect()
 }
 
 async fn read_workspace_in_tx(

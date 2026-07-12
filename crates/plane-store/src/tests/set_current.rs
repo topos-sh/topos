@@ -243,7 +243,7 @@ async fn revert_advances_seq_and_a_stale_publish_conflicts(pool: PgPool) {
 
     // revert --to X → R(tree=β, parents=[Y]) → (1,3). seq advances; bytes return to β.
     let rop = op("cccccccc-0000-4000-8000-000000000002");
-    let rdev = revert_request("dk_a", gn(1, 2));
+    let rdev = revert_request(&w, "dk_a", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -1022,7 +1022,7 @@ async fn revert_to_another_skills_commit_is_refused(pool: PgPool) {
 
     // s1 reverts to c2 (s2's commit) — refused; the skill-scoped digest lookup returns nothing.
     let rop = op("30000000-0000-4000-8000-cccccccccccc");
-    let rdev = revert_request("dk_a", gn(1, 1));
+    let rdev = revert_request(&w, "dk_a", gn(1, 1));
     let r = fx
         .authority
         .revert(
@@ -1065,8 +1065,8 @@ async fn publish_labelled_as_a_non_direct_op_is_rejected_before_ingest(pool: PgP
         .unwrap();
 
     let op_id = op("31000000-0000-4000-8000-000000000000");
-    let dev = DeviceOpRequest {
-        device_key_id: "dk_a".to_owned(),
+    let dev = DeviceOpAuth {
+        credential: cred(&w, "dk_a"),
         op: DeviceOp::Revert,
         expected: gn(0, 0),
     };
@@ -1222,7 +1222,7 @@ async fn a_revert_lost_ack_retry_replays_the_original_ok(pool: PgPool) {
 
     // First revert (op K) → (1,3).
     let rop = op("33000000-0000-4000-8000-000000000002");
-    let rdev = revert_request("dk_a", gn(1, 2));
+    let rdev = revert_request(&w, "dk_a", gn(1, 2));
     let first = fx
         .authority
         .revert(
@@ -1297,18 +1297,18 @@ async fn a_non_canonical_uuid_op_id_is_rejected(pool: PgPool) {
 }
 
 /// The genesis standup: a CONFIRMED workspace member with NO per-skill roster row genesis-publishes a
-/// brand-new skill — the publish succeeds at (1,1) and self-rosters the author in the same transaction.
-/// The roster row is proven behaviorally: a follow-up NON-genesis publish (which passes the roster gate
-/// only when the row exists) succeeds.
+/// brand-new skill — the publish succeeds at (1,1) and self-seats the author's roster follow-state in the
+/// same transaction. A follow-up NON-genesis publish then succeeds too (both writes gate on the confirmed
+/// membership now; the self-seated roster row is follow-state that no longer gates any write).
 #[sqlx::test]
-async fn genesis_by_a_confirmed_member_stands_up_the_roster(pool: PgPool) {
+async fn genesis_by_a_confirmed_member_stands_up_the_skill(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-standup").await;
     let (w, s) = (ws("w_acme"), skill("s_new"));
     let key = dev_key(31);
     let p = prin("p_author");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key, &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false, &cred(&w, "dk_a"))
         .await
         .unwrap();
     fx.authority
@@ -1357,7 +1357,7 @@ async fn genesis_by_a_confirmed_member_stands_up_the_roster(pool: PgPool) {
 /// An INVITED-but-unconfirmed member cannot stand up a skill: the genesis-eligible shape alone is not
 /// enough — the standup requires a CONFIRMED workspace membership, and nothing is created on the DENIED.
 /// (No member row at all is the same DENIED, proven by
-/// `a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable`.)
+/// `a_publish_by_a_non_member_principal_is_denied_and_records_nothing_readable`.)
 #[sqlx::test]
 async fn genesis_by_an_invited_unconfirmed_member_is_denied(pool: PgPool) {
     let fx = Fixture::new(pool, "sc-standup-invited").await;
@@ -1366,7 +1366,7 @@ async fn genesis_by_an_invited_unconfirmed_member_is_denied(pool: PgPool) {
     let p = prin("p_invitee");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key, &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false, &cred(&w, "dk_a"))
         .await
         .unwrap();
     fx.authority
@@ -1408,7 +1408,7 @@ async fn concurrent_genesis_standups_one_ok_one_conflict(pool: PgPool) {
     let p = prin("p_author");
     fx.authority
         .db()
-        .seed_device(&w, "dk_a", &key, &p, false)
+        .seed_device(&w, "dk_a", &key, &p, false, &cred(&w, "dk_a"))
         .await
         .unwrap();
     fx.authority
@@ -1477,10 +1477,10 @@ async fn receipt_rows(pool: &PgPool, op_id: &str) -> i64 {
         .get::<i64, _>("n")
 }
 
-/// An UNKNOWN device id is the same synthesized, never-persisted DENIED — for both the pointer-move
-/// transaction and the standalone reject transaction. (A forged-credential proof is no longer a pre-auth
-/// cause — nothing signs — so the credential-model pre-auth causes are exactly an unknown or a revoked
-/// `device_key_id`; the revoked case is pinned by `a_revoke_before_promotion_blocks_the_move`.)
+/// An UNKNOWN workspace credential is the same synthesized, never-persisted DENIED — for both the
+/// pointer-move transaction and the standalone reject transaction. (Nothing signs, so the credential-model
+/// pre-auth causes are exactly an unknown or a revoked credential — a credential that resolves to no
+/// non-revoked registry row; the revoked case is pinned by `a_revoke_before_promotion_blocks_the_move`.)
 #[sqlx::test]
 async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sc-preauth-ghost").await;
@@ -1518,8 +1518,8 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
             &s,
             &ghost_op,
             child(c0, vec![file("f", b"v1")]),
-            DeviceOpRequest {
-                device_key_id: "dk_ghost".to_owned(),
+            DeviceOpAuth {
+                credential: cred(&w, "dk_ghost"),
                 op: DeviceOp::PublishDirect,
                 expected: gn(1, 1),
             },
@@ -1540,8 +1540,8 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
             &w,
             &s,
             c0,
-            DeviceOpRequest {
-                device_key_id: "dk_ghost".to_owned(),
+            DeviceOpAuth {
+                credential: cred(&w, "dk_ghost"),
                 op: DeviceOp::ReviewReject,
                 expected: gn(1, 1),
             },
@@ -1567,13 +1567,13 @@ async fn an_authenticated_denial_stays_durable_and_replays(pool: PgPool) {
     let p = prin("p_out");
     fx.authority
         .db()
-        .seed_device(&w, "dk_out", &key, &p, false)
+        .seed_device(&w, "dk_out", &key, &p, false, &cred(&w, "dk_out"))
         .await
         .unwrap();
 
     let op_id = op("44000000-0000-4000-8000-000000000000");
-    let device = DeviceOpRequest {
-        device_key_id: "dk_out".to_owned(),
+    let device = DeviceOpAuth {
+        credential: cred(&w, "dk_out"),
         op: DeviceOp::PublishDirect,
         expected: gn(0, 0),
     };
@@ -1629,8 +1629,8 @@ async fn a_corrupt_stored_receipt_details_is_integrity_instead_of_replaying(pool
 
     let files = vec![file("SKILL.md", b"replay me")];
     let op_id = op("45000000-0000-4000-8000-000000000000");
-    let device = DeviceOpRequest {
-        device_key_id: "dk_a".to_owned(),
+    let device = DeviceOpAuth {
+        credential: cred(&w, "dk_a"),
         op: DeviceOp::PublishDirect,
         expected: gn(0, 0),
     };

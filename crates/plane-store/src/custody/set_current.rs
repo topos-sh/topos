@@ -36,13 +36,44 @@ pub enum DeviceOp {
     ReviewReject,
 }
 
-/// The device-lane request fields that accompany a pointer-move. The device credential is the
-/// presented `device_key_id`, authenticated INSIDE the transaction by registry-row lookup (non-revoked,
-/// bound to a rostered principal) — and every identity the receipt binds is the **server's** value (the
+/// The device-lane request as PRESENTED on the wire: the workspace credential (a LIVE bearer secret)
+/// plus the op + CAS target. The public entry resolves the credential over the pool (an unknown one
+/// is a synthesized pre-auth DENIED, never persisted) into the internal `DeviceOpRequest`; the
+/// transaction then re-authenticates in-transaction by the credential's sha256.
+#[derive(Clone)]
+pub struct DeviceOpAuth {
+    /// The presented workspace credential (only its sha256 is ever stored or compared server-side).
+    pub credential: String,
+    /// The operation the route names (`PublishDirect` / `PublishPropose` / `Revert` / `ReviewApprove`
+    /// / `ReviewReject`) — the client never carries it.
+    pub op: DeviceOp,
+    /// The `(epoch, seq)` the compare-and-set targets.
+    pub expected: Generation,
+}
+
+// `credential` is a LIVE bearer secret — redact it so a formatted request value (a debug trace, a
+// panic message) can never mint a second custody surface for it.
+impl std::fmt::Debug for DeviceOpAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceOpAuth")
+            .field("credential", &"<redacted>")
+            .field("op", &self.op)
+            .field("expected", &self.expected)
+            .finish()
+    }
+}
+
+/// The device-lane request fields that accompany a pointer-move — built by the public entry AFTER its
+/// pool pre-resolution of the presented workspace credential (an unknown credential never constructs
+/// one). `credential_sha256` is what the transaction re-authenticates by (the in-transaction registry
+/// lookup, serialized with the write); `device_key_id` is the resolved row's stable name, keying the
+/// pre-transaction receipt machinery. Every identity the receipt binds is the **server's** value (the
 /// rehashed candidate id + bundle digest + the request scope), never a client claim.
 #[derive(Debug, Clone)]
-pub struct DeviceOpRequest {
-    /// The presented device credential (the registry row is selected by this).
+pub(crate) struct DeviceOpRequest {
+    /// The presented workspace credential's sha256 (the transaction's authentication input).
+    pub credential_sha256: [u8; 32],
+    /// The pool-resolved device key id (the receipts/audit actor; re-verified in-transaction).
     pub device_key_id: String,
     /// The operation: `PublishDirect` (direct publish / genesis) or `Revert` in the backbone.
     pub op: DeviceOp,
@@ -153,6 +184,7 @@ pub(crate) async fn publish(
             display_name,
         },
         WriteActor::Device {
+            credential_sha256: device.credential_sha256,
             device_key_id: &device.device_key_id,
         },
         device.op,
@@ -452,6 +484,7 @@ pub(crate) async fn propose(
             display_name,
         },
         WriteActor::Device {
+            credential_sha256: device.credential_sha256,
             device_key_id: &device.device_key_id,
         },
         device.op,

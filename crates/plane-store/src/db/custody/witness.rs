@@ -13,16 +13,19 @@
 
 use sqlx::{Postgres, Transaction};
 
-use crate::db::ReadLane;
 use crate::error::Result;
 use crate::id::{Principal, SkillId, WorkspaceId};
 
-/// A device resolved from its presented credential (`device_key_id`) — the registry row's facts.
+/// A device resolved from its presented workspace credential — the registry row's facts.
 #[derive(Debug, Clone)]
 pub(crate) struct DeviceIdentity {
+    /// The device's stable name (the server-derived `dk_…` id) — the receipts/audit actor. From the
+    /// trusted row, never a caller claim (the caller presents only the credential).
+    pub(crate) device_key_id: String,
     /// The principal the device is bound to (from the trusted row, never a caller claim).
     pub(crate) principal: Principal,
-    /// Whether the device has been revoked (a revoked device fails authentication).
+    /// Whether the device has been revoked. A revoked row still RESOLVES (so a since-revoked device's
+    /// lost-ack retry can replay its stored receipt); the caller separately denies fresh work on it.
     pub(crate) revoked: bool,
 }
 
@@ -45,25 +48,19 @@ pub(crate) enum SessionWriteGate {
 /// [`seat_roster`](Self::seat_roster), the one directory write the genesis pointer-move must make
 /// atomically) — policy semantics stay on the directory side of the seam.
 pub(crate) trait AccessWitness {
-    /// Resolve a presented device credential to its registry row, inside the live transaction.
-    /// `None` ⇒ no such device (indistinguishable from revoked at the caller's surface).
+    /// Resolve a presented workspace credential (by its sha256) to its registry row, inside the live
+    /// transaction. The lookup IS the authentication. `None` ⇒ no such credential (an unknown
+    /// credential is indistinguishable from a rotated-away one at the caller's surface); a REVOKED
+    /// row still resolves — the caller checks [`DeviceIdentity::revoked`] after its replay probe.
     async fn device(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        device_key_id: &str,
+        credential_sha256: &[u8; 32],
     ) -> Result<Option<DeviceIdentity>>;
 
-    /// Whether the principal holds a per-skill roster row (the device lane's write gate).
-    async fn rostered(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-    ) -> Result<bool>;
-
-    /// Whether the principal is a CONFIRMED workspace member (the genesis-standup gate).
+    /// Whether the principal is a CONFIRMED workspace member — the device lane's write gate (and the
+    /// genesis-standup gate): membership is the ONE authorization predicate on every lane.
     async fn confirmed_member(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -100,13 +97,9 @@ pub(crate) trait AccessWitness {
         principal: &Principal,
     ) -> Result<()>;
 
-    /// The pool-level principal gate for reads, dispatched by [`ReadLane`] — the gate half of the
-    /// gate/reach split (custody owns the lane-blind reachability statements).
-    async fn read_gate(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        lane: ReadLane,
-    ) -> Result<bool>;
+    /// The pool-level principal gate for reads — a CONFIRMED `workspace_member` row exists. The gate
+    /// half of the gate/reach split (custody owns the lane-blind reachability statements); the ONE
+    /// membership predicate, shared by the device and session lanes (the lanes differ only in how
+    /// the principal was authenticated — presented credential vs. verified session).
+    async fn read_gate(&self, ws: &WorkspaceId, principal: &Principal) -> Result<bool>;
 }

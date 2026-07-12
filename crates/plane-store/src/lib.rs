@@ -101,8 +101,8 @@ pub(crate) use directory::{enroll, governance, session_read, session_review, ses
 pub use authority::{Authority, PoolConfig};
 pub use enroll::{
     ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
-    EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap, MintedReadToken,
-    PasscodeComplete, PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
+    EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap, PasscodeComplete,
+    PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
 };
 pub use error::{AuthorityError, Result};
 pub use governance::{
@@ -121,7 +121,7 @@ pub use session_review::{
 pub use session_roster::{
     RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
-pub use set_current::{DeviceOp, DeviceOpRequest, SetCurrentReceipt};
+pub use set_current::{DeviceOp, DeviceOpAuth, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 
 /// The embedded Postgres migration set, exposed for out-of-crate test harnesses (the loopback e2e crates)

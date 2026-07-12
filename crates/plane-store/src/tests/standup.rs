@@ -226,7 +226,14 @@ async fn claim_redeem_refuses_a_rebound_device_key(pool: PgPool) {
     let dpub = device_pub(&device_seed);
     let dkid = device_key_id_for(&dpub);
     a.db()
-        .seed_device(&w, &dkid, &[9u8; 32], &prin("squatter@x.com"), false)
+        .seed_device(
+            &w,
+            &dkid,
+            &[9u8; 32],
+            &prin("squatter@x.com"),
+            false,
+            &cred(&w, &dkid),
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -711,32 +718,39 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
     };
     assert_eq!(grant.workspace_id.as_str(), w.as_str());
     assert_eq!(grant.workspace_display_name, "Acme");
-    assert!(grant.offered_skills.is_empty());
 
     // REDEEM: admits the owner (seated `confirmed` — the cloud gate admits any rostered status) and
-    // registers the device; no skills were offered, so no read tokens mint.
+    // registers the device, minting its ONE workspace credential (deterministic per grant).
     let out = redeem(a, &grant, &device_seed, dpub).await;
     let RedeemOutcome::Redeemed(r) = out else {
         panic!("redeem: {out:?}");
     };
     assert_eq!(r.principal.as_str(), "founder@acme.com");
-    assert!(r.read_tokens.is_empty());
+    assert!(!r.credential.is_empty());
 
-    // GENESIS PUBLISH: the registered device + confirmed membership pass the genesis roster gate — the
-    // first publish self-rosters and lands at (1,1).
-    let key = device_pub(&device_seed);
+    // GENESIS PUBLISH: the registered device + its confirmed OWNER membership pass the genesis
+    // (confirmed-member) gate — the first publish self-seats the roster follow-state and lands at (1,1).
+    // The write presents the REAL minted credential (not the seed-helper convention), authenticated by
+    // its stored sha256.
     let s = skill("s_onboarding");
-    let receipt = publish(
-        &fx,
-        &key,
-        &r.device_key_id,
-        &w,
-        &s,
-        "b1111111-1111-4111-8111-111111111111",
-        genesis(vec![file("SKILL.md", b"standup genesis\n")]),
-        gn(0, 0),
-    )
-    .await;
+    let receipt = fx
+        .authority
+        .publish(
+            &w,
+            &s,
+            &op("b1111111-1111-4111-8111-111111111111"),
+            genesis(vec![file("SKILL.md", b"standup genesis\n")]),
+            DeviceOpAuth {
+                credential: r.credential.clone(),
+                op: DeviceOp::PublishDirect,
+                expected: gn(0, 0),
+            },
+            None,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
     assert_eq!(receipt.outcome, TerminalOutcome::Ok);
     assert_eq!(receipt.current, Some(gn(1, 1)));
 }

@@ -18,9 +18,10 @@ const MIGRATION_0010: &str = include_str!("../../migrations/0010_canonical_princ
 
 /// The 0010 statements with `workspace_member` / `roster` rewritten to the probe tables:
 /// comment lines stripped, split on `;`, empties dropped. The fold-in-place UPDATEs on the other
-/// real tables (`read_token`, `device_registry`, `admin_claim`, `genesis_requests`, `proposals`)
-/// survive untouched and run against the real — empty — tables, so the WHOLE script is proven to
-/// execute in order.
+/// real tables (`device_registry`, `admin_claim`, `genesis_requests`, `proposals`) survive untouched
+/// and run against the real — empty — tables, so the WHOLE script is proven to execute in order. The
+/// one exception is 0010's `UPDATE read_token …`: a LATER migration (0014) DROPPED `read_token`, so on
+/// a fully-migrated probe DB that table is gone and its fold statement is skipped here.
 fn probe_statements() -> Vec<String> {
     let rewritten = MIGRATION_0010
         .lines()
@@ -33,6 +34,9 @@ fn probe_statements() -> Vec<String> {
         .split(';')
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        // `read_token` was dropped by migration 0014, so its 0010 fold statement can no longer run
+        // against a fully-migrated database — skip it (the other real-table folds still run).
+        .filter(|s| !s.contains("read_token"))
         .map(str::to_owned)
         .collect()
 }

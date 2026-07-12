@@ -205,17 +205,22 @@ async fn offloaded_object_read_is_skill_scoped_404_never_by_bare_hash(pool: PgPo
         a.db().object_location(&w, obj).await.unwrap(),
         Some(Location::LargeLocal)
     );
-    // Make the offloaded object readable for skill `s`: provenance + reachability + roster.
+    // Make the offloaded object readable for skill `s`: provenance + reachability + confirmed membership
+    // (the read gate; the per-skill roster rows are follow-state only now).
     a.db()
         .seed_commit(&w, &s, staged.version_id, &[obj])
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
         .await
         .unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
     a.db().seed_roster(&w, &other, &reader).await.unwrap();
 
-    // A rostered reader of `s` gets the offloaded bytes (the read dispatched to the large store + re-verified).
+    // A member reads the offloaded bytes of `s` (the read dispatched to the large store + re-verified).
     assert_eq!(a.read_object(&reader, &w, &s, obj).await.unwrap(), body);
-    // An unrostered principal → the single indistinguishable NotFound (404, never 403).
+    // A non-member principal → the single indistinguishable NotFound (404, never 403).
     assert!(matches!(
         a.read_object(&outsider, &w, &s, obj).await,
         Err(AuthorityError::NotFound)
@@ -244,9 +249,14 @@ async fn cross_workspace_offload_has_no_dedup_and_stays_isolated(pool: PgPool) {
     assert!(a.large_store(&wa).exists(obj.0).unwrap());
     assert!(a.large_store(&wb).exists(obj.0).unwrap());
 
-    // Readable in A only; an A-rostered principal cannot reach it via B (cross-workspace isolation).
+    // Readable in A only; an A-member cannot reach it via B (cross-workspace isolation). The read gate is
+    // confirmed membership in the CLAIMED workspace (roster is follow-state only): p is a member of A, not B.
     a.db()
         .seed_commit(&wa, &s, sa.version_id, &[obj])
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(&wa, &p, "member", "confirmed")
         .await
         .unwrap();
     a.db().seed_roster(&wa, &s, &p).await.unwrap();
@@ -355,6 +365,11 @@ async fn an_authorized_read_of_a_gone_offloaded_object_is_integrity_not_notfound
     let staged = ingest_migrate(a, &w, "op1", vec![file("model.bin", &body)], 100).await;
     a.db()
         .seed_commit(&w, &s, staged.version_id, &[obj])
+        .await
+        .unwrap();
+    // The read gate is confirmed membership now (per-skill roster is follow-state only).
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
     a.db().seed_roster(&w, &s, &p).await.unwrap();
@@ -556,6 +571,11 @@ async fn single_object_read_of_a_git_file_in_a_mixed_bundle_succeeds(pool: PgPoo
     );
     a.db()
         .seed_commit(&w, &s, staged.version_id, &[small_id, big_id])
+        .await
+        .unwrap();
+    // The read gate is confirmed membership now (per-skill roster is follow-state only).
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
     a.db().seed_roster(&w, &s, &p).await.unwrap();

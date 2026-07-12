@@ -11,7 +11,7 @@
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
-use crate::set_current::{DeviceOp, DeviceOpRequest, SetCurrentReceipt};
+use crate::set_current::{DeviceOp, DeviceOpAuth, SetCurrentReceipt};
 
 impl Authority {
     /// Stage a roster membership (the read/write entitlement for a principal on a skill). Test-only.
@@ -27,11 +27,13 @@ impl Authority {
         self.db().seed_roster(ws, skill, principal).await
     }
 
-    /// Register a device key — `(device_key_id) -> (public_key, principal, revoked)` — the pointer-move's
-    /// in-transaction authorization resolves against. Test-only (real issuance is the enrollment port's).
+    /// Register a device WITH its workspace credential — the row every credential resolution (reads,
+    /// writes, governance) authenticates against; only the credential's sha256 is stored, exactly as
+    /// the real redeem mint writes it. Test-only (real issuance is the enrollment path's).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
+    #[allow(clippy::too_many_arguments)]
     pub async fn seed_device(
         &self,
         ws: &WorkspaceId,
@@ -39,9 +41,17 @@ impl Authority {
         public_key: &[u8; 32],
         principal: &Principal,
         revoked: bool,
+        credential: &str,
     ) -> Result<()> {
         self.db()
-            .seed_device(ws, device_key_id, public_key, principal, revoked)
+            .seed_device(
+                ws,
+                device_key_id,
+                public_key,
+                principal,
+                revoked,
+                credential,
+            )
             .await
     }
 
@@ -57,21 +67,6 @@ impl Authority {
         review_required: bool,
     ) -> Result<()> {
         self.set_review_required(ws, review_required).await
-    }
-
-    /// Mint a read token (store only its sha256, exactly as [`resolve_read_token`](Self::resolve_read_token)
-    /// looks it up). Test-only — the real minting + the `0600` at-rest token file land with the enrollment port.
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] on a database fault.
-    pub async fn mint_read_token(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        token: &str,
-    ) -> Result<()> {
-        self.db().seed_read_token(ws, skill, principal, token).await
     }
 
     /// Stage a `workspace` row (the enrollment/governance billable object) so a downstream cloud-enrollment
@@ -110,9 +105,10 @@ impl Authority {
             .await
     }
 
-    /// Drive a REAL genesis [`publish`](Self::publish) for a registered + rostered device — producing a
-    /// `current` pointer at generation (1,1). The device must already be registered
-    /// ([`seed_device`](Self::seed_device)) + rostered ([`seed_roster`](Self::seed_roster)). Test-only.
+    /// Drive a REAL genesis [`publish`](Self::publish) for a registered, credentialed, confirmed-member
+    /// device — producing a `current` pointer at generation (1,1). The device must already be registered
+    /// ([`seed_device`](Self::seed_device)) and its principal seated as a confirmed member
+    /// ([`seed_workspace_member`](Self::seed_workspace_member)). Test-only.
     ///
     /// Returns the durable [`SetCurrentReceipt`] (its `version_id`/`current` drive a follow-up test).
     ///
@@ -123,7 +119,7 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
-        device_key_id: &str,
+        credential: &str,
         op_id: &OpId,
         files: Vec<crate::UploadedFile>,
         author: &str,
@@ -131,8 +127,8 @@ impl Authority {
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
-        let device = DeviceOpRequest {
-            device_key_id: device_key_id.to_owned(),
+        let auth = DeviceOpAuth {
+            credential: credential.to_owned(),
             op: DeviceOp::PublishDirect,
             expected: topos_types::Generation { epoch: 0, seq: 0 },
         };
@@ -142,7 +138,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, device, None, created_at, now)
+        self.publish(ws, skill, op_id, candidate, auth, None, created_at, now)
             .await
     }
 
@@ -160,7 +156,7 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
-        device_key_id: &str,
+        credential: &str,
         op_id: &OpId,
         parent: CommitId,
         files: Vec<crate::UploadedFile>,
@@ -182,8 +178,8 @@ impl Authority {
             serde_json::from_slice(&record_bytes).map_err(AuthorityError::internal)?;
         let expected = record.record.generation;
 
-        let device = DeviceOpRequest {
-            device_key_id: device_key_id.to_owned(),
+        let auth = DeviceOpAuth {
+            credential: credential.to_owned(),
             op: DeviceOp::PublishDirect,
             expected,
         };
@@ -193,7 +189,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, device, None, created_at, now)
+        self.publish(ws, skill, op_id, candidate, auth, None, created_at, now)
             .await
     }
 

@@ -24,7 +24,7 @@ use crate::session_read::SkillIndexRow;
 use crate::session_roster::{
     RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
 };
-use crate::set_current::{DeviceOpRequest, SetCurrentReceipt};
+use crate::set_current::{DeviceOpAuth, SetCurrentReceipt};
 use crate::upload::CandidateUpload;
 
 /// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
@@ -186,9 +186,10 @@ impl Authority {
 
     /// Read one object's bytes through the skill-scoped access rule.
     ///
-    /// The bytes are returned only if `principal` is rostered for `skill` **and** some commit of that
-    /// skill reaches `object_id`. Every not-entitled and not-found case — not rostered, the skill does
-    /// not reach the object, or the object does not exist — returns the single [`AuthorityError::NotFound`],
+    /// The bytes are returned only if `principal` is a confirmed member of `ws` **and** some commit of
+    /// that skill reaches `object_id`. Every not-entitled and not-found case — not a member, the skill
+    /// does not reach the object, or the object does not exist — returns the single
+    /// [`AuthorityError::NotFound`],
     /// byte-for-byte indistinguishable, so a caller can never probe which skills or objects exist.
     ///
     /// # Errors
@@ -203,29 +204,32 @@ impl Authority {
         skill: &SkillId,
         object_id: ObjectId,
     ) -> Result<Vec<u8>> {
-        crate::read::read_object(
-            self,
-            principal,
-            ws,
-            skill,
-            object_id,
-            crate::db::ReadLane::SkillRoster,
-        )
-        .await
+        crate::read::read_object(self, principal, ws, skill, object_id).await
     }
 
-    /// Resolve a presented **read token** to its opaque [`ReadScope`] — the read-credential resolver (the
-    /// entry point for every authenticated read). Only the token's sha256 is stored, so the plaintext is
-    /// never recoverable from the database; an unknown token is the single indistinguishable
-    /// [`AuthorityError::NotFound`]. The returned scope is a capability: it is passed back to
-    /// [`serve_object`](Self::serve_object) / [`read_current`](Self::read_current) /
+    /// Resolve a presented **workspace credential** to an opaque [`ReadScope`] on one of the
+    /// workspace's skills — the read-credential resolver (the entry point for every authenticated
+    /// device read). The credential's sha256 selects its registry row bound to the CALLER'S CLAIMED
+    /// workspace; the row's principal must be a CONFIRMED workspace member (the membership join IS
+    /// the read authorization — deleting the membership row kills reads immediately). Only the sha256
+    /// is stored, so the plaintext is never recoverable from the database; every miss is the single
+    /// indistinguishable [`AuthorityError::NotFound`]. The returned scope is a capability: it is
+    /// passed back to [`serve_object`](Self::serve_object) / [`read_current`](Self::read_current) /
     /// [`read_version_metadata`](Self::read_version_metadata), never parsed by the caller.
     ///
     /// # Errors
-    /// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
-    /// [`AuthorityError::Integrity`] if a stored token row is corrupt.
-    pub async fn resolve_read_token(&self, token: &str, now: i64) -> Result<ReadScope> {
-        crate::enroll::resolve_read_token(self, token, now).await
+    /// [`AuthorityError::NotFound`] on any miss (unknown/revoked credential, non-member, malformed
+    /// ids); [`AuthorityError::Internal`] on a database fault; [`AuthorityError::Integrity`] if a
+    /// stored row is corrupt.
+    pub async fn resolve_read_scope(
+        &self,
+        ws: &str,
+        skill: &str,
+        credential: &str,
+    ) -> Result<ReadScope> {
+        let ws = WorkspaceId::parse(ws).map_err(|_| AuthorityError::NotFound)?;
+        let skill = SkillId::parse(skill).map_err(|_| AuthorityError::NotFound)?;
+        crate::enroll::resolve_read_scope(self, ws, skill, credential).await
     }
 
     /// Read a skill's `current` pointer for an authenticated [`ReadScope`] — the public authenticated
@@ -312,6 +316,49 @@ impl Authority {
         crate::lineage::check_lineage(self, ws, skill, candidates).await
     }
 
+    /// Resolve a device-lane op's presented workspace credential over the POOL — the pre-transaction
+    /// resolution the pre-txn receipt machinery keys on (the transaction re-authenticates
+    /// in-transaction; this read is advisory). `Err(receipt)` is the SYNTHESIZED pre-auth DENIED for
+    /// an unknown credential — never persisted (an unauthenticated caller must not mint durable
+    /// rows), mirroring the transaction's own `denied_preauth`. A REVOKED credential still resolves:
+    /// the pre-txn replay probes must serve a since-revoked device its stored receipts; the
+    /// in-transaction authz denies its fresh work.
+    async fn resolve_device_op(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        op_id: &OpId,
+        auth: &crate::set_current::DeviceOpAuth,
+        created_at: &str,
+    ) -> Result<std::result::Result<crate::set_current::DeviceOpRequest, SetCurrentReceipt>> {
+        let credential_sha256 = topos_core::digest::sha256(auth.credential.as_bytes());
+        match self
+            .db()
+            .resolve_device_credential(ws, &credential_sha256)
+            .await?
+        {
+            Some(identity) => Ok(Ok(crate::set_current::DeviceOpRequest {
+                credential_sha256,
+                device_key_id: identity.device_key_id,
+                op: auth.op,
+                expected: auth.expected,
+            })),
+            None => Ok(Err(SetCurrentReceipt {
+                op_id: op_id.as_str().to_owned(),
+                command: crate::set_current::device_op_command(auth.op).to_owned(),
+                skill_id: skill.as_str().to_owned(),
+                version_id: None,
+                bundle_digest: None,
+                expected: auth.expected,
+                outcome: topos_types::TerminalOutcome::Denied,
+                current: None,
+                record: None,
+                created_at: created_at.to_owned(),
+                details: crate::set_current::detail_msg("device unknown or revoked"),
+            })),
+        }
+    }
+
     /// Publish a candidate as the skill's new `current` — a direct publish, or **genesis** for the first
     /// version. The full backbone flow: a review-required preflight (uploads nothing if gated) → ingest +
     /// migrate (the crash-safe quarantine → lease → install → record) → the one pure-DB pointer-move
@@ -331,11 +378,20 @@ impl Authority {
         skill: &SkillId,
         op_id: &OpId,
         candidate: CandidateUpload,
-        device: DeviceOpRequest,
+        auth: DeviceOpAuth,
         display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        // Authenticate FIRST (the pool pre-resolution): an unknown credential mints nothing durable —
+        // not even the typed pre-txn receipts below.
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
         // A direct publish must arrive as exactly that. Forwarding an arbitrary device op (e.g. a
         // `Revert`-labelled candidate of new bytes) would skip the direct-publish review gate while still
         // reaching the promote path — a review bypass. Reject anything but `PublishDirect` BEFORE ingesting
@@ -389,13 +445,20 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         good: CommitId,
-        device: DeviceOpRequest,
+        auth: DeviceOpAuth,
         author: &str,
         message: &str,
         op_id: &OpId,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
         // A revert must arrive as exactly `Revert` (mirroring the publish/propose/review guards): a
         // mismatched op would otherwise mis-route into the promote arms. Reject it before constructing the
         // forward commit, recording nothing.
@@ -417,6 +480,7 @@ impl Authority {
             skill,
             good,
             crate::actor::WriteActor::Device {
+                credential_sha256: device.credential_sha256,
                 device_key_id: &device.device_key_id,
             },
             device.expected,
@@ -449,11 +513,18 @@ impl Authority {
         skill: &SkillId,
         op_id: &OpId,
         candidate: CandidateUpload,
-        device: DeviceOpRequest,
+        auth: DeviceOpAuth,
         display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
         // A proposal must arrive as exactly `PublishPropose`. Forwarding another device op could reach the
         // promote path (which moves `current`) — a gate bypass — so reject anything else BEFORE ingesting (a
         // misuse uploads/migrates/opens nothing).
@@ -514,11 +585,18 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         commit: CommitId,
-        device: DeviceOpRequest,
+        auth: DeviceOpAuth,
         op_id: &OpId,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
         if !matches!(device.op, crate::set_current::DeviceOp::ReviewApprove) {
             return crate::set_current::reject_op_mismatch(
                 self,
@@ -537,6 +615,7 @@ impl Authority {
             skill,
             commit,
             crate::actor::WriteActor::Device {
+                credential_sha256: device.credential_sha256,
                 device_key_id: &device.device_key_id,
             },
             device.expected,
@@ -560,10 +639,17 @@ impl Authority {
         ws: &WorkspaceId,
         skill: &SkillId,
         commit: CommitId,
-        device: DeviceOpRequest,
+        auth: DeviceOpAuth,
         op_id: &OpId,
         created_at: &str,
     ) -> Result<SetCurrentReceipt> {
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
         if !matches!(device.op, crate::set_current::DeviceOp::ReviewReject) {
             return crate::set_current::reject_op_mismatch(
                 self,
@@ -582,6 +668,7 @@ impl Authority {
             skill,
             commit,
             crate::actor::WriteActor::Device {
+                credential_sha256: device.credential_sha256,
                 device_key_id: &device.device_key_id,
             },
             device.expected,
@@ -1200,10 +1287,10 @@ impl Authority {
     pub async fn list_skills_device(
         &self,
         ws: &WorkspaceId,
-        device_key_id: &str,
+        credential: &str,
         now: i64,
     ) -> Result<Vec<SkillIndexRow>> {
-        crate::session_read::list_skills_device(self, ws, device_key_id, now).await
+        crate::session_read::list_skills_device(self, ws, credential, now).await
     }
 
     /// A skill's `current` pointer for a confirmed member. `Ok(None)` — no pointer record exists

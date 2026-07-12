@@ -56,18 +56,6 @@ async fn seat_of(pool: &PgPool, ws: &str, email: &str) -> Option<(String, String
     .unwrap()
 }
 
-/// COUNT the read tokens a principal holds in a workspace.
-async fn read_token_rows(pool: &PgPool, ws: &str, principal: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM read_token WHERE workspace_id = $1 AND principal = $2",
-    )
-    .bind(ws)
-    .bind(principal)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
 /// The workspace_events rows for a workspace as `(op_id, actor, gov_op_type, outcome, method)`.
 async fn events_of(pool: &PgPool, ws: &str) -> Vec<(String, String, String, String, String)> {
     sqlx::query_as::<_, (String, String, String, String, String)>(
@@ -470,7 +458,7 @@ async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPoo
 // ── remove: lockout + instant revoke ────────────────────────────────────────────────────────────
 
 #[sqlx::test]
-async fn remove_locks_out_the_last_owner_and_drops_read_tokens_in_txn(pool: PgPool) {
+async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sr-remove").await;
     let a = &fx.authority;
     let w = ws("w_rm");
@@ -484,11 +472,24 @@ async fn remove_locks_out_the_last_owner_and_drops_read_tokens_in_txn(pool: PgPo
         .seed_roster(&w, &skill("s_deploy"), &alice)
         .await
         .unwrap();
+    // Alice's device credential authenticates her device read lane; her confirmed membership is the gate.
     a.db()
-        .seed_read_token(&w, &skill("s_deploy"), &alice, "rt-alice")
+        .seed_device(
+            &w,
+            "dk_alice",
+            &dev_key(9),
+            &alice,
+            false,
+            &cred(&w, "dk_alice"),
+        )
         .await
         .unwrap();
-    assert_eq!(read_token_rows(&pool, "w_rm", "alice@acme.com").await, 1);
+    assert!(
+        a.resolve_read_scope("w_rm", "s_deploy", &cred(&w, "dk_alice"))
+            .await
+            .is_ok(),
+        "alice can read before she is removed"
+    );
 
     // The last confirmed owner cannot be removed — typed, recorded.
     assert!(matches!(
@@ -498,7 +499,7 @@ async fn remove_locks_out_the_last_owner_and_drops_read_tokens_in_txn(pool: PgPo
         GovernanceOutcome::Denied("would remove the last owner")
     ));
 
-    // Removing alice severs the seat AND her per-skill roster + read tokens in ONE transaction.
+    // Removing alice severs the seat AND her per-skill roster row in ONE transaction.
     assert!(matches!(
         a.roster_remove_session(&w, &op_id(2), owner.as_str(), alice.as_str(), CLOUD, T0)
             .await
@@ -506,9 +507,12 @@ async fn remove_locks_out_the_last_owner_and_drops_read_tokens_in_txn(pool: PgPo
         GovernanceOutcome::Ok
     ));
     assert!(seat_of(&pool, "w_rm", "alice@acme.com").await.is_none());
-    assert_eq!(read_token_rows(&pool, "w_rm", "alice@acme.com").await, 0);
+    // Her reads are instantly revoked: the member row is gone, so although her device credential still
+    // resolves (the device is not revoked) the confirmed-member gate now denies (the read_token table is
+    // gone — membership IS the entitlement).
     assert!(matches!(
-        a.resolve_read_token("rt-alice", NOW).await,
+        a.resolve_read_scope("w_rm", "s_deploy", &cred(&w, "dk_alice"))
+            .await,
         Err(AuthorityError::NotFound)
     ));
 
@@ -619,14 +623,9 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
         .seed_roster(&w, &skill("s_deploy"), &bob)
         .await
         .unwrap();
-    a.db()
-        .seed_read_token(&w, &skill("s_deploy"), &bob, "rt-bob")
-        .await
-        .unwrap();
-    assert_eq!(read_token_rows(&pool, "w_canon_rm", "bob@x.io").await, 1);
 
-    // Remove by the MIXED-CASE spelling: the target folds, and the canonical seat + per-skill
-    // roster + read tokens are severed in the one transaction (the instant-revoke shape).
+    // Remove by the MIXED-CASE spelling: the target folds, and the canonical seat + per-skill roster
+    // are severed in the one transaction (the instant-revoke shape).
     assert!(matches!(
         a.roster_remove_session(&w, &op_id(2), owner.as_str(), "Bob@X.io", CLOUD, T0)
             .await
@@ -634,11 +633,6 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
         GovernanceOutcome::Ok
     ));
     assert!(seat_of(&pool, "w_canon_rm", "bob@x.io").await.is_none());
-    assert_eq!(read_token_rows(&pool, "w_canon_rm", "bob@x.io").await, 0);
-    assert!(matches!(
-        a.resolve_read_token("rt-bob", NOW).await,
-        Err(AuthorityError::NotFound)
-    ));
     let roster_rows = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM roster WHERE workspace_id = $1 AND principal = $2",
     )
@@ -805,16 +799,19 @@ async fn rotation_blocks_future_redemption_only(pool: PgPool) {
         Err(AuthorityError::NotFound)
     ));
 
-    // …but nothing already exchanged is severed: alice's membership + read tokens stand, and
+    // …but nothing already exchanged is severed: alice's membership + credential stand, and
     // bob's ALREADY-ISSUED grant completes (his session passed the entry gate pre-rotation; the
     // roster gate — not the link — is the security boundary).
     assert_eq!(
         seat_of(&pool, "w_sever", "alice@acme.com").await,
         Some(("reviewer".to_owned(), "confirmed".to_owned()))
     );
-    for t in &alice_red.read_tokens {
-        assert!(a.resolve_read_token(&t.token, NOW).await.is_ok());
-    }
+    assert!(
+        a.resolve_read_scope("w_sever", "s_deploy", &alice_red.credential)
+            .await
+            .is_ok(),
+        "alice's minted credential still resolves — rotation touched neither her seat nor her device"
+    );
     let RedeemOutcome::Redeemed(bob_red) =
         redeem(a, &bob_grant, &bob_seed, device_pub(&bob_seed)).await
     else {

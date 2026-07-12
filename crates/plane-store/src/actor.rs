@@ -2,12 +2,13 @@
 //! receipts layer records it.
 //!
 //! One module so the three types stay together: [`WriteActor`] is what the orchestration hands the
-//! transaction (the device lane's presented credential, or the session lane's verified principal + its
-//! domain-tagged request identity), and [`WriteActor::receipt_actor`] is the ONE projection into the
-//! receipts layer ([`ReceiptActor`]) — every terminal writer derives its `(actor, method,
-//! request_sha256)` triple here, so the lane vocabulary cannot drift per writer. A crate-root shared
-//! leaf: custody consumes it, the directory's session legs construct it, and neither imports the other
-//! to do so.
+//! transaction — the device lane's presented workspace credential (a bearer SECRET, carried only as
+//! its sha256 past the public boundary) beside its pool-pre-resolved `device_key_id`, or the session
+//! lane's verified principal + its domain-tagged request identity — and [`WriteActor::receipt_actor`]
+//! is the ONE projection into the receipts layer ([`ReceiptActor`]): every terminal writer derives
+//! its `(actor, method, request_sha256)` triple here, so the lane vocabulary cannot drift per writer.
+//! A crate-root shared leaf: custody consumes it, the directory's session legs construct it, and
+//! neither imports the other to do so.
 
 use crate::id::Principal;
 
@@ -29,10 +30,17 @@ pub(crate) const REVIEWER_ROLE_REQUIRED_MSG: &str =
 /// authorization step; every other step is actor-blind.
 #[derive(Debug, Clone)]
 pub(crate) enum WriteActor<'a> {
-    /// The device lane (the CLI): the presented device credential. The transaction authenticates it by
-    /// LOOKUP — the non-revoked registry row for this id, read inside the same transaction — never by a
-    /// possession proof.
-    Device { device_key_id: &'a str },
+    /// The device lane (the CLI): the presented workspace credential's sha256 (the stored form — the
+    /// plaintext never crosses the orchestration boundary) plus the POOL-pre-resolved
+    /// `device_key_id` the pre-transaction receipt machinery keys on. The transaction authenticates
+    /// by LOOKUP — it re-resolves `credential_sha256` against the live registry row INSIDE the
+    /// write transaction and requires the row to name exactly this `device_key_id` (they can only
+    /// diverge if the credential rotated mid-flight, which fails closed as a pre-auth denial) —
+    /// never by a possession proof.
+    Device {
+        credential_sha256: [u8; 32],
+        device_key_id: &'a str,
+    },
     /// The web-session lane (hosted compositions only; self-host is denied upstream). `acting` is
     /// the composing caller's session-verified, canonical principal; `request_sha256` is the
     /// domain-tagged full-request identity (reason included on a reject) the replay probe compares.
@@ -43,10 +51,13 @@ pub(crate) enum WriteActor<'a> {
 }
 
 impl WriteActor<'_> {
-    /// The ONE projection into the receipts layer.
+    /// The ONE projection into the receipts layer. The device lane's actor is its (pre-resolved,
+    /// in-transaction re-verified) `device_key_id` — the device's stable name, never the presented
+    /// credential (a credential rotates on re-enrollment; a lost-ack retry across that rotation must
+    /// still name the same slot).
     pub(crate) fn receipt_actor(&self) -> ReceiptActor<'_> {
         match self {
-            WriteActor::Device { device_key_id } => ReceiptActor {
+            WriteActor::Device { device_key_id, .. } => ReceiptActor {
                 actor: device_key_id,
                 method: ReceiptMethod::Device,
                 request_sha256: None,

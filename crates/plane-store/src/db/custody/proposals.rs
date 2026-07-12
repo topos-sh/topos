@@ -12,7 +12,7 @@ use sqlx::{Postgres, Transaction};
 use topos_types::Generation;
 
 use crate::db::custody::witness::AccessWitness;
-use crate::db::{Db, ReadLane, blob32};
+use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
@@ -159,19 +159,17 @@ impl Db {
     }
 
     /// List the OPEN, non-stale proposals on `(ws, skill)` for a gate-admitted `principal` — the
-    /// proposals-listing read, split gate/reach like the object/version authorizations: the lane's
-    /// principal gate ([`crate::db::Db::read_gate`]), then the principal-free [`Self::open_proposal_rows`].
-    /// The gate **is** the authorization, and a denial folds to an EMPTY list, never a not-found — a
-    /// valid token whose principal is not on this skill's roster sees `[]`, exactly as before the split
+    /// proposals-listing read, split gate/reach like the object/version authorizations: the membership
+    /// gate ([`crate::db::Db::read_gate`]), then the principal-free [`Self::open_proposal_rows`].
+    /// The gate **is** the authorization, and a denial folds to an EMPTY list, never a not-found
     /// (the route's scope/path assert is the cross-skill guard; membership is silent).
     pub(crate) async fn list_open_proposals(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
         principal: &Principal,
-        lane: ReadLane,
     ) -> Result<Vec<OpenProposalRow>> {
-        if !self.read_gate(ws, skill, principal, lane).await? {
+        if !self.read_gate(ws, principal).await? {
             return Ok(Vec::new());
         }
         self.open_proposal_rows(ws, skill).await

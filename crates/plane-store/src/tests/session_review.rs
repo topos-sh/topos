@@ -330,7 +330,7 @@ async fn aba_a_stale_session_approve_conflicts_even_when_the_live_tree_matches_t
     .await;
     // Revert --to X -> (1,3). Now current.tree == beta == Q's base tree, but the generation moved on.
     let rop = op("62000000-0000-4000-8000-000000000004");
-    let rdev = revert_request("dk", gn(1, 2));
+    let rdev = revert_request(&w, "dk", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -1072,8 +1072,8 @@ async fn a_raced_device_and_session_approve_sharing_one_op_id_executes_once(pool
     // promote, never a CONFLICT (replay runs before the CAS on both lanes).
     let shared = "6d000000-0000-4000-8000-000000000003";
     let op_shared = op(shared);
-    let device = DeviceOpRequest {
-        device_key_id: "dk".to_owned(),
+    let device = DeviceOpAuth {
+        credential: cred(&w, "dk"),
         op: DeviceOp::ReviewApprove,
         expected: gn(1, 1),
     };
@@ -1776,7 +1776,7 @@ async fn a_device_revert_cannot_reuse_a_session_reverts_request_id(pool: PgPool)
     // forward-commit lease released on the Mismatch arm — no strand). The two lanes never replay each
     // other.
     let dop = op(shared);
-    let ddev = revert_request("dk", gn(1, 3));
+    let ddev = revert_request(&w, "dk", gn(1, 3));
     let rd = fx
         .authority
         .revert(

@@ -2,7 +2,7 @@
 //! principal probes the session legs read from the pool.
 //!
 //! Every fact here comes from a DIRECTORY table (`device_registry`, `roster`, `workspace_member`,
-//! `workspace_policy`, `read_token`); custody consumes them only through the
+//! `workspace_policy`); custody consumes them only through the
 //! [`AccessWitness`](crate::db::custody::witness::AccessWitness) trait, whose in-transaction methods
 //! run inside custody's own `SERIALIZABLE` transactions — so a policy-row write committed before a
 //! byte op is seen by that op's re-verification (revoke-blocks-promotion), with no duplicated
@@ -11,7 +11,7 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::db::custody::witness::{AccessWitness, DeviceIdentity, SessionWriteGate};
-use crate::db::{Db, ReadLane, blob32};
+use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::governance::Role;
 use crate::id::{Principal, SkillId, WorkspaceId};
@@ -21,43 +21,9 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        device_key_id: &str,
+        credential_sha256: &[u8; 32],
     ) -> Result<Option<DeviceIdentity>> {
-        let ws_s = ws.as_str();
-        let row = sqlx::query!(
-            r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!", revoked AS "revoked!: i64"
-               FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2"#,
-            ws_s,
-            device_key_id,
-        )
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-        match row {
-            None => Ok(None),
-            Some(r) => {
-                // Stored values are validated on the way in, so a re-parse failure is store corruption.
-                // The stored public key's width is still CHECK-bound; re-validate it here so a corrupt
-                // row surfaces as an integrity fault, not a silently-served device.
-                blob32(&r.public_key)?;
-                let principal =
-                    Principal::parse(&r.principal).map_err(AuthorityError::integrity)?;
-                Ok(Some(DeviceIdentity {
-                    principal,
-                    revoked: r.revoked != 0,
-                }))
-            }
-        }
-    }
-
-    async fn rostered(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-    ) -> Result<bool> {
-        roster_exists(&mut **tx, ws, skill, principal).await
+        device_by_credential(&mut **tx, ws, credential_sha256).await
     }
 
     async fn confirmed_member(
@@ -116,18 +82,50 @@ impl AccessWitness for Db {
         insert_roster(&mut **tx, ws, skill, principal).await
     }
 
-    async fn read_gate(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        lane: ReadLane,
-    ) -> Result<bool> {
-        match lane {
-            ReadLane::SkillRoster => roster_exists(self.pool(), ws, skill, principal).await,
-            ReadLane::WorkspaceMember => {
-                workspace_member_confirmed(self.pool(), ws, principal).await
-            }
+    async fn read_gate(&self, ws: &WorkspaceId, principal: &Principal) -> Result<bool> {
+        workspace_member_confirmed(self.pool(), ws, principal).await
+    }
+}
+
+/// Shared credential-resolution probe (the in-transaction witness read and its pool twin run the
+/// identical query; the governance preamble in [`super::governance`] runs it in ITS transaction too).
+/// **The one lookup guarded by the partial-unique `device_registry_by_credential`
+/// index**: the presented secret's sha256 probes it O(1), bound to the caller's claimed workspace so
+/// a cross-workspace credential is the same miss as an unknown one. A revoked row still resolves —
+/// the callers separately deny fresh work on it (the flag rides out on [`DeviceIdentity`]).
+pub(super) async fn device_by_credential<'e, E>(
+    executor: E,
+    ws: &WorkspaceId,
+    credential_sha256: &[u8; 32],
+) -> Result<Option<DeviceIdentity>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ws_s = ws.as_str();
+    let cred = credential_sha256.as_slice();
+    let row = sqlx::query!(
+        r#"SELECT device_key_id AS "device_key_id!", public_key AS "public_key!: Vec<u8>",
+                  principal AS "principal!", revoked AS "revoked!: i64"
+           FROM device_registry WHERE workspace_id = $1 AND credential_sha256 = $2"#,
+        ws_s,
+        cred,
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(AuthorityError::internal)?;
+    match row {
+        None => Ok(None),
+        Some(r) => {
+            // Stored values are validated on the way in, so a re-parse failure is store corruption.
+            // The stored public key's width is still CHECK-bound; re-validate it here so a corrupt
+            // row surfaces as an integrity fault, not a silently-served device.
+            blob32(&r.public_key)?;
+            let principal = Principal::parse(&r.principal).map_err(AuthorityError::integrity)?;
+            Ok(Some(DeviceIdentity {
+                device_key_id: r.device_key_id,
+                principal,
+                revoked: r.revoked != 0,
+            }))
         }
     }
 }
@@ -205,62 +203,34 @@ impl Db {
         Ok(())
     }
 
-    /// Resolve a read token's sha256 to its `(workspace, skill, principal)` scope — the read-credential
-    /// resolver. **The one lookup NOT bound on `workspace_id`:** the token IS what resolves the workspace,
-    /// so this probes the globally-unique `token_sha256` primary key (O(1)) and ESTABLISHES the binding
-    /// every subsequent query carries. Only the hash is stored, never the plaintext. The row's strings were
-    /// validated when the token was minted, so a re-parse failure is store corruption (an integrity fault),
-    /// not a client error. `None` ⇒ no such token.
-    pub(crate) async fn lookup_read_token(
+    /// Resolve a presented workspace credential over the POOL for the READ lane: the credential's
+    /// sha256 → its non-revoked registry row's principal. The device read lane's authentication —
+    /// the member gate + reachability run after it, all misses folding to the caller's uniform
+    /// `NotFound`. Unlike the write path (which must replay a since-revoked device's stored receipt
+    /// before denying), a read has no replay surface, so `revoked` folds to a miss right here.
+    pub(crate) async fn resolve_read_credential(
         &self,
-        token_sha256: &[u8; 32],
-        now: i64,
-    ) -> Result<Option<(WorkspaceId, SkillId, Principal)>> {
-        let key = token_sha256.as_slice();
-        let row = sqlx::query!(
-            r#"SELECT workspace_id AS "workspace_id!", skill_id AS "skill_id!", principal AS "principal!"
-               FROM read_token WHERE token_sha256 = $1 AND (expires_at IS NULL OR expires_at > $2)"#,
-            key,
-            now,
-        )
-        .fetch_optional(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        match row {
-            None => Ok(None),
-            Some(r) => Ok(Some((
-                WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity)?,
-                SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
-                Principal::parse(&r.principal).map_err(AuthorityError::integrity)?,
-            ))),
+        ws: &WorkspaceId,
+        credential_sha256: &[u8; 32],
+    ) -> Result<Option<DeviceIdentity>> {
+        match device_by_credential(self.pool(), ws, credential_sha256).await? {
+            Some(identity) if !identity.revoked => Ok(Some(identity)),
+            _ => Ok(None),
         }
     }
-}
 
-/// Shared roster-existence probe (used by both the pool-level read gate and the in-transaction write
-/// gate). Generic over the executor so the identical query serves both.
-async fn roster_exists<'e, E>(
-    executor: E,
-    ws: &WorkspaceId,
-    skill: &SkillId,
-    principal: &Principal,
-) -> Result<bool>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let ws = ws.as_str();
-    let skill = skill.as_str();
-    let principal = principal.as_str();
-    let row = sqlx::query!(
-        "SELECT principal FROM roster WHERE workspace_id = $1 AND skill_id = $2 AND principal = $3 LIMIT 1",
-        ws,
-        skill,
-        principal,
-    )
-    .fetch_optional(executor)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(row.is_some())
+    /// Resolve a presented workspace credential over the POOL for the WRITE lane's pre-transaction
+    /// machinery (the stable-replay probes and the preflight typed failures need the acting
+    /// `device_key_id` before any durable write, and an unauthenticated caller must mint nothing
+    /// durable). `revoked` is NOT folded here — a since-revoked device must still reach its replay
+    /// probes; the in-transaction resolve + revoked check stay the authority.
+    pub(crate) async fn resolve_device_credential(
+        &self,
+        ws: &WorkspaceId,
+        credential_sha256: &[u8; 32],
+    ) -> Result<Option<DeviceIdentity>> {
+        device_by_credential(self.pool(), ws, credential_sha256).await
+    }
 }
 
 /// A CONFIRMED `workspace_member` row exists for this principal (the workspace-level RBAC roster,

@@ -1,7 +1,8 @@
 # `plane-store` — the server authority boundary
 
 **A crate so that raw access is private.** It owns the plane's per-workspace SQL — **raw `sqlx`, no
-ORM** — and per-workspace git-object storage, and it is the single place the **skill-scoped access rule**
+ORM** — and per-workspace git-object storage, and it is the single place the **membership access rule**
+(one predicate: a CONFIRMED `workspace_member` seat, on every lane, for reads AND writes)
 is enforced. The pool, every transaction, every raw SQL statement, and every raw git-object read are
 `pub(crate)`-private; the **only** public surface is authorized authority operations on `Authority`.
 
@@ -34,15 +35,19 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   machinery + the terminal-outcome writers both `db/custody/set_current.rs` paths call.
 - `db/custody/proposals.rs` — the contribute tables' SQL.
 - `db/custody/witness.rs` — **the `AccessWitness` TRAIT** custody declares and consumes: `device` (resolve
-  a presented credential to its registry row), `rostered`, `confirmed_member`, `session_write_gate` (the
+  a presented workspace credential — by its sha256 — to its registry row, INSIDE the live transaction;
+  the lookup IS the authentication), `confirmed_member` (the ONE write gate), `session_write_gate` (the
   three-way session outcome — the role matrix itself lives directory-side), `review_required`,
-  `seat_roster` (the one genesis directory write the pointer-move makes), and the pool-level `read_gate`.
+  `seat_roster` (the one genesis directory write the pointer-move makes), and the pool-level `read_gate`
+  (the membership gate, shared by both read lanes).
   Its in-transaction methods take the live write transaction, so a directory row-write is instantly
   effective against byte ops (revoke-blocks-promotion) — no duplicated enforcement, no cache to invalidate.
 
 **Directory** (`directory/` + `db/directory/`) — access/identity/policy:
 - `enroll.rs` / `db/directory/enroll.rs` — enrollment issuance (invites-bootstrap read, device-auth,
-  passcodes, grants, the central redeem). The shared credential derivations (HMAC mint, sha256 storage
+  passcodes, grants, the central redeem — which mints the ONE **workspace credential** per device) and
+  the device READ lane's resolver (`resolve_read_scope`). The shared credential derivations (HMAC mint,
+  sha256 storage
   form, the server-derived device key id) and the cross-domain in-txn helpers (`read_device`, `blob32`)
   live here.
 - `governance.rs` / `db/directory/governance.rs` — the role-gated governance surface (create-invite +
@@ -62,9 +67,11 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   `db/custody/set_current.rs` transaction (branching on the `WriteActor` lane at its authorization step
   alone); its read sibling (`read_proposal_detail_session`) lives in `session_read.rs` over the same gate.
 - `db/directory/witness.rs` — **the `AccessWitness` IMPL for `Db`** over the directory tables
-  (`device_registry`, `roster`, `workspace_member`, `workspace_policy`, `read_token`), plus the
-  directory-owned pool probes the session legs read (`confirmed_member`, `member_role`, `lookup_read_token`,
-  the policy read/write).
+  (`device_registry`, `roster`, `workspace_member`, `workspace_policy`) — the shared
+  `device_by_credential` resolver (a presented workspace credential's sha256 → its registry row, O(1)
+  on the partial-unique index, workspace-bound) plus the
+  directory-owned pool probes (`confirmed_member`, `member_role`, `resolve_read_credential` /
+  `resolve_device_credential`, the policy read/write).
 
 **Shared crate-root leaves** (imported by both groups; neither group imports the other):
 - `authority.rs` — the sealed facade: `Authority` + `PoolConfig`, exactly the production API (the
@@ -75,7 +82,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
 - `error.rs` — the boxed-source error (no `sqlx`/git-store type in a public signature); `id.rs` — the
   validated id newtypes; `secret.rs` — the `0600` seed custody (load-or-generate, atomic publish; now used
   only by the enrollment HMAC secret).
-- `db/mod.rs` — the pool, `run_serializable!`, the `ReadLane` split, the `blob32` helper, and the retry
+- `db/mod.rs` — the pool, `run_serializable!`, the `blob32` helper, and the retry
   classification; `db/seed.rs` — test-only staging.
 - `fixtures.rs` — the `feature = "test-fixtures"` `impl Authority` shims (never in a production build);
   `src/tests/` — the in-crate suite, one named module per concern.
@@ -96,7 +103,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   PK `(workspace_id, id)` where `id` IS the opening op_id; a **partial-unique** "one open per
   (skill,commit,base)"; `base_commit_id` = the approve's authoritative first parent), `proposal_object` (the
   **gated** retention/read root for a pending proposal), and `approvals` (the audit log). Later migrations:
-  `0005` (`read_token`), `0006` (the enrollment/governance schema — see the issuance bullet below), `0007`
+  `0005` (`read_token` — DROPPED by `0014`), `0006` (the enrollment/governance schema — see the issuance bullet below), `0007`
   (the `object_presence (workspace_id, git_oid)` index the version-metadata read resolves tree leaves
   through), and `0008` (the workspace-standup schema: session `intent` + a nullable session `workspace_id`
   CHECK-bound to unapproved standups, the claim row's mint-time facts, and the `genesis_requests`
@@ -104,7 +111,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   migrations (`0009`–`0012`): `current.signed_record → current.record` with the signature block stripped,
   `op_receipts` likewise + its `key_id` column dropped, and the receipt/audit `method` discriminant
   `device_signed → device` (nothing signs; the receipt's actor is the presented device credential's key id).
-- **`Authority::read_object`** — the skill-scoped read. One join authorizes on rostered ∧ reachable —
+- **`Authority::read_object`** — the skill-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
   uses, so **keep-set == read surface** — and yields a witness commit; the bytes are then read + re-verified.
@@ -113,19 +120,21 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   fetch miss **re-authorizes** (the read-time TOCTOU guard): a proposal that staled — and whose unique bytes
   a GC reclaimed — between the authorize and the fetch reads **404, never Integrity**. **No object is served
   by bare hash.**
-- **The network read surface (what the HTTP plane composes over).** `resolve_read_token` maps an opaque
-  per-skill read token (stored only as its **sha256**) to a `ReadScope` whose `(workspace, skill, principal)`
-  are built from the trusted row — **never** a caller-asserted id — a miss being the same indistinguishable
+- **The network read surface (what the HTTP plane composes over).** `resolve_read_scope(ws, skill,
+  credential)` authenticates the presented **workspace credential** (stored only as its **sha256**, ON the
+  device's registry row, workspace-bound) and gates on the CONFIRMED-membership join — the principal comes
+  from the trusted row, **never** a caller-asserted id; every miss (unknown/rotated/revoked credential,
+  non-member, malformed id) is the same indistinguishable
   `NotFound`. Over it: `read_current` (the `current` record — the unsigned `WireCurrentRecord` — + its generation/version, for the
   conditional-GET/ETag/304 read), `serve_object` (the bundle read — a scope/path mismatch or a malformed id
   is `NotFound`, then the same `read_object`), `read_version_metadata` (a version's
   parents/author/message/digest/file-list — **no blob bytes** — for the client's reassembly walk), and
-  `list_open_proposals` (the OPEN proposals on a rostered skill as `{version_id, base, created_at}` —
+  `list_open_proposals` (the OPEN proposals on a workspace skill as `{version_id, base, created_at}` —
   **count + handles only, no bytes, no roles**: the reviewer's discovery surface for `proposals_awaiting` /
   `list <skill>`; reuses the SAME `open ∧ base==current` staleness clause verbatim — the **fifth** tracked
-  copy — so a staled proposal vanishes [keep==read==list], and folds not-rostered into an empty list via the
-  roster join, never a 403/oracle). The version-metadata read is R1-scoped by `authorize_version_read`, which
-  **mirrors `read_object`'s predicate** (rostered ∧ accepted-trunk-or-open-non-stale-proposal), so an
+  copy — so a staled proposal vanishes [keep==read==list], and folds a non-member into an empty list via the
+  membership gate, never a 403/oracle). The version-metadata read is R1-scoped by `authorize_version_read`, which
+  **mirrors `read_object`'s predicate** (member ∧ accepted-trunk-or-open-non-stale-proposal), so an
   unaccepted/rejected proposal version is the indistinguishable `NotFound`; `list_open_proposals` applies the
   same scope/path assert first (a cross-skill/workspace token ⇒ `NotFound`). Commit metadata comes from gitstore's exact one-commit `read_commit_meta`
   (fails closed on an unmapped parent, never the lossy `log`). `read_current_record` is `pub(crate)` (the
@@ -205,9 +214,10 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   only** — the S3-compatible remote backend + the online backfill are the named next steps.
 - **The pointer-move write (`set-current`) — publish · genesis · revert.** The `current` row this layer only
   created now **moves** in **one `run_serializable!` (`SERIALIZABLE` + retry) pure-DB transaction** (no filesystem op
-  inside it): receipt-replay → in-transaction authoritative authz (the presented `device_key_id` resolved to its
-  **non-revoked** registry row bound to a **rostered** principal — the lookup IS the authentication, so a revoke
-  committed before the promotion blocks it) → **compare-and-set on the whole `(epoch, seq)` pair** (CONFLICT carries the live
+  inside it): in-transaction authentication FIRST (the presented **workspace credential**'s sha256 resolved to its
+  registry row — the lookup IS the authentication; unknown mints nothing durable) → receipt-replay →
+  the revoked check + the **confirmed-membership** gate (one predicate on every lane; a revoke or a
+  membership removal committed before the promotion is serialized ahead and blocks it) → **compare-and-set on the whole `(epoch, seq)` pair** (CONFLICT carries the live
   generation; a restore that bumps `epoch` while reusing `seq` is caught) → availability (every candidate
   object `present` + not tombstoned) + a **lease-completion gate** (the committed lease proves the migrate
   finished) → same-skill lineage + the **first-parent assert** → provenance + reachability written **before**
@@ -265,10 +275,12 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   `device_auth_sessions`, `passcodes`, `admin_claim`, and the `workspace_events` governance audit + op_id
   idempotency store — all ws-scoped, 32-byte BYTEA width-checked, with NO foreign key
   onto the standalone `workspace` (so the existing publish/read tests, which seed no workspace, stay green);
-  it also adds nullable `device_key_id` + `expires_at` to `read_token`. **Every opaque credential is
+  (`enrollment_grant_skill` and `read_token` were later DROPPED by `0014` — the workspace-credential
+  clean break). **Every opaque credential is
   deterministically HMAC-derived** (`hmac`/`sha2` over a `0600` enrollment secret loaded with the same `0600`
   seed custody) and **stored ONLY as its sha256** — so a lost-ack retry re-derives the IDENTICAL credential, a
-  consumed grant re-derives the SAME read tokens (naturally idempotent redeem), and a revoke is an instant row
+  consumed grant re-derives the SAME workspace credential (naturally idempotent redeem), and a revoke is an
+  instant row
   flip; `device_code`/`user_code`/`passcode` are fresh `getrandom`. The ops, all decided IN-Authority against
   server-trusted rows (never a client-asserted id): **`create_invite`** (device-credential, owner-role-gated;
   mints the `/i/<token>` link, seeds the invited members, op_id-idempotent), **`read_invite_bootstrap`** (the
@@ -279,16 +291,22 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   (the email parsed INSIDE the op, a constant-shaped ack, brute-force locked after a cap), the central
   **`redeem_enrollment`** (ONE `run_serializable!` txn: a binding-equality check — the presented device key must
   equal the GRANT's bound key → the deployment-mode roster gate [cloud requires a confirmed, already-rostered
-  identity; self-host grants membership from the bearer] → device registry register with anti-squat → per-skill
-  roster + **minted read tokens, NEVER a user token**), and **`admin_claim`** (self-host first-boot standup).
-  The **governance** mutations (`roster_set`/`roster_remove`/`revoke_device`) resolve the acting `device_key_id`
-  to its non-revoked registered device in-transaction (the lookup IS the authentication) and bind a canonical
-  request identity under `TOPOS_DEVICE_GOVERNANCE_V1`, enforce the role matrix (owner-only for invite/roster;
+  identity; self-host grants membership from the bearer] → device registry register with anti-squat, WRITING
+  the device's ONE **workspace credential** (`derive_token(b"wscred", [grant_sha256])` — deterministic, so a
+  lost-ack replay re-returns the identical plaintext; only its sha256 lands on the registry row; a re-redeem
+  through a FRESH grant rotates it) — **NEVER a user token, never a per-skill token**; no roster rows are
+  written at redeem anymore), and **`admin_claim`** (self-host first-boot standup — same `b"wscred"` mint over
+  the claim's sha256, so the consumed-replay probe re-returns the identical credential).
+  The **governance** mutations (`roster_set`/`roster_remove`/`revoke_device`) resolve the ACTING workspace
+  credential to its registered device in-transaction (resolve → request identity bound to the RESOLVED
+  `device_key_id` → replay → revoked → role, so a since-revoked owner still replays its committed OK) under
+  the canonical
+  request identity `TOPOS_DEVICE_GOVERNANCE_V1`, enforce the role matrix (owner-only for invite/roster;
   owner-or-self for revoke) + a
   last-owner-lockout guard, are op_id-idempotent via `workspace_events` (a same-op_id retry with a matching
-  `request_sha256` replays; a different one is a denied key-reuse), and revoke is **instant** (flip `revoked` +
-  drop the device's read tokens in one txn). `resolve_read_token` now takes `now` and enforces the token's
-  `expires_at`. Two more read/confirm ops feed the verification surface: **`read_verification_context`** (the
+  `request_sha256` replays; a different one is a denied key-reuse), and revoke is **instant** (flip `revoked`
+  in one txn — the row and its credential hash stay, so replay survives while fresh work is denied; member
+  removal deletes the `workspace_member` row, which every gate joins — access dies with the row). Two more read/confirm ops feed the verification surface: **`read_verification_context`** (the
   RFC-8628 confused-deputy disclosure — resolve a LIVE, non-expired session by `user_code` and return the
   machine name + device fingerprint, the workspace identity, and the offered skills; no secret; a miss/expiry
   is the one indistinguishable `NotFound`) and **`confirm_external_identity`** (the OIDC callback's
@@ -297,9 +315,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   Driven in-process by the device-flow→grant→redeem happy path, the binding-equality teeth (a leaked grant
   redeemed on a different key ⇒ DENIED), deterministic redeem idempotency, the cloud roster gate, self-host SMTP-free
   membership, instant revoke, the governance role matrix, server-derived device ids, the verification-context
-  disclosure, and the external-identity confirm-then-grant — **no HTTP** (the verification-page HTML, the
-  OIDC/magic-link transport + the mailer, and active read-token rotation land in `topos-plane`). Test-fixture
-  shims gain `seed_workspace` / `seed_workspace_member`.
+  disclosure, and the external-identity confirm-then-grant — **no HTTP** (the verification-page HTML and the
+  OIDC/magic-link transport + the mailer land in `topos-plane`). Test-fixture
+  shims gain `seed_workspace` / `seed_workspace_member`; `seed_device` seeds the credentialed row.
 - **Workspace standup (the first-boot genesis authority).** Three doors onto ONE shared genesis seat
   (`seat_workspace_and_owner`: the workspace INSERT's `ON CONFLICT DO NOTHING … RETURNING` probe is the
   created-or-exists witness, and the confirmed-`owner` member INSERT runs ONLY on Created — no genesis path
@@ -373,26 +391,28 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   and **`list_open_proposals_session`**. ONE shared `member_gate` preamble authorizes them all —
   self-host uniformly denied, canonical principal fold, then a CONFIRMED `workspace_member` probe —
   and every pre-gate miss (self-host / malformed email or skill / unknown workspace / non-member /
-  invited-unconfirmed) is the single indistinguishable `NotFound`. **Deliberately BROADER than the
-  device lane, by decision: catalog visibility IS workspace membership** — any confirmed member, any
-  role, with or without per-skill `roster` rows, reads the workspace's full catalog and every skill's
-  content; per-skill `roster` remains the device lane's (read-token) gate, and the two gates are
-  disjoint by test. Mechanically, the three read authorizations are split into a principal GATE
-  (`ReadLane::{SkillRoster, WorkspaceMember}` dispatch — zero new gate SQL) and ONE lane-blind
+  invited-unconfirmed) is the single indistinguishable `NotFound`. **Both lanes now run the SAME gate:
+  access IS workspace membership** — any confirmed member, any
+  role, reads the workspace's full catalog and every skill's
+  content, on the session lane AND the device lane (the lanes differ only in authentication: verified
+  session email vs. presented workspace credential; the earlier lane asymmetry — per-skill roster on
+  the device lane — is deleted, and per-skill `roster` gates nothing). Mechanically, the read
+  authorizations are split into the ONE membership GATE (`read_gate`) and ONE lane-blind
   reachability statement each (`object_witness` / `version_readable` / `open_proposal_rows`), so both
   lanes share identical reachability SQL and the `open ∧ base == current` staleness predicate stays at
   its FIVE tracked copies; the index's proposal count delegates per skill to the SAME listing
   statement (count == list by construction — a deliberate O(skills) fan-out on a cold route). The
-  read-time re-authorize guard re-gates on the caller's lane: a reclaimed object reads 404 and genuine
+  read-time re-authorize guard re-gates on the caller's principal: a reclaimed object reads 404 and genuine
   corruption stays an Integrity alarm on BOTH lanes (both directions pinned by `tests/session_read.rs`,
   alongside the full miss-uniformity matrix, the staled-proposal list/count parity, the
   rejected-candidate 404 through both lanes, and the NULL-digest-under-current Integrity probe). Reads
   mint nothing durable. The gate→reach two-statement window (a principal revoked between them completes
   one in-flight read) is the same accepted posture as the authorize-then-fetch TOCTOU.
 - **The DEVICE-lane catalog read (`list_skills_device`) — an OSS HTTP route, unlike the session lane.**
-  A public `Authority::list_skills_device(ws, device_key_id, now)` that lets a member's
+  A public `Authority::list_skills_device(ws, credential, now)` that lets a member's
   **device** (not a web session) read the SAME workspace catalog `list_skills_session` returns: resolve
-  the non-revoked registered device (the credential lookup IS the authentication) → `confirmed_member`, then the shared
+  the presented workspace credential to its non-revoked registry row (the lookup IS the authentication) →
+  `confirmed_member`, then the shared
   `build_skill_index` (the session lane's index build, factored out and shared verbatim). Every failure
   folds to the one uniform `NotFound` (a corrupt stored principal stays `Integrity`). It takes **no
   `DeploymentMode`** and applies **no self-host denial** — device auth IS the self-host membership story,
@@ -403,6 +423,29 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   reads stay lib-only). Driven by `src/tests/session_read.rs`'s device-lane suite (member reads the
   catalog; a cross-workspace device selector, revoked device, and non-member all `NotFound`; and the key
   contrast — the device lane SERVES a member on self-host where the session lane denies).
+- **The workspace credential — ONE membership credential per (principal × workspace ×
+  device), authenticating EVERYTHING on the device lane.** The per-skill read tokens and the interim
+  non-secret `device_key_id` authentication are both GONE (migration `0014`: `credential_sha256` on
+  `device_registry` + `DROP TABLE read_token, enrollment_grant_skill`). The credential is a bearer
+  secret (HMAC domain `b"wscred"` over the grant/claim sha256 — deterministic per redemption door, so
+  lost-ack replays re-return the identical plaintext), stored ONLY as its sha256 ON the device's
+  registry row (one row, one device, one credential; the partial-unique index is the resolver's O(1)
+  probe, workspace-bound so a credential never crosses workspaces). Presentation is the
+  `Authorization: Bearer` header — never a body field, so the secret never enters a receipt request
+  identity or the client's persisted op-WAL, and a rotation between retries can't break byte-identical
+  replay. The pointer-move + reject transactions authenticate at a new step (0) — the in-transaction
+  resolve, BEFORE any probe or durable write (an unknown credential mints nothing, closing the old
+  pre-txn hole where unauthenticated callers could grow `op_receipts` via the review-gate preflight) —
+  with the revoked check deferred past the replay probe (a since-revoked device still replays its
+  stored OK; its fresh work is denied). Authorization on every lane is the ONE membership predicate
+  (`confirmed_member`); the `WriteActor::Device` carries `(credential_sha256, pool-resolved
+  device_key_id)` and the txn asserts the in-txn resolution names exactly that device. Revocation is a
+  directory row-write, effective in-transaction: a device revoke flips `revoked` (the row + hash stay —
+  replay survives, fresh work dies, re-enrollment is refused); a member removal deletes the
+  `workspace_member` row (every read/write gate joins it — access dies the moment it commits; the
+  member's per-skill roster rows go too). Rotation = re-enrollment (a fresh grant derives a fresh
+  credential and the register upsert replaces the column). NO expiry (journaled: revoke + re-enroll is
+  the rotation).
 - **The web-session REVIEW leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
   a hosted composition's authenticated admin routes call them; self-host uniformly denied in-op):
   **`review_approve_session`** / **`review_reject_session`** (approve / reject an OPEN proposal from a
@@ -410,9 +453,11 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   TERMINATES in the SAME serializable pointer-move transaction the device lane runs (`db/set_current.rs`'s
   `run` and the reject transaction) — one approve predicate, one `(epoch,seq)` CAS, one moved
   pointer, one four-eyes gate — branching on the new `WriteActor` (Device|Session; `actor.rs`) ONLY at the
-  authorization step: the device arm is byte-identical to before, and the session arm is an
+  authorization step: the device arm authenticates by the in-transaction credential resolve + the
+  membership gate, and the session arm is an
   in-transaction confirmed **owner|reviewer** workspace-seat gate — **the FIRST enforcement of the
-  reviewer role** (a deliberate lane asymmetry: the device lane keeps its per-skill roster). Orchestration
+  reviewer role** (the remaining lane asymmetry is ROLE alone — deliberate, for now:
+  CLI approve/reject takes any confirmed member + four-eyes; finer role gating is later work). Orchestration
   (`session_review.rs`) mirrors the roster leg's trust shape: uniform self-host deny, a canonical-UUID
   `request_id` idempotency under a fresh `TOPOS_SESSION_REVIEW_V1` domain tag (distinct from every kernel
   and roster tag, so no stored identity from another domain can byte-match a review request), a
@@ -425,7 +470,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   always held the acting identity — a device key id, or now the session's verified EMAIL),
   adds the `method` discriminant (`device` | `web_session`, after 0013's `device_signed → device` rename) +
   `request_sha256` (the session lane's
-  full-request identity; NULL on the device lane, whose identity is the presented device key id) + a
+  full-request identity; NULL on the device lane, whose identity is the resolved device key id) + a
   reserved `step_up_attestation` column + the `(workspace_id, op_id)` index, and adds
   `proposals.resolved_reason` + `resolved_at` (a device reject writes NULL — the CLI keeps its surface).
   The receipt replay probe is now **lane-blind** per `(workspace, op_id)`: cross-lane id reuse fails
@@ -495,10 +540,10 @@ governance request/response DTOs, the mailer, and one generic OSS OIDC connector
 `topos-plane` earlier, and the workspace-policy
 mutation route is now BUILT there as the admin-token `PUT …/policy/review-required`; verification-page HTML
 is a composing web layer's surface, never this repo's — the JSON routes + the `topos-plane` lib wrappers
-are the seam, and hosted compositions serve their own pages over them); **active read-token
-rotation** (redeem
-mints non-expiring, device-bound read tokens today — `expires_at` is enforced but minted NULL, with per-device
-revoke as the kill switch); domain-ownership **verification** (`verified_domain_status` is operator-asserted);
+are the seam, and hosted compositions serve their own pages over them); **active credential
+rotation** in the `current` path (the workspace credential has NO expiry by decision — revoke +
+re-enroll IS the rotation; an in-place rotate-without-re-enroll op is later work if ever needed);
+domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest encryption / KMS of the enrollment secret** (a plaintext `0600` seed for
 now); the `purge` verb + force-unlink (the tombstones table + denylist check already exist); two-parent
 author merges; per-skill encryption-at-rest.

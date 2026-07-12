@@ -1,8 +1,8 @@
 //! The enrollment issuance core — the orchestration half (outside the transaction).
 //!
 //! This is where a device registers its key and redeems the bearer grant bound to it, and where the plane mints the only
-//! credentials it ever issues: **workspace-scoped** invites, enrollment grants, and per-skill read tokens —
-//! **never** a user OAuth token. Every issuance / roster / device decision is made INSIDE these ops against
+//! credentials it ever issues: **workspace-scoped** invites, enrollment grants, and the ONE workspace
+//! credential per enrolled device — **never** a user OAuth token, never a per-skill token. Every issuance / roster / device decision is made INSIDE these ops against
 //! a server-trusted row; a client-asserted id is never parsed into authority. Every opaque credential is
 //! **deterministically HMAC-derived** from a `0600` enrollment secret (so a lost-ack retry re-derives the
 //! IDENTICAL credential) and stored ONLY as its sha256 (so a database read can never recover a live
@@ -113,8 +113,6 @@ pub struct GrantIssued {
     pub device_auth_id: String,
     /// The server-derived device key id.
     pub device_key_id: String,
-    /// The skills the grant offers (the redeem rosters + mints read tokens for these).
-    pub offered_skills: Vec<SkillId>,
     /// The grant expiry (epoch-ms).
     pub expires_at: i64,
 }
@@ -193,20 +191,9 @@ pub enum ConfirmOutcome {
     Confirmed,
 }
 
-/// One minted read token (returned ONCE on redeem; only its sha256 is stored).
-#[derive(Debug, Clone)]
-pub struct MintedReadToken {
-    /// The skill the token reads.
-    pub skill_id: SkillId,
-    /// The plaintext read token (the `0600` at-rest secret on the follower; only its sha256 is stored here).
-    pub token: String,
-    /// The token expiry (epoch-ms; `None` = non-expiring — per-device revoke is the kill switch).
-    pub expires_at: Option<i64>,
-}
-
-/// The successful result of an enrollment redeem (or an admin claim) — the confirmed identity, the registered
-/// device, and the minted per-skill read tokens. **NO user token, ever.**
-#[derive(Debug, Clone)]
+/// The successful result of an enrollment redeem (or an admin claim) — the confirmed identity, the
+/// registered device, and the ONE minted workspace credential. **NO user token, ever.**
+#[derive(Clone)]
 pub struct EnrollmentRedeemed {
     /// The workspace the device enrolled into.
     pub workspace_id: WorkspaceId,
@@ -214,8 +201,24 @@ pub struct EnrollmentRedeemed {
     pub principal: Principal,
     /// The server-derived device key id now registered.
     pub device_key_id: String,
-    /// The minted per-skill read tokens (returned once).
-    pub read_tokens: Vec<MintedReadToken>,
+    /// The plaintext workspace credential (the `0600` at-rest secret on the device; only its sha256
+    /// is stored server-side, on the device's registry row). Returned once; deterministic per grant,
+    /// so a lost-ack replay re-returns the identical value. No expiry — revoke + re-enroll is the
+    /// rotation (a directory row-write is the kill switch).
+    pub credential: String,
+}
+
+// `credential` is a LIVE bearer secret — redact it so a formatted value (a debug trace, a panic
+// message) can never mint a second custody surface for it.
+impl std::fmt::Debug for EnrollmentRedeemed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollmentRedeemed")
+            .field("workspace_id", &self.workspace_id)
+            .field("principal", &self.principal)
+            .field("device_key_id", &self.device_key_id)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The outcome of [`Authority::redeem_enrollment`](crate::Authority::redeem_enrollment) /
@@ -376,9 +379,10 @@ impl EnrollmentState {
 
 /// Derive a deterministic opaque credential: `base64url-unpadded(HMAC-SHA256(secret, domain ‖ each part
 /// length-prefixed))`. **Determinism is the keystone** — a lost-ack create/issue retry re-derives the
-/// IDENTICAL credential, and a consumed grant re-derives the SAME read tokens, so redeem is naturally
-/// idempotent with no fresh mint per call. The `domain` is a fixed byte tag (`b"invite"` / `b"grant"` /
-/// `b"readtoken"` — none a prefix of another) that separates the credential families; each `part` is framed
+/// IDENTICAL credential, and a consumed grant re-derives the SAME workspace credential, so redeem is
+/// naturally idempotent with no fresh mint per call. The `domain` is a fixed byte tag (`b"invite"` /
+/// `b"grant"` / `b"wscred"` / `b"door"` — none a prefix of another) that separates the credential
+/// families; each `part` is framed
 /// with a `u32be` length prefix so the concatenation is unambiguous. Only `sha256(token)` is ever stored.
 pub(crate) fn derive_token(secret: &[u8; 32], domain: &[u8], parts: &[&[u8]]) -> String {
     use hmac::{Hmac, Mac};
@@ -834,7 +838,7 @@ pub(crate) async fn confirm_external_identity(
 /// the bearer credential (a deterministic HMAC secret, stored only as its sha256); the presented device
 /// key must equal the grant's bound key (the binding consistency check runs in-transaction). SERVER-derives
 /// the device key id from the presented key, then runs the one gate + register + mint transaction. Returns
-/// minted per-skill read tokens — NEVER a user token.
+/// the ONE minted workspace credential — NEVER a user token, never a per-skill token.
 pub(crate) async fn redeem_enrollment(
     authority: &Authority,
     grant_token: &str,
@@ -855,28 +859,41 @@ pub(crate) async fn redeem_enrollment(
     authority.db().redeem_txn(&input, secret).await
 }
 
-/// Resolve a presented read token to its opaque [`ReadScope`] — the read-credential resolver.
+/// Resolve a presented workspace credential to an opaque [`ReadScope`] on one of the workspace's
+/// skills — the device READ lane's authentication + gate.
 ///
-/// Hashes the token (the table stores ONLY the sha256 — the plaintext is a `0600` secret at rest on the
-/// follower, never recoverable from a database read) and does one indexed lookup on the hash. A miss is the
-/// single indistinguishable [`AuthorityError::NotFound`], so a caller can never probe which tokens,
-/// workspaces, or skills exist; a stored row that fails to re-parse is store corruption (handled in
-/// [`crate::db`], not surfaced as not-found).
+/// Hashes the credential (the registry stores ONLY the sha256 — the plaintext is a `0600` secret at
+/// rest on the device, never recoverable from a database read), probes the registry row bound to the
+/// CALLER'S CLAIMED workspace (a cross-workspace credential is the same miss as an unknown one), then
+/// gates on a CONFIRMED `workspace_member` row for the row's bound principal — the membership join IS
+/// the read authorization; deleting the membership row kills reads immediately. The skill comes from
+/// the caller's path and is checked by the lane-blind reachability half, never here. Every miss — an
+/// unknown/rotated/revoked credential, a removed member, a malformed id — is the single
+/// indistinguishable [`AuthorityError::NotFound`], so a caller can never probe what exists.
 ///
 /// # Errors
-/// [`AuthorityError::NotFound`] on an unknown token; [`AuthorityError::Internal`] on a database fault;
+/// [`AuthorityError::NotFound`] on any miss; [`AuthorityError::Internal`] on a database fault;
 /// [`AuthorityError::Integrity`] if a stored row is corrupt.
-pub(crate) async fn resolve_read_token(
+pub(crate) async fn resolve_read_scope(
     authority: &Authority,
-    token: &str,
-    now: i64,
+    ws: WorkspaceId,
+    skill: SkillId,
+    credential: &str,
 ) -> Result<ReadScope> {
-    let token_sha256 = digest::sha256(token.as_bytes());
-    // `now` enforces the token's `expires_at` (a NULL expiry never expires — legacy + non-expiring rows): an
-    // expired token resolves to the same indistinguishable `NotFound` as an unknown one, so a per-device
-    // revoke (which also drops the row) and an expiry are both an instant 404, never an enumeration oracle.
-    match authority.db().lookup_read_token(&token_sha256, now).await? {
-        Some((ws, skill, principal)) => Ok(ReadScope::for_skill_roster(ws, skill, principal)),
-        None => Err(AuthorityError::NotFound),
+    let credential_sha256 = digest::sha256(credential.as_bytes());
+    let Some(identity) = authority
+        .db()
+        .resolve_read_credential(&ws, &credential_sha256)
+        .await?
+    else {
+        return Err(AuthorityError::NotFound);
+    };
+    if !authority
+        .db()
+        .confirmed_member(&ws, &identity.principal)
+        .await?
+    {
+        return Err(AuthorityError::NotFound);
     }
+    Ok(ReadScope::for_member(ws, skill, identity.principal))
 }

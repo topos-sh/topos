@@ -13,6 +13,7 @@ use sqlx::{Postgres, Transaction};
 use topos_core::digest;
 
 use super::enroll::{EnrollCorrupt, read_device};
+use super::witness::device_by_credential;
 use crate::db::{Db, blob32};
 use crate::enroll::{self, DeploymentMode, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
@@ -26,6 +27,8 @@ use crate::id::{Principal, SkillId, WorkspaceId};
 
 /// The acting device resolved — the shared governance preamble's success result.
 struct GovernActor {
+    /// The resolved row's device key id (the audit/receipt actor — never a caller claim).
+    device_key_id: String,
     principal: Principal,
     role: Role,
     request_sha256: [u8; 32],
@@ -37,8 +40,8 @@ enum Preamble {
     Replay(GovernanceOutcome),
     /// Authorized: the actor's confirmed principal + role + the request identity to record.
     Proceed(GovernActor),
-    /// A device/role-resolution failure — record a DENIED event with this request identity.
-    Fail(&'static str, [u8; 32]),
+    /// A credential/role-resolution failure — NEVER recorded (see the callers' recording rule).
+    Fail(&'static str),
 }
 
 /// The versioned domain tag the governance request identity binds — distinct from every session-lane
@@ -46,14 +49,16 @@ enum Preamble {
 const GOVERNANCE_TAG: &[u8] = b"TOPOS_DEVICE_GOVERNANCE_V1";
 
 /// The governance request identity: sha256 over [`GOVERNANCE_TAG`] + u64-be length-prefixed parts of the
-/// FULL request — workspace, op id, the acting device key id, the op's kind byte, and every parameter
+/// FULL request — workspace, op id, the acting device's RESOLVED key id (the device's stable name,
+/// never the presented credential: a credential rotates on re-enrollment, and a lost-ack retry across
+/// that rotation must still byte-match its own slot), the op's kind byte, and every parameter
 /// (list parameters ride as their count then per-element parts). The `emails`/`skills` lists are SETS —
 /// canonicalized here (sorted + deduped) so the identity is order-independent, matching the seating
 /// effect (order-independent UPSERTs): a lost-ack retry that reorders the list replays rather than
 /// tripping the key-reuse guard. The `workspace_events` idempotency slot binds it: a same-op_id retry
 /// must byte-match to replay; any divergent payload is a denied key-reuse. Deterministic, built from
 /// server-trusted values.
-fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
+fn governance_request_sha256(input: &GovernanceInput<'_>, acting_device_key_id: &str) -> [u8; 32] {
     fn put(buf: &mut Vec<u8>, part: &[u8]) {
         buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
         buf.extend_from_slice(part);
@@ -71,7 +76,7 @@ fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
     buf.extend_from_slice(GOVERNANCE_TAG);
     put(&mut buf, input.ws.as_str().as_bytes());
     put(&mut buf, input.op_id.as_bytes());
-    put(&mut buf, input.request.device_key_id.as_bytes());
+    put(&mut buf, acting_device_key_id.as_bytes());
     match &input.request.op {
         GovernanceOp::Invite {
             role,
@@ -103,17 +108,28 @@ fn governance_request_sha256(input: &GovernanceInput<'_>) -> [u8; 32] {
     digest::sha256(&buf)
 }
 
-/// The shared in-transaction governance authorization: build the request identity, replay-check the op
-/// id, resolve the ACTING device credential to a non-revoked registry row + its bound principal (the
-/// lookup IS the authentication), and look up that principal's confirmed workspace role. The op-specific
-/// ROLE check (owner-only, or owner-or-self) is the caller's — this returns the actor + role.
+/// The shared in-transaction governance authorization: resolve the ACTING workspace credential to its
+/// registry row (the lookup IS the authentication — an unknown credential proceeds no further and can
+/// bind no request identity), build the request identity from the RESOLVED device key id, replay-check
+/// the op id, THEN enforce non-revoked + the confirmed workspace role. The resolve→replay→revoked order
+/// is load-bearing: a since-revoked owner's credential still resolves (the row keeps its hash), so its
+/// lost-ack retry still replays the committed OK, while its fresh work is denied. The op-specific ROLE
+/// check (owner-only, or owner-or-self) is the caller's — this returns the actor + role.
 async fn govern_preamble(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
 ) -> Result<Preamble> {
-    let request_sha256 = governance_request_sha256(input);
+    // Resolve the ACTING credential FIRST — everything below (the request identity, the replay probe's
+    // meaning, the audit actor) is keyed on the resolved device, and an unauthenticated caller gets one
+    // uniform denial with no durable side effect.
+    let Some(device) = device_by_credential(&mut **tx, input.ws, &input.credential_sha256).await?
+    else {
+        return Ok(Preamble::Fail("acting device unknown or revoked"));
+    };
+    let request_sha256 = governance_request_sha256(input, &device.device_key_id);
 
-    // Replay BEFORE authz (mirrors the pointer-move): a since-revoked owner still replays its committed OK.
+    // Replay BEFORE the revoked/role checks (mirrors the pointer-move): a since-revoked owner still
+    // replays its committed OK.
     if let Some(stored) = read_event(tx, input.ws, input.op_id).await? {
         let replay = if stored.request_sha256 == request_sha256 {
             match stored.outcome.as_str() {
@@ -126,33 +142,21 @@ async fn govern_preamble(
         return Ok(Preamble::Replay(replay));
     }
 
-    // Resolve the ACTING device (non-revoked) — the credential lookup is the authentication.
-    let Some((_public_key, principal_s)) =
-        read_active_device(tx, input.ws, &input.request.device_key_id).await?
-    else {
-        return Ok(Preamble::Fail(
-            "acting device unknown or revoked",
-            request_sha256,
-        ));
-    };
-    let principal = Principal::parse(&principal_s).map_err(AuthorityError::integrity)?;
+    if device.revoked {
+        return Ok(Preamble::Fail("acting device unknown or revoked"));
+    }
     // The actor must be a CONFIRMED member with a governance role.
-    let Some((role_s, status)) = read_member_role(tx, input.ws, &principal).await? else {
-        return Ok(Preamble::Fail(
-            "actor is not a workspace member",
-            request_sha256,
-        ));
+    let Some((role_s, status)) = read_member_role(tx, input.ws, &device.principal).await? else {
+        return Ok(Preamble::Fail("actor is not a workspace member"));
     };
     if status != "confirmed" {
-        return Ok(Preamble::Fail(
-            "actor is not a confirmed member",
-            request_sha256,
-        ));
+        return Ok(Preamble::Fail("actor is not a confirmed member"));
     }
     let role = Role::parse(&role_s)
         .ok_or_else(|| AuthorityError::integrity(EnrollCorrupt("member role")))?;
     Ok(Preamble::Proceed(GovernActor {
-        principal,
+        device_key_id: device.device_key_id,
+        principal: device.principal,
         role,
         request_sha256,
     }))
@@ -206,12 +210,12 @@ async fn create_invite_run(
         // would let an UNAUTHENTICATED network client forge audit entries (attacker-chosen actor/target for an
         // arbitrary workspace) and grow storage without bound. The authenticated-but-unauthorized denials below
         // (the role / last-owner guards, reached via Proceed) ARE recorded — they name a verified device.
-        Preamble::Fail(reason, _req) => return Ok(GovernanceOutcome::Denied(reason)),
+        Preamble::Fail(reason) => return Ok(GovernanceOutcome::Denied(reason)),
         Preamble::Proceed(s) => s,
     };
     // Owner-only.
     if actor.role != Role::Owner {
-        record_event(tx, input, &actor.request_sha256, "DENIED", None).await?;
+        record_event(tx, input, &actor, "DENIED", None).await?;
         return Ok(GovernanceOutcome::Denied("invite requires the owner role"));
     }
 
@@ -228,7 +232,7 @@ async fn create_invite_run(
     )
     .await?;
     let details = serde_json::json!({ "emails": emails.len(), "skills": skills.len() }).to_string();
-    record_event(tx, input, &actor.request_sha256, "OK", Some(&details)).await?;
+    record_event(tx, input, &actor, "OK", Some(&details)).await?;
     Ok(GovernanceOutcome::Ok)
 }
 
@@ -315,7 +319,7 @@ async fn governance_mutation_run(
         // Pre-authentication failure (an unknown or revoked acting device): NOT attributable to a
         // verified actor, so record NOTHING (see create_invite_run) — an unauthenticated request can't forge
         // an audit row. Post-auth denials below (role / last-owner) are recorded against the verified device.
-        Preamble::Fail(reason, _req) => return Ok(GovernanceOutcome::Denied(reason)),
+        Preamble::Fail(reason) => return Ok(GovernanceOutcome::Denied(reason)),
         Preamble::Proceed(s) => s,
     };
     let ws_s = input.ws.as_str();
@@ -351,10 +355,12 @@ async fn governance_mutation_run(
                 GovernanceOutcome::Denied("would remove the last owner")
             } else {
                 let tgt = target.as_str();
-                // Remove the workspace membership AND, in the same transaction, revoke the principal's read
-                // access instantly: drop every per-skill roster grant + read token they hold in this workspace
-                // (the same instant-revoke discipline the device-revoke arm uses). Otherwise a removed member
-                // would keep reading the workspace's skills through their surviving roster rows.
+                // Remove the workspace membership — the membership row IS the access: every read and
+                // write gate joins against a CONFIRMED `workspace_member` row, so deleting it kills the
+                // principal's access the moment this commits (their devices' credentials still
+                // authenticate, and then every gate denies — fail closed, nothing cached). The per-skill
+                // roster rows go too: they gate nothing anymore, but they are this principal's
+                // follow-state in this workspace and a removed member has none.
                 sqlx::query!(
                     "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
                     ws_s,
@@ -365,14 +371,6 @@ async fn governance_mutation_run(
                 .map_err(AuthorityError::internal)?;
                 sqlx::query!(
                     "DELETE FROM roster WHERE workspace_id = $1 AND principal = $2",
-                    ws_s,
-                    tgt,
-                )
-                .execute(&mut **tx)
-                .await
-                .map_err(AuthorityError::internal)?;
-                sqlx::query!(
-                    "DELETE FROM read_token WHERE workspace_id = $1 AND principal = $2",
                     ws_s,
                     tgt,
                 )
@@ -395,17 +393,13 @@ async fn governance_mutation_run(
                     "revoke requires the owner role or the device's own principal",
                 )
             } else {
-                // Instant per-device revoke: flip `revoked` AND drop the device's read tokens in one txn.
+                // Instant per-device revoke: flip `revoked` in one txn. The row (and its credential
+                // hash) stays — a revoked device's credential still RESOLVES, so its lost-ack retry can
+                // replay a stored receipt, while every fresh read/write is denied by the revoked check;
+                // and a revoked device can never re-enroll (the redeem's anti-squat arm), so the
+                // credential can never be re-armed.
                 sqlx::query!(
                     "UPDATE device_registry SET revoked = 1 WHERE workspace_id = $1 AND device_key_id = $2",
-                    ws_s,
-                    target_device_key_id,
-                )
-                .execute(&mut **tx)
-                .await
-                .map_err(AuthorityError::internal)?;
-                sqlx::query!(
-                    "DELETE FROM read_token WHERE workspace_id = $1 AND device_key_id = $2",
                     ws_s,
                     target_device_key_id,
                 )
@@ -423,7 +417,7 @@ async fn governance_mutation_run(
     } else {
         "DENIED"
     };
-    record_event(tx, input, &actor.request_sha256, outcome_s, None).await?;
+    record_event(tx, input, &actor, outcome_s, None).await?;
     Ok(outcome)
 }
 
@@ -674,6 +668,7 @@ impl Db {
     /// (`run_serializable!`) txn. All checks run before any write; an absent/consumed/expired token is the
     /// uniform denial, EXCEPT the same-device replay of an already-consumed claim, which deterministically
     /// re-returns `Redeemed` (lost-200 recovery).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admin_claim_txn(
         &self,
         claim_sha256: &[u8; 32],
@@ -682,6 +677,7 @@ impl Db {
         plane_mode: &str,
         now: i64,
         created_at: &str,
+        secret: &[u8; 32],
     ) -> Result<RedeemOutcome> {
         run_serializable!(self, tx, {
             admin_claim_run(
@@ -692,6 +688,7 @@ impl Db {
                 plane_mode,
                 now,
                 created_at,
+                secret,
             )
             .await
         })
@@ -836,8 +833,14 @@ async fn admin_claim_run(
     plane_mode: &str,
     now: i64,
     created_at: &str,
+    secret: &[u8; 32],
 ) -> Result<RedeemOutcome> {
     let cs = claim_sha256.as_slice();
+    // The claiming device's ONE workspace credential — deterministic in the claim (the same
+    // `b"wscred"` derivation the grant redeem uses, over the claim's sha256), so the consumed-replay
+    // probe below re-returns the IDENTICAL value on a lost-200 retry.
+    let credential = enroll::derive_token(secret, b"wscred", &[cs]);
+    let credential_sha = enroll::sha256_token(&credential);
     // (1) Resolve the claim. Absent ⇒ the uniform denial.
     let Some(claim) = read_claim_row(tx, cs).await? else {
         return Ok(RedeemOutcome::Denied("no such claim token"));
@@ -848,7 +851,8 @@ async fn admin_claim_run(
     // (2) CONSUMED-REPLAY PROBE — before the expiry check, so a lost-200 retry recovers even after the TTL
     // (expiry applies only to the FIRST consumption). If the consumed claim's workspace already holds THIS
     // exact device — same key id, same public key, same seated principal, not revoked — the original redeem
-    // committed and this is the same caller retrying: deterministically re-return Redeemed. Anything else
+    // committed and this is the same caller retrying: deterministically re-return Redeemed (the credential
+    // re-derives to the same value the original mint stored). Anything else
     // about a consumed claim is the one static denial.
     if claim.consumed_at.is_some() {
         if let Some((existing_pk, existing_principal, revoked)) =
@@ -861,7 +865,7 @@ async fn admin_claim_run(
                 workspace_id: ws,
                 principal,
                 device_key_id: server_device_key_id.to_owned(),
-                read_tokens: Vec::new(),
+                credential,
             }));
         }
         return Ok(RedeemOutcome::Denied("claim token already consumed"));
@@ -914,16 +918,20 @@ async fn admin_claim_run(
         }
     }
 
-    // (6) Register the claiming device; (7) consume the claim (CAS on the unconsumed row).
+    // (6) Register the claiming device WITH its workspace credential; (7) consume the claim (CAS on the
+    // unconsumed row).
     let (ws_s, prin) = (ws.as_str(), principal.as_str());
     let pk = device_public_key.as_slice();
+    let crs = credential_sha.as_slice();
     sqlx::query!(
-        "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
-         VALUES ($1, $2, $3, $4, 0) ON CONFLICT (workspace_id, device_key_id) DO NOTHING",
+        "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked, credential_sha256) \
+         VALUES ($1, $2, $3, $4, 0, $5) \
+         ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET credential_sha256 = excluded.credential_sha256",
         ws_s,
         server_device_key_id,
         pk,
         prin,
+        crs,
     )
     .execute(&mut **tx)
     .await
@@ -941,7 +949,7 @@ async fn admin_claim_run(
         workspace_id: ws,
         principal,
         device_key_id: server_device_key_id.to_owned(),
-        read_tokens: Vec::new(),
+        credential,
     }))
 }
 
@@ -1183,28 +1191,6 @@ async fn approve_standup_run(
 
 // ── shared in-txn helpers (governance-only; the cross-domain ones live in [`super::enroll`]) ───────────
 
-/// Resolve a NON-REVOKED registered device to `(public_key, principal)`. `None` ⇒ unknown or revoked.
-async fn read_active_device(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-    device_key_id: &str,
-) -> Result<Option<([u8; 32], String)>> {
-    let ws_s = ws.as_str();
-    let row = sqlx::query!(
-        r#"SELECT public_key AS "public_key!: Vec<u8>", principal AS "principal!"
-           FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2 AND revoked = 0"#,
-        ws_s,
-        device_key_id,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    match row {
-        None => Ok(None),
-        Some(r) => Ok(Some((blob32(&r.public_key)?, r.principal))),
-    }
-}
-
 // `pub(in crate::db)`: shared across the seam — the custody pointer-move transaction
 // (`db::custody::set_current`) reads the acting principal's workspace role from it.
 pub(in crate::db) async fn read_member_role(
@@ -1313,12 +1299,12 @@ pub(super) async fn record_event_raw(
     Ok(())
 }
 
-/// The DEVICE lane's receipt: actor = the acting device key id (the confirmed principal is resolved per
-/// row; the audit "who" is the acting device — the request identity is bound to it), method `device`.
+/// The DEVICE lane's receipt: actor = the acting device's RESOLVED key id (the audit "who" is the
+/// acting device the credential resolved to — the request identity is bound to it), method `device`.
 async fn record_event(
     tx: &mut Transaction<'_, Postgres>,
     input: &GovernanceInput<'_>,
-    request_sha256: &[u8; 32],
+    actor: &GovernActor,
     outcome: &str,
     details: Option<&str>,
 ) -> Result<()> {
@@ -1327,9 +1313,9 @@ async fn record_event(
         &EventRecord {
             ws: input.ws,
             op_id: input.op_id,
-            actor: input.request.device_key_id.as_str(),
+            actor: &actor.device_key_id,
             gov_op_type: input.request.op.audit_verb(),
-            request_sha256,
+            request_sha256: &actor.request_sha256,
             target: input.request.op.audit_target(),
             outcome,
             details,

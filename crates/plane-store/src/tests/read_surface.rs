@@ -2,24 +2,33 @@
 use super::*;
 
 #[sqlx::test]
-async fn resolve_read_token_resolves_a_scope_and_a_miss_is_notfound(pool: PgPool) {
+async fn resolve_read_scope_resolves_a_scope_and_a_miss_is_notfound(pool: PgPool) {
     let fx = Fixture::new(pool, "rt-token").await;
     let a = &fx.authority;
-    let (w, s, p) = (ws("w_acme"), skill("s_pr"), prin("dev_read"));
+    let (w, p) = (ws("w_acme"), prin("dev_read"));
+    // The device READ lane: a workspace credential resolves to the device's registry row, gated by a
+    // CONFIRMED workspace member. The skill comes from the caller's path (a member reads any skill).
     a.db()
-        .seed_read_token(&w, &s, &p, "tok-secret-123")
+        .seed_device(&w, "dk_read", &dev_key(7), &p, false, &cred(&w, "dk_read"))
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
 
-    // A known token resolves to its exact (workspace, skill, principal) scope.
-    let scope = a.resolve_read_token("tok-secret-123", 0).await.unwrap();
+    // A known credential resolves to its (workspace, requested-skill, device-principal) scope.
+    let scope = a
+        .resolve_read_scope("w_acme", "s_pr", &cred(&w, "dk_read"))
+        .await
+        .unwrap();
     assert_eq!(scope.ws().as_str(), "w_acme");
     assert_eq!(scope.skill().as_str(), "s_pr");
     assert_eq!(scope.principal().as_str(), "dev_read");
 
-    // An unknown token is the single indistinguishable not-found (a caller cannot probe which tokens exist).
+    // An unknown credential is the single indistinguishable not-found (a caller cannot probe what exists).
     assert!(matches!(
-        a.resolve_read_token("tok-WRONG", 0).await,
+        a.resolve_read_scope("w_acme", "s_pr", "cred-WRONG").await,
         Err(AuthorityError::NotFound)
     ));
 }
@@ -31,22 +40,16 @@ async fn list_open_proposals_lists_open_then_a_staled_one_vanishes(pool: PgPool)
     let fx = Fixture::new(pool, "prop-list").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
-    let reader = prin("p_dev");
-    a.db().seed_roster(&w, &s, &reader).await.unwrap();
 
     // `current` points at a base commit Cb at (1,1) — the proposal's base.
     let cb = CommitId([0xB0; 32]);
     a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
     a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
 
-    // A read token for the rostered reader → its (ws, skill, principal) scope.
-    a.db()
-        .seed_read_token(&w, &s, &reader, "tok-list")
-        .await
-        .unwrap();
-    let scope = a.resolve_read_token("tok-list", 0).await.unwrap();
+    // A confirmed member's read scope (the read gate is membership; no per-skill roster needed).
+    let scope = member_read_scope(a, &w, &s, "dk_dev", "p_dev").await;
 
-    // Rostered, but no proposals yet → an EMPTY list (never a not-found).
+    // A member, but no proposals yet → an EMPTY list (never a not-found).
     assert!(
         a.list_open_proposals(&scope, "w_acme", "s_x")
             .await
@@ -83,28 +86,55 @@ async fn list_open_proposals_lists_open_then_a_staled_one_vanishes(pool: PgPool)
 }
 
 #[sqlx::test]
-async fn list_open_proposals_non_rostered_token_is_empty_not_notfound(pool: PgPool) {
-    // The roster JOIN IS the authorization: a VALID token whose principal is NOT on the skill's roster yields
-    // an EMPTY list (silent membership), never a not-found — there is no per-row probe. (A scope/path mismatch
-    // is the only 404 this op raises; membership is invisible.)
-    let fx = Fixture::new(pool, "prop-list-noroster").await;
+async fn list_open_proposals_gates_on_membership_not_roster_and_stays_silent(pool: PgPool) {
+    // The read gate is confirmed MEMBERSHIP, not the per-skill roster. Two pins:
+    //  (1) a confirmed member with NO roster row on the skill STILL sees its open proposals — roster
+    //      grants nothing on the read lanes now (a member reads any skill in the workspace); and
+    //  (2) the listing stays LOW-DISCLOSURE — a principal who is not a confirmed member sees an EMPTY
+    //      list (silent membership), never a not-found, so a caller cannot probe what exists (the only
+    //      404 this op raises is a scope/path mismatch; membership is invisible).
+    let fx = Fixture::new(pool, "prop-list-membership").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
-    let outsider = prin("p_outsider");
-    // A token for the outsider's scope, but NO roster row for them.
-    a.db()
-        .seed_read_token(&w, &s, &outsider, "tok-out")
-        .await
-        .unwrap();
-    let scope = a.resolve_read_token("tok-out", 0).await.unwrap();
+    let member = prin("p_member");
 
-    // Even with an OPEN, non-stale proposal present, the non-rostered principal sees an empty list.
     let cb = CommitId([0xB0; 32]);
     a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
     a.db().seed_current(&w, &s, cb, 1, 1).await.unwrap();
     let cp = CommitId([0xC0; 32]);
     a.db()
         .seed_proposal(&w, "prop1", &s, cp, cb, 1, 1, "open", &prin("p_author"))
+        .await
+        .unwrap();
+
+    // A confirmed member — but deliberately NO roster row on s_x — resolves a scope and sees the proposal.
+    a.db()
+        .seed_device(&w, "dk_m", &dev_key(7), &member, false, &cred(&w, "dk_m"))
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(&w, &member, "member", "confirmed")
+        .await
+        .unwrap();
+    let scope = a
+        .resolve_read_scope("w_acme", "s_x", &cred(&w, "dk_m"))
+        .await
+        .unwrap();
+    let listed = a
+        .list_open_proposals(&scope, "w_acme", "s_x")
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "a member reads a skill's proposals with no roster row"
+    );
+    assert_eq!(listed[0].version_id, cp.0);
+
+    // Revoke confirmation (a remove/downgrade below confirmed): the SAME scope now lists EMPTY — silent,
+    // never a 404 — so membership can't be probed through this low-disclosure surface.
+    a.db()
+        .seed_workspace_member(&w, &member, "member", "invited")
         .await
         .unwrap();
     assert!(
@@ -123,13 +153,7 @@ async fn list_open_proposals_rejects_a_scope_or_path_mismatch(pool: PgPool) {
     let fx = Fixture::new(pool, "prop-list-scope").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
-    let reader = prin("p_dev");
-    a.db().seed_roster(&w, &s, &reader).await.unwrap();
-    a.db()
-        .seed_read_token(&w, &s, &reader, "tok-scope")
-        .await
-        .unwrap();
-    let scope = a.resolve_read_token("tok-scope", 0).await.unwrap();
+    let scope = member_read_scope(a, &w, &s, "dk_dev", "p_dev").await;
 
     // The in-scope path lists fine (empty here — no proposals).
     assert!(
@@ -156,12 +180,12 @@ async fn read_current_present_absent_and_corrupt_blob(pool: PgPool) {
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(40);
     register(&fx, &w, &s, "dk", &key, "p_dev").await;
-    fx.authority
-        .db()
-        .seed_read_token(&w, &s, &prin("p_dev"), "tok-cur")
+    // `register` seeded the device "dk" with its `(ws, dkid)` credential + confirmed membership for p_dev.
+    let scope = fx
+        .authority
+        .resolve_read_scope("w_acme", "s_deploy", &cred(&w, "dk"))
         .await
         .unwrap();
-    let scope = fx.authority.resolve_read_token("tok-cur", 0).await.unwrap();
 
     // Absent: no pointer has moved yet → None.
     assert!(fx.authority.read_current(&scope).await.unwrap().is_none());
@@ -213,15 +237,9 @@ async fn serve_object_serves_in_scope_and_rejects_a_scope_or_path_mismatch(pool:
     let fx = Fixture::new(pool, "rt-serve").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_pr"));
-    let p = prin("dev_read");
-    a.db().seed_roster(&w, &s, &p).await.unwrap();
     let body = b"served bytes";
     stage_committed(a, &w, &s, "serve", vec![file("SKILL.md", body)]).await;
-    a.db()
-        .seed_read_token(&w, &s, &p, "tok-serve")
-        .await
-        .unwrap();
-    let scope = a.resolve_read_token("tok-serve", 0).await.unwrap();
+    let scope = member_read_scope(a, &w, &s, "dk_read", "dev_read").await;
     let oid_hex = digest::to_hex(&object_id(body).0);
 
     // Happy: the scope's (ws, skill) matches the path's → the bytes.
@@ -277,22 +295,11 @@ async fn read_version_metadata_accepted_proposal_arm_and_unauthorized(pool: PgPo
         .bundle_digest
         .expect("an OK receipt carries the digest");
 
-    // A rostered reader's scope (version-read authz is roster-based — no device needed).
-    let reader = prin("p_reader");
-    fx.authority
-        .db()
-        .seed_roster(&w, &s, &reader)
-        .await
-        .unwrap();
-    fx.authority
-        .db()
-        .seed_read_token(&w, &s, &reader, "tok-vm")
-        .await
-        .unwrap();
-    let scope = fx.authority.resolve_read_token("tok-vm", 0).await.unwrap();
+    // A confirmed member's read scope (version-read authz is membership-based now).
+    let scope = member_read_scope(&fx.authority, &w, &s, "dk_reader", "p_reader").await;
     let g_hex = digest::to_hex(&g.0);
 
-    // rostered + accepted → ok: exact id, the complete (empty, genesis) parent set, the file leaf, the digest.
+    // member + accepted → ok: exact id, the complete (empty, genesis) parent set, the file leaf, the digest.
     let meta = fx
         .authority
         .read_version_metadata(&scope, "w_acme", "s_deploy", &g_hex)
@@ -305,14 +312,15 @@ async fn read_version_metadata_accepted_proposal_arm_and_unauthorized(pool: PgPo
     assert_eq!(meta.files[0].path, "SKILL.md");
     assert_eq!(meta.files[0].object_id, object_id(body).0);
 
-    // non-rostered → NotFound: a token for a principal with NO roster row resolves, but the version read is
-    // the indistinguishable not-found (never a 403).
+    // non-member → NotFound: a scope whose principal is not a CONFIRMED member (here removed/downgraded
+    // after resolution) makes the version read the indistinguishable not-found (never a 403) — the read
+    // re-gates on membership per statement.
+    let outscope = member_read_scope(&fx.authority, &w, &s, "dk_out", "p_outsider").await;
     fx.authority
         .db()
-        .seed_read_token(&w, &s, &prin("p_outsider"), "tok-out")
+        .seed_workspace_member(&w, &prin("p_outsider"), "member", "invited")
         .await
         .unwrap();
-    let outscope = fx.authority.resolve_read_token("tok-out", 0).await.unwrap();
     assert!(matches!(
         fx.authority
             .read_version_metadata(&outscope, "w_acme", "s_deploy", &g_hex)
@@ -408,18 +416,7 @@ async fn read_version_metadata_rejected_candidate_is_the_uniform_notfound(pool: 
     )
     .await;
 
-    let reader = prin("p_reader");
-    fx.authority
-        .db()
-        .seed_roster(&w, &s, &reader)
-        .await
-        .unwrap();
-    fx.authority
-        .db()
-        .seed_read_token(&w, &s, &reader, "tok-rej")
-        .await
-        .unwrap();
-    let scope = fx.authority.resolve_read_token("tok-rej", 0).await.unwrap();
+    let scope = member_read_scope(&fx.authority, &w, &s, "dk_reader", "p_reader").await;
     let cp_hex = digest::to_hex(&cp.0);
 
     // Open + non-stale → readable through the proposal arm.

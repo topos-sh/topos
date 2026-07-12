@@ -128,29 +128,33 @@ async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Ve
 /// the self-host membership story, so this lane does NOT take or consult a [`DeploymentMode`]. Two gates,
 /// every failure the ONE uniform [`AuthorityError::NotFound`] (mirroring [`member_gate`]'s
 /// indistinguishability):
-/// 1. resolve the presented device credential to a NON-REVOKED registry row + its bound principal (the
-///    lookup is the authentication; a miss ⇒ NotFound) — the row is workspace-scoped, so a credential
-///    never reads across workspaces;
+/// 1. resolve the presented workspace credential (by its sha256) to a NON-REVOKED registry row + its
+///    bound principal (the lookup is the authentication; a miss ⇒ NotFound) — the row is
+///    workspace-scoped, so a credential never reads across workspaces;
 /// 2. the device's bound principal must be a CONFIRMED workspace member (catalog visibility == membership).
 ///
 /// Then the SAME [`build_skill_index`] body the session lane builds. A pool read only — no transaction, no
-/// receipt, no op id. `_now` is accepted for signature parity with the token-lane reads; device
-/// registration carries no expiry, so this lane never consults a clock.
+/// receipt, no op id. `_now` is accepted for signature parity with the session-lane reads; the
+/// credential carries no expiry, so this lane never consults a clock.
 pub(crate) async fn list_skills_device(
     authority: &Authority,
     ws: &WorkspaceId,
-    device_key_id: &str,
+    credential: &str,
     _now: i64,
 ) -> Result<Vec<SkillIndexRow>> {
-    let Some((_public_key, principal_s)) =
-        authority.db().read_active_device(ws, device_key_id).await?
+    let credential_sha256 = topos_core::digest::sha256(credential.as_bytes());
+    let Some(identity) = authority
+        .db()
+        .resolve_read_credential(ws, &credential_sha256)
+        .await?
     else {
         return Err(AuthorityError::NotFound);
     };
-    // A device_registry principal was validated at registration, so a re-parse failure is store corruption
-    // (Integrity), never a not-found — the same convention `govern_preamble` follows for an acting device.
-    let principal = Principal::parse(&principal_s).map_err(AuthorityError::integrity)?;
-    if !authority.db().confirmed_member(ws, &principal).await? {
+    if !authority
+        .db()
+        .confirmed_member(ws, &identity.principal)
+        .await?
+    {
         return Err(AuthorityError::NotFound);
     }
     build_skill_index(authority, ws).await

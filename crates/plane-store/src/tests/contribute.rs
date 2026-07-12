@@ -64,8 +64,8 @@ async fn a_propose_against_an_absent_current_fails_typed_uploading_nothing(pool:
     register(&fx, &w, &s, "dk", &key, "p_author").await;
     // No genesis publish: `current` is absent. A `--propose` must fail typed (a proposal needs a base) and
     // upload nothing — the first version is a direct genesis publish.
-    let device = DeviceOpRequest {
-        device_key_id: "dk".to_owned(),
+    let device = DeviceOpAuth {
+        credential: cred(&w, "dk"),
         op: DeviceOp::PublishPropose,
         expected: gn(0, 0),
     };
@@ -381,7 +381,7 @@ async fn interleaving_c_aba_a_stale_approve_conflicts_even_when_the_live_tree_ma
     .await;
     // Revert --to X -> R(tree=beta, parents=[Y]) -> (1,3). Now current.tree == beta == Q's base tree.
     let rop = op("24000000-0000-4000-8000-000000000004");
-    let rdev = revert_request("dk", gn(1, 2));
+    let rdev = revert_request(&w, "dk", gn(1, 2));
     let rev = fx
         .authority
         .revert(
@@ -797,16 +797,24 @@ async fn rejecting_an_already_rejected_proposal_is_idempotent_and_approve_after_
 }
 
 #[sqlx::test]
-async fn an_unrostered_principal_cannot_reject(pool: PgPool) {
+async fn a_non_member_principal_cannot_reject(pool: PgPool) {
     let fx = Fixture::new(pool, "pr-reject-authz").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(42);
     let stranger = dev_key(43);
     register(&fx, &w, &s, "dk_author", &author, "p_author").await;
-    // The stranger's device is registered but NOT rostered for the skill.
+    // The stranger's device is registered (its credential resolves) but its principal is NOT a confirmed
+    // workspace member — so its write is authenticated yet denied at the member gate.
     fx.authority
         .db()
-        .seed_device(&w, "dk_stranger", &stranger, &prin("p_stranger"), false)
+        .seed_device(
+            &w,
+            "dk_stranger",
+            &stranger,
+            &prin("p_stranger"),
+            false,
+            &cred(&w, "dk_stranger"),
+        )
         .await
         .unwrap();
     publish(
@@ -832,7 +840,7 @@ async fn an_unrostered_principal_cannot_reject(pool: PgPool) {
         gn(1, 1),
     )
     .await;
-    // The unrostered stranger's reject ⇒ DENIED; the proposal stays open (its object still readable).
+    // The non-member stranger's reject ⇒ DENIED; the proposal stays open (its object still readable).
     let denied = do_reject(
         &fx,
         &stranger,
@@ -846,7 +854,7 @@ async fn an_unrostered_principal_cannot_reject(pool: PgPool) {
     )
     .await;
     assert_eq!(denied.outcome, TerminalOutcome::Denied);
-    // The author (rostered) can still approve it (it was never rejected).
+    // The author (a confirmed member) can still approve it (it was never rejected).
     let ok = do_approve(
         &fx,
         &author,
@@ -976,16 +984,16 @@ async fn the_proposals_table_rejects_out_of_range_generations(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_readable(pool: PgPool) {
-    // The pointer-move's in-transaction authorization (the roster check) replaces the retired upload's
-    // roster gate: a registered-but-unrostered device migrates its candidate but cannot promote it, and
-    // records no commit_object — so the object is unreadable.
-    let fx = Fixture::new(pool, "authz-unrostered").await;
+async fn a_publish_by_a_non_member_principal_is_denied_and_records_nothing_readable(pool: PgPool) {
+    // The pointer-move's in-transaction authorization (the confirmed-member check): a registered device
+    // whose principal is not a confirmed workspace member migrates its candidate but cannot promote it,
+    // and records no commit_object — so the object is unreadable even to an entitled reader.
+    let fx = Fixture::new(pool, "authz-nonmember").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(50);
     fx.authority
         .db()
-        .seed_device(&w, "dk", &key, &prin("p_stranger"), false)
+        .seed_device(&w, "dk", &key, &prin("p_stranger"), false, &cred(&w, "dk"))
         .await
         .unwrap();
     let body = b"injected";
@@ -1014,9 +1022,11 @@ async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_read
     .await
     .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
+    // An entitled reader (a confirmed member — so the read GATE passes) still gets NotFound: the denied
+    // publish recorded no commit_object, so the object is genuinely unreachable (not merely gate-denied).
     fx.authority
         .db()
-        .seed_roster(&w, &s, &prin("p_reader"))
+        .seed_workspace_member(&w, &prin("p_reader"), "member", "confirmed")
         .await
         .unwrap();
     assert!(matches!(
@@ -1031,7 +1041,7 @@ async fn a_publish_by_an_unrostered_principal_is_denied_and_records_nothing_read
 async fn a_publish_cannot_adopt_another_skills_commit(pool: PgPool) {
     // The cross-skill adoption guard, in the SHARED write body (so it covers publish / propose / approve
     // alike): a content-addressed commit belongs to exactly one skill, so re-creating its identical bytes
-    // under another skill is refused — even by a principal rostered for both.
+    // under another skill is refused — even by a confirmed workspace member.
     let fx = Fixture::new(pool, "authz-xskill").await;
     let (w, x, y) = (ws("w_acme"), skill("s_x"), skill("s_y"));
     let key = dev_key(51);
@@ -1183,7 +1193,7 @@ async fn revert_to_a_proposal_commit_is_refused_so_it_cannot_bypass_review(pool:
     .await;
     // revert --to <the proposal commit> ⇒ PERMANENT_FAILURE; `current` must NOT advance to the proposal's tree.
     let rop = op("52000000-0000-4000-8000-000000000003");
-    let rdev = revert_request("dk", gn(1, 1));
+    let rdev = revert_request(&w, "dk", gn(1, 1));
     let r = fx
         .authority
         .revert(

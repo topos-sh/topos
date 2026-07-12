@@ -54,21 +54,6 @@ pub(in crate::db) async fn retry_backoff(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 }
 
-/// Which principal gate authorizes a read — the lane of the gate/reach split (the access witness's
-/// `read_gate`). The
-/// reachability statements are lane-blind; the lane decides ONLY who may ask.
-///
-/// - [`SkillRoster`](Self::SkillRoster) — the device lane: a per-skill `roster` row exists (the
-///   read-token scope's gate).
-/// - [`WorkspaceMember`](Self::WorkspaceMember) — the web-session lane: a CONFIRMED `workspace_member`
-///   row exists (skill-blind BY DESIGN — catalog visibility is workspace membership; the composing
-///   caller's session verification is the authentication).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadLane {
-    SkillRoster,
-    WorkspaceMember,
-}
-
 /// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault when the width is wrong (the
 /// schema's `CHECK (octet_length(…) = 32)` forbids it; a violation is store corruption). The ONE shared
 /// definition — every `mod db` sibling imports this one.

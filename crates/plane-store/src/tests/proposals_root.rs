@@ -13,6 +13,11 @@ async fn an_open_non_stale_proposal_roots_and_reads_then_a_stale_one_reclaims_an
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
+    // The read gate is confirmed membership now; the per-skill roster row is follow-state only.
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
+        .await
+        .unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
 
     // `current` points at a base commit Cb at (1,1) — the proposal's base.
@@ -113,6 +118,11 @@ async fn a_rejected_proposals_unique_object_reclaims_and_reads_404(pool: PgPool)
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
+    // The read gate is confirmed membership now; the per-skill roster row is follow-state only.
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
+        .await
+        .unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
     let cb = CommitId([0xB0; 32]);
     a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();
@@ -145,6 +155,11 @@ async fn a_trunk_shared_object_stays_kept_and_readable_after_its_proposal_stales
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
+    // The read gate is confirmed membership now; the per-skill roster row is follow-state only.
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
+        .await
+        .unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
     let ybytes = b"shared bytes";
     let ccur = migrate_unrooted(a, &w, PROP_OP_1, "Y.md", ybytes).await;
@@ -186,6 +201,11 @@ async fn genuine_corruption_under_an_open_proposal_is_integrity_not_masked_as_40
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_x"));
     let reader = prin("p_dev");
+    // The read gate is confirmed membership now; the per-skill roster row is follow-state only.
+    a.db()
+        .seed_workspace_member(&w, &reader, "member", "confirmed")
+        .await
+        .unwrap();
     a.db().seed_roster(&w, &s, &reader).await.unwrap();
     let cb = CommitId([0xB0; 32]);
     a.db().seed_commit(&w, &s, cb, &[]).await.unwrap();

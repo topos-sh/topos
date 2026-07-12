@@ -519,8 +519,9 @@ async fn session_remove_run(
         .await?;
         return Ok(GovernanceOutcome::Denied("would remove the last owner"));
     }
-    // The device lane's exact instant-revoke shape: drop the membership AND, in the same
-    // transaction, every per-skill roster grant + read token the principal holds here.
+    // The device lane's exact removal shape: drop the membership — the row every read/write gate
+    // joins against, so access dies the moment this commits — and, in the same transaction, the
+    // principal's per-skill roster rows (their follow-state here; a removed member has none).
     let (ws_s, tgt) = (input.ws.as_str(), target.as_str());
     sqlx::query!(
         "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
@@ -532,14 +533,6 @@ async fn session_remove_run(
     .map_err(AuthorityError::internal)?;
     sqlx::query!(
         "DELETE FROM roster WHERE workspace_id = $1 AND principal = $2",
-        ws_s,
-        tgt,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    sqlx::query!(
-        "DELETE FROM read_token WHERE workspace_id = $1 AND principal = $2",
         ws_s,
         tgt,
     )

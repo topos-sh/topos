@@ -508,10 +508,12 @@ async fn a_publish_is_visible_to_the_next_index_call(pool: PgPool) {
     assert_eq!(index[0].bundle_digest, g_digest);
 }
 
-/// The two lanes are deliberately different gates: per-skill roster admits the token lane only;
-/// confirmed workspace membership admits the session lane only. Neither implies the other.
+/// Both read lanes now gate on the SAME predicate — a CONFIRMED workspace member. A per-skill roster
+/// row grants NOTHING on either lane; membership is the entitlement everywhere. Two pins: a principal
+/// WITH a roster row but WITHOUT membership is the uniform miss on BOTH lanes, and a confirmed member
+/// with NO roster row reads on BOTH lanes.
 #[sqlx::test]
-async fn the_two_lanes_gates_are_disjoint(pool: PgPool) {
+async fn both_lanes_gate_on_membership_not_roster(pool: PgPool) {
     let fx = Fixture::new(pool, "sr-lanes").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
@@ -529,28 +531,21 @@ async fn the_two_lanes_gates_are_disjoint(pool: PgPool) {
     .await;
     let o_hex = digest::to_hex(&obj.0);
 
-    // Rostered-but-NOT-a-workspace-member: token lane reads; session lane is the uniform miss.
+    // A per-skill roster row but NO confirmed membership → the uniform miss on BOTH lanes (roster grants
+    // nothing): the device lane (public `read_object`, the shared membership gate) and the session lane.
     let rostered = prin("rostered@acme.com");
     a.db().seed_roster(&w, &s, &rostered).await.unwrap();
-    a.db()
-        .seed_read_token(&w, &s, &rostered, "tok-lane")
-        .await
-        .unwrap();
-    let scope = a.resolve_read_token("tok-lane", 0).await.unwrap();
-    assert_eq!(
-        a.serve_object(&scope, "w_acme", "s_deploy", &o_hex)
-            .await
-            .unwrap(),
-        body
-    );
+    assert!(matches!(
+        a.read_object(&rostered, &w, &s, obj).await,
+        Err(AuthorityError::NotFound)
+    ));
     assert!(matches!(
         a.serve_object_session(&w, "s_deploy", &o_hex, "rostered@acme.com", CLOUD)
             .await,
         Err(AuthorityError::NotFound)
     ));
 
-    // Confirmed-member-with-NO-roster-row: session lane reads; the token-lane gate denies the same
-    // principal (public read_object is the skill-roster lane).
+    // A confirmed member with NO roster row → reads on BOTH lanes (membership is the entitlement).
     seat(&fx, &w, "member@acme.com", "member").await;
     assert_eq!(
         a.serve_object_session(&w, "s_deploy", &o_hex, "member@acme.com", CLOUD)
@@ -558,10 +553,12 @@ async fn the_two_lanes_gates_are_disjoint(pool: PgPool) {
             .unwrap(),
         body
     );
-    assert!(matches!(
-        a.read_object(&prin("member@acme.com"), &w, &s, obj).await,
-        Err(AuthorityError::NotFound)
-    ));
+    assert_eq!(
+        a.read_object(&prin("member@acme.com"), &w, &s, obj)
+            .await
+            .unwrap(),
+        body
+    );
 }
 
 /// `skill_commit.bundle_digest` is nullable (rows can predate the column), but a `current`-pointed
@@ -584,10 +581,10 @@ async fn a_null_digest_under_a_current_row_is_integrity(pool: PgPool) {
 
 // ── the DEVICE catalog read (`list --remote`) — the workspace-membership device lane ────────────────────
 //
-// Authorized by a NON-REVOKED registered device (resolved by its presented `device_key_id`) whose bound
-// principal is a CONFIRMED workspace member — on BOTH cloud and self-host (the lane never consults a
-// deployment mode). The registry is workspace-scoped, so a device is only ever presented against the
-// workspace it was registered in. Every miss is the one uniform NotFound.
+// Authorized by a NON-REVOKED registered device (resolved by its presented workspace credential) whose
+// bound principal is a CONFIRMED workspace member — on BOTH cloud and self-host (the lane never consults
+// a deployment mode). The credential lookup binds the caller's claimed workspace, so a device is only
+// ever presented against the workspace it was registered in. Every miss is the one uniform NotFound.
 
 /// Seed a NON-REVOKED reader device bound to `email`, and seat that email as a CONFIRMED member — the
 /// device catalog lane's whole entitlement (deliberately NO per-skill roster row).
@@ -600,7 +597,7 @@ async fn seat_device_member(
 ) {
     fx.authority
         .db()
-        .seed_device(w, dkid, key, &prin(email), false)
+        .seed_device(w, dkid, key, &prin(email), false, &cred(w, dkid))
         .await
         .unwrap();
     seat(fx, w, email, "member").await;
@@ -628,7 +625,10 @@ async fn a_member_device_reads_the_catalog(pool: PgPool) {
     let rk = dev_key(71);
     seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
 
-    let idx = a.list_skills_device(&w, "dk_read", NOW).await.unwrap();
+    let idx = a
+        .list_skills_device(&w, &cred(&w, "dk_read"), NOW)
+        .await
+        .unwrap();
     assert_eq!(idx.len(), 1);
     assert_eq!(idx[0].skill_id, "s_deploy");
     assert_eq!(idx[0].version_id, g.0);
@@ -661,7 +661,7 @@ async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: Pg
 
     // The device lane serves the catalog — it never consults deployment mode.
     assert_eq!(
-        a.list_skills_device(&w, "dk_read", NOW)
+        a.list_skills_device(&w, &cred(&w, "dk_read"), NOW)
             .await
             .unwrap()
             .len(),
@@ -694,15 +694,17 @@ async fn an_unknown_or_cross_workspace_device_is_notfound(pool: PgPool) {
     let rk = dev_key(75);
     seat_device_member(&fx, &w, "dk_read", &rk, "reader@acme.com").await;
 
-    // An UNKNOWN device key id (never registered) is the uniform miss — the credential lookup fails.
+    // An UNKNOWN credential (never issued) is the uniform miss — the credential lookup fails.
     assert!(matches!(
-        a.list_skills_device(&w, "dk_ghost", NOW).await,
+        a.list_skills_device(&w, &cred(&w, "dk_ghost"), NOW).await,
         Err(AuthorityError::NotFound)
     ));
-    // The registry is WORKSPACE-scoped: `dk_read` is registered in `w_acme`, so presenting it against a
-    // DIFFERENT workspace resolves nothing → the uniform miss (no cross-workspace catalog leak).
+    // The credential lookup binds the CLAIMED workspace: `dk_read`'s credential is registered in
+    // `w_acme`, so presenting it against a DIFFERENT workspace resolves nothing → the uniform miss (no
+    // cross-workspace catalog leak).
     assert!(matches!(
-        a.list_skills_device(&ws("w_other"), "dk_read", NOW).await,
+        a.list_skills_device(&ws("w_other"), &cred(&w, "dk_read"), NOW)
+            .await,
         Err(AuthorityError::NotFound)
     ));
 }
@@ -727,12 +729,19 @@ async fn a_revoked_device_is_notfound_on_the_catalog_read(pool: PgPool) {
     // A REVOKED reader device whose principal is nonetheless a confirmed member.
     let rk = dev_key(77);
     a.db()
-        .seed_device(&w, "dk_read", &rk, &prin("reader@acme.com"), true)
+        .seed_device(
+            &w,
+            "dk_read",
+            &rk,
+            &prin("reader@acme.com"),
+            true,
+            &cred(&w, "dk_read"),
+        )
         .await
         .unwrap();
     seat(&fx, &w, "reader@acme.com", "member").await;
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", NOW).await,
+        a.list_skills_device(&w, &cred(&w, "dk_read"), NOW).await,
         Err(AuthorityError::NotFound)
     ));
 }
@@ -757,11 +766,18 @@ async fn a_registered_device_whose_principal_is_not_a_confirmed_member_is_notfou
     // A registered, non-revoked device, but its principal holds no confirmed seat.
     let rk = dev_key(79);
     a.db()
-        .seed_device(&w, "dk_read", &rk, &prin("stranger@acme.com"), false)
+        .seed_device(
+            &w,
+            "dk_read",
+            &rk,
+            &prin("stranger@acme.com"),
+            false,
+            &cred(&w, "dk_read"),
+        )
         .await
         .unwrap();
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", NOW).await,
+        a.list_skills_device(&w, &cred(&w, "dk_read"), NOW).await,
         Err(AuthorityError::NotFound)
     ));
     // Even an INVITED (unconfirmed) seat is not a confirmed member → still the uniform miss.
@@ -770,7 +786,7 @@ async fn a_registered_device_whose_principal_is_not_a_confirmed_member_is_notfou
         .await
         .unwrap();
     assert!(matches!(
-        a.list_skills_device(&w, "dk_read", NOW).await,
+        a.list_skills_device(&w, &cred(&w, "dk_read"), NOW).await,
         Err(AuthorityError::NotFound)
     ));
 }

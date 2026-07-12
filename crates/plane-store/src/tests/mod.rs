@@ -241,7 +241,8 @@ const PROP_OP_1: &str = "a1111111-1111-4111-8111-111111111111";
 
 use topos_types::{Generation, TerminalOutcome, WireCurrentRecord};
 
-use crate::{DeviceOp, DeviceOpRequest};
+use crate::set_current::DeviceOpRequest;
+use crate::{DeviceOp, DeviceOpAuth};
 
 const NOW: i64 = 1_000_000;
 
@@ -251,6 +252,26 @@ fn gn(epoch: u64, seq: u64) -> Generation {
     Generation { epoch, seq }
 }
 
+/// The test workspace credential a device is seeded with — derived from its `(workspace, device_key_id)`
+/// so the seed (`seed_device`) and the presented request (`DeviceOpAuth`/`DeviceOpRequest`) stay in
+/// lock-step. The workspace-credential model authenticates every device-lane op (reads/writes/governance)
+/// by one bearer secret per (workspace × device); a `device_registry` GLOBAL-unique index on the stored
+/// `credential_sha256` means the plaintext must be unique per device across the whole DB, so the
+/// derivation binds BOTH the workspace and the device key id (a distinct device ⇒ a distinct credential).
+fn cred(ws: &WorkspaceId, dkid: &str) -> String {
+    cred_str(ws.as_str(), dkid)
+}
+
+/// [`cred`] over a raw workspace-id string — for call sites (governance) that hold the ws as a `&str`.
+fn cred_str(ws: &str, dkid: &str) -> String {
+    format!("cred_{ws}_{dkid}")
+}
+
+/// The sha256 of [`cred`] — the stored/compared credential form the internal [`DeviceOpRequest`] carries.
+fn cred_sha(ws: &WorkspaceId, dkid: &str) -> [u8; 32] {
+    digest::sha256(cred(ws, dkid).as_bytes())
+}
+
 /// A deterministic device PUBLIC key (the test's "client device") seeded into the registry. Nothing
 /// verifies it — the credential a write presents is the `device_key_id` string, authenticated by a
 /// registry-row lookup — so any fixed 32 bytes stand in for a real key.
@@ -258,7 +279,10 @@ fn dev_key(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
 
-/// Register a device + roster its principal so the pointer-move's in-transaction authorization passes.
+/// Register a device with its workspace credential + seat its principal as a confirmed member (the write
+/// gate) and roster it on the skill (follow-state) so the pointer-move's in-transaction authorization
+/// passes. The credential is [`cred`]`(dkid)`, so a matching request built through [`prepare`] /
+/// [`revert_request`] / [`do_approve`] authenticates.
 async fn register(
     fx: &Fixture,
 
@@ -275,7 +299,14 @@ async fn register(
     let p = prin(principal);
     fx.authority
         .db()
-        .seed_device(ws, dkid, key, &p, false)
+        .seed_device(ws, dkid, key, &p, false, &cred(ws, dkid))
+        .await
+        .unwrap();
+    // Every device write now gates on a CONFIRMED workspace member (any role); seat one (the per-skill
+    // roster no longer authorizes anything — it survives only as follow-state).
+    fx.authority
+        .db()
+        .seed_workspace_member(ws, &p, "member", "confirmed")
         .await
         .unwrap();
     fx.authority.db().seed_roster(ws, skill, &p).await.unwrap();
@@ -315,6 +346,7 @@ async fn prepare(
     (
         staged,
         DeviceOpRequest {
+            credential_sha256: cred_sha(ws, dkid),
             device_key_id: dkid.to_owned(),
             op: op_kind,
             expected,
@@ -384,11 +416,13 @@ fn wire_record(bytes: &[u8]) -> WireCurrentRecord {
     serde_json::from_slice(bytes).expect("a stored current record parses as WireCurrentRecord")
 }
 
-/// A revert device request — the server constructs the forward commit; the request presents only the
-/// device credential + the CAS target generation (nothing signs the forward version id any more).
-fn revert_request(dkid: &str, expected: Generation) -> DeviceOpRequest {
-    DeviceOpRequest {
-        device_key_id: dkid.to_owned(),
+/// A revert device auth — the server constructs the forward commit; the request presents only the
+/// workspace credential + the CAS target generation (nothing signs the forward version id any more). The
+/// public [`Authority::revert`](crate::Authority::revert) takes the presented [`DeviceOpAuth`]. `ws` binds
+/// the credential to the seeded device (credentials are `(ws, dkid)`-scoped — see [`cred`]).
+fn revert_request(ws: &WorkspaceId, dkid: &str, expected: Generation) -> DeviceOpAuth {
+    DeviceOpAuth {
+        credential: cred(ws, dkid),
         op: DeviceOp::Revert,
         expected,
     }
@@ -480,13 +514,13 @@ async fn do_approve(
     base: Generation,
 ) -> crate::SetCurrentReceipt {
     let op_id = op(op_id_str);
-    let device = DeviceOpRequest {
-        device_key_id: dkid.to_owned(),
+    let auth = DeviceOpAuth {
+        credential: cred(ws, dkid),
         op: DeviceOp::ReviewApprove,
         expected: base,
     };
     fx.authority
-        .review_approve(ws, skill, commit, device, &op_id, CREATED_AT, NOW)
+        .review_approve(ws, skill, commit, auth, &op_id, CREATED_AT, NOW)
         .await
         .unwrap()
 }
@@ -514,18 +548,47 @@ async fn do_reject(
     base: Generation,
 ) -> crate::SetCurrentReceipt {
     let op_id = op(op_id_str);
-    let device = DeviceOpRequest {
-        device_key_id: dkid.to_owned(),
+    let auth = DeviceOpAuth {
+        credential: cred(ws, dkid),
         op: DeviceOp::ReviewReject,
         expected: base,
     };
     fx.authority
-        .review_reject(ws, skill, commit, device, &op_id, CREATED_AT)
+        .review_reject(ws, skill, commit, auth, &op_id, CREATED_AT)
         .await
         .unwrap()
 }
 
-// ===== The authenticated read surface (read-token resolver + the bound reads) =====
+/// Seed a device with its workspace credential + seat its principal as a confirmed member, then resolve
+/// the device READ lane's [`crate::ReadScope`] on `skill`. This is the workspace-credential read path:
+/// one bearer credential authenticates the device, and a CONFIRMED `workspace_member` row is the read
+/// gate (the per-skill roster no longer scopes reads — a member reads any skill in the workspace).
+async fn member_read_scope(
+    a: &Authority,
+
+    w: &WorkspaceId,
+
+    s: &SkillId,
+
+    dkid: &str,
+
+    principal: &str,
+) -> crate::ReadScope {
+    let p = prin(principal);
+    a.db()
+        .seed_device(w, dkid, &dev_key(7), &p, false, &cred(w, dkid))
+        .await
+        .unwrap();
+    a.db()
+        .seed_workspace_member(w, &p, "member", "confirmed")
+        .await
+        .unwrap();
+    a.resolve_read_scope(w.as_str(), s.as_str(), &cred(w, dkid))
+        .await
+        .unwrap()
+}
+
+// ===== The authenticated read surface (credential resolver + the bound reads) =====
 
 // ── the proposals-listing read (`list_open_proposals`) — keep == read == LIST ─────────────────────────
 //

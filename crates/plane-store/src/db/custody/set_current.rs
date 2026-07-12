@@ -5,9 +5,10 @@
 //! all-outcome receipt — **with no filesystem op inside the transaction**. The ordered sub-steps (and why
 //! each ordering is load-bearing) are in [`run`]. All `sqlx` stays here; the caller
 //! ([`crate::custody::set_current`]) hands in server-trusted values and gets back a domain
-//! [`SetCurrentReceipt`]. Every access fact (device resolution, roster/role gates, the review policy)
+//! [`SetCurrentReceipt`]. Every access fact (the credential resolution, the membership/role gates, the
+//! review policy)
 //! enters through the [`AccessWitness`] seam — read INSIDE this transaction, so a directory row committed
-//! before it (a revoke, a roster removal) is serialized ahead and decides the outcome. The receipt
+//! before it (a revoke, a membership removal) is serialized ahead and decides the outcome. The receipt
 //! persistence/replay machinery + the terminal-outcome writers `run` and `reject_run` call live in
 //! [`super::receipts`]; this file keeps the ordered state machine itself.
 
@@ -186,8 +187,10 @@ impl Db {
     }
 }
 
-/// The ordered sub-steps of the one transaction. Each ordering is load-bearing. Replay runs before authz, so
-/// a since-revoked device still gets its stored OK on retry. Authz runs before the CAS, so an unauthorized
+/// The ordered sub-steps of the one transaction. Each ordering is load-bearing. The device lane's
+/// credential resolution (step 0) runs first — an unauthenticated caller reaches nothing — but its
+/// REVOKED check is deferred into authz, and replay runs between them, so a since-revoked device
+/// still gets its stored OK on retry. Authz runs before the CAS, so an unauthorized
 /// caller never learns the live generation from a CONFLICT. The CAS runs before availability and lineage, so
 /// a stale base returns CONFLICT-rebase, never a confusing DENIED for GC-reclaimed objects. Provenance and
 /// reachability are written before the pointer advance (the `current` to `skill_commit` foreign key is
@@ -204,6 +207,24 @@ async fn run(
         commit: Some(input.candidate_commit),
         bundle_digest: Some(input.candidate_bundle_digest),
         expected: input.expected,
+    };
+
+    // (0) Device-lane AUTHENTICATION — before any probe or durable write: re-resolve the presented
+    // workspace credential against the live registry row INSIDE this transaction (the pool
+    // pre-resolution that keyed the pre-txn machinery is advisory; this read is the authority) and
+    // require it to name exactly the pre-resolved device. An unknown/rotated-away credential is
+    // DENIED without a durable receipt (`denied_preauth` — an unauthenticated caller must not mint
+    // rows). The `revoked` flag is deliberately NOT checked here — the replay probe below must still
+    // serve a since-revoked device its stored OK; the authz arm (3) denies its fresh work.
+    let device_identity = match &input.actor {
+        WriteActor::Device {
+            credential_sha256,
+            device_key_id,
+        } => match witness.device(tx, input.ws, credential_sha256).await? {
+            Some(d) if d.device_key_id == *device_key_id => Some(d),
+            _ => return denied_preauth(tx, input, &bound, "device unknown or revoked").await,
+        },
+        WriteActor::Session { .. } => None,
     };
 
     // (1) Replay — return the stored receipt on a bound-identity match; a same-op_id different identity is a
@@ -258,58 +279,46 @@ async fn run(
     // lane. Both arms read `current` only after their authentication step, so an unauthorized caller never
     // learns the live generation; both hoist the acting principal the actor-blind tails consume.
     //
-    // DELIBERATE LANE ASYMMETRY (stated once, here): the device arm's gate is per-skill `roster`
-    // membership (genesis-aware, unchanged); the session arm's gate is the WORKSPACE role — a confirmed
-    // owner or reviewer seat, the first enforcement of the reviewer role. A session reviewer needs no
-    // per-skill roster row (the session read lane's catalog-visibility-is-membership decision, carried to
-    // the review write).
+    // ONE MEMBERSHIP PREDICATE, EVERY LANE: both arms gate on a CONFIRMED `workspace_member` seat —
+    // the same directory join the read path runs (deleting the membership row kills writes AND reads
+    // the moment it commits). The remaining lane asymmetry is ROLE alone: the session arm (a
+    // review/revert surface) additionally requires an owner|reviewer seat; the device arm's writes
+    // take any confirmed member (per-skill `roster` gates nothing — it survives only as the genesis
+    // self-seat's interim follow-state).
     let (acting, genesis_standup, current) = match &input.actor {
-        WriteActor::Device { device_key_id } => {
-            // Resolve the PRESENTED device credential against the live registry row — the witness read,
-            // inside THIS transaction, so a revoke committed before it is serialized ahead and blocks the
-            // move — and require the bound principal is rostered. Authentication IS the credential
-            // lookup: an unknown or revoked device is DENIED **without a durable receipt** — see
-            // `denied_preauth`; the authenticated-but-unauthorized denials below stay receipted.
-            let Some(device) = witness.device(tx, input.ws, device_key_id).await? else {
-                return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
-            };
+        WriteActor::Device { .. } => {
+            // Authenticated at step (0) — the in-transaction credential resolution, so a revoke or a
+            // membership removal committed before this transaction is serialized ahead and decides it.
+            let device = device_identity.clone().ok_or_else(|| {
+                AuthorityError::internal(DeviceLaneUnresolved) // step (0) resolves every device-lane call
+            })?;
             if device.revoked {
                 return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
             }
-            // The roster gate — genesis-aware. `current` is read FIRST so a missing per-skill roster row is
-            // tolerated ONLY on the genesis-eligible shape (absent pointer + a zero-parent direct publish)
-            // by a CONFIRMED workspace member — a fresh skill has no roster yet, so its first publisher
-            // must be seated by workspace membership, then self-rostered. The self-INSERT is DEFERRED to
-            // just before the op tail: every terminal writer below (denied/conflict/retryable) COMMITS its
-            // receipt, so an inline insert here would commit an orphan roster row alongside a later
-            // availability/lineage DENIED.
             let current = read_current(tx, input.ws, input.skill).await?;
-            let genesis_standup = if witness
-                .rostered(tx, input.ws, input.skill, &device.principal)
+            // THE MEMBERSHIP GATE: a confirmed workspace seat authorizes the write (the git/GitHub
+            // model — push access is workspace-wide; protection + channels add finer gates later).
+            if !witness
+                .confirmed_member(tx, input.ws, &device.principal)
                 .await?
             {
-                false
-            } else {
-                let genesis_shaped = current.is_none()
-                    && matches!(input.op, DeviceOp::PublishDirect)
-                    && input.parents.is_empty();
-                if !genesis_shaped {
-                    return denied(tx, input, &bound, "principal not rostered for the skill").await;
-                }
-                if !witness
-                    .confirmed_member(tx, input.ws, &device.principal)
-                    .await?
-                {
-                    return denied(
-                        tx,
-                        input,
-                        &bound,
-                        "principal is not a confirmed workspace member",
-                    )
-                    .await;
-                }
-                true
-            };
+                return denied(
+                    tx,
+                    input,
+                    &bound,
+                    "principal is not a confirmed workspace member",
+                )
+                .await;
+            }
+            // The genesis self-seat: a zero-parent direct publish creating a fresh skill seats its
+            // author on the per-skill roster (interim follow-state — an author follows what they
+            // create; NOT an authorization row). The INSERT is DEFERRED to just before the op tail:
+            // every terminal writer below (denied/conflict/retryable) COMMITS its receipt, so an
+            // inline insert here would commit an orphan roster row alongside a later
+            // availability/lineage DENIED.
+            let genesis_standup = current.is_none()
+                && matches!(input.op, DeviceOp::PublishDirect)
+                && input.parents.is_empty();
             (device.principal, genesis_standup, current)
         }
         WriteActor::Session { acting, .. } => {
@@ -716,6 +725,21 @@ async fn reject_run(
         expected: r.expected,
     };
 
+    // (0) Device-lane AUTHENTICATION — the same step-(0) resolve `run` performs: re-resolve the
+    // presented credential inside THIS transaction and require it to name the pre-resolved device.
+    // An unknown/rotated credential is DENIED without a durable receipt (a reject has no lease, so
+    // nothing is even released); `revoked` is deferred past the replay probe, as in `run`.
+    let device_identity = match &r.actor {
+        WriteActor::Device {
+            credential_sha256,
+            device_key_id,
+        } => match witness.device(tx, r.ws, credential_sha256).await? {
+            Some(d) if d.device_key_id == *device_key_id => Some(d),
+            _ => return Ok(reject_denied_preauth(r, "device unknown or revoked")),
+        },
+        WriteActor::Session { .. } => None,
+    };
+
     // (1) Replay — a same-op_id retry replays the stored receipt; a different bound identity is key-reuse.
     // The probe is lane-blind (see `replay`), exactly as in `run`.
     match replay(tx, r.ws, &r.actor.receipt_actor(), r.op_id, &bound).await? {
@@ -726,26 +750,22 @@ async fn reject_run(
         Replay::Fresh => {}
     }
 
-    // (2) Authorization — the reject twin of `run`'s one lane fork (the same deliberate lane asymmetry:
-    // device = per-skill roster; session = confirmed owner|reviewer workspace seat).
+    // (2) Authorization — the reject twin of `run`'s one lane fork (one membership predicate on both
+    // lanes; the asymmetry is ROLE alone: session rejects need an owner|reviewer seat).
     let acting: Principal = match &r.actor {
-        WriteActor::Device { device_key_id } => {
-            // The SAME in-transaction witness lookups the promotion runs (a non-revoked registry row
-            // bound to a rostered principal). A revoke serialized ahead of this blocks the reject. A
-            // pre-authentication failure is DENIED without a durable receipt (mirroring `run`'s
-            // `denied_preauth`; a reject has no lease, so nothing is even released) — the roster denial
-            // below names an authenticated device and stays receipted.
-            let Some(device) = witness.device(tx, r.ws, device_key_id).await? else {
-                return Ok(reject_denied_preauth(r, "device unknown or revoked"));
-            };
+        WriteActor::Device { .. } => {
+            // Authenticated at step (0); a revoke serialized ahead of this blocks the reject.
+            let device = device_identity
+                .clone()
+                .ok_or_else(|| AuthorityError::internal(DeviceLaneUnresolved))?;
             if device.revoked {
                 return Ok(reject_denied_preauth(r, "device unknown or revoked"));
             }
             if !witness
-                .rostered(tx, r.ws, r.skill, &device.principal)
+                .confirmed_member(tx, r.ws, &device.principal)
                 .await?
             {
-                return reject_denied(tx, r, "principal not rostered for the skill").await;
+                return reject_denied(tx, r, "principal is not a confirmed workspace member").await;
             }
             device.principal
         }
@@ -1065,3 +1085,9 @@ struct RejectNotPromotable;
 #[derive(Debug, thiserror::Error)]
 #[error("a session actor reached a non-review op (an internal mis-route, not a request)")]
 struct SessionOpNotReviewable;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "a device-lane authz arm ran without the step-(0) credential resolution (an internal fault)"
+)]
+struct DeviceLaneUnresolved;

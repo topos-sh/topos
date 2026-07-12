@@ -1,20 +1,22 @@
 //! Custody's read authorizations — the REACH half of the gate/reach split, composed with the
 //! directory's principal gate through the access-witness seam.
 //!
-//! Each authorization runs the witness's [`read_gate`](AccessWitness::read_gate) (WHO may ask — a
-//! directory fact) and then ONE principal-free reachability statement over custody's own tables (what
-//! the skill makes readable). The reachability SQL is lane-blind; the lane decides only who may ask.
-//! The gate and the reach are two statements — a principal revoked between them completes one in-flight
+//! Each authorization runs the witness's [`read_gate`](AccessWitness::read_gate) (WHO may ask — the
+//! ONE membership predicate: a CONFIRMED `workspace_member` row, shared by the device and session
+//! lanes) and then ONE principal-free reachability statement over custody's own tables (what
+//! the skill makes readable — the `skill_in_workspace` half: every statement binds `(workspace_id,
+//! skill_id)`, so a skill outside the workspace reaches nothing).
+//! The gate and the reach are two statements — a principal removed between them completes one in-flight
 //! read, the same accepted window as the authorize-then-fetch TOCTOU
 //! [`crate::custody::read::read_object`] already re-guards (and re-runs on a miss).
 
 use crate::db::custody::witness::AccessWitness;
-use crate::db::{Db, ReadLane, blob32};
+use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
 
 impl Db {
-    /// The object-read authorization: the lane's principal gate, then the principal-free reachability
+    /// The object-read authorization: the membership gate, then the principal-free reachability
     /// witness ([`Self::object_witness`]). Returns the **witness** commit id iff the gate admits the
     /// principal AND the skill makes the object readable. An empty result is the single
     /// not-entitled/not-found signal (gate-denied, skill-doesn't-reach, and object-nonexistent are
@@ -25,9 +27,8 @@ impl Db {
         skill: &SkillId,
         principal: &Principal,
         object_id: ObjectId,
-        lane: ReadLane,
     ) -> Result<Option<CommitId>> {
-        if !self.read_gate(ws, skill, principal, lane).await? {
+        if !self.read_gate(ws, principal).await? {
             return Ok(None);
         }
         self.object_witness(ws, skill, object_id).await
@@ -127,7 +128,7 @@ impl Db {
 
     /// The version-read authorization — the R1 gate the version-metadata route runs, mirroring
     /// [`Self::authorize_object_read`]'s gate/reach split but anchored on a VERSION (`commit_id`) rather
-    /// than an object: the lane's principal gate, then the principal-free
+    /// than an object: the membership gate, then the principal-free
     /// [`Self::version_readable`]. `false` collapses gate-denied and not-reachable into the caller's one
     /// indistinguishable not-found.
     pub(crate) async fn authorize_version_read(
@@ -136,9 +137,8 @@ impl Db {
         skill: &SkillId,
         principal: &Principal,
         version_id: CommitId,
-        lane: ReadLane,
     ) -> Result<bool> {
-        if !self.read_gate(ws, skill, principal, lane).await? {
+        if !self.read_gate(ws, principal).await? {
             return Ok(false);
         }
         self.version_readable(ws, skill, version_id).await

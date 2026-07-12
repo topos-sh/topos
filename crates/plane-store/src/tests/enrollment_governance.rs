@@ -25,19 +25,21 @@ fn token_of(link: &str) -> String {
     link.rsplit('/').next().expect("a link tail").to_owned()
 }
 
-/// Build a governance request as an owner's device presents it — the acting `device_key_id` + the typed
-/// op. The transaction authenticates the credential by registry-row lookup; nothing signs. (`_owner_seed`,
-/// `_ws`, `_op_id` are vestigial now that nothing signs — kept so the call sites stay stable; `op_id`
-/// rides the outer `create_invite`/`roster_*`/`revoke_device` call, never the request body.)
+/// Build a governance request as an owner's device presents it — the acting device's workspace
+/// CREDENTIAL + the typed op. The transaction resolves the credential to its registry row (the acting
+/// `device_key_id`) and authenticates by that lookup; nothing signs. The credential is derived from
+/// `(ws, device_key_id)` so it matches whatever `seat_owner`/`seed_device` seeded the acting device with.
+/// (`_owner_seed`, `_op_id` are vestigial now that nothing signs — kept so the call sites stay stable;
+/// `op_id` rides the outer `create_invite`/`roster_*`/`revoke_device` call, never the request body.)
 pub(super) fn sign_governance(
     _owner_seed: &[u8; 32],
-    _ws: &str,
+    ws: &str,
     _op_id: &str,
     device_key_id: &str,
     op: GovernanceOp,
 ) -> GovernanceRequest {
     GovernanceRequest {
-        device_key_id: device_key_id.to_owned(),
+        credential: cred_str(ws, device_key_id),
         op,
     }
 }
@@ -62,7 +64,7 @@ pub(super) async fn seat_owner(
         .await
         .unwrap();
     a.db()
-        .seed_device(w, &owner_dk, &owner_pub, &owner, false)
+        .seed_device(w, &owner_dk, &owner_pub, &owner, false, &cred(w, &owner_dk))
         .await
         .unwrap();
     (owner_seed, owner, owner_dk)
@@ -258,7 +260,7 @@ async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(
 }
 
 #[sqlx::test]
-async fn cloud_device_flow_to_redeem_mints_a_resolvable_read_token(pool: PgPool) {
+async fn cloud_device_flow_to_redeem_mints_a_resolvable_credential(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-happy").await;
     let a = &fx.authority;
     let w = ws("w_acme");
@@ -284,11 +286,11 @@ async fn cloud_device_flow_to_redeem_mints_a_resolvable_read_token(pool: PgPool)
     };
     assert_eq!(r.principal.as_str(), "alice@acme.com");
     assert_eq!(r.device_key_id, device_key_id_for(&dpub));
-    assert_eq!(r.read_tokens.len(), 1);
-    assert_eq!(r.read_tokens[0].skill_id.as_str(), "s_deploy");
-    // The minted read token resolves to exactly the (ws, skill) scope.
+    assert!(!r.credential.is_empty());
+    // The redeem wrote the device's `credential_sha256` and confirmed alice's membership (the read gate),
+    // so the minted workspace credential resolves a read scope on any of the workspace's skills.
     let scope = a
-        .resolve_read_token(&r.read_tokens[0].token, NOW)
+        .resolve_read_scope("w_acme", "s_deploy", &r.credential)
         .await
         .unwrap();
     assert_eq!(scope.ws().as_str(), "w_acme");
@@ -327,7 +329,7 @@ async fn a_leaked_grant_redeemed_by_a_different_device_is_denied(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn redeem_replay_re_derives_identical_read_tokens(pool: PgPool) {
+async fn redeem_replay_re_derives_the_identical_credential(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-replay").await;
     let a = &fx.authority;
     let w = ws("w_acme");
@@ -352,12 +354,13 @@ async fn redeem_replay_re_derives_identical_read_tokens(pool: PgPool) {
     let RedeemOutcome::Redeemed(r2) = redeem(a, &grant, &device_seed, dpub).await else {
         panic!("replay redeem");
     };
-    // Deterministic: the replay re-derives the IDENTICAL token (the same content-id PK row, no fresh mint).
-    assert_eq!(r1.read_tokens.len(), 1);
-    assert_eq!(r1.read_tokens[0].token, r2.read_tokens[0].token);
-    // Both resolve (the row is the same one, REPLACED in place).
+    // Deterministic: the replay re-derives the IDENTICAL workspace credential (derived per grant, so a
+    // lost-ack retry re-returns the same value; the registry row's credential_sha256 is replaced in place).
+    assert!(!r1.credential.is_empty());
+    assert_eq!(r1.credential, r2.credential);
+    // Both resolve a read scope (the same credential, the same confirmed member).
     assert!(
-        a.resolve_read_token(&r2.read_tokens[0].token, NOW)
+        a.resolve_read_scope("w_acme", "s_deploy", &r2.credential)
             .await
             .is_ok()
     );
@@ -571,16 +574,18 @@ async fn self_host_redeem_grants_membership_without_smtp(pool: PgPool) {
         r.principal.as_str().starts_with("dev."),
         "device-rooted principal"
     );
-    assert_eq!(r.read_tokens.len(), 1);
+    // Self-host granted the device-rooted principal membership, so its minted credential resolves a read
+    // scope (the read gate — a confirmed member — is satisfied by the same redeem).
+    assert!(!r.credential.is_empty());
     assert!(
-        a.resolve_read_token(&r.read_tokens[0].token, NOW)
+        a.resolve_read_scope("w_local", "s_deploy", &r.credential)
             .await
             .is_ok()
     );
 }
 
 #[sqlx::test]
-async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPool) {
+async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-revoke").await;
     let a = &fx.authority;
     let w = ws("w_acme");
@@ -602,10 +607,15 @@ async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPoo
     let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
         panic!("redeem");
     };
-    let alice_token = r.read_tokens[0].token.clone();
-    assert!(a.resolve_read_token(&alice_token, NOW).await.is_ok());
+    let alice_cred = r.credential.clone();
+    assert!(
+        a.resolve_read_scope("w_acme", "s_deploy", &alice_cred)
+            .await
+            .is_ok()
+    );
 
-    // The owner revokes ALICE's device → her read token is purged (instant 404).
+    // The owner revokes ALICE's device → its credential stops resolving (revoked=1; the read-lane resolver
+    // requires a non-revoked row), so her reads instantly 404.
     let revoke = sign_governance(
         &owner_seed,
         w.as_str(),
@@ -620,12 +630,13 @@ async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPoo
         GovernanceOutcome::Ok
     );
     assert!(matches!(
-        a.resolve_read_token(&alice_token, NOW).await,
+        a.resolve_read_scope("w_acme", "s_deploy", &alice_cred)
+            .await,
         Err(AuthorityError::NotFound)
     ));
 
-    // The revoked device cannot RE-REDEEM its still-live grant to re-mint the dropped token (the kill
-    // switch is durable, not undone within the grant TTL).
+    // The revoked device cannot RE-REDEEM its still-live grant to un-revoke itself (the kill switch is
+    // durable, not undone within the grant TTL).
     assert!(
         matches!(
             redeem(a, &grant, &device_seed, dpub).await,
@@ -635,10 +646,11 @@ async fn revoke_device_404s_read_tokens_and_refuses_later_device_ops(pool: PgPoo
     );
     assert!(
         matches!(
-            a.resolve_read_token(&alice_token, NOW).await,
+            a.resolve_read_scope("w_acme", "s_deploy", &alice_cred)
+                .await,
             Err(AuthorityError::NotFound)
         ),
-        "the read token stays 404 — the denied re-redeem re-minted nothing"
+        "the credential stays 404 — the denied re-redeem un-revoked nothing"
     );
 
     // The owner self-revokes its OWN device → a subsequent governance op from that device is refused.
@@ -698,9 +710,11 @@ async fn roster_remove_revokes_the_members_reads(pool: PgPool) {
     let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
         panic!("redeem");
     };
-    let alice_token = r.read_tokens[0].token.clone();
+    let alice_cred = r.credential.clone();
     assert!(
-        a.resolve_read_token(&alice_token, NOW).await.is_ok(),
+        a.resolve_read_scope("w_acme", "s_deploy", &alice_cred)
+            .await
+            .is_ok(),
         "alice can read before she is removed"
     );
 
@@ -719,10 +733,12 @@ async fn roster_remove_revokes_the_members_reads(pool: PgPool) {
         GovernanceOutcome::Ok
     );
 
-    // Her read access is instantly revoked: the read token 404s (I-404), not a 403.
+    // Her read access is instantly revoked: the member row is gone, so although her credential still
+    // resolves (the device is not revoked) the confirmed-member gate now denies — the read 404s, not a 403.
     assert!(
         matches!(
-            a.resolve_read_token(&alice_token, NOW).await,
+            a.resolve_read_scope("w_acme", "s_deploy", &alice_cred)
+                .await,
             Err(AuthorityError::NotFound)
         ),
         "a removed member's reads must 404"
@@ -752,7 +768,14 @@ async fn concurrent_last_two_owner_removals_keep_one_owner(pool: PgPool) {
         .await
         .unwrap();
     a.db()
-        .seed_device(&w, &owner2_dk, &owner2_pub, &owner2, false)
+        .seed_device(
+            &w,
+            &owner2_dk,
+            &owner2_pub,
+            &owner2,
+            false,
+            &cred(&w, &owner2_dk),
+        )
         .await
         .unwrap();
 
@@ -813,7 +836,14 @@ async fn a_members_governance_op_is_denied(pool: PgPool) {
         .await
         .unwrap();
     a.db()
-        .seed_device(&w, &member_dk, &member_pub, &member, false)
+        .seed_device(
+            &w,
+            &member_dk,
+            &member_pub,
+            &member,
+            false,
+            &cred(&w, &member_dk),
+        )
         .await
         .unwrap();
 

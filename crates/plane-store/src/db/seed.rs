@@ -138,29 +138,9 @@ impl Db {
         Ok(())
     }
 
-    /// Remove a roster membership — the revocation mechanism (membership = a row exists, so revocation
-    /// is row deletion). Test-only here; enrollment owns issuance + revocation later.
-    pub(crate) async fn delete_roster(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-    ) -> Result<()> {
-        let (ws, skill, principal) = (ws.as_str(), skill.as_str(), principal.as_str());
-        sqlx::query!(
-            "DELETE FROM roster WHERE workspace_id = $1 AND skill_id = $2 AND principal = $3",
-            ws,
-            skill,
-            principal,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(())
-    }
-
-    /// Register a fixture device — `(device_key_id) -> (public_key, principal, revoked)` — the pointer-move's
-    /// in-transaction authorization resolves against. Real issuance lands later behind the enrollment port.
+    /// Register a fixture device WITH its workspace credential — the row every credential resolution
+    /// (reads, writes, governance) authenticates against; only the credential's sha256 is stored,
+    /// exactly as the real redeem mint writes it. Real issuance is the enrollment path's.
     pub(crate) async fn seed_device(
         &self,
         ws: &WorkspaceId,
@@ -168,21 +148,26 @@ impl Db {
         public_key: &[u8; 32],
         principal: &Principal,
         revoked: bool,
+        credential: &str,
     ) -> Result<()> {
         let ws_s = ws.as_str();
         let pk = public_key.as_slice();
         let principal_s = principal.as_str();
         let revoked_i = i64::from(revoked);
+        let credential_sha256 = digest::sha256(credential.as_bytes());
+        let cs = credential_sha256.as_slice();
         sqlx::query!(
-            "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked, credential_sha256) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET \
-               public_key = excluded.public_key, principal = excluded.principal, revoked = excluded.revoked",
+               public_key = excluded.public_key, principal = excluded.principal, revoked = excluded.revoked, \
+               credential_sha256 = excluded.credential_sha256",
             ws_s,
             device_key_id,
             pk,
             principal_s,
             revoked_i,
+            cs,
         )
         .execute(&self.pool)
         .await
@@ -223,34 +208,6 @@ impl Db {
             skill_s,
             epoch,
             seq,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(AuthorityError::internal)?;
-        Ok(())
-    }
-
-    /// Stage a read token (the per-follower, per-skill read credential) — storing only its sha256, never the
-    /// plaintext, exactly as the resolver looks it up. Real minting (and the 0600 at-rest token file) lands
-    /// later behind the enrollment port.
-    pub(crate) async fn seed_read_token(
-        &self,
-        ws: &WorkspaceId,
-        skill: &SkillId,
-        principal: &Principal,
-        token: &str,
-    ) -> Result<()> {
-        let (ws_s, skill_s, principal_s) = (ws.as_str(), skill.as_str(), principal.as_str());
-        let token_sha256 = digest::sha256(token.as_bytes());
-        let key = token_sha256.as_slice();
-        sqlx::query!(
-            "INSERT INTO read_token (workspace_id, skill_id, principal, token_sha256) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (token_sha256) DO UPDATE SET \
-               workspace_id = excluded.workspace_id, skill_id = excluded.skill_id, principal = excluded.principal",
-            ws_s,
-            skill_s,
-            principal_s,
-            key,
         )
         .execute(&self.pool)
         .await

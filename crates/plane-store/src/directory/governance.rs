@@ -80,15 +80,29 @@ impl GovernanceOp {
     }
 }
 
-/// A governance request presented by a device credential. The transaction authenticates the credential
-/// by registry-row lookup (non-revoked, bound to a confirmed principal whose ROLE the op-specific check
-/// then gates) — authority comes from the directory rows, never a client claim.
-#[derive(Debug, Clone)]
+/// A governance request presented by a workspace credential. The transaction authenticates the
+/// credential by registry-row lookup (the row holding the presented secret's sha256 — non-revoked,
+/// bound to a confirmed principal whose ROLE the op-specific check then gates) — authority comes from
+/// the directory rows, never a client claim; the resolved row supplies the acting `device_key_id`
+/// the audit trail records.
+#[derive(Clone)]
 pub struct GovernanceRequest {
-    /// The **acting** device's presented credential (the registry row is selected by this).
-    pub device_key_id: String,
+    /// The **acting** device's presented workspace credential (a LIVE bearer secret; the registry row
+    /// is selected by its sha256, and only the sha256 is ever stored or bound).
+    pub credential: String,
     /// The governance op (its kind + parameter tail bind the request's idempotency identity).
     pub op: GovernanceOp,
+}
+
+// `credential` is a LIVE bearer secret — redact it so a formatted request value (a debug trace, a
+// panic message) can never mint a second custody surface for it.
+impl std::fmt::Debug for GovernanceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GovernanceRequest")
+            .field("credential", &"<redacted>")
+            .field("op", &self.op)
+            .finish()
+    }
 }
 
 /// The result of creating an invite — the shareable link plus the roster + skills it seeded. Re-derives
@@ -267,7 +281,10 @@ pub(crate) struct GovernanceInput<'a> {
     pub ws: &'a WorkspaceId,
     /// The client-minted op id (the idempotency key).
     pub op_id: &'a str,
-    /// The governance request (the acting device credential + the typed op).
+    /// The presented workspace credential's sha256 (the stored form — hashed once at the
+    /// orchestration boundary; the plaintext never reaches the transaction).
+    pub credential_sha256: [u8; 32],
+    /// The governance request (the typed op; its acting credential rides as the hash above).
     pub request: &'a GovernanceRequest,
     /// The server-stamped creation timestamp (governance rows are timestamped by `created_at`, not the clock).
     pub created_at: &'a str,
@@ -325,6 +342,7 @@ pub(crate) async fn create_invite(
     let input = GovernanceInput {
         ws,
         op_id,
+        credential_sha256: sha256_token(&request.credential),
         request,
         created_at,
     };
@@ -359,6 +377,7 @@ pub(crate) async fn governance_mutation(
     let input = GovernanceInput {
         ws,
         op_id,
+        credential_sha256: sha256_token(&request.credential),
         request,
         created_at,
     };
@@ -378,7 +397,9 @@ pub(crate) async fn admin_claim(
 ) -> Result<RedeemOutcome> {
     let claim_sha256 = sha256_token(claim_token);
     let server_device_key_id = device_key_id_for(&device_public_key);
-    let plane_mode = authority.enrollment()?.config.deployment_mode;
+    let enrollment = authority.enrollment()?;
+    let plane_mode = enrollment.config.deployment_mode;
+    let secret = enrollment.secret.as_bytes();
     authority
         .db()
         .admin_claim_txn(
@@ -388,6 +409,7 @@ pub(crate) async fn admin_claim(
             plane_mode.as_str(),
             now,
             created_at,
+            secret,
         )
         .await
 }
