@@ -232,6 +232,22 @@ impl ExtractedRepo {
         })
     }
 
+    /// Every discoverable skill NAME under `subdir` (sorted, deduped) — the expansion of `add -s '*'`
+    /// (import every skill of a multi-skill repo). Empty when the repo carries no `SKILL.md`. The caller
+    /// loops the single-select [`select`](Self::select) path per name, so a repo-root skill returns the
+    /// repo name and a `skills/<x>` layout returns each `<x>`.
+    pub(crate) fn skill_names(&self, subdir: Option<&str>, repo_name: &str) -> Vec<String> {
+        let search_root = subdir.map(trim_slashes).unwrap_or("");
+        let mut names: Vec<String> = self
+            .discover_roots(search_root)
+            .iter()
+            .map(|r| skill_name(r, repo_name))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// The skill root paths (repo-relative) reachable under `search_root`. A `SKILL.md` AT the search root
     /// shadows any nested ones (that root is the single skill); otherwise the depth-bounded nested roots.
     fn discover_roots(&self, search_root: &str) -> Vec<String> {
@@ -449,6 +465,32 @@ mod tests {
             .select(None, Some("gamma"), "r", "github.com/o/r")
             .unwrap_err();
         assert!(matches!(err, ClientError::SkillNotInRepo { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn skill_names_enumerates_every_skill_for_the_star_import() {
+        // A multi-skill repo → every skill name (sorted, deduped) — the `-s '*'` fan-out set.
+        let targz = build_repo_targz(
+            "o-r-abc1234",
+            &[
+                ("README.md", b"not a skill", 0o644),
+                ("skills/beta/SKILL.md", b"b", 0o644),
+                ("skills/alpha/SKILL.md", b"a", 0o644),
+            ],
+        );
+        let repo = extract_tree(&targz).unwrap();
+        assert_eq!(
+            repo.skill_names(None, "r"),
+            vec!["alpha".to_owned(), "beta".to_owned()]
+        );
+        // A repo-root skill → the repo name (the single skill).
+        let root = build_repo_targz("o-r-abc1234", &[("SKILL.md", b"x", 0o644)]);
+        let root = extract_tree(&root).unwrap();
+        assert_eq!(root.skill_names(None, "agent-skills"), vec!["agent-skills"]);
+        // A repo with no SKILL.md → empty (the caller turns this into NO_SKILL_IN_SOURCE).
+        let none = build_repo_targz("o-r-abc1234", &[("README.md", b"y", 0o644)]);
+        let none = extract_tree(&none).unwrap();
+        assert!(none.skill_names(None, "r").is_empty());
     }
 
     #[test]

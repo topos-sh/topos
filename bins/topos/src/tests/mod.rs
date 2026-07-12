@@ -6,6 +6,7 @@ mod auth;
 mod durability;
 mod follow;
 mod publish_autoadd;
+mod seams;
 mod standup;
 mod subscribe;
 mod sync;

@@ -652,6 +652,7 @@ fn status_reports_the_probe_causes_and_the_reporting_posture() {
                     last_delivery_at: Some(1_700_000_000_000 - 1_000),
                     last_report_at: Some(1_700_000_000_000 - 1_000),
                     staleness_window_ms: 604_800_000,
+                    ..Default::default()
                 },
             ),
             (
@@ -660,6 +661,7 @@ fn status_reports_the_probe_causes_and_the_reporting_posture() {
                     last_delivery_at: Some(1_000),
                     last_report_at: Some(1_000),
                     staleness_window_ms: 10_000,
+                    ..Default::default()
                 },
             ),
         ],

@@ -976,6 +976,7 @@ fn the_quiet_hook_warns_once_stale_and_unreachable_and_stays_silent_otherwise() 
                 last_delivery_at: Some(1_000),
                 last_report_at: Some(1_000),
                 staleness_window_ms: window,
+                ..Default::default()
             },
         )],
     )

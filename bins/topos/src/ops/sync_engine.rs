@@ -36,7 +36,8 @@ use crate::scan::{self, ScannedBundle};
 use crate::{doc, logfile, sidecar};
 
 /// The fixed commit message for a draft snapshot (folded into its `version_id`; must stay constant).
-const DRAFT_SNAPSHOT_MESSAGE: &str = "topos: draft snapshot";
+/// `pub(crate)` so `keep-as-yours` (`ops::add`) can recognise a retained draft snapshot in the store.
+pub(crate) const DRAFT_SNAPSHOT_MESSAGE: &str = "topos: draft snapshot";
 /// A bound on ancestor backfill — far beyond any real lineage gap; stops a forged cyclic store.
 const MAX_BACKFILL: usize = 256;
 /// The `applied` generation a go-back leaves behind: the genesis sentinel `(0,0)`, which is strictly below

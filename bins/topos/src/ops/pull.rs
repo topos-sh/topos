@@ -18,7 +18,7 @@
 //! hang the harness.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use topos_core::digest::to_hex;
@@ -34,7 +34,7 @@ use crate::plane::{
     DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, KnownCurrent,
     PlaneError, PlaneSource, PointerFetch,
 };
-use crate::sync_status::{self, WorkspaceSync};
+use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, sidecar};
 
 use super::sync_engine::{self, Invocation, WorkState};
@@ -378,6 +378,10 @@ pub(crate) fn pull_reconcile_with(
         proposals_awaiting = proposals_awaiting
             .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
 
+        // The offline delivery cache this reconcile rebuilds for `list` (the served version + `via`
+        // channels per delivered skill; a withdrawn skill is flagged below). REPLACES the prior map,
+        // so a re-delivered skill self-heals and a since-detached one drops out.
+        let mut delivered_cache: BTreeMap<String, DeliveredSkill> = BTreeMap::new();
         let mut delivered_ids: HashSet<&str> = HashSet::with_capacity(snapshot.skills.len());
         for ds in &snapshot.skills {
             // A DECLINED new arrival (a dirname collision the follow describe listed and `--yes`
@@ -388,6 +392,14 @@ pub(crate) fn pull_reconcile_with(
                 continue;
             }
             delivered_ids.insert(ds.skill_id.as_str());
+            delivered_cache.insert(
+                ds.skill_id.clone(),
+                DeliveredSkill {
+                    served_version: to_hex(&ds.version_id),
+                    withdrawn: false,
+                    via_channels: ds.via_channels.clone(),
+                },
+            );
             // Teach the READ transport this skill's credential before anything fetches its bytes.
             // The per-skill credential map is derived from `follows.json`, which cannot yet name a
             // brand-new arrival — without this, the arrival's first version fetch answers
@@ -446,7 +458,15 @@ pub(crate) fn pull_reconcile_with(
                 ))
             } else {
                 // UPSTREAM withdrew it (archived, or its last delivering channel dropped it):
-                // managed distribution cleans what it managed.
+                // managed distribution cleans what it managed. Flag it in the offline cache so
+                // `list` reports `removed-upstream` without a network call.
+                delivered_cache.insert(
+                    skill_id.to_string(),
+                    DeliveredSkill {
+                        withdrawn: true,
+                        ..DeliveredSkill::default()
+                    },
+                );
                 withdraw_upstream(ctx, &sid)
             };
             match row {
@@ -496,6 +516,7 @@ pub(crate) fn pull_reconcile_with(
                         .and_then(|e| e.last_report_at)
                 },
                 staleness_window_ms: snapshot.staleness_window_ms,
+                delivered: delivered_cache,
             },
         ));
 
@@ -545,6 +566,213 @@ pub(crate) fn pull_reconcile_with(
         access_gone,
         unreachable,
     })
+}
+
+/// `update [<skill>...] [--skill <s>...] [--channel <c>...]` — the SELECTOR / MULTI-TARGET update. Resolves
+/// every positional + `--skill` + `--channel` name through the ONE grammar ALL-OR-NONE (an unresolvable
+/// name refuses the whole invocation, exactly like `follow`), then:
+///  - a resolved SKILL runs the targeted per-skill path (accept its pending update);
+///  - a resolved CHANNEL runs a channel-filtered sync over the live delivery's `via` attribution —
+///    installing new arrivals in that channel and landing pending updates for the ones already followed.
+///
+/// # Errors
+/// The grammar's resolution errors (`AMBIGUOUS_NAME`, the uniform not-found, a kind mismatch);
+/// [`ClientError::Enrollment`] when a `--channel` selector is used without a delivery transport; a
+/// store/io/transport failure.
+pub(crate) fn update_selective(
+    ctx: &Ctx<'_>,
+    directory_connect: &super::follow::DirectoryConnect<'_>,
+    delivery: Option<&dyn DeliverySource>,
+    positionals: &[String],
+    channels: &[String],
+    skills: &[String],
+    only_workspace: Option<&str>,
+) -> Result<PullOutcome, ClientError> {
+    use crate::resolve::{self, KindScope, Resolution, ResourceKind, TargetSpec};
+
+    // Build the enrolled universe, then resolve every target ALL-OR-NONE (channels + skills only).
+    let (_, universe) = super::follow::build_universe_via(ctx, directory_connect)?;
+    let mut specs: Vec<TargetSpec> = Vec::new();
+    for t in positionals {
+        specs.push(TargetSpec::free(t));
+    }
+    for s in skills {
+        specs.push(TargetSpec::kinded(s, ResourceKind::Skill));
+    }
+    for c in channels {
+        specs.push(TargetSpec::kinded(c, ResourceKind::Channel));
+    }
+    let resolutions = resolve::resolve_all(&universe, &specs, KindScope::SUBSCRIBABLE)?;
+
+    // Partition into skill names (targeted) and channel names (delivery-filtered).
+    let mut skill_targets: Vec<String> = Vec::new();
+    let mut channel_targets: Vec<String> = Vec::new();
+    for r in resolutions {
+        match r {
+            Resolution::Resource {
+                kind: ResourceKind::Skill,
+                name,
+                ..
+            } => skill_targets.push(name),
+            Resolution::Resource {
+                kind: ResourceKind::Channel,
+                name,
+                ..
+            } => channel_targets.push(name),
+            // SUBSCRIBABLE excludes workspaces, so a workspace resolution cannot occur here.
+            Resolution::Workspace { .. } => {}
+        }
+    }
+
+    let mut acc = PullAccumulator::default();
+    // Skill targets → the targeted per-skill engine (accept a pending update / resume a hold).
+    for name in &skill_targets {
+        acc.merge(pull(
+            ctx,
+            PullScope::One {
+                name: name.clone(),
+                mode: TargetMode::AcceptPending,
+            },
+        )?);
+    }
+    // Channel targets → the channel-filtered delivery sync.
+    if !channel_targets.is_empty() {
+        let delivery = delivery.ok_or_else(|| {
+            ClientError::Enrollment("not enrolled; nothing to update from a channel".into())
+        })?;
+        acc.merge(pull_channel_filtered(
+            ctx,
+            delivery,
+            &channel_targets,
+            only_workspace,
+        )?);
+    }
+    Ok(acc.into_outcome())
+}
+
+/// A channel-scoped update: sync every DELIVERED skill whose `via` channels include one of `channels`
+/// — installing a new arrival, landing a pending update for a known one — over the live delivery. It is a
+/// PARTIAL, targeted operation (like `pull <skill>`): it never withdraws, freezes, reports, acks notices,
+/// or writes the freshness cache — those belong to the full bare reconcile. A whole-workspace access loss
+/// still surfaces as a warning + the structured `access_gone` signal.
+fn pull_channel_filtered(
+    ctx: &Ctx<'_>,
+    delivery: &dyn DeliverySource,
+    channels: &[String],
+    only_workspace: Option<&str>,
+) -> Result<PullOutcome, ClientError> {
+    let want: HashSet<&str> = channels.iter().map(String::as_str).collect();
+    let followed = ctx.follow.followed();
+    let mut skills = Vec::new();
+    let mut warnings = Vec::new();
+    let mut proposals_awaiting: u32 = 0;
+    let mut access_gone = Vec::new();
+    let mut unreachable = Vec::new();
+
+    for ws in delivery.workspaces() {
+        if only_workspace.is_some_and(|only| only != ws) {
+            continue;
+        }
+        let snapshot = match delivery.fetch_delivery(&ws) {
+            Ok(s) => s,
+            Err(PlaneError::NotFound) => {
+                warnings.push(format!(
+                    "ACCESS_GONE {ws}: this device no longer has access; its skills stay frozen in \
+                     place (re-adding the member re-enables them)"
+                ));
+                access_gone.push(ws.clone());
+                continue;
+            }
+            Err(PlaneError::Unreachable(m) | PlaneError::Unavailable(m)) => {
+                warnings.push(format!("PLANE_UNAVAILABLE {ws}: {m}"));
+                unreachable.push(ws.clone());
+                continue;
+            }
+            Err(PlaneError::Malformed(m)) => {
+                warnings.push(format!("WIRE_INVALID {ws}: {m}"));
+                continue;
+            }
+        };
+        proposals_awaiting = proposals_awaiting
+            .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
+        for ds in &snapshot.skills {
+            if !ds.via_channels.iter().any(|c| want.contains(c.as_str())) {
+                continue;
+            }
+            // Teach the read transport this skill's credential before its first byte fetch (a new
+            // arrival is not yet named in `follows.json`).
+            delivery.bind_skill(&ws, &ds.skill_id);
+            let entry = followed.iter().find(|(id, _)| *id == ds.skill_id);
+            let row = match entry {
+                // A locally-paused (unfollowed) entry the plane still delivers: respect the pause.
+                Some((_, f)) if !f.following => continue,
+                // A channel-scoped update is explicit consent — ACCEPT the pending bytes.
+                Some((_, f)) => sync_delivered(ctx, &ws, ds, f, Invocation::Accept),
+                None => install_new_arrival(
+                    ctx,
+                    &ws,
+                    ds,
+                    &ReconcileOpts {
+                        accept_first_receive: true,
+                        ..ReconcileOpts::default()
+                    },
+                ),
+            };
+            match row {
+                Ok(mut row) => {
+                    row.workspace_id = Some(ws.clone());
+                    skills.push(row);
+                }
+                Err(e) => note_skill_failure(ctx, &mut warnings, &ds.skill_id, &e),
+            }
+        }
+    }
+    Ok(PullOutcome {
+        data: PullData {
+            skills,
+            proposals_awaiting,
+            notices: Vec::new(),
+            sync: Vec::new(),
+        },
+        warnings,
+        access_gone,
+        unreachable,
+    })
+}
+
+/// Accumulates several [`PullOutcome`]s from a multi-target update into one — concatenating the per-skill
+/// rows / warnings / structured signals, and keeping the MAX proposals gauge (each targeted pull computes
+/// the same workspace-wide count, so summing would multiply it).
+#[derive(Default)]
+struct PullAccumulator {
+    skills: Vec<PullSkill>,
+    warnings: Vec<String>,
+    access_gone: Vec<String>,
+    unreachable: Vec<String>,
+    proposals_awaiting: u32,
+}
+
+impl PullAccumulator {
+    fn merge(&mut self, out: PullOutcome) {
+        self.skills.extend(out.data.skills);
+        self.warnings.extend(out.warnings);
+        self.access_gone.extend(out.access_gone);
+        self.unreachable.extend(out.unreachable);
+        self.proposals_awaiting = self.proposals_awaiting.max(out.data.proposals_awaiting);
+    }
+    fn into_outcome(self) -> PullOutcome {
+        PullOutcome {
+            data: PullData {
+                skills: self.skills,
+                proposals_awaiting: self.proposals_awaiting,
+                notices: Vec::new(),
+                sync: Vec::new(),
+            },
+            warnings: self.warnings,
+            access_gone: self.access_gone,
+            unreachable: self.unreachable,
+        }
+    }
 }
 
 /// The invocation an already-followed DELIVERED skill syncs under: the `follow --yes` batch consent

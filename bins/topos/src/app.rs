@@ -15,6 +15,7 @@ use crate::cli::{AuthCmd, Cli, Command};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
+use crate::git_source::GitTarballSource;
 use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{
     ContributeSource, DirectorySource, EnrollSource, GovernanceSource, PlaneSource,
@@ -172,65 +173,70 @@ pub fn run() -> ExitCode {
             global,
             yes,
         } => {
-            // The two-phase describe/`--yes` flow lands in a later leg; today `add` applies directly.
-            let _ = yes;
-            // MULTI selectors (`-s a -s b`, `-a x -a y`) apply to a REMOTE import — loop the single-select
-            // path per (skill × harness) combination, disclosing each. A single (or absent) selector keeps
-            // the classic single path below; `'*'` (all-skills / all-agents) stays a marked seam.
-            if skill.len() > 1 || agent.len() > 1 {
-                let has_star = skill.iter().chain(agent.iter()).any(|v| v == "*");
-                let result = add_multi(&ctx, &source, &skill, &agent, global, has_star);
+            let has_star = skill.iter().chain(agent.iter()).any(|v| v == "*");
+            // MULTI selectors (`-s a -s b`, `-a x -a y`) and the `*` fan-outs apply to a REMOTE import —
+            // loop the single-select path per (skill × harness) combination, disclosing each landing. `-s *`
+            // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
+            if has_star || skill.len() > 1 || agent.len() > 1 {
+                let result = add_multi(&ctx, &source, &skill, &agent, global);
                 return finish_add_many(json, cmd_name, result, &diag);
+            }
+            let single_skill = skill.into_iter().next();
+            let single_agent = agent.into_iter().next();
+            // keep-as-yours: a bare NAME that resolves to a RETAINED withdrawn/detached copy re-forks it
+            // into a new LOCAL skill, two-phase (bare describes the fork; `--yes` applies). A non-retained
+            // name falls through to the ordinary adopt below.
+            if let crate::source::SourceSpec::LocalName(name) = crate::source::classify(&source) {
+                match ops::keep_as_yours(&ctx, &name, yes) {
+                    Ok(Some(outcome)) => {
+                        return finish_keep_as_yours(json, cmd_name, outcome, &diag);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish(json, cmd_name, Err(e), render::add_tty, &diag),
+                }
             }
             // The one positional is classified by shape (crate::source): a local path adopts in place; a
             // bare name resolves against `list`'s untracked discovery; a remote `owner/repo`/URL fetches +
             // imports. No prompts — a remote import is fully non-interactive (the source's trust is the
             // user/agent's to verify).
-            let result = single_selector(skill, "add --skill with multiple values or '*'")
-                .and_then(|skill| {
-                    single_selector(agent, "add --agent with multiple values or '*'")
-                        .map(|agent| (skill, agent))
-                })
-                .and_then(|(skill, harness)| {
-                    match crate::source::classify(&source) {
-                    crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
-                    crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
-                        // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
-                        // agree on the name even for a harness the active adapter does not recognize.
-                        Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
-                            .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
-                        None => Err(ClientError::InvalidArgument(
-                            "cannot resolve a skill name without $HOME set — adopt a directory by \
-                             path (`topos add ./<dir>`)"
-                                .into(),
-                        )),
-                    },
-                    crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
-                        Some(roots) => {
-                            let git = crate::plane_http::UreqGitSource::new();
-                            ops::add_remote(
-                                &ctx,
-                                &git,
-                                &spec,
-                                &roots,
-                                &ops::AddRemoteOpts {
-                                    skill,
-                                    harness,
-                                    global,
-                                },
-                            )
-                        }
-                        None => Err(ClientError::InvalidArgument(
-                            "cannot import a remote skill without $HOME set (needed to resolve the \
-                             harness skills dir)"
-                                .into(),
-                        )),
-                    },
-                    crate::source::SourceSpec::Unsupported(msg) => {
-                        Err(ClientError::InvalidArgument(msg))
+            let result = match crate::source::classify(&source) {
+                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
+                crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
+                    // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
+                    // agree on the name even for a harness the active adapter does not recognize.
+                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
+                        .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
+                    None => Err(ClientError::InvalidArgument(
+                        "cannot resolve a skill name without $HOME set — adopt a directory by \
+                         path (`topos add ./<dir>`)"
+                            .into(),
+                    )),
+                },
+                crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
+                    Some(roots) => {
+                        let git = crate::plane_http::UreqGitSource::new();
+                        ops::add_remote(
+                            &ctx,
+                            &git,
+                            &spec,
+                            &roots,
+                            &ops::AddRemoteOpts {
+                                skill: single_skill,
+                                harness: single_agent,
+                                global,
+                            },
+                        )
                     }
+                    None => Err(ClientError::InvalidArgument(
+                        "cannot import a remote skill without $HOME set (needed to resolve the \
+                         harness skills dir)"
+                            .into(),
+                    )),
+                },
+                crate::source::SourceSpec::Unsupported(msg) => {
+                    Err(ClientError::InvalidArgument(msg))
                 }
-                });
+            };
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
         Command::Follow {
@@ -312,11 +318,13 @@ pub fn run() -> ExitCode {
             channel,
             skill,
         } => {
-            // A single positional name filter stays wired; the `--channel`/`--skill` selectors and
-            // multi-name resolution land with the full grammar in a later leg (a marked seam).
-            let name_filter = match single_target(name, &channel, &skill, "list") {
-                Ok(n) => n,
-                Err(e) => return finish_list(json, cmd_name, Err(e), &diag),
+            // The full row filter: positional names + the `--channel`/`--skill` selectors. A single bare
+            // name keeps the classic exactly-one narrowing; richer forms resolve ALL-OR-NONE (an unmatched
+            // name refuses the whole invocation) and filter the tracked rows.
+            let filter = ops::ListFilter {
+                names: name,
+                channels: channel,
+                skills: skill,
             };
             // Under `--remote`, resolve the enrolled plane + memberships (a typed "run follow first" when
             // there is no enrollment), then build the credentialed catalog transport as a local so the
@@ -345,13 +353,7 @@ pub fn run() -> ExitCode {
             finish_list(
                 json,
                 cmd_name,
-                ops::list(
-                    &ctx,
-                    name_filter.as_deref(),
-                    footprint,
-                    list_discovery(tracked),
-                    scope,
-                ),
+                ops::list_with(&ctx, &filter, footprint, list_discovery(tracked), scope),
                 &diag,
             )
         }
@@ -524,11 +526,31 @@ pub fn run() -> ExitCode {
                 let _ = &channel;
                 return finish_reset(json, cmd_name, ops::reset(&ctx, &reset_targets, yes), &diag);
             }
-            let result = match single_target(targets, &channel, &skill, "update") {
-                Ok(target) => {
-                    pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
+            // A `--channel`/`--skill` selector or more than one positional is the SELECTOR / MULTI-TARGET
+            // update: resolve every name through the grammar all-or-none, then the targeted path per skill
+            // and the channel-filtered sync per channel. A single bare target (or none) keeps the classic
+            // engine — the go-back `<skill>@<hash>` and the `--onto-current` escape live only there.
+            let has_selectors = !channel.is_empty() || !skill.is_empty() || targets.len() > 1;
+            let result = if has_selectors {
+                if onto_current {
+                    Err(ClientError::InvalidArgument(
+                        "--onto-current takes a single <skill> target, not selectors or several targets"
+                            .into(),
+                    ))
+                } else {
+                    ops::update_selective(
+                        &ctx,
+                        &connect_directory,
+                        delivery,
+                        &targets,
+                        &channel,
+                        &skill,
+                        workspace.as_deref(),
+                    )
                 }
-                Err(e) => Err(e),
+            } else {
+                let target = targets.into_iter().next();
+                pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
             };
             if quiet {
                 // NEAR-byte-silent stdout (the session-start hook injects stdout into the session):
@@ -677,33 +699,6 @@ fn channel_seam(args: &[String]) -> ClientError {
     }
 }
 
-/// Collapse a repeatable value selector (`-s/--skill`, `-a/--agent`) to at most ONE concrete value. More
-/// than one — or a `'*'` — parses today but resolves in a later leg, so it is a marked seam ([`ops::not_yet`]).
-fn single_selector(values: Vec<String>, what: &str) -> Result<Option<String>, ClientError> {
-    match values.as_slice() {
-        [] => Ok(None),
-        [one] if one != "*" => Ok(values.into_iter().next()),
-        _ => Err(ops::not_yet(what)),
-    }
-}
-
-/// Collapse a multi-target positional + the dual-kind `--channel`/`--skill` selectors to at most ONE
-/// positional target. Any selector, or more than one positional, parses today but resolves with the full
-/// grammar in a later leg — a marked seam — so the single-target verb paths stay wired meanwhile.
-fn single_target(
-    targets: Vec<String>,
-    channel: &[String],
-    skill: &[String],
-    verb: &str,
-) -> Result<Option<String>, ClientError> {
-    if !channel.is_empty() || !skill.is_empty() || targets.len() > 1 {
-        return Err(ops::not_yet(&format!(
-            "{verb} with --channel/--skill selectors or multiple targets"
-        )));
-    }
-    Ok(targets.into_iter().next())
-}
-
 /// The ENROLLMENT connector: `UreqDeviceClient` with an EMPTY credential map — the device-flow routes are
 /// unauthenticated (they mint the credential the write/governance connectors then present). The governance
 /// and contribute connectors are closures in [`run`] (they must re-read `credentials.json` fresh so a
@@ -789,9 +784,12 @@ fn finish_pull(
     match result {
         Ok(out) => {
             if json {
+                // Each WITHDRAWN skill carries a paste-ready `keep-as-yours` next action.
+                let next_actions = render::withdrawn_next_actions(&out.data);
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.warnings = out.warnings;
+                envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::pull_tty(&out.data, &out.warnings));
@@ -946,31 +944,29 @@ fn finish_unfollow(
 }
 
 /// Import a REMOTE source into several skills and/or several harness dirs — the `-s a -s b` / `-a x -a y`
-/// loop over the single-select [`ops::add_remote`] path (disclosing each). Multi selectors apply to a
-/// remote import only (a local path/name adopts exactly one skill); `'*'` expansion stays a seam.
+/// loop over the single-select [`ops::add_remote`] path (disclosing each landing). Multi selectors apply
+/// to a remote import only (a local path/name adopts exactly one skill). A `*` selector fans out:
+/// `-s '*'` imports EVERY skill of a multi-skill repo, `-a '*'` places into every harness DETECTED on
+/// this machine (the same registry discovery `list` uses, filtered to those with a skills dir at the
+/// chosen scope).
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] for a non-remote source or a missing `$HOME`; [`ops::not_yet`] for a
-/// `'*'` selector; whatever [`ops::add_remote`] returns for a given combination (all-or-error).
+/// [`ClientError::InvalidArgument`] for a non-remote source, a missing `$HOME`, or `-a '*'` matching no
+/// detected harness; [`ClientError::NoSkillInSource`] for `-s '*'` on a repo with no skill; whatever
+/// [`ops::add_remote`] returns for a given combination (all-or-error).
 fn add_multi(
     ctx: &Ctx<'_>,
     source: &str,
     skills: &[String],
     agents: &[String],
     global: bool,
-    has_star: bool,
 ) -> Result<Vec<topos_types::results::AddData>, ClientError> {
-    if has_star {
-        return Err(ops::not_yet(
-            "add with a `*` selector (all-skills / all-agents)",
-        ));
-    }
     let spec = match crate::source::classify(source) {
         crate::source::SourceSpec::Remote(spec) => spec,
         _ => {
             return Err(ClientError::InvalidArgument(
-                "multiple `-s`/`-a` selectors apply to a REMOTE import (`owner/repo` or a github.com \
-                 URL) — a local path or name adopts a single skill"
+                "multiple `-s`/`-a` selectors (or `*`) apply to a REMOTE import (`owner/repo` or a \
+                 github.com URL) — a local path or name adopts a single skill"
                     .into(),
             ));
         }
@@ -982,15 +978,35 @@ fn add_multi(
         ));
     };
     let git = crate::plane_http::UreqGitSource::new();
-    let skill_opts: Vec<Option<String>> = if skills.is_empty() {
-        vec![None]
-    } else {
-        skills.iter().cloned().map(Some).collect()
-    };
-    let agent_opts: Vec<Option<String>> = if agents.is_empty() {
+    // `-a '*'` → every DETECTED harness with a skills dir at the chosen scope; explicit values loop as-is.
+    let agent_opts: Vec<Option<String>> = if agents.iter().any(|a| a == "*") {
+        let detected = detected_harness_slugs(&roots, global);
+        if detected.is_empty() {
+            return Err(ClientError::InvalidArgument(
+                "`-a '*'` found no harness on this machine to place into at the chosen scope — name one \
+                 with `-a <slug>` (or drop `--global` for project scope)"
+                    .into(),
+            ));
+        }
+        detected.into_iter().map(Some).collect()
+    } else if agents.is_empty() {
         vec![None]
     } else {
         agents.iter().cloned().map(Some).collect()
+    };
+    // `-s '*'` → every skill in the repo (fetch + extract once to enumerate the names).
+    let skill_opts: Vec<Option<String>> = if skills.iter().any(|s| s == "*") {
+        let targz = git.fetch(&spec)?;
+        let repo = crate::git_source::extract_tree(&targz)?;
+        let names = repo.skill_names(spec.subdir.as_deref(), &spec.repo);
+        if names.is_empty() {
+            return Err(ClientError::NoSkillInSource { src: spec.label() });
+        }
+        names.into_iter().map(Some).collect()
+    } else if skills.is_empty() {
+        vec![None]
+    } else {
+        skills.iter().cloned().map(Some).collect()
     };
     let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
     for s in &skill_opts {
@@ -1009,6 +1025,62 @@ fn add_multi(
         }
     }
     Ok(out)
+}
+
+/// The harness slugs DETECTED on this machine (the same registry discovery `list` uses) that have a
+/// skills directory at the chosen scope — the fan-out set for `add -a '*'`. Deduped + sorted; a harness
+/// with no writable dir at this scope is dropped (so the loop never fails on it).
+fn detected_harness_slugs(roots: &ops::DiscoveryRoots, global: bool) -> Vec<String> {
+    let scope = if global {
+        topos_harness::registry::SkillScope::User
+    } else {
+        topos_harness::registry::SkillScope::Project
+    };
+    let mut slugs: Vec<String> =
+        topos_harness::registry::discover_all(&roots.home, roots.cwd.as_deref())
+            .into_iter()
+            .map(|d| d.harness_slug)
+            .filter(|slug| {
+                topos_harness::registry::skills_root(slug, scope, &roots.home, roots.cwd.as_deref())
+                    .is_some()
+            })
+            .collect();
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
+/// The `keep-as-yours` finisher — the local-fork DESCRIBE (with its `--yes` argv) or the applied fork
+/// (rendered as an ordinary `add` receipt over the new local skill).
+fn finish_keep_as_yours(
+    json: bool,
+    command: &str,
+    outcome: ops::KeepAsYoursOutcome,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    let _ = diag;
+    match outcome {
+        ops::KeepAsYoursOutcome::Described { data, yes_argv } => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::keep_as_yours_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        ops::KeepAsYoursOutcome::Forked(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::add_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 /// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.

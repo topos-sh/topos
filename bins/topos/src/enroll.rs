@@ -922,6 +922,33 @@ pub(crate) fn set_excluded(
     )
 }
 
+/// DROP a skill's follow entry from `follows.json` under the identity lock — the `keep-as-yours` re-fork
+/// retires the retained (withdrawn/detached) entry so `list` stops showing a ghost once the bytes have
+/// been re-adopted as a new local skill. A no-op when the entry (or the file) is absent.
+pub(crate) fn remove_follow(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    skill_id: &str,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
+        return Ok(());
+    };
+    let before = follows.follows.len();
+    follows.follows.retain(|e| e.skill_id != skill_id);
+    if follows.follows.len() == before {
+        return Ok(());
+    }
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            follows: follows.follows,
+        },
+    )
+}
+
 /// Write `identity/user.json` (metadata only; ordinary perms). The identity dir must exist.
 pub(crate) fn write_user(
     fs: &dyn FsOps,

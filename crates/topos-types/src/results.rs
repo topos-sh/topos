@@ -405,6 +405,37 @@ pub struct AddData {
     pub origin: Option<SkillOrigin>,
 }
 
+/// The `keep it as yours` describe — an `add <name>` that re-forks a RETAINED withdrawn/detached copy
+/// into a NEW local skill with no upstream. Bare `add <name>` returns this preview; `--yes` re-adopts the
+/// bytes and returns an ordinary [`AddData`]. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct KeepAsYoursData {
+    /// The skill name to re-fork.
+    pub name: String,
+    /// The workspace the retained copy was followed in (its former upstream), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Why the local copy is retained (and no longer delivering here).
+    pub reason: KeepReason,
+    /// Whether a local draft rides along into the fork (a snapshotted or on-disk edit ahead of the base).
+    pub has_draft: bool,
+}
+
+/// Why a `keep-as-yours` copy is retained but no longer live. **INFERRED** (additive value set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum KeepReason {
+    /// Upstream withdrew the skill (archived, or its last delivering channel dropped it) — the agent dirs
+    /// were cleaned; the sidecar kept the bytes + any draft.
+    WithdrawnUpstream,
+    /// The person unfollowed the skill (a detach) — its bytes are frozen in place here.
+    Detached,
+    /// `topos remove` excluded the skill on this device — the agent dirs were cleaned, the sidecar kept.
+    RemovedHere,
+}
+
 /// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.
 /// **INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /
 /// `workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the

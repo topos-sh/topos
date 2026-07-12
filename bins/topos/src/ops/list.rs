@@ -26,6 +26,7 @@ use crate::error::ClientError;
 use crate::plane::{CatalogSource, PlaneError};
 use crate::scan;
 use crate::sidecar;
+use crate::sync_status::{self, DeliveredSkill};
 use crate::{doc, scan::ScannedBundle};
 
 /// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's global
@@ -104,16 +105,71 @@ pub(crate) struct FollowNote {
     pub following: bool,
 }
 
+/// A `list` invocation's row filter: positional NAMES, `--skill` selectors (both matched by skill
+/// name), and `--channel` selectors (matched offline against each skill's cached `via` channels). A
+/// single positional name keeps the classic narrowing (proposals annotation + the exactly-one gate);
+/// any richer form resolves ALL-OR-NONE (an unmatched name refuses the whole invocation) and filters
+/// the tracked rows to the union of what matched.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ListFilter {
+    pub names: Vec<String>,
+    pub channels: Vec<String>,
+    pub skills: Vec<String>,
+}
+
+impl ListFilter {
+    /// A single positional name with no selectors — the classic `list <skill>` narrowing.
+    fn single_name(&self) -> Option<&str> {
+        if self.channels.is_empty() && self.skills.is_empty() && self.names.len() == 1 {
+            Some(self.names[0].as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Any filter at all — narrows the view (suppresses untracked discovery + the remote catalog, the
+    /// same way the classic single name does).
+    fn narrows(&self) -> bool {
+        !(self.names.is_empty() && self.channels.is_empty() && self.skills.is_empty())
+    }
+}
+
 /// Inventory the tracked skills, optionally narrowed to one name and/or with the footprint, and — under
 /// `--remote` ([`RemoteScope`] present) — the followed workspaces' catalogs annotated with local
 /// follow-state (a per-workspace transport fault DEGRADES to a warning, never failing the whole `list`).
 ///
+/// The classic single-name entry point — a thin wrapper over [`list_with`] so the inline tests and the
+/// feature-gated e2e rig keep the `Option<&str>` shape. Production (`app.rs`) calls [`list_with`] with the
+/// full filter, so this shim is compiled only for tests / the `test-fixtures` facade.
+///
 /// # Errors
 /// [`ClientError::NoSuchSkill`] / [`ClientError::AmbiguousName`] when a name filter does not resolve to
 /// exactly one skill; otherwise a read failure.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) fn list(
     ctx: &Ctx<'_>,
     skill: Option<&str>,
+    want_footprint: bool,
+    discover: Option<DiscoveryRoots>,
+    remote: Option<RemoteScope<'_>>,
+) -> Result<ListOutcome, ClientError> {
+    let filter = ListFilter {
+        names: skill.map(|s| vec![s.to_owned()]).unwrap_or_default(),
+        ..ListFilter::default()
+    };
+    list_with(ctx, &filter, want_footprint, discover, remote)
+}
+
+/// Inventory the tracked skills under a full [`ListFilter`] (positional names + `--channel`/`--skill`
+/// selectors), the footprint, and the optional `--remote` catalog.
+///
+/// # Errors
+/// [`ClientError::NoSuchSkill`] when a name selector matches no tracked skill; the uniform not-found when
+/// a `--channel` selector matches no delivered skill; [`ClientError::AmbiguousName`] for the classic
+/// single-name over-match; otherwise a read failure.
+pub(crate) fn list_with(
+    ctx: &Ctx<'_>,
+    filter: &ListFilter,
     want_footprint: bool,
     discover: Option<DiscoveryRoots>,
     remote: Option<RemoteScope<'_>>,
@@ -145,6 +201,10 @@ pub(crate) fn list(
                 .collect()
         })
         .unwrap_or_default();
+    // The last reconcile's per-skill delivery cache — the offline source of the `behind` status and the
+    // `removed-upstream` cause, plus each skill's `via` channels for a `--channel` filter. Best-effort
+    // (absent ⇒ no cache signal; `list` never wedges on the advisory doc).
+    let sync = sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
 
     // Carry the stable skill id alongside each entry — the proposals read route and the follow-state
     // are keyed by id, not name.
@@ -176,6 +236,12 @@ pub(crate) fn list(
             .ok()
             .flatten()
             .and_then(|o| origin_host(&o.origin.source));
+        // The skill's last-delivery cache entry (served version + withdrawn flag) — offline `behind` +
+        // `removed-upstream`.
+        let delivered = workspace_id
+            .as_deref()
+            .and_then(|w| sync.workspaces.get(w))
+            .and_then(|ws| ws.delivered.get(&id_str));
         let (source, status, cause) = derive_columns(
             follow_entry,
             draft,
@@ -184,6 +250,8 @@ pub(crate) fn list(
             workspace_id
                 .as_deref()
                 .is_none_or(|w| credentials.contains_key(w)),
+            delivered,
+            &lock.base_commit,
         );
         tracked.push((
             id_str,
@@ -207,7 +275,9 @@ pub(crate) fn list(
             .then_with(|| a.1.version_id.cmp(&b.1.version_id))
     });
 
-    if let Some(want) = skill {
+    let narrowed = filter.narrows();
+    if let Some(want) = filter.single_name() {
+        // The classic `list <skill>` narrowing: exactly-one gate + the OPEN-proposals annotation.
         let count = tracked.iter().filter(|(_, e)| e.skill == want).count();
         match count {
             0 => {
@@ -236,6 +306,9 @@ pub(crate) fn list(
                 });
             }
         }
+    } else if narrowed {
+        // The multi-name / `--skill` / `--channel` filter: resolve ALL-OR-NONE, keep the union.
+        tracked = apply_filter(tracked, filter, &sync)?;
     }
 
     // The enrolled-state disclosure + the followed bucket, from the same docs the pull engine reads.
@@ -317,26 +390,27 @@ pub(crate) fn list(
         None
     };
 
-    // Discover untracked skills across the baked harness registry — only on a bare sweep (a name-narrowed
-    // `list` is about that one tracked skill) and only when not `--tracked`. Dedups against every tracked
-    // placement so an adopted/followed skill never shows up as "untracked".
-    let untracked = match (&discover, skill) {
-        (Some(roots), None) => discover_untracked(ctx, roots)?,
-        _ => Vec::new(),
+    // Discover untracked skills across the baked harness registry — only on a bare sweep (any filter
+    // narrows to tracked rows) and only when not `--tracked`. Dedups against every tracked placement so an
+    // adopted/followed skill never shows up as "untracked".
+    let untracked = if let (Some(roots), false) = (&discover, narrowed) {
+        discover_untracked(ctx, roots)?
+    } else {
+        Vec::new()
     };
 
     // The `--remote` catalog: for each followed workspace, a catalog read merged with the
     // local follow-state. A per-workspace transport fault degrades to a warning (never fails the `list`).
     let mut warnings: Vec<String> = Vec::new();
-    let remote_available = match (remote, skill) {
+    let remote_available = match (remote, narrowed) {
         // Bare-sweep only, mirroring untracked discovery above: the catalog is a browse of the WHOLE
-        // workspace, so a name-narrowed `list <skill>` skips it. This also keeps `local_versions` complete
-        // (it is captured after the no-op narrowing), so the follow-state merge can never mislabel a
-        // followed skill the narrowing dropped as `Following` when it is really `FollowingBehind`.
-        (Some(scope), None) => build_remote(&scope, &follows, &local_versions, &mut warnings),
-        (Some(_), Some(_)) => {
+        // workspace, so any filter skips it. This also keeps `local_versions` complete (captured after the
+        // no-op narrowing), so the follow-state merge can never mislabel a followed skill the narrowing
+        // dropped as `Following` when it is really `FollowingBehind`.
+        (Some(scope), false) => build_remote(&scope, &follows, &local_versions, &mut warnings),
+        (Some(_), true) => {
             warnings.push(
-                "the remote catalog is listed only on a bare `topos list --remote`, not with a skill filter — skipped".to_owned(),
+                "the remote catalog is listed only on a bare `topos list --remote`, not with a name/channel/skill filter — skipped".to_owned(),
             );
             Vec::new()
         }
@@ -532,16 +606,20 @@ fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientE
 
 /// The SOURCE / STATUS / CAUSE columns for one tracked row, from the offline signals: the follow entry
 /// (following flag + the per-device exclusion marker), the draft flag, an import origin host, the
-/// workspace's friendly label, and whether a workspace credential is held (signed-out detection).
+/// workspace's friendly label, whether a workspace credential is held (signed-out detection), and the
+/// last-delivery cache entry + the locally-applied version (offline `behind` + `removed-upstream`).
 ///
-/// The `behind` status needs the plane's `current` and is decided by the online `--remote` view; offline
-/// a live followed row is reported `current` (or `draft` when it holds local edits).
+/// `behind` reads the last reconcile's served version (the cache) against the local applied version — an
+/// auto follower whose reconcile already applied the update stays `current`; a confirm-each follower with
+/// a pending offer, or any device that has not re-synced since the plane moved, reads `behind`.
 fn derive_columns(
     follow: Option<&FollowEntry>,
     draft: bool,
     origin_host: Option<String>,
     ws_label: Option<&String>,
     has_credential: bool,
+    delivered: Option<&DeliveredSkill>,
+    local_version: &str,
 ) -> (Option<String>, Option<SkillStatus>, Option<DetachCause>) {
     // A purely local, never-followed, non-imported skill carries no columns (its absent workspace already
     // says "local") — leaving the pinned `list` shape byte-identical for that common case.
@@ -553,22 +631,87 @@ fn derive_columns(
         .or_else(|| ws_label.cloned())
         .unwrap_or_else(|| "local".to_owned());
 
-    // CAUSE (only when detached): the per-device exclusion, a person-scoped unfollow, or signed-out —
-    // checked most-specific first.
-    let cause = match follow {
-        Some(f) if f.excluded_here => Some(DetachCause::ExcludedHere),
-        Some(f) if !f.following => Some(DetachCause::Unfollowed),
-        Some(_) if !has_credential => Some(DetachCause::SignedOut),
-        _ => None,
+    // CAUSE (only when detached): an UPSTREAM withdrawal (the skill is still followed, so it outranks the
+    // person/device causes), the per-device exclusion, a person-scoped unfollow, or signed-out — checked
+    // most-specific first.
+    let cause = if delivered.is_some_and(|d| d.withdrawn) {
+        Some(DetachCause::RemovedUpstream)
+    } else {
+        match follow {
+            Some(f) if f.excluded_here => Some(DetachCause::ExcludedHere),
+            Some(f) if !f.following => Some(DetachCause::Unfollowed),
+            Some(_) if !has_credential => Some(DetachCause::SignedOut),
+            _ => None,
+        }
     };
     let status = if cause.is_some() {
         SkillStatus::Detached
     } else if draft {
         SkillStatus::Draft
+    } else if is_behind(delivered, local_version) {
+        SkillStatus::Behind
     } else {
         SkillStatus::Current
     };
     (Some(source), Some(status), cause)
+}
+
+/// Whether the last reconcile served a version this copy has not applied — the offline `behind` signal.
+/// Guards the never-received baseline (an all-zero local version is an unaccepted first receive, not
+/// "behind") and an empty served version (a withdrawn / uncached skill).
+fn is_behind(delivered: Option<&DeliveredSkill>, local_version: &str) -> bool {
+    let Some(d) = delivered else { return false };
+    !d.served_version.is_empty()
+        && !local_version.bytes().all(|b| b == b'0')
+        && d.served_version != local_version
+}
+
+/// Filter the tracked rows to the union of what the [`ListFilter`] names, ALL-OR-NONE: every positional
+/// name and `--skill` selector must match at least one tracked skill (else [`ClientError::NoSuchSkill`]),
+/// and every `--channel` selector must match at least one skill the last delivery cached as delivered via
+/// that channel (else the uniform not-found). The rows are kept in their existing order.
+fn apply_filter(
+    tracked: Vec<(String, SkillEntry)>,
+    filter: &ListFilter,
+    sync: &sync_status::SyncStatus,
+) -> Result<Vec<(String, SkillEntry)>, ClientError> {
+    let mut keep: HashSet<String> = HashSet::new();
+    // Names + `--skill` selectors: matched by skill name.
+    for name in filter.names.iter().chain(filter.skills.iter()) {
+        let matched: Vec<&String> = tracked
+            .iter()
+            .filter(|(_, e)| &e.skill == name)
+            .map(|(id, _)| id)
+            .collect();
+        if matched.is_empty() {
+            return Err(ClientError::NoSuchSkill { name: name.clone() });
+        }
+        keep.extend(matched.into_iter().cloned());
+    }
+    // `--channel` selectors: matched by the last delivery's cached `via` channels.
+    for ch in &filter.channels {
+        let mut matched = false;
+        for (id, e) in &tracked {
+            let via = e
+                .workspace_id
+                .as_deref()
+                .and_then(|w| sync.workspaces.get(w))
+                .and_then(|ws| ws.delivered.get(id))
+                .map(|d| d.via_channels.as_slice())
+                .unwrap_or(&[]);
+            if via.iter().any(|c| c == ch) {
+                keep.insert(id.clone());
+                matched = true;
+            }
+        }
+        if !matched {
+            return Err(crate::resolve::not_found(ch));
+        }
+    }
+    Ok(tracked
+        .into_iter()
+        .filter(|(id, _)| keep.contains(id))
+        .collect())
 }
 
 /// The host of an import source (`github.com/owner/repo` → `github.com`), or `None` for an empty source.
@@ -886,5 +1029,220 @@ mod tests {
             fake.calls.borrow().is_empty(),
             "no catalog read is attempted when narrowed to a skill"
         );
+    }
+
+    /// A local ctx over `layout` — the offline column/filter derivations need no plane.
+    fn local_ctx<'a>(
+        fs: &'a RealFs,
+        ids: &'a RealIds,
+        clock: &'a RealClock,
+        harness: &'a ClaudeCode,
+        plane: &'a InertPlane,
+        follow: &'a InertFollow,
+        layout: &Layout,
+    ) -> Ctx<'a> {
+        Ctx {
+            fs,
+            ids,
+            clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness,
+            plane,
+            follow,
+        }
+    }
+
+    /// Seed one workspace's delivery cache in `sync_status.json` (served version + withdrawn + via).
+    fn seed_delivered(fs: &RealFs, layout: &Layout, ws: &str, entries: &[(&str, DeliveredSkill)]) {
+        crate::sync_status::record(
+            fs,
+            layout,
+            &[(
+                ws.to_owned(),
+                crate::sync_status::WorkspaceSync {
+                    last_delivery_at: Some(1),
+                    staleness_window_ms: 604_800_000,
+                    delivered: entries
+                        .iter()
+                        .map(|(id, d)| ((*id).to_owned(), d.clone()))
+                        .collect(),
+                    ..Default::default()
+                },
+            )],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn offline_behind_and_removed_upstream_come_from_the_delivery_cache() {
+        let home = scratch("cache-cols");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        // Two followed skills (auto), a credential present (so neither is "signed out").
+        lay_skill(&fs, &layout, "s_beh", "beh", VER_A); // local applied @A
+        lay_skill(&fs, &layout, "s_gone", "gone", VER_B);
+        enroll::write_follows_merged(
+            &fs,
+            &layout,
+            &[
+                follow_entry("s_beh", "w_acme", true),
+                follow_entry("s_gone", "w_acme", true),
+            ],
+        )
+        .unwrap();
+        enroll::write_credential(&fs, &layout, "w_acme", "wsc").unwrap();
+        // The cache: `beh` was last served @C (≠ local A → behind); `gone` was withdrawn.
+        seed_delivered(
+            &fs,
+            &layout,
+            "w_acme",
+            &[
+                (
+                    "s_beh",
+                    DeliveredSkill {
+                        served_version: hex(VER_C),
+                        withdrawn: false,
+                        via_channels: vec!["eng".into()],
+                    },
+                ),
+                (
+                    "s_gone",
+                    DeliveredSkill {
+                        withdrawn: true,
+                        ..DeliveredSkill::default()
+                    },
+                ),
+            ],
+        );
+
+        let (ids, clock, harness, plane, follow) = (
+            RealIds,
+            RealClock,
+            ClaudeCode::new(scratch("adapter-cc"), &fs),
+            InertPlane,
+            InertFollow,
+        );
+        let ctx = local_ctx(&fs, &ids, &clock, &harness, &plane, &follow, &layout);
+        let rows = list(&ctx, None, false, None, None).unwrap().data.tracked;
+
+        let beh = rows.iter().find(|e| e.skill == "beh").unwrap();
+        assert_eq!(beh.status, Some(SkillStatus::Behind));
+        assert!(beh.cause.is_none());
+        let gone = rows.iter().find(|e| e.skill == "gone").unwrap();
+        assert_eq!(gone.status, Some(SkillStatus::Detached));
+        assert_eq!(gone.cause, Some(DetachCause::RemovedUpstream));
+    }
+
+    #[test]
+    fn channel_and_skill_selectors_filter_rows_all_or_none() {
+        let home = scratch("filters");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        lay_skill(&fs, &layout, "s_deploy", "deploy", VER_A);
+        lay_skill(&fs, &layout, "s_docs", "docs", VER_B);
+        lay_skill(&fs, &layout, "s_lint", "lint", VER_C);
+        enroll::write_follows_merged(
+            &fs,
+            &layout,
+            &[
+                follow_entry("s_deploy", "w_acme", true),
+                follow_entry("s_docs", "w_acme", true),
+                follow_entry("s_lint", "w_acme", true),
+            ],
+        )
+        .unwrap();
+        enroll::write_credential(&fs, &layout, "w_acme", "wsc").unwrap();
+        // `deploy` + `docs` ride channel `eng`; `lint` rides `release`.
+        seed_delivered(
+            &fs,
+            &layout,
+            "w_acme",
+            &[
+                ("s_deploy", via(&["eng"])),
+                ("s_docs", via(&["eng"])),
+                ("s_lint", via(&["release"])),
+            ],
+        );
+
+        let (ids, clock, harness, plane, follow) = (
+            RealIds,
+            RealClock,
+            ClaudeCode::new(scratch("adapter-f"), &fs),
+            InertPlane,
+            InertFollow,
+        );
+        let ctx = local_ctx(&fs, &ids, &clock, &harness, &plane, &follow, &layout);
+
+        // `--channel eng` keeps deploy + docs, drops lint.
+        let by_channel = list_with(
+            &ctx,
+            &ListFilter {
+                channels: vec!["eng".into()],
+                ..Default::default()
+            },
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+        .data
+        .tracked;
+        let names: Vec<&str> = by_channel.iter().map(|e| e.skill.as_str()).collect();
+        assert_eq!(names, vec!["deploy", "docs"]);
+
+        // `--skill deploy --skill lint` keeps exactly those two (a name selector, union).
+        let by_skill = list_with(
+            &ctx,
+            &ListFilter {
+                skills: vec!["deploy".into(), "lint".into()],
+                ..Default::default()
+            },
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+        .data
+        .tracked;
+        let names: Vec<&str> = by_skill.iter().map(|e| e.skill.as_str()).collect();
+        assert_eq!(names, vec!["deploy", "lint"]);
+
+        // ALL-OR-NONE: an unknown `--skill` refuses the whole invocation.
+        assert!(matches!(
+            list_with(
+                &ctx,
+                &ListFilter {
+                    skills: vec!["deploy".into(), "ghost".into()],
+                    ..Default::default()
+                },
+                false,
+                None,
+                None,
+            ),
+            Err(ClientError::NoSuchSkill { .. })
+        ));
+        // A `--channel` matching no delivered skill is the uniform not-found.
+        assert!(matches!(
+            list_with(
+                &ctx,
+                &ListFilter {
+                    channels: vec!["nope".into()],
+                    ..Default::default()
+                },
+                false,
+                None,
+                None,
+            ),
+            Err(ClientError::TargetNotFound { .. })
+        ));
+    }
+
+    fn via(channels: &[&str]) -> DeliveredSkill {
+        DeliveredSkill {
+            served_version: hex(VER_A),
+            withdrawn: false,
+            via_channels: channels.iter().map(|c| (*c).to_owned()).collect(),
+        }
     }
 }

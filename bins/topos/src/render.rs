@@ -253,6 +253,51 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     out
 }
 
+/// The `keep-as-yours` DESCRIBE's TTY: what the retained copy is, why the team copy is gone, and that
+/// `--yes` re-adopts it as a NEW local skill with no upstream (the draft rides along). Nothing has changed.
+pub(crate) fn keep_as_yours_describe_tty(
+    data: &topos_types::results::KeepAsYoursData,
+    yes_argv: &[String],
+) -> String {
+    use topos_types::results::KeepReason;
+    let why = match data.reason {
+        KeepReason::WithdrawnUpstream => {
+            "the team withdrew it (archived, or its last channel dropped it)"
+        }
+        KeepReason::Detached => "you unfollowed it",
+        KeepReason::RemovedHere => "you removed it from this device",
+    };
+    let mut s = format!("'{}' — {}. Its bytes are kept locally.\n", data.name, why);
+    s.push_str(
+        "Keep it as yours: re-adopt the copy as a NEW local skill with no upstream (the team copy stays \
+         gone; nothing syncs it any more)",
+    );
+    if data.has_draft {
+        s.push_str(" — your local draft rides along");
+    }
+    s.push_str(".\n");
+    s.push_str(&format!("  {}", argv_line(yes_argv)));
+    s
+}
+
+/// The per-row next-actions a bare `update` surfaces: each WITHDRAWN skill points at the `keep-as-yours`
+/// re-fork (`topos add <name> --yes`), so the agent has the paste-ready salvage command inline.
+pub(crate) fn withdrawn_next_actions(data: &PullData) -> Vec<NextAction> {
+    data.skills
+        .iter()
+        .filter(|s| matches!(s.action, topos_types::results::PullAction::Withdrawn))
+        .map(|s| NextAction {
+            code: ActionCode::from("KEEP_AS_YOURS".to_owned()),
+            argv: vec![
+                "topos".to_owned(),
+                "add".to_owned(),
+                s.skill.clone(),
+                "--yes".to_owned(),
+            ],
+        })
+        .collect()
+}
+
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
@@ -1597,8 +1642,9 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             )
         }
         PullAction::Withdrawn => (
-            String::from(
-                "withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally",
+            format!(
+                "withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally (run \
+                 `topos add {name} --yes` to keep it as yours)"
             ),
             Vec::new(),
         ),

@@ -38,6 +38,37 @@ pub(crate) struct WorkspaceSync {
     /// The workspace's staleness window (ms) — a device whose last delivery is older is stale.
     #[serde(default)]
     pub staleness_window_ms: u64,
+    /// The last delivery's per-skill cache — what the plane last SERVED this device (keyed by skill
+    /// id). Additive + cheap: it lets `list` answer OFFLINE two questions the follow-state alone
+    /// cannot — `behind` (the served version differs from the locally-applied one) and
+    /// `removed-upstream` (the skill was withdrawn) — and it records each skill's `via` channels so
+    /// `list --channel <name>` filters offline. Absent keys just narrow what a column can say, exactly
+    /// as the timestamps do; a full reconcile REPLACES this map, so a re-delivered skill self-heals.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delivered: BTreeMap<String, DeliveredSkill>,
+}
+
+/// One skill's last-delivery cache entry (see [`WorkspaceSync::delivered`]). Written by the reconcile,
+/// read only by offline `list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveredSkill {
+    /// The version id (hex) the plane last served — compared to the local applied version to flag
+    /// `behind`. Empty for a withdrawn skill (nothing is served).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub served_version: String,
+    /// Whether upstream WITHDREW the skill at the last reconcile (archived, or its last delivering
+    /// channel dropped it) — the offline source of the `removed-upstream` detach cause.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub withdrawn: bool,
+    /// The channels that deliver this skill (the `via` attribution) — the offline source for
+    /// `list --channel <name>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub via_channels: Vec<String>,
+}
+
+/// serde skip helper — a `false` bool is the common case and stays out of the on-disk bytes.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Read the document, or an empty default when absent. Fail-closed on a newer `schema_version`
@@ -127,6 +158,7 @@ mod tests {
                     last_delivery_at: Some(1_000),
                     last_report_at: Some(1_001),
                     staleness_window_ms: 604_800_000,
+                    ..WorkspaceSync::default()
                 },
             )],
         )
@@ -141,6 +173,7 @@ mod tests {
                     last_delivery_at: Some(2_000),
                     last_report_at: None,
                     staleness_window_ms: 1_000,
+                    ..WorkspaceSync::default()
                 },
             )],
         )
@@ -159,6 +192,7 @@ mod tests {
             last_delivery_at: Some(1_000),
             last_report_at: None,
             staleness_window_ms: 10_000,
+            ..WorkspaceSync::default()
         };
         // Inside the window — not stale; past it — stale.
         assert!(!is_stale(Some(&fresh), 5_000));

@@ -6,20 +6,22 @@
 //! version, and writes the sidecar docs — all staged and published with one directory rename, so it is
 //! all-or-nothing and the source bytes are never touched.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use topos_core::digest::to_hex;
+use topos_core::digest::{FileMode, to_hex};
 use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_harness::DiscoveredPlacement;
 use topos_harness::registry::SkillScope;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, SyncState};
-use topos_types::results::{AddData, SkillOrigin, UntrackedEntry};
+use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
+use crate::enroll;
 use crate::error::ClientError;
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
+use crate::id::SkillId;
 use crate::scan::{self, ScannedBundle};
 use crate::source::RemoteSpec;
 use crate::{doc, logfile, sidecar};
@@ -388,6 +390,214 @@ pub(crate) fn add_remote(
     }
     data.origin = Some(origin);
     Ok(data)
+}
+
+/// The two-phase outcome of an `add <name>` that RE-FORKS a retained withdrawn/detached copy.
+#[derive(Debug)]
+pub(crate) enum KeepAsYoursOutcome {
+    /// Bare `add <name>` — the local-fork preview (nothing changed) + the `--yes` argv.
+    Described {
+        data: KeepAsYoursData,
+        yes_argv: Vec<String>,
+    },
+    /// `add <name> --yes` — the re-forked new local skill (boxed: `AddData` dwarfs the describe variant).
+    Forked(Box<AddData>),
+}
+
+/// If `<name>` resolves to a RETAINED (withdrawn-upstream / detached / removed-here) tracked skill — the
+/// state `withdraw_upstream` / `freeze_detached` / a `remove` exclusion leave, where the sidecar keeps the
+/// bytes (+ any draft snapshot) but the follow entry no longer delivers here — re-adopt it as a **new
+/// local skill** with no upstream ("keep it as yours"): the team copy stays archived/detached, the local
+/// draft rides along, and the old (ghost) follow entry + sidecar are retired so `list` stops showing it.
+///
+/// Returns `Ok(None)` for a name that is NOT a retained tracked copy (a LIVE tracked skill, a purely-local
+/// skill, or an untracked name) — the caller falls through to the ordinary `add <name>` adopt, which keeps
+/// the `ALREADY_TRACKED` / discovery behavior.
+///
+/// # Errors
+/// A store / io failure; a resolve error other than not-found/ambiguous (which fall through as `Ok(None)`).
+pub(crate) fn keep_as_yours(
+    ctx: &Ctx<'_>,
+    name: &str,
+    yes: bool,
+) -> Result<Option<KeepAsYoursOutcome>, ClientError> {
+    // Resolve to a tracked skill; a miss / ambiguity is not a retained copy — let the normal path answer.
+    let (sid, lock) = match super::resolve_skill(ctx, name) {
+        Ok(v) => v,
+        Err(ClientError::NoSuchSkill { .. } | ClientError::AmbiguousName { .. }) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    // Only a FOLLOWED skill can be withdrawn/detached — a purely-local (genesis) skill is not a fork case.
+    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
+        .map(|f| f.follows)
+        .unwrap_or_default();
+    let Some(entry) = follows.iter().find(|f| f.skill_id == sid.as_str()) else {
+        return Ok(None);
+    };
+    // Placement state: a withdrawal / exclusion CLEANED the agent dirs; a detach (unfollow) LEFT them.
+    let sp = ctx.layout.published(&sid);
+    let placements: Vec<String> = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)?
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    let present = placements.iter().any(|p| ctx.fs.exists(Path::new(p)));
+
+    // The retained reason — or NOT a fork case (a live followed skill stays the ordinary already-tracked
+    // answer; `!following` outranks the rest, then the per-device exclusion, then an upstream withdrawal).
+    let reason = if !entry.following {
+        KeepReason::Detached
+    } else if entry.excluded_here {
+        KeepReason::RemovedHere
+    } else if !present {
+        KeepReason::WithdrawnUpstream
+    } else {
+        return Ok(None);
+    };
+
+    let Some(dest) = placements.first().cloned() else {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{name}' has no recorded placement to re-fork — adopt it by path instead"
+        )));
+    };
+    let dest = PathBuf::from(dest);
+    let has_draft = fork_has_draft(ctx, &sp, &lock, present)?;
+
+    if !yes {
+        return Ok(Some(KeepAsYoursOutcome::Described {
+            data: KeepAsYoursData {
+                name: name.to_owned(),
+                workspace_id: Some(entry.workspace_id.clone()),
+                reason,
+                has_draft,
+            },
+            yes_argv: vec![
+                "topos".to_owned(),
+                "add".to_owned(),
+                name.to_owned(),
+                "--yes".to_owned(),
+            ],
+        }));
+    }
+
+    // ---- APPLY (`--yes`) ----
+    // 1. When the dirs were cleaned (withdrawn / removed here), re-render the retained tree (the draft
+    //    snapshot if one rides along, else the base) back into the former placement path. A DETACHED copy
+    //    already has its bytes on disk, so it is adopted in place.
+    if !present {
+        render_retained_into(ctx, &sp, &lock, &dest)?;
+    }
+    // 2. Retire the old sidecar record + follow entry BEFORE re-adopting `dest` — else `add`'s
+    //    already-tracked guard would refuse the still-tracked path.
+    retire_tracked(ctx, &sid)?;
+    // 3. Adopt `dest` fresh: a new local skill id, named `<name>`, with NO upstream.
+    let data = add_with_name(ctx, &dest, Some(name))?;
+    Ok(Some(KeepAsYoursOutcome::Forked(Box::new(data))))
+}
+
+/// Whether a local draft rides along into the fork: for a present (detached) copy, the live bytes differ
+/// from the base digest; for a cleaned copy, a draft snapshot was retained in the store at withdrawal.
+fn fork_has_draft(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    lock: &Lock,
+    present: bool,
+) -> Result<bool, ClientError> {
+    if present {
+        let Some(placement) = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)?
+            .and_then(|m| m.placements.into_iter().next())
+        else {
+            return Ok(false);
+        };
+        let src = Path::new(&placement);
+        if !src.exists() {
+            return Ok(false);
+        }
+        return Ok(match scan::scan(src) {
+            Ok(b) => to_hex(&b.bundle_digest) != lock.bundle_digest,
+            Err(_) => false,
+        });
+    }
+    let store = Store::open(&sp.store)?;
+    let base = super::parse_hex32(&lock.base_commit)?;
+    Ok(retained_head(&store, base)?.is_some())
+}
+
+/// Render the retained tree (the draft snapshot if one rides along, else the base) back into `dest` — the
+/// bytes a withdrawal/exclusion cleaned off disk but kept in the sidecar store. The dest is cleared then
+/// recreated, so a stray remnant can never shadow the fork.
+fn render_retained_into(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    lock: &Lock,
+    dest: &Path,
+) -> Result<(), ClientError> {
+    let store = Store::open(&sp.store)?;
+    let base = super::parse_hex32(&lock.base_commit)?;
+    let head = retained_head(&store, base)?.unwrap_or(base);
+    let leaves = store
+        .read_tree_structure(head)
+        .map_err(|e| ClientError::Corrupt(format!("read retained tree: {e:?}")))?;
+    if ctx.fs.exists(dest) {
+        ctx.fs.remove_dir_all(dest)?;
+    }
+    ctx.fs.create_dir_all(dest)?;
+    for leaf in &leaves {
+        let (bytes, _sha) = store
+            .read_git_blob_verified(leaf.git_oid)
+            .map_err(|e| ClientError::Corrupt(format!("read retained blob: {e:?}")))?;
+        let mut p = dest.to_path_buf();
+        for comp in leaf.path.split('/') {
+            p.push(comp);
+        }
+        if let Some(parent) = p.parent() {
+            ctx.fs
+                .create_dir_all(parent)
+                .map_err(|e| ClientError::Io(format!("create {}: {e}", parent.display())))?;
+        }
+        let executable = matches!(leaf.mode, FileMode::Executable);
+        ctx.fs.write_staged(&p, &bytes, executable)?;
+    }
+    Ok(())
+}
+
+/// The retained head: the single draft snapshot parented on `base` (what a withdrawal snapshots), else
+/// `None` (the base is the retained tree). A rare multi-snapshot history at one base falls back to `None`
+/// (the base bytes are always a valid "keep as yours") rather than guessing which draft is current.
+fn retained_head(store: &Store, base: [u8; 32]) -> Result<Option<[u8; 32]>, ClientError> {
+    let versions = store
+        .list_versions()
+        .map_err(|e| ClientError::Corrupt(format!("list retained versions: {e:?}")))?;
+    let mut drafts: Vec<[u8; 32]> = Vec::new();
+    for v in versions {
+        if v == base {
+            continue;
+        }
+        let Ok(node) = store.read_commit_meta(v) else {
+            continue;
+        };
+        if node.parents.as_slice() == [base]
+            && node.message == super::sync_engine::DRAFT_SNAPSHOT_MESSAGE
+        {
+            drafts.push(v);
+        }
+    }
+    match drafts.as_slice() {
+        [one] => Ok(Some(*one)),
+        _ => Ok(None),
+    }
+}
+
+/// Retire the retained skill's sidecar record + follow entry — the `keep-as-yours` fork re-adopts the
+/// bytes as a new local skill, so the old (ghost) entry must go before the re-adopt (else the
+/// already-tracked guard refuses the path) and so `list` stops showing a detached ghost afterward.
+fn retire_tracked(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
+    enroll::remove_follow(ctx.fs, &ctx.layout, sid.as_str())?;
+    let skill_dir = ctx.layout.skill_dir(sid);
+    if ctx.fs.exists(&skill_dir) {
+        ctx.fs.remove_dir_all(&skill_dir)?;
+    }
+    Ok(())
 }
 
 /// Verbatim guidance when a destination harness has no dir for the chosen scope.

@@ -37,8 +37,8 @@ mod sync_engine;
 mod unfollow;
 
 pub(crate) use add::{
-    AddRemoteOpts, add, add_remote, add_with_name, resolve_add_target, split_target,
-    tracked_skill_at,
+    AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_with_name, keep_as_yours,
+    resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use auth::{
     AuthConnectors, AuthLoginData, AuthLoginOutcome, AuthLoginPending, AuthLogoutData,
@@ -50,7 +50,11 @@ pub(crate) use follow::{
     FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, follow,
 };
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
-pub(crate) use list::{DiscoveryRoots, ListOutcome, RemoteScope, list};
+pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
+// The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);
+// production uses `list_with`, so its re-export is gated to stay warning-clean in a plain build.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) use list::list;
 pub(crate) use unfollow::{UnfollowApplied, UnfollowDescribe};
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
@@ -66,7 +70,7 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
-    quiet_hook_lines, quiet_soft_failure, reset,
+    quiet_hook_lines, quiet_soft_failure, reset, update_selective,
 };
 pub(crate) use remove::{RemoveConnectors, RemoveOutcome, remove};
 pub(crate) use revert::revert;
@@ -83,15 +87,6 @@ use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::sidecar::SkillPaths;
 use crate::{doc, enroll};
-
-/// A MARKED SEAM: a verb path that parses today but whose full behavior (resolution grammar, describe /
-/// `--yes` two-phase flow, or a new server call) lands in a later leg. Returns a typed `INVALID_ARGUMENT`
-/// refusal so the caller gets an honest answer, and the later leg finds every seam by grepping `not_yet(`.
-pub(crate) fn not_yet(what: &str) -> ClientError {
-    ClientError::InvalidArgument(format!(
-        "`{what}` is recognized but not wired yet — coming with the full verb grammar"
-    ))
-}
 
 /// Resolve a skill name to its `(id, lock)` across the tracked skills, WITHOUT a workspace filter — the
 /// common case (the local verbs that do not act in a workspace: `add`, `log`, `diff`, `unfollow`, `pull`,
