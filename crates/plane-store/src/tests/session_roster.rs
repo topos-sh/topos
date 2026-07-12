@@ -138,7 +138,7 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
                 SessionInviteRole::Member,
                 CLOUD,
                 T0,
-            , NOW)
+            NOW)
             .await
             .unwrap();
         let SessionInviteOutcome::Denied(inv_reason) = inv else {
@@ -270,8 +270,8 @@ async fn all_four_session_ops_deny_on_self_host(pool: PgPool) {
             &["a@x.com".to_owned()],
             SessionInviteRole::Member,
             sh,
-            T0
-        , NOW)
+            T0,
+        NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied(_)
@@ -312,8 +312,8 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             &["a@x.com".to_owned()],
             SessionInviteRole::Member,
             CLOUD,
-            T0
-        , NOW)
+            T0,
+        NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("request_id is not a canonical UUID")
@@ -353,8 +353,8 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             &["other@x.com".to_owned()],
             SessionInviteRole::Member,
             CLOUD,
-            T0
-        , NOW)
+            T0,
+        NOW)
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("op id reused with a different request")
@@ -976,8 +976,8 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             &emails,
             SessionInviteRole::Member,
             CLOUD,
-            T0
-        , NOW),
+            T0,
+        NOW),
         a.invite_members_session(
             &w,
             &rid,
@@ -985,8 +985,8 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             &emails,
             SessionInviteRole::Member,
             CLOUD,
-            T0
-        , NOW),
+            T0,
+        NOW),
     );
     let tok = |o: SessionInviteOutcome| match o {
         SessionInviteOutcome::Invited {

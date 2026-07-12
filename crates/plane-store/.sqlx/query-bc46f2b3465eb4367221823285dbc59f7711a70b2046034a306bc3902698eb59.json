@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM roster WHERE workspace_id = $1 AND principal = $2",
+  "query": "DELETE FROM current WHERE workspace_id = $1 AND skill_id = $2",
   "describe": {
     "columns": [],
     "parameters": {
@@ -11,5 +11,5 @@
     },
     "nullable": []
   },
-  "hash": "e1b08005e4918332c0c646aa3ba85ecf15a1c2fca091efa9518a211b5c38bf72"
+  "hash": "bc46f2b3465eb4367221823285dbc59f7711a70b2046034a306bc3902698eb59"
 }

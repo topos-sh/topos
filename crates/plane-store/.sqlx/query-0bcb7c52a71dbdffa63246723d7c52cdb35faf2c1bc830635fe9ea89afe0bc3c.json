@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.skill_id      AS \"skill_id!\",\n                   c.commit_id     AS \"commit_id!: Vec<u8>\",\n                   c.epoch         AS \"epoch!: i64\",\n                   c.seq           AS \"seq!: i64\",\n                   c.updated_at    AS \"updated_at!: i64\",\n                   cat.name         AS \"name?\",\n                   cat.status       AS \"status?\",\n                   cat.display_name AS \"display_name?\",\n                   sc.bundle_digest AS \"bundle_digest?: Vec<u8>\"\n            FROM current c\n            JOIN skill_commit sc ON sc.workspace_id = c.workspace_id AND sc.commit_id = c.commit_id\n            LEFT JOIN catalog cat ON cat.workspace_id = c.workspace_id AND cat.skill_id = c.skill_id\n            WHERE c.workspace_id = $1\n            ORDER BY c.skill_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "skill_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id!: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 2,
+        "name": "epoch!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "seq!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "updated_at!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "display_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "bundle_digest?: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0bcb7c52a71dbdffa63246723d7c52cdb35faf2c1bc830635fe9ea89afe0bc3c"
+}

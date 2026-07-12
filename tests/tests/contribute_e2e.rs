@@ -333,29 +333,45 @@ fn a_mismatched_approve_digest_is_refused() {
     );
 }
 
-// ── scenario 6: under review_required, a DIRECT publish fails typed (APPROVAL_REQUIRED) ─────────────────
+// ── scenario 6: under review_required, a plain member's DIRECT publish DOWNGRADES to a proposal ─────────
 
 #[test]
-fn a_direct_publish_under_review_required_is_typed_refused() {
-    let plane = start_plane("approvalreq");
+fn a_member_direct_publish_on_a_reviewed_bundle_downgrades_to_a_proposal() {
+    let plane = start_plane("downgrade");
     set_review_required(&plane, true);
-    let pub_h = drafting_publisher(&plane, "approvalreq");
+    let pub_h = drafting_publisher(&plane, "downgrade");
 
-    // A direct publish is refused closed — the verb surfaces the `publish --propose` next-action; it never
-    // auto-flips to a proposal.
+    // A plain member's DIRECT publish (no `--propose`) is DOWNGRADED to a proposal IN-TRANSACTION — the
+    // client surfaces the NEEDS_REVIEW outcome as `Proposed` (never an error), and `current` does not move.
     let digest = pub_h.draft_digest();
-    let err = pub_h
+    let proposal = match pub_h
         .publish(false, &approve_token(SKILL, &digest))
-        .expect_err("review_required refuses a direct publish");
-    assert!(
-        err.contains("review") || err.contains("propose"),
-        "APPROVAL_REQUIRED surfaces the propose next-action: {err}"
+        .expect("a direct publish on a reviewed bundle downgrades, it does not error")
+    {
+        PublishResult::Proposed(d) => d.proposal,
+        other => panic!("expected a downgraded proposal, got {other:?}"),
+    };
+
+    // The follower does NOT receive new bytes — `current` is frozen at the genesis (1,1).
+    let follower_before = follower("downgrade-f0");
+    let pulled = follower_before.run_pull(&plane.base_url, Scope::AllFollowed);
+    assert_eq!(pulled.skills[0].applied, Generation { epoch: 1, seq: 1 });
+
+    // A DISTINCT reviewer approves the downgraded proposal (four-eyes satisfied) — `current` advances.
+    let reviewer = enrolled_reviewer(&plane, "downgrade-rev");
+    let review = reviewer
+        .review(&proposal, true)
+        .expect("a different reviewer may approve the downgraded proposal");
+    assert_eq!(
+        review.current_generation,
+        Some(Generation { epoch: 1, seq: 2 })
     );
 
-    // Nothing ingested / moved.
-    let follower = follower("approvalreq-f");
-    let pulled = follower.run_pull(&plane.base_url, Scope::AllFollowed);
-    assert_eq!(pulled.skills[0].applied, Generation { epoch: 1, seq: 1 });
+    // Now a follower applies the reviewed candidate (the downgrade reached the team via review).
+    let follower_after = follower("downgrade-f1");
+    let pulled = follower_after.run_pull(&plane.base_url, Scope::AllFollowed);
+    assert_eq!(pulled.skills[0].applied, Generation { epoch: 1, seq: 2 });
+    assert_eq!(follower_after.placement_files(SKILL), expected(DRAFT));
 }
 
 // ── scenario 7: four-eyes — a proposer cannot self-approve under review_required ────────────────────────

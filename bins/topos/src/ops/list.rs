@@ -558,6 +558,8 @@ mod tests {
     fn catalog_entry(skill_id: &str, version: &str) -> WireSkillIndexEntry {
         WireSkillIndexEntry {
             skill_id: skill_id.to_owned(),
+            name: skill_id.to_owned(),
+            status: "active".to_owned(),
             version_id: hex(version),
             bundle_digest: hex(DIGEST),
             generation: Generation { epoch: 1, seq: 1 },

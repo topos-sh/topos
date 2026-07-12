@@ -113,6 +113,9 @@ fn start_plane(tag: &str) -> Plane {
                     genesis_files(),
                     AUTHOR,
                     MSG,
+                    // A real publish carries the folder name — surface it so the follower's local skill
+                    // name matches SKILL (else the offer falls back to the minted catalog name).
+                    Some(SKILL),
                     AT,
                     NOW,
                 )
@@ -270,6 +273,7 @@ fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
                 },
             },
             AT,
+            NOW,
         ))
         .expect("roster_remove runs");
     assert!(

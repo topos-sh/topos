@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_skill_state (workspace_id, device_key_id, skill_id, applied_commit, reported_at) SELECT $1, $2, r.skill_id, r.applied_commit, $3 FROM UNNEST($4::TEXT[], $5::BYTEA[]) AS r(skill_id, applied_commit) JOIN catalog cat ON cat.workspace_id = $1 AND cat.skill_id = r.skill_id ON CONFLICT (workspace_id, device_key_id, skill_id) DO UPDATE SET applied_commit = excluded.applied_commit, reported_at = excluded.reported_at WHERE device_skill_state.detached = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "TextArray",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a40a9ac8c3354bc954ec1244d5d8c660424c0a2921020758e07e815e610ef1c7"
+}

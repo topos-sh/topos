@@ -92,6 +92,9 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
                 genesis_files(),
                 AUTHOR,
                 MSG,
+                // A real publish carries the folder name — surface it so the offer + the follower's local
+                // skill name match SKILL (else the offer would fall back to the minted catalog name).
+                Some(SKILL),
                 AT,
                 NOW,
             )

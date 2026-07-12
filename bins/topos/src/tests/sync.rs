@@ -622,6 +622,7 @@ fn pull_name_fallback_reaches_a_skill_literally_named_with_a_hex_at_suffix() {
         &rig.ctx(&inert_p, &inert_f),
         Some("docs@abcdef12".to_owned()),
         false,
+        None,
     )
     .unwrap();
     assert_eq!(out.data.skills.len(), 1, "the @-named skill resolved");
@@ -631,6 +632,7 @@ fn pull_name_fallback_reaches_a_skill_literally_named_with_a_hex_at_suffix() {
         &rig.ctx(&inert_p, &inert_f),
         Some("nope@abcdef12".to_owned()),
         false,
+        None,
     ) {
         Ok(_) => panic!("an untracked name must not resolve"),
         Err(e) => e,
@@ -659,6 +661,7 @@ fn pull_name_fallback_keeps_the_go_back_primary() {
         &rig.ctx(&plane, &foll),
         Some(format!("{name}@{}", to_hex(&genesis))),
         false,
+        None,
     )
     .unwrap();
     assert_eq!(out.data.skills[0].action, PullAction::Held);

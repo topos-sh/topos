@@ -122,6 +122,10 @@ impl Authority {
     ///
     /// # Errors
     /// As [`publish`](Self::publish); [`AuthorityError::RejectedUpload`] if the candidate is malformed.
+    /// `display_name` is the advisory folder name a REAL publish carries (it becomes the catalog's
+    /// `display_name`, and — through the `COALESCE(display_name, name, …)` cascade — the label an invite
+    /// offer surfaces + the follower's local skill name). `None` leaves it unset (the offer then falls back
+    /// to the minted catalog name).
     #[allow(clippy::too_many_arguments)]
     pub async fn seed_published_genesis(
         &self,
@@ -132,6 +136,7 @@ impl Authority {
         files: Vec<crate::UploadedFile>,
         author: &str,
         message: &str,
+        display_name: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
@@ -146,7 +151,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, auth, None, None, created_at, now)
+        self.publish(ws, skill, op_id, candidate, auth, display_name, None, created_at, now)
             .await
     }
 

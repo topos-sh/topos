@@ -406,7 +406,7 @@ mod retry_classification_tests {
     /// The SERIALIZABLE runner retries a `23505` on a CONVERGENT constraint — the two idempotency-key PKs
     /// (`op_receipts` / `workspace_events`) and the one-open-proposal partial-unique (`proposals_one_open`) —
     /// so a concurrent same-`op_id` receipt sibling or same-candidate proposer converges to the winner's
-    /// outcome rather than surfacing a 500 — but NEVER on an ordinary unique violation (e.g. `roster_pkey`), a
+    /// outcome rather than surfacing a 500 — but NEVER on an ordinary unique violation (e.g. `catalog_pkey`), a
     /// real business/integrity duplicate that must not be silently retried. Proven against real Postgres
     /// duplicate-key errors. Raw `sqlx::query` (not `query!`), so it adds nothing to the `.sqlx` drift surface.
     #[sqlx::test]
@@ -481,17 +481,19 @@ mod retry_classification_tests {
             "a 23505 on genesis_requests_pkey must be retryable"
         );
 
-        // roster_pkey → an ordinary unique violation the runner must NOT retry.
-        let roster =
-            "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ('w_a', 's_a', 'p_a')";
-        sqlx::query(roster)
+        // catalog_pkey → an ordinary unique violation the runner must NOT retry (the per-skill `roster`
+        // table that once stood in here was dropped when channels landed; the catalog PK is the same
+        // shape — a real integrity duplicate, not a convergent idempotency key).
+        let catalog = "INSERT INTO catalog (workspace_id, skill_id, name, status, created_at) \
+            VALUES ('w_a', 's_a', 's-a', 'active', 'seed')";
+        sqlx::query(catalog)
             .execute(&pool)
             .await
-            .expect("first roster insert");
-        let dup = sqlx::query(roster)
+            .expect("first catalog insert");
+        let dup = sqlx::query(catalog)
             .execute(&pool)
             .await
-            .expect_err("a duplicate roster row must raise a unique violation");
+            .expect_err("a duplicate catalog row must raise a unique violation");
         assert!(
             !is_serialization_failure_sqlx(&dup),
             "a 23505 on an ordinary constraint must NOT be retried"

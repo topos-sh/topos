@@ -872,11 +872,12 @@ async fn a_non_member_principal_cannot_reject(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_review_required_loop_direct_is_approval_required_propose_needs_review_approve_ok(
+async fn the_review_required_loop_direct_downgrades_propose_needs_review_approve_ok(
     pool: PgPool,
 ) {
-    // Under review_required a DIRECT publish is APPROVAL_REQUIRED (the dead-end), an explicit --propose is
-    // NEEDS_REVIEW (the remedy), and a second-actor approve promotes — never confusing the two outcomes.
+    // Under review_required a plain MEMBER's DIRECT publish is DOWNGRADED to a proposal (NEEDS_REVIEW with a
+    // `downgraded` detail, current unmoved), an explicit --propose is NEEDS_REVIEW too, and a second-actor
+    // approve promotes — the direct publish is no longer a dead-end, it reroutes to the same review queue.
     let fx = Fixture::new(pool, "pr-rr-loop").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let author = dev_key(44);
@@ -901,7 +902,7 @@ async fn the_review_required_loop_direct_is_approval_required_propose_needs_revi
     )
     .await;
     let g = current_commit(&fx, &w, &s).await;
-    // A non-genesis DIRECT publish ⇒ APPROVAL_REQUIRED (the gate; uploads nothing readable, current unmoved).
+    // A non-genesis DIRECT publish by a plain member ⇒ DOWNGRADED to a proposal (current unmoved).
     let (staged, device) = prepare(
         &fx,
         &author,
@@ -921,14 +922,24 @@ async fn the_review_required_loop_direct_is_approval_required_propose_needs_revi
         &staged,
         &device,
         None,
+        None,
         CREATED_AT,
         NOW,
     )
     .await
     .unwrap();
-    assert_eq!(direct.outcome, TerminalOutcome::ApprovalRequired);
+    assert_eq!(direct.outcome, TerminalOutcome::NeedsReview);
+    assert_eq!(
+        direct
+            .details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the direct publish reroutes to a proposal, marked downgraded"
+    );
     assert_eq!(current_commit(&fx, &w, &s).await, g);
-    // The remedy: an explicit --propose ⇒ NEEDS_REVIEW.
+    // The explicit --propose ⇒ NEEDS_REVIEW (the same outcome, arrived at deliberately).
     let (p, cp, digest) = do_propose(
         &fx,
         &author,
@@ -1017,6 +1028,7 @@ async fn a_publish_by_a_non_member_principal_is_denied_and_records_nothing_reada
         &staged,
         &device,
         None,
+        None,
         CREATED_AT,
         NOW,
     )
@@ -1079,6 +1091,7 @@ async fn a_publish_cannot_adopt_another_skills_commit(pool: PgPool) {
         &y,
         &staged,
         &device,
+        None,
         None,
         CREATED_AT,
         NOW,

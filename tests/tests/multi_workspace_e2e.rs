@@ -150,6 +150,11 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
             s.files,
             AUTHOR,
             MSG,
+            // A real publish carries the folder name. Surface the offered name (else the skill id) as the
+            // catalog display name, so the follower's local skill name is what each scenario approves by —
+            // the invite's `offered_name` no longer wins the offer for a PUBLISHED skill (the catalog
+            // label does), so it must ride the genesis publish to reach the follower.
+            s.offered_name.or(Some(s.skill)),
             AT,
             NOW,
         )

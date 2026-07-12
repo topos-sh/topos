@@ -674,11 +674,15 @@ async fn a_two_parent_merge_is_denied(pool: PgPool) {
     assert_eq!(r.outcome, TerminalOutcome::Denied);
 }
 
-/// The review-required gate: a direct publish preflight short-circuits to APPROVAL_REQUIRED having ingested
-/// nothing; and the in-transaction read is authoritative if a migrate somehow happened first.
+/// The protection gate REROUTES, it does not refuse: a plain MEMBER's direct publish on an
+/// effectively-REVIEWED bundle (here the workspace `review_required` default, no per-skill pin) is
+/// DOWNGRADED in-transaction to a proposal — NEEDS_REVIEW carrying a `downgraded` detail, with `current`
+/// frozen, an open `proposals` row opened, and the migrate lease released. Genesis always LANDS directly
+/// (a proposal against a base that does not exist is meaningless, and the role matrix gives members
+/// brand-new skills), and a same-`op_id` retry replays the downgraded receipt byte-for-byte.
 #[sqlx::test]
-async fn review_required_gates_a_direct_publish(pool: PgPool) {
-    let fx = Fixture::new(pool, "sc-gate").await;
+async fn a_member_direct_publish_on_a_reviewed_bundle_downgrades_to_a_proposal(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sc-downgrade").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(21);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
@@ -689,7 +693,7 @@ async fn review_required_gates_a_direct_publish(pool: PgPool) {
         .unwrap();
 
     // Genesis BYPASSES the gate (someone must create the first version; it cannot be proposed against a
-    // base that does not exist) — even under review-required, it promotes.
+    // base that does not exist) — even under review-required, it LANDS directly at (1,1).
     let g = publish(
         &fx,
         &key,
@@ -702,6 +706,7 @@ async fn review_required_gates_a_direct_publish(pool: PgPool) {
     )
     .await;
     assert!(g.is_ok());
+    assert_eq!(g.current, Some(gn(1, 1)));
     let c0 = fx
         .authority
         .db()
@@ -710,54 +715,79 @@ async fn review_required_gates_a_direct_publish(pool: PgPool) {
         .unwrap()
         .unwrap();
 
-    // A NON-genesis direct publish IS gated. Preflight: APPROVAL_REQUIRED, having ingested/migrated nothing.
-    let op_id = op("40000000-0000-4000-8000-000000000001");
-    let pre = crate::set_current::publish_preflight(
-        &fx.authority,
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &op_id,
-        None,
-        None,
-        gn(1, 1),
-        CREATED_AT,
-    )
-    .await
-    .unwrap();
-    assert_eq!(pre.unwrap().outcome, TerminalOutcome::ApprovalRequired);
-
-    // The in-txn gate is authoritative too: a direct publish that DID migrate first still fails closed, and
-    // the pointer does not move.
-    let (ss, ds) = prepare(
+    // A NON-genesis direct publish by a plain MEMBER on the reviewed bundle DOWNGRADES to a proposal.
+    let child_op = "40000000-0000-4000-8000-000000000001";
+    let r = publish(
         &fx,
         &key,
         "dk_a",
         &w,
         &s,
-        DeviceOp::PublishDirect,
-        "40000000-0000-4000-8000-000000000002",
+        child_op,
         child(c0, vec![file("f", b"1")]),
         gn(1, 1),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
-    assert_eq!(r.outcome, TerminalOutcome::ApprovalRequired);
+    assert_eq!(r.outcome, TerminalOutcome::NeedsReview);
+    assert_eq!(
+        r.details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the receipt marks the publish downgraded to a proposal"
+    );
+    // `current` never moved — the pointer is frozen at the genesis version, generation unchanged.
     assert_eq!(
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
         Some(c0)
     );
+    assert_eq!(
+        fx.authority
+            .db()
+            .read_current_generation(&w, &s)
+            .await
+            .unwrap(),
+        Some(gn(1, 1))
+    );
+    // An open proposal was opened for the downgraded candidate, and its migrate lease is released.
+    assert_eq!(
+        open_proposal_count(&pool, w.as_str(), s.as_str()).await,
+        1,
+        "the downgrade opens exactly one open proposal"
+    );
+    assert_eq!(
+        lease_count(&pool, w.as_str(), child_op).await,
+        0,
+        "the migrate lease is released after the downgrade"
+    );
+
+    // A same-op_id retry replays the downgraded receipt byte-for-byte (and opens no second proposal).
+    let retry = publish(
+        &fx,
+        &key,
+        "dk_a",
+        &w,
+        &s,
+        child_op,
+        child(c0, vec![file("f", b"1")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(retry, r, "the downgraded receipt replays byte-identically");
+    assert_eq!(
+        open_proposal_count(&pool, w.as_str(), s.as_str()).await,
+        1,
+        "the replay opens no second proposal"
+    );
 }
 
 /// A REVOKED device's genuinely FRESH write is DENIED at the shared `resolve_device_op` front door —
-/// SYNTHESIZED, never a durable receipt — uniformly across every pre-transaction path, INCLUDING the
-/// review-required preflight (before this was fixed, the preflight persisted an `APPROVAL_REQUIRED` row
-/// for the revoked device, letting a de-authorized principal grow `op_receipts` unbounded). The revoked
-/// device is admitted only to REPLAY a receipt it minted while authorized — pinned by the sibling OK-replay
-/// assertion below.
+/// SYNTHESIZED, never a durable receipt — uniformly across every pre-transaction path. The membership
+/// front-door check runs BEFORE the in-transaction protection gate could ever downgrade the publish to a
+/// proposal, so a de-authorized principal grows no `op_receipts` (and mints no `proposals`) row at all.
+/// The revoked device is admitted only to REPLAY a receipt it minted while authorized — pinned by the
+/// sibling OK-replay assertion below.
 #[sqlx::test]
 async fn a_revoked_device_fresh_write_is_denied_but_still_replays_a_stored_receipt(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "sc-gate-revoked").await;
@@ -794,12 +824,12 @@ async fn a_revoked_device_fresh_write_is_denied_but_still_replays_a_stored_recei
         .await
         .unwrap()
         .unwrap();
-    // Turn review-required ON so a live fresh child publish WOULD mint a durable APPROVAL_REQUIRED — the
-    // exact row the pre-fix revoked device could grow.
+    // Turn review-required ON so a live fresh child publish by a MEMBER WOULD downgrade to a proposal
+    // (a durable NEEDS_REVIEW receipt + a proposals row) — the exact rows a de-authorized device must not grow.
     fx.authority.set_review_required(&w, true).await.unwrap();
 
-    // Revoke the device, then drive a FRESH child publish. It is DENIED (not APPROVAL_REQUIRED), the pointer
-    // does not move, and NOTHING durable is minted — the revoked device gains no audit-row growth vector.
+    // Revoke the device, then drive a FRESH child publish. It is DENIED at the front door (never downgraded),
+    // the pointer does not move, and NOTHING durable is minted — the revoked device gains no audit-row vector.
     fx.authority.db().revoke_device(&w, "dk_a").await.unwrap();
     let fresh_op = "52000000-0000-4000-8000-000000000001";
     let r = fx
@@ -857,19 +887,24 @@ async fn a_revoked_device_fresh_write_is_denied_but_still_replays_a_stored_recei
     assert_eq!(replay.current, g.current);
 }
 
-/// Once `review_required` is MUTABLE (the public set-policy op exists), a gated direct publish must REPLAY
-/// its original `APPROVAL_REQUIRED` even when the policy is turned OFF between a lost-ack and a same-`op_id`
-/// retry. The preflight gate binds `commit = None`, so without the pre-txn replay the retry would fall
-/// through to the promote path, whose commit-comparison replay would burn it as `OP_ID_REUSED`. The pointer
-/// never moves, and a FRESH op under the now-off policy is NOT gated (the replay is op-scoped).
+/// A reviewer|owner direct publish on an effectively-REVIEWED bundle LANDS directly — the protected-branch
+/// model: the protection gate downgrades only a plain MEMBER, and lands reviewer+ writes outright. The
+/// pointer advances (no proposal is opened).
 #[sqlx::test]
-async fn a_gated_publish_replays_approval_required_across_a_policy_flip(pool: PgPool) {
-    let fx = Fixture::new(pool, "sc-gate-flip").await;
+async fn a_reviewer_direct_publish_on_a_reviewed_bundle_lands_directly(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sc-reviewer-lands").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(23);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+    // `register` seats a plain member; upgrade the SAME seat to reviewer, then turn review-required ON.
+    fx.authority
+        .db()
+        .seed_workspace_member(&w, &prin("p_dev"), "reviewer", "confirmed")
+        .await
+        .unwrap();
+    fx.authority.set_review_required(&w, true).await.unwrap();
 
-    // Genesis (bypasses the gate) so a child publish has a base.
+    // Genesis (lands), then a reviewer's direct CHILD publish LANDS directly — no downgrade.
     let g = publish(
         &fx,
         &key,
@@ -889,87 +924,43 @@ async fn a_gated_publish_replays_approval_required_across_a_policy_flip(pool: Pg
         .await
         .unwrap()
         .unwrap();
-
-    // Review ON (via the new PUBLIC op): the preflight gates op_id X → APPROVAL_REQUIRED (commit/digest None).
-    let op_id = op("41000000-0000-4000-8000-000000000001");
-    fx.authority.set_review_required(&w, true).await.unwrap();
-    let pre1 = crate::set_current::publish_preflight(
-        &fx.authority,
+    let r = publish(
+        &fx,
+        &key,
+        "dk_a",
         &w,
         &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &op_id,
-        None,
-        None,
+        "41000000-0000-4000-8000-000000000001",
+        child(c0, vec![file("f", b"1")]),
         gn(1, 1),
-        CREATED_AT,
     )
-    .await
-    .unwrap();
-    assert_eq!(pre1.unwrap().outcome, TerminalOutcome::ApprovalRequired);
-
-    // Flip the policy OFF, then RETRY the SAME op_id: the gated outcome is REPLAYED (without the fix this
-    // returns `None`, the promote runs, and the bound-identity mismatch burns it as OP_ID_REUSED).
-    fx.authority.set_review_required(&w, false).await.unwrap();
-    let pre2 = crate::set_current::publish_preflight(
-        &fx.authority,
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &op_id,
-        None,
-        None,
-        gn(1, 1),
-        CREATED_AT,
-    )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
-        pre2.expect("the gated outcome replays across the policy flip")
-            .outcome,
-        TerminalOutcome::ApprovalRequired,
+        r.outcome,
+        TerminalOutcome::Ok,
+        "a reviewer lands directly on a reviewed bundle"
     );
-
-    // A DIFFERENT op id under the now-off policy is NOT gated — the replay is op-scoped, not a sticky gate.
-    let fresh = op("41000000-0000-4000-8000-000000000002");
-    let pre3 = crate::set_current::publish_preflight(
-        &fx.authority,
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &fresh,
-        None,
-        None,
-        gn(1, 1),
-        CREATED_AT,
-    )
-    .await
-    .unwrap();
-    assert!(pre3.is_none(), "a fresh op under review-off is not gated");
-
-    // The pointer never moved across the whole flip.
-    assert_eq!(
+    assert_eq!(r.current, Some(gn(1, 2)), "the pointer advances");
+    // The pointer moved off the genesis commit, and NO proposal was opened.
+    assert_ne!(
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
         Some(c0)
     );
+    assert_eq!(open_proposal_count(&pool, w.as_str(), s.as_str()).await, 0);
 }
 
-/// The MIRROR direction: a SUCCESSFUL direct publish (review OFF), then the policy flips ON, then a
-/// same-`op_id` retry. The stored OK receipt binds `commit = Some`; the preflight must NOT re-gate it — it
-/// skips the gate so the promote path's in-txn replay (which runs BEFORE the in-txn gate) returns the
-/// original OK, rather than recording a `commit = None` gate receipt that mismatches the stored one and burns
-/// the op as `OP_ID_REUSED`. A FRESH op is still gated under the now-on policy.
+/// A per-skill `open` pin OVERRIDES the workspace review-required DEFAULT (the cascade reads the per-bundle
+/// pin first): with the bundle pinned open, a plain MEMBER's direct publish LANDS directly rather than
+/// downgrading.
 #[sqlx::test]
-async fn a_successful_publish_replays_ok_even_after_review_required_flips_on(pool: PgPool) {
-    let fx = Fixture::new(pool, "sc-ok-flip-on").await;
+async fn a_per_skill_open_pin_overrides_the_review_required_default(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sc-open-pin").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(24);
     register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+    fx.authority.set_review_required(&w, true).await.unwrap();
 
-    // Genesis, then a successful CHILD publish under review-OFF (records an OK receipt for op_id Y).
+    // Genesis registers the catalog row (protection NULL ⇒ follows the workspace default = reviewed).
     let g = publish(
         &fx,
         &key,
@@ -989,91 +980,34 @@ async fn a_successful_publish_replays_ok_even_after_review_required_flips_on(poo
         .await
         .unwrap()
         .unwrap();
-    let op_y = "42000000-0000-4000-8000-000000000001";
-    let ok = publish(
-        &fx,
-        &key,
-        "dk_a",
-        &w,
-        &s,
-        op_y,
-        child(c0, vec![file("f", b"1")]),
-        gn(1, 1),
-    )
-    .await;
-    assert_eq!(ok.outcome, TerminalOutcome::Ok);
-    let c1 = fx
-        .authority
-        .db()
-        .read_current_commit(&w, &s)
+
+    // Pin THIS skill explicitly `open` — the per-bundle pin the cascade reads before the workspace default.
+    sqlx::query("UPDATE catalog SET protection = 'open' WHERE workspace_id = $1 AND skill_id = $2")
+        .bind(w.as_str())
+        .bind(s.as_str())
+        .execute(&pool)
         .await
-        .unwrap()
         .unwrap();
 
-    // Flip review ON. The preflight for the SAME op id must NOT re-gate the stored OK (skip the gate ⇒ None).
-    fx.authority.set_review_required(&w, true).await.unwrap();
-    let pre = crate::set_current::publish_preflight(
-        &fx.authority,
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &op(op_y),
-        None,
-        None,
-        gn(1, 1),
-        CREATED_AT,
-    )
-    .await
-    .unwrap();
-    assert!(
-        pre.is_none(),
-        "a stored OK op is not re-gated when review flips on (the gate is skipped)"
-    );
-
-    // A FRESH op IS gated under the now-on policy (the gate still fires for new ops).
-    let fresh = op("42000000-0000-4000-8000-000000000002");
-    let pre_fresh = crate::set_current::publish_preflight(
-        &fx.authority,
-        &w,
-        &s,
-        DeviceOp::PublishDirect,
-        "dk_a",
-        &fresh,
-        None,
-        None,
-        gn(1, 2),
-        CREATED_AT,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        pre_fresh.unwrap().outcome,
-        TerminalOutcome::ApprovalRequired
-    );
-
-    // The full promote retry of op Y replays the original OK (the in-txn replay precedes the in-txn gate),
-    // not OP_ID_REUSED — and the pointer does not double-advance.
-    let retry = publish(
+    // A plain member's direct child publish now LANDS (the pin beats the workspace review-required default).
+    let r = publish(
         &fx,
         &key,
         "dk_a",
         &w,
         &s,
-        op_y,
+        "42000000-0000-4000-8000-000000000001",
         child(c0, vec![file("f", b"1")]),
         gn(1, 1),
     )
     .await;
     assert_eq!(
-        retry.outcome,
+        r.outcome,
         TerminalOutcome::Ok,
-        "the retry replays the original OK"
+        "an open pin lets a member's direct publish land under a reviewed default"
     );
-    assert_eq!(
-        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
-        Some(c1)
-    );
+    assert_eq!(r.current, Some(gn(1, 2)));
+    assert_eq!(open_proposal_count(&pool, w.as_str(), s.as_str()).await, 0);
 }
 
 /// A revert may only target a version of the SAME skill — reverting to another skill's commit (same
@@ -1422,7 +1356,8 @@ async fn genesis_by_a_confirmed_member_stands_up_the_skill(pool: PgPool) {
         .seed_workspace_member(&w, &p, "member", "confirmed")
         .await
         .unwrap();
-    // Deliberately NO seed_roster — the standup must create the row itself.
+    // Deliberately NO catalog / follow seeding — the genesis publish registers the skill and
+    // self-follows the author itself.
 
     let g = publish(
         &fx,
@@ -1581,6 +1516,32 @@ async fn receipt_rows(pool: &PgPool, op_id: &str) -> i64 {
         .await
         .unwrap()
         .get::<i64, _>("n")
+}
+
+/// Count the OPEN `proposals` rows for a skill (raw `sqlx`, off the `.sqlx` drift surface) — the downgrade
+/// tests assert a member's gated publish opens exactly one, and a replay opens no second.
+async fn open_proposal_count(pool: &PgPool, ws: &str, skill: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::int8 FROM proposals \
+         WHERE workspace_id = $1 AND skill_id = $2 AND status = 'open'",
+    )
+    .bind(ws)
+    .bind(skill)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Count the `promotion_lease` rows for an op id — a downgraded publish must have released its migrate lease.
+async fn lease_count(pool: &PgPool, ws: &str, op_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::int8 FROM promotion_lease WHERE workspace_id = $1 AND op_id = $2",
+    )
+    .bind(ws)
+    .bind(op_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 /// An UNKNOWN workspace credential is the same synthesized, never-persisted DENIED — for both the

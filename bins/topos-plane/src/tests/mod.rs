@@ -150,6 +150,7 @@ async fn seed_genesis(ctx: &Ctx, op_id: &str) -> ([u8; 32], [u8; 32]) {
             vec![file("SKILL.md", b"genesis v0\n")],
             AUTHOR,
             MESSAGE,
+            None,
             CREATED_AT,
             NOW,
         )

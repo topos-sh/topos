@@ -228,6 +228,10 @@ async fn a_staled_proposal_vanishes_from_the_session_list_and_the_index_count(po
         .await
         .unwrap();
     assert_eq!(index[0].open_proposals, 1);
+    // The index carries the catalog's minted name (the genesis publish registered the skill: `s_deploy`
+    // folds to `s-deploy`) and its lifecycle status.
+    assert_eq!(index[0].name, "s-deploy");
+    assert_eq!(index[0].status, "active");
 
     // A direct publish advances `current` past the proposal's base — the eventless stale transition.
     publish(

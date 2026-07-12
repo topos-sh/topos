@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM device_skill_state WHERE workspace_id = $1 AND device_key_id = $2 AND detached = 0 AND skill_id <> ALL($3::TEXT[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e6f3ef6748b37f7a4a372e95549b5b97202b8652c3766189acf68ee1c8096492"
+}

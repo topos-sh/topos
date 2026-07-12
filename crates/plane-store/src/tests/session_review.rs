@@ -562,7 +562,7 @@ async fn four_eyes_blocks_a_device_proposer_from_session_approving_under_review_
     assert_eq!(denied.outcome, TerminalOutcome::Denied);
     assert_eq!(
         msg_of(&denied).as_deref(),
-        Some("the proposer may not approve their own proposal under review-required")
+        Some("the proposer may not approve their own proposal on a reviewed bundle")
     );
     assert_eq!(current_commit(&fx, &w, &s).await, g);
     // A past-the-gate denial of a CONFIRMED reviewer is durable.

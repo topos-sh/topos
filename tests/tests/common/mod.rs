@@ -330,6 +330,7 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
             spec.files,
             spec.author,
             spec.message,
+            None,
             spec.created_at,
             NOW,
         )
@@ -396,7 +397,7 @@ pub(crate) async fn mint_invite_with_role(
         },
     };
     match authority
-        .create_invite(ws, op_id, request, at)
+        .create_invite(ws, op_id, request, at, NOW)
         .await
         .expect("create_invite")
     {

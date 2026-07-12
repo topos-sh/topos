@@ -492,7 +492,7 @@ async fn run(
     let downgrade = matches!(input.op, DeviceOp::PublishDirect | DeviceOp::Revert)
         && current.is_some()
         && gate.reviewed()
-        && matches!(device_role, Some(ActorRole::Member));
+        && matches!(device_role, Some(role) if !role.lands_on_reviewed());
 
     // (6c) The catalog + channel directory writes — every deny-returning gate above has passed, so
     // for a genesis the catalog row, the placement, the author's self-follow, and the pointer land

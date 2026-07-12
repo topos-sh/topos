@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE catalog SET display_name = $3 WHERE workspace_id = $1 AND skill_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "38cb4979b0ad5493b65e03c544a32ffee812d9672c6e36e744e5be1518d2c967"
+}
