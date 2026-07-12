@@ -157,7 +157,7 @@ pub(crate) async fn get_log(
     tag = "reads",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's catalog name."),
+        ("skill" = String, Path, description = "The skill's immutable id."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(

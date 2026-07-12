@@ -1593,6 +1593,15 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
         out.push_str(&format!("warning: {w}\n"));
     }
 
+    // The delivered notices (verdicts first) — an interactive `update` MARKED these read server-side,
+    // so it MUST show them here or the verdict + its reason are lost forever (the quiet hook fetches
+    // without acking, so it never reaches this renderer).
+    let (verdicts, others): (Vec<_>, Vec<_>) =
+        data.notices.iter().partition(|n| n.kind == "verdict");
+    for n in verdicts.iter().chain(others.iter()) {
+        out.push_str(&format!("{}\n", notice_line(n)));
+    }
+
     // The summary counts every skill the sweep attempted — including the failed ones above.
     let total = data.skills.len() + warnings.len();
     if rows.is_empty() && warnings.is_empty() {
@@ -1614,6 +1623,44 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
         out.push('.');
     }
     append_proposals_trailer(out, data.proposals_awaiting)
+}
+
+/// A one-line human rendering of a delivered notice — the verdict (with its reason), a proposal
+/// closure, or any other kind. Falls back to the server's rendered `message` for a kind this client
+/// does not specially format.
+fn notice_line(n: &topos_types::requests::WireNotice) -> String {
+    let skill = n.skill_name.as_deref().unwrap_or("a skill");
+    match n.kind.as_str() {
+        "verdict" => {
+            let verb = match n.outcome.as_deref() {
+                Some("approve") => "was approved",
+                Some("reject") => "was rejected",
+                _ => "was reviewed",
+            };
+            let who = n
+                .actor
+                .as_deref()
+                .map_or_else(String::new, |a| format!(" by {a}"));
+            let why = n
+                .reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .map_or_else(String::new, |r| format!(" — {r}"));
+            format!("verdict: your proposal to {skill} {verb}{who}{why}")
+        }
+        "proposal_closed" => {
+            let why = n
+                .reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .map_or_else(String::new, |r| format!(" ({r})"));
+            format!("proposal closed: {skill}{why}")
+        }
+        _ => n
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("{}: {skill}", n.kind)),
+    }
 }
 
 /// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
@@ -1928,6 +1975,45 @@ mod tests {
             out.contains("Checked 3 followed skill(s): 2 up to date, 1 failed."),
             "{out}"
         );
+    }
+
+    #[test]
+    fn pull_tty_renders_delivered_notices_so_an_interactive_update_never_acks_them_unseen() {
+        // An interactive `update` marks the delivered notices read server-side; the TTY MUST show them
+        // or the verdict + reason are lost forever. Verdicts render first, with the reviewer's reason.
+        let notice = |kind: &str, outcome: Option<&str>, reason: Option<&str>| {
+            topos_types::requests::WireNotice {
+                id: "n1".into(),
+                kind: kind.into(),
+                skill_id: Some("s_deploy".into()),
+                skill_name: Some("deploy".into()),
+                version_id: None,
+                actor: Some("rob@acme.test".into()),
+                outcome: outcome.map(str::to_owned),
+                reason: reason.map(str::to_owned),
+                message: None,
+                created_at: "2026-07-12T00:00:00Z".into(),
+            }
+        };
+        let data = PullData {
+            skills: vec![row("deploy", PullAction::UpToDate)],
+            proposals_awaiting: 0,
+            notices: vec![
+                notice("proposal_closed", Some("closed"), Some("superseded")),
+                notice("verdict", Some("reject"), Some("needs a test")),
+            ],
+            sync: Vec::new(),
+        };
+        let out = pull_tty(&data, &[]);
+        // The verdict shows its outcome + reason, and sorts before the closure.
+        let v = out.find("was rejected").expect("the verdict is shown");
+        assert!(
+            out.contains("needs a test"),
+            "the reason rides along: {out}"
+        );
+        let c = out.find("proposal closed").expect("the closure is shown");
+        assert!(v < c, "verdicts render before other notices: {out}");
+        assert!(out.contains("deploy"), "the skill name is named: {out}");
     }
 
     #[test]

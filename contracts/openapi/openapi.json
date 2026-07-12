@@ -1208,7 +1208,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name to place into the channel.",
+            "description": "The skill's immutable id to place into the channel.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1294,7 +1294,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name to remove from the channel.",
+            "description": "The skill's immutable id to remove from the channel.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1592,7 +1592,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The followed skill's catalog name to exclude from THIS device.",
+            "description": "The followed skill's immutable id to exclude from THIS device.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1671,7 +1671,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name to direct-follow.",
+            "description": "The skill's immutable id to direct-follow (the client resolves the address to it).",
             "required": true,
             "schema": {
               "type": "string"
@@ -1748,7 +1748,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name to unfollow (person-scoped negative mask).",
+            "description": "The skill's immutable id to unfollow (person-scoped negative mask).",
             "required": true,
             "schema": {
               "type": "string"
@@ -2921,7 +2921,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -3020,7 +3020,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -4874,8 +4874,7 @@
           "skills",
           "detached",
           "notices",
-          "proposals_awaiting",
-          "staleness_window_ms"
+          "proposals_awaiting"
         ],
         "properties": {
           "detached": {
@@ -4921,7 +4920,7 @@
           "staleness_window_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.",
+            "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.\nAdditive: an older producer that omits it falls back to the one-week default (a whole delivery\nbody must never fail to parse over one new field).",
             "minimum": 0
           },
           "workspace_id": {

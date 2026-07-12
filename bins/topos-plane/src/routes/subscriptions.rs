@@ -1,4 +1,4 @@
-//! The person-scoped subscription writes — direct follow/unfollow of a skill (by its catalog name), and
+//! The person-scoped subscription writes — direct follow/unfollow of a skill (by its immutable id), and
 //! this-device exclusion (the `remove` verb's row). Bodyless PUT/DELETE, authenticated by the ONE Bearer
 //! workspace credential and front-doored by the ONE membership predicate; every miss is the uniform 404.
 //! Naturally idempotent (no receipt): each answers a 200 all-outcome envelope carrying a `status` string,
@@ -26,7 +26,7 @@ fn parse_ws(ws: &str) -> Result<WorkspaceId, PlaneHttpError> {
     tag = "writes",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's catalog name to direct-follow."),
+        ("skill" = String, Path, description = "The skill's immutable id to direct-follow (the client resolves the address to it)."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
@@ -61,7 +61,7 @@ pub(crate) async fn follow_skill(
     tag = "writes",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's catalog name to unfollow (person-scoped negative mask)."),
+        ("skill" = String, Path, description = "The skill's immutable id to unfollow (person-scoped negative mask)."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
@@ -96,7 +96,7 @@ pub(crate) async fn unfollow_skill(
     tag = "writes",
     params(
         ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The followed skill's catalog name to exclude from THIS device."),
+        ("skill" = String, Path, description = "The followed skill's immutable id to exclude from THIS device."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(

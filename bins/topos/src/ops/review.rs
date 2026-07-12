@@ -26,6 +26,10 @@ use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::{op_wal, sidecar};
 
+/// The all-zero digest a reject/withdraw records in its WAL — those verdicts flip a status and touch no
+/// bytes, so no digest is fetched or sent (the wire review request carries none).
+const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// The seams `review` needs — the directory connector (the inbox / describe reads) and the contribute
 /// connector (the approve/reject/withdraw write).
 pub(crate) struct ReviewConnectors<'a> {
@@ -325,10 +329,21 @@ pub(crate) fn review(
             // The proposal's base == `current` (it is reviewable only while open ∧ base == current), so the
             // FRESH current generation is the correct `expected` even for a reviewer who has not pulled.
             let (_current, expected) = contribute::fresh_current(ctx, id.as_str(), &workspace_id)?;
-            // Bind the proposal's RECORDED bundle digest — re-derived from the fetched bytes + asserted to
-            // reproduce the named `@hash` (consent re-derivation).
-            let bundle_digest =
-                contribute::verified_version_digest(ctx, id.as_str(), proposal_commit)?;
+            // Only an APPROVE moves the pointer to the candidate's bytes, so only an approve re-derives
+            // the digest from the fetched bytes as its consent check (asserting they reproduce the named
+            // `@hash`). A reject / withdraw is a status flip that touches no bytes — fetching them would
+            // wedge the verb the instant a publish stales the proposal and the GC reclaims its unique
+            // objects (a 404 that must never block a retraction). Its digest is unused on the wire (the
+            // review request carries the proposal id + verdict, never a digest).
+            let bundle_digest = if matches!(verdict, ReviewVerdict::Approve) {
+                to_hex(&contribute::verified_version_digest(
+                    ctx,
+                    id.as_str(),
+                    proposal_commit,
+                )?)
+            } else {
+                ZERO_HEX.to_owned()
+            };
             OpRecord {
                 schema_version: PERSISTED_SCHEMA_VERSION,
                 op_id: contribute::new_op_id(ctx),
@@ -336,7 +351,7 @@ pub(crate) fn review(
                 skill_id: id.to_string(),
                 op: this_kind,
                 candidate_commit: proposal_hex.clone(),
-                bundle_digest: to_hex(&bundle_digest),
+                bundle_digest,
                 expected_generation: expected,
                 good: None,
                 // A review renames nothing — carry no name so the plane preserves the stored one.

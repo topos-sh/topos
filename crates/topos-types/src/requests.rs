@@ -464,7 +464,15 @@ pub struct WireDelivery {
     pub proposals_awaiting: u64,
     /// The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the
     /// client's hook warning both read: a device whose last report is older than this is stale.
+    /// Additive: an older producer that omits it falls back to the one-week default (a whole delivery
+    /// body must never fail to parse over one new field).
+    #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
+}
+
+/// The default staleness window (one week, ms) — the fallback when a producer omits the field.
+fn default_staleness_window_ms() -> u64 {
+    604_800_000
 }
 
 /// One applied-state row a device reports: the skill and the version it currently holds after its

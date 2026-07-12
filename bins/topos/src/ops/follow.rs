@@ -1248,6 +1248,10 @@ fn subscribe(
     }
 
     // ---- APPLY (`--yes`) ----
+    // 0) Refresh the stored display name to the workspace's TRUE name — the enroll poll could only
+    //    echo the requested address slug (it must not disclose the real name before the redeem gate),
+    //    and this member-authenticated `me` read is the first place the real name is known.
+    enroll::set_membership_display_name(ctx.fs, &ctx.layout, ws_id, &me.display_name)?;
     // 1) The subscription rows — the consented change (a workspace target needs none: membership
     //    itself entitles `everyone`).
     let mut subscribed = Vec::new();

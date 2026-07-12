@@ -98,7 +98,7 @@ pub(crate) async fn channel_leave(
     params(
         ("ws" = String, Path, description = "Workspace id."),
         ("ch" = String, Path, description = "The channel name (created on first placement, member-level self-serve)."),
-        ("skill" = String, Path, description = "The skill's catalog name to place into the channel."),
+        ("skill" = String, Path, description = "The skill's immutable id to place into the channel."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
@@ -134,7 +134,7 @@ pub(crate) async fn channel_place(
     params(
         ("ws" = String, Path, description = "Workspace id."),
         ("ch" = String, Path, description = "The channel name."),
-        ("skill" = String, Path, description = "The skill's catalog name to remove from the channel."),
+        ("skill" = String, Path, description = "The skill's immutable id to remove from the channel."),
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(

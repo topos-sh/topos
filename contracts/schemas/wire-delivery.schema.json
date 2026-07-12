@@ -46,9 +46,10 @@
       }
     },
     "staleness_window_ms": {
-      "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.",
+      "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.\nAdditive: an older producer that omits it falls back to the one-week default (a whole delivery\nbody must never fail to parse over one new field).",
       "type": "integer",
       "format": "uint64",
+      "default": 604800000,
       "minimum": 0
     },
     "workspace_id": {
@@ -62,8 +63,7 @@
     "skills",
     "detached",
     "notices",
-    "proposals_awaiting",
-    "staleness_window_ms"
+    "proposals_awaiting"
   ],
   "$defs": {
     "Generation": {

@@ -469,8 +469,13 @@ pub(crate) fn pull_reconcile_with(
                 // downgrade past a bumped doc schema can make it unreadable); keep it INSIDE the
                 // per-skill Result so a failure is isolated to this skill, never aborting the sweep
                 // (the quiet hook must not die on one poisoned doc).
-                read_sync(ctx, &sid)
-                    .map(|s| undelivered_row(&sid, s.as_ref(), PullAction::Excluded))
+                read_sync(ctx, &sid).map(|s| {
+                    undelivered_row(
+                        &skill_name_or_id(ctx, &sid),
+                        s.as_ref(),
+                        PullAction::Excluded,
+                    )
+                })
             } else {
                 // UPSTREAM withdrew it (archived, or its last delivering channel dropped it):
                 // managed distribution cleans what it managed. Flag it in the offline cache so
@@ -732,17 +737,12 @@ fn pull_channel_filtered(
             let row = match entry {
                 // A locally-paused (unfollowed) entry the plane still delivers: respect the pause.
                 Some((_, f)) if !f.following => continue,
-                // A channel-scoped update is explicit consent — ACCEPT the pending bytes.
+                // Naming the channel is explicit consent to re-sync a skill you ALREADY hold — accept
+                // the pending update. But a NEVER-SEEN arrival in the channel was not named and its
+                // bytes/digest were never disclosed, so it stays a first-receive OFFER (the I-TOFU the
+                // bare sweep gives too) — `follow --yes` is the path that batch-accepts after a describe.
                 Some((_, f)) => sync_delivered(ctx, &ws, ds, f, Invocation::Accept),
-                None => install_new_arrival(
-                    ctx,
-                    &ws,
-                    ds,
-                    &ReconcileOpts {
-                        accept_first_receive: true,
-                        ..ReconcileOpts::default()
-                    },
-                ),
+                None => install_new_arrival(ctx, &ws, ds, &ReconcileOpts::default()),
             };
             match row {
                 Ok(mut row) => {
@@ -928,7 +928,11 @@ fn freeze_detached(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientErro
     // and this device must resume. Freezing is simply: touch nothing. The plane keeps the skill out
     // of `skills[]` for as long as the detachment stands, so every subsequent sweep re-freezes it
     // (a no-op), and the sweep that finally sees it delivered again syncs it.
-    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Detached))
+    Ok(undelivered_row(
+        &skill_name_or_id(ctx, sid),
+        sync.as_ref(),
+        PullAction::Detached,
+    ))
 }
 
 /// UPSTREAM withdrew this skill (archived, or its last delivering channel dropped it) — managed
@@ -1017,7 +1021,11 @@ fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientEr
     // subscription change): the sidecar keeps every byte + any draft, and the sync state is reset to
     // the NEVER-RECEIVED baseline — the same all-zero sentinel `follow` lays.
     reset_to_never_received(ctx, sid, sync.as_ref())?;
-    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
+    Ok(undelivered_row(
+        &skill_name_or_id(ctx, sid),
+        sync.as_ref(),
+        PullAction::Withdrawn,
+    ))
 }
 
 /// Reset a skill's sync state to the NEVER-RECEIVED baseline — the same all-zero sentinel `follow`
@@ -1056,7 +1064,10 @@ pub(crate) fn reset_to_never_received(
 }
 
 /// A row for a skill the sweep did NOT sync (frozen / withdrawn): last-known generations, no offer.
-fn undelivered_row(sid: &SkillId, sync: Option<&SyncState>, action: PullAction) -> PullSkill {
+/// `name` is the CATALOG name (what a synced row carries and what `add`/`resolve_skill` key on) — a
+/// withdrawn row's `topos add <name>` "keep it as yours" salvage command must resolve, so this can
+/// never be the raw id.
+fn undelivered_row(name: &str, sync: Option<&SyncState>, action: PullAction) -> PullSkill {
     let (observed, applied) = sync.map_or(
         (
             topos_types::Generation { epoch: 0, seq: 0 },
@@ -1065,7 +1076,7 @@ fn undelivered_row(sid: &SkillId, sync: Option<&SyncState>, action: PullAction) 
         |s| (s.observed, s.applied),
     );
     PullSkill {
-        skill: sid.as_str().to_owned(),
+        skill: name.to_owned(),
         workspace_id: None,
         observed,
         applied,
@@ -1074,6 +1085,16 @@ fn undelivered_row(sid: &SkillId, sync: Option<&SyncState>, action: PullAction) 
         conflict: None,
         merge: None,
     }
+}
+
+/// The skill's catalog NAME from its sidecar lock (what synced rows and `resolve_skill` use), falling
+/// back to the id when no lock is readable.
+fn skill_name_or_id(ctx: &Ctx<'_>, sid: &SkillId) -> String {
+    let sp = ctx.layout.published(sid);
+    doc::read_doc::<Lock>(ctx.fs, &sp.lock)
+        .ok()
+        .flatten()
+        .map_or_else(|| sid.as_str().to_owned(), |l| l.name)
 }
 
 fn read_sync(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<SyncState>, ClientError> {

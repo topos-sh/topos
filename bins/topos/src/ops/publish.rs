@@ -169,9 +169,24 @@ pub(crate) fn publish_describe(
     workspace: Option<&str>,
 ) -> Result<PublishDescribeData, ClientError> {
     let (source_str, pin) = parse_target(target);
-    // Adopt an untracked LOCAL source first (the same disclosed local step the apply performs) so the
-    // describe can scan its bytes; a remote source is refused here exactly as in the apply.
-    let (skill_name, _added) = ensure_tracked(ctx, roots, &source_str)?;
+    let _ = roots;
+    // A describe MUTATES NOTHING (the consent contract). An already-tracked target is scanned in place;
+    // an UNTRACKED source is NOT adopted here — adopting mints a sidecar and arms the session-start hook,
+    // a durable change the human has not confirmed. The apply (`--yes`) does the adoption and discloses
+    // it; the describe points the user at that.
+    let skill_name = match resolve_skill(ctx, &source_str) {
+        Ok((_, lock)) => lock.name,
+        // Tracked ambiguously (2+ under this exact name) — the `--workspace`-filtered resolve below picks.
+        Err(ClientError::AmbiguousName { .. }) => source_str.clone(),
+        Err(ClientError::NoSuchSkill { .. }) => {
+            return Err(ClientError::InvalidArgument(format!(
+                "'{source_str}' is not tracked yet — a describe will not adopt it (that would change \
+                 this machine before you confirm). Run `topos add {source_str}` first to preview it, \
+                 or `topos publish {source_str} --yes` to adopt and ship in one step."
+            )));
+        }
+        Err(e) => return Err(e),
+    };
 
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())

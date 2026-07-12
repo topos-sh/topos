@@ -799,6 +799,36 @@ pub(crate) fn upsert_membership(user: &mut UserDoc, m: Membership) {
     }
 }
 
+/// Refresh a stored membership's display name to the AUTHORITATIVE one — the enrollment poll can only
+/// echo the requested address slug (it must not disclose the real name pre-redeem), so the first
+/// member-authenticated `me` read replaces it with the workspace's true display name. A no-op when the
+/// membership is absent (nothing enrolled yet) — the enroll promote records it first.
+///
+/// # Errors
+/// A doc read/write failure.
+pub(crate) fn set_membership_display_name(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    workspace_id: &str,
+    display_name: &str,
+) -> Result<(), ClientError> {
+    let Some(mut user) = read_user(fs, layout)? else {
+        return Ok(());
+    };
+    if let Some(m) = user
+        .workspaces
+        .iter_mut()
+        .find(|e| e.workspace_id == workspace_id)
+    {
+        if m.display_name.as_deref() == Some(display_name) {
+            return Ok(());
+        }
+        m.display_name = Some(display_name.to_owned());
+        write_user(fs, layout, &user)?;
+    }
+    Ok(())
+}
+
 // -------------------------------------------------------------------------------------------------
 // The enrollment writers. `instance.json` is PUBLIC (plane metadata, no secret) → `write_doc`.
 // `follows.json` is pure subscription state, still `0600`-written for perm hygiene → `write_doc_private`.
