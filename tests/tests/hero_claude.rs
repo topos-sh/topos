@@ -2,9 +2,10 @@
 //!
 //! An author (a plain confirmed workspace member) genesis-publishes a brand-new skill over loopback HTTP
 //! (the plane stands up the author's first-skill roster row in the same transaction); a teammate on a
-//! second "machine" (a fresh client home + a temp stand-in `$CLAUDE_CONFIG_DIR`) redeems an invite with
-//! the real two-call `follow` — which arms the REAL `settings.json` SessionStart hook via the genuine
-//! Claude Code adapter — and places the first-received bundle. Then the currency loop: the author ships
+//! second "machine" (a fresh client home + a temp stand-in `$CLAUDE_CONFIG_DIR`) JOINS BY THE WORKSPACE
+//! ADDRESS with the real `follow` (card → device flow → confirm → redeem → `--yes`) — which arms the REAL
+//! `settings.json` SessionStart hook via the genuine Claude Code adapter — and the `--yes` reconcile lands
+//! `everyone`'s genesis bundle byte-exact. Then the currency loop: the author ships
 //! an update, the follower's next bare `pull` sweep (what the installed hook runs) fast-forwards the
 //! placement byte-exact; the author `revert --to <good>` (the real client verb — a FORWARD pointer move),
 //! and the next sweep restores the good bytes. A second, drafting follower (confirm-each, local edits) is
@@ -39,15 +40,16 @@
 
 mod common;
 
-use common::{NOW, Plane, SKILL, WS, expected};
+use common::{NOW, Plane, WS, expected, ws_address};
 use plane_store::{Authority, ConfirmOutcome, Principal, WorkspaceId};
-use topos::test_support::{ContributeHarness, FollowHarness, PublishResult, Scope};
+use topos::test_support::{ContributeHarness, Follow, FollowHarness, PublishResult, Scope};
 use topos_types::results::PullAction;
 use topos_types::{CurrencyKind, Generation, TriggerReport, TriggerState};
 
 // ── shared constants ──────────────────────────────────────────────────────────────────────────────
-/// The workspace admin — an OWNER with a fixed-key device, who mints the follower invites. Deliberately
-/// NOT the author: the genesis standup must work for a plain member.
+/// The workspace owner — an OWNER with a fixed-key device (the workspace's governance root). Deliberately
+/// NOT the author: the genesis standup must work for a plain member. Joining is now by ADDRESS, so the
+/// owner mints no invite links — the followers hold pre-seeded invited seats, and the address is the door.
 const ADMIN: &str = "p_admin";
 const ADMIN_DKID: &str = "dk_admin";
 /// The admin device's registered 32-byte public key (a fixed test value; nothing verifies against it).
@@ -62,14 +64,18 @@ const AUTHOR_CRED: &str = "wc_author_secret";
 /// The two followers, identified by email (the cloud confirms each at the verification step).
 const FOLLOWER1: &str = "dev@acme.test";
 const FOLLOWER2: &str = "eve@acme.test";
-const AT: &str = "2026-07-01T00:00:00Z";
-const INVITE_OP_1: &str = "b0000000-0000-4000-8000-000000000001";
-const INVITE_OP_2: &str = "b0000000-0000-4000-8000-000000000002";
+
+/// This suite's skill id — SLUG-CLEAN (no underscore), shadowing the shared `common::SKILL`. The plane
+/// mints the catalog NAME as the slug of the published folder name (`_` → `-`), and the REAL Claude Code
+/// adapter places a delivered skill under that catalog name while the WorkHarness stub places by id — a
+/// slug-clean id makes id == name, so `placement_files(SKILL)` reads the same directory every adapter
+/// writes.
+const SKILL: &str = "s-deploy";
 
 /// The exact SessionStart hook command the Claude Code adapter installs (duplicated here on purpose — the
 /// e2e pins the contract; an adapter change must break this loudly).
 const HOOK_COMMAND: &str =
-    "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
+    "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
 
 /// The OpenClaw adapter's config artifacts (duplicated here on purpose, like `HOOK_COMMAND` — the e2e
 /// pins the contract). Provisional until the readiness probe against the pilot's exact OpenClaw build.
@@ -136,7 +142,7 @@ fn claude_case() -> AdapterCase {
 /// The exact `pre_llm_call` entry line the Hermes adapter registers (duplicated here on purpose — the e2e
 /// pins the contract; an adapter change must break this loudly). The trailing `# topos:currency` is a YAML
 /// comment outside the scalar: Hermes parses the command as exactly `topos pull --quiet`.
-const HERMES_ENTRY_LINE: &str = "  - command: topos pull --quiet  # topos:currency";
+const HERMES_ENTRY_LINE: &str = "  - command: topos update --quiet  # topos:currency";
 
 fn hermes_case() -> AdapterCase {
     AdapterCase {
@@ -194,7 +200,7 @@ fn openclaw_case() -> AdapterCase {
                 .openclaw_plugin()
                 .expect("promote wrote the topos-owned inject plugin file");
             assert!(
-                plugin.contains("topos pull"),
+                plugin.contains("topos update"),
                 "the inject surface names the currency verb"
             );
             assert!(
@@ -217,8 +223,8 @@ fn openclaw_case() -> AdapterCase {
 // ── the loopback plane (the shared harness + this suite's scenario seeding) ─────────────────────────
 
 /// Stand the plane up via the shared harness (bind-first, enrollment-configured) with a workspace, the
-/// admin owner, two invited followers, and their invites — deliberately NO skill roster and NO published
-/// genesis: the author's first client publish creates both.
+/// owner, and two invited followers (seated, no invite link — the address is the door) — deliberately NO
+/// skill roster and NO published genesis: the author's first client publish creates both.
 fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
     let (author_dkid, author_pubkey) = author_device;
     let author_dkid = author_dkid.to_owned();
@@ -264,7 +270,8 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
                 .await
                 .expect("seed author device");
 
-            // The followers are invited members; each confirms their email at the verification step.
+            // The followers are invited members — an invited seat is all a join-by-address needs (the
+            // roster is the lock; the redeem flips invited → confirmed). No invite link is minted.
             for email in [FOLLOWER1, FOLLOWER2] {
                 authority
                     .seed_workspace_member(
@@ -276,52 +283,38 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
                     .await
                     .expect("pre-roster follower");
             }
-            let invite1 = common::mint_invite(
-                authority,
-                &ws,
-                ADMIN_CRED,
-                INVITE_OP_1,
-                FOLLOWER1,
-                SKILL,
-                AT,
-            )
-            .await;
-            let invite2 = common::mint_invite(
-                authority,
-                &ws,
-                ADMIN_CRED,
-                INVITE_OP_2,
-                FOLLOWER2,
-                SKILL,
-                AT,
-            )
-            .await;
             common::Seeded {
                 genesis: None,
-                invites: vec![invite1, invite2],
+                invites: Vec::new(),
             }
         },
     )
 }
 
-/// Enroll a follower through the real two-call `follow` (headless: the identity confirm is driven through
-/// the authority), then assert the adapter armed currency and place the offered version.
+/// Enroll a follower through the real `follow <address>` (headless: the identity confirm is driven through
+/// the authority), landing `everyone`'s genesis via `--yes`, then assert the adapter armed currency.
 fn enroll_follower(
     plane: &Plane,
     case: &AdapterCase,
     tag: &str,
-    invite: &str,
+    address: &str,
     email: &str,
     manual: bool,
 ) -> FollowHarness {
     let follower = (case.follower)(tag);
-    let pending = follower.follow_with(invite, manual).expect("follow call 1");
+    // Call 1 — `topos follow <address>` in the case's mode (confirm-each for the drafter): fetch the card,
+    // re-root, mint the device key, device-authorize toward the address name, write the pending WAL.
+    let pending = follower
+        .follow_with(address, manual)
+        .expect("follow call 1 (address)");
+    assert!(!pending.enrolled, "call 1 only begins enrollment");
     let user_code = pending
         .pending
         .as_ref()
         .expect("pending verification handle")
         .user_code
         .clone();
+    // The human identity leg, in-process (the authority's external-confirm op — the flow is headless).
     let confirm = plane
         .rt
         .block_on(
@@ -331,15 +324,29 @@ fn enroll_follower(
         )
         .expect("confirm identity");
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
-    let done = follower.resume().expect("follow --resume");
-    assert!(done.enrolled);
-    // The promote armed the REAL adapter's currency trigger and disclosed it — assert both the config
-    // bytes and the report's honesty per adapter.
-    let currency = done
-        .currency
-        .as_ref()
-        .expect("the enrollment must disclose the currency-arm outcome");
-    (case.assert_currency)(&follower, currency);
+    // Resume WITH `--yes`: poll → redeem → promote (arming the REAL adapter's currency trigger) then apply —
+    // the reconcile batch-accepts `everyone`'s genesis first-receive in this same invocation.
+    let applied = follower.resume_apply().expect("the resume enrolls + applies");
+    assert!(applied.enrolled_now, "THIS invocation enrolled the device");
+    assert_eq!(
+        applied.installed.len(),
+        1,
+        "the everyone genesis landed: {:?}",
+        applied.installed
+    );
+    assert_eq!(applied.installed[0].skill_id, SKILL);
+    // CONVERSION-NOTE (the confirm-each drafter): call 1 recorded the `--manual` intent in the WAL, but
+    // the reconcile's first-receive install currently records `Auto` in `follows.json` (threading the WAL
+    // mode into the install is the client's later work). Re-record the human's declared intent through the
+    // doc-level bridge, so every subsequent sweep runs the engine's GENUINE confirm-each contract (the
+    // never-clobber assertions below stay real engine behavior, not a fixture).
+    if manual {
+        follower.set_follow_mode(SKILL, Follow::ConfirmEach);
+    }
+    // The promote armed the adapter's currency trigger; re-probe it (the address flow's apply does not carry
+    // the classic `FollowData.currency`) and assert both the config bytes and the report's honesty per adapter.
+    let report = follower.currency_report();
+    (case.assert_currency)(&follower, &report);
     follower
 }
 
@@ -366,44 +373,43 @@ fn run_distribute_hero(case: &AdapterCase) {
         Some(Generation { epoch: 1, seq: 1 })
     );
     assert!(
-        genesis.invite_link.is_none(),
-        "the genesis invite fold-in is owner-gated; a plain member publishes without one"
+        genesis.share_line.is_none(),
+        "an ordinary enrolled publish carries no share line (only a workspace-creating standup does); the \
+         address is the share surface — a plain member publishes fine"
     );
     let genesis_id = genesis
         .version_id
         .clone()
         .expect("a published receipt names its version");
 
-    // ── 2 · Machine B: a pure follower enrolls via the real `follow`; the hook arms; genesis lands. ──
+    // The workspace ADDRESS both followers join by (w_acme slugifies to w-acme).
+    let address = ws_address(&plane.base_url);
+
+    // ── 2 · Machine B: a pure follower JOINS BY ADDRESS via the real `follow`; the hook arms; `--yes`
+    //        lands `everyone`'s genesis in one invocation (no separate approve). ──
     let follower = enroll_follower(
         &plane,
         case,
         &format!("hero-{}-f1", case.tag),
-        plane.invite(0),
+        &address,
         FOLLOWER1,
         false,
     );
-    follower
-        .approve(&plane.base_url, &[format!("{SKILL}@{genesis_id}")])
-        .expect("first-receive approve");
     assert_eq!(
         follower.placement_files(SKILL),
         expected(V1),
         "the genesis bundle lands byte-exact (incl. the exec bit) in the adapter's skills dir"
     );
 
-    // ── 3 · The drafting follower (confirm-each) receives genesis, then edits a local draft. ──
+    // ── 3 · The drafting follower (confirm-each) joins + receives genesis via `--yes`, then edits a draft. ──
     let drafter = enroll_follower(
         &plane,
         case,
         &format!("hero-{}-f2", case.tag),
-        plane.invite(1),
+        &address,
         FOLLOWER2,
         true,
     );
-    drafter
-        .approve(&plane.base_url, &[format!("{SKILL}@{genesis_id}")])
-        .expect("drafter first-receive approve");
     drafter.edit_placement(SKILL, DRAFT);
 
     // ── 4 · The author ships an update; the follower's next bare sweep self-updates byte-exact. ──

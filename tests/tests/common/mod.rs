@@ -22,9 +22,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use plane_store::{
-    Authority, CommitId, CreateInviteOutcome, DeploymentMode, EnrollmentConfig, FileMode,
-    GovernanceOp, GovernanceRequest, OpId, Principal, Role, SkillId, UploadedFile, WorkspaceId,
+    Authority, CommitId, ConfirmOutcome, DeploymentMode, EnrollmentConfig, FileMode, InviteOutcome,
+    OpId, Principal, SkillId, UploadedFile, WorkspaceId,
 };
+use topos::test_support::FollowHarness;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use topos_plane::{PlaneState, router};
@@ -341,69 +342,72 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
     receipt.version_id.expect("genesis version id")
 }
 
-/// Mint an owner-driven `/i/` invite pre-offering `skill` to `email` at the `Member` role. The acting
-/// `owner_credential` is the presented workspace Bearer credential the plane resolves to its registry row →
-/// principal → OWNER role gate (nothing is signed — authority is the directory rows). See
-/// [`mint_invite_with_role`] for the role-selectable form (the multi-workspace e2e mints owner-role invites
-/// so the joiner can itself invite).
-pub(crate) async fn mint_invite(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    owner_credential: &str,
-    op_id: &str,
-    email: &str,
-    skill: &str,
-    at: &str,
-) -> String {
-    mint_invite_with_role(
-        authority,
-        ws,
-        owner_credential,
-        op_id,
-        email,
-        skill,
-        None,
-        Role::Member,
-        at,
-    )
-    .await
+/// The ADDRESS name `seed_workspace` derives for the shared [`WS`] id (`w_acme` slugifies to `w-acme`) —
+/// the workspace slug a member joins by. A member's join target is `<base_url>/<WS_NAME>` ([`ws_address`]).
+pub(crate) const WS_NAME: &str = "w-acme";
+
+/// The full workspace ADDRESS a `follow` targets against a loopback plane: `<base_url>/<name>`. The real
+/// client fetches the constant protocol card here (`Accept: application/json` → `WireProtocolCard`),
+/// re-roots onto the card's `api_base_url`, and device-authorizes toward the ADDRESS name (intent enroll).
+pub(crate) fn ws_address(base_url: &str) -> String {
+    format!("{base_url}/{WS_NAME}")
 }
 
-/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The request presents
-/// the acting `owner_credential`; the plane resolves its non-revoked registry row → principal → OWNER role
-/// gate (no signature — authority is the directory rows). The offered `name` is advisory (it becomes the
-/// follower's local skill name, never part of the request identity — the deterministic link binds skill
-/// ids only), so the multi-workspace e2e uses it to give a skill the SAME name in two workspaces and prove
-/// `--workspace` disambiguation.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn mint_invite_with_role(
+/// Seat `emails` as INVITED members through the REAL invitation op ([`Authority::invite`]) — the
+/// member-lane roster write the reshaped `invite` verb (and `POST …/invitations`) drive; the tokened
+/// `/i/` invite link is gone, an invitation is a roster row and nothing more. The acting
+/// `owner_credential` is the presented workspace Bearer credential the plane resolves to its registry row
+/// → principal → role gate (nothing is signed — authority is the directory rows). `channels` pre-places
+/// the invitees (resolve-all-or-apply-none). Returns the invited principals in their canonical folded
+/// form; panics on any denial (a test-precondition error).
+pub(crate) async fn invite_member(
     authority: &Authority,
     ws: &WorkspaceId,
     owner_credential: &str,
-    op_id: &str,
-    email: &str,
-    skill: &str,
-    name: Option<&str>,
-    role: Role,
+    emails: &[&str],
+    channels: &[&str],
     at: &str,
-) -> String {
-    let request = GovernanceRequest {
-        credential: owner_credential.to_owned(),
-        op: GovernanceOp::Invite {
-            role,
-            expires_at: None,
-            emails: vec![Principal::parse(email).unwrap()],
-            skills: vec![(SkillId::parse(skill).unwrap(), name.map(str::to_owned))],
-        },
-    };
+) -> Vec<String> {
+    let emails: Vec<String> = emails.iter().map(|e| (*e).to_owned()).collect();
+    let channels: Vec<String> = channels.iter().map(|c| (*c).to_owned()).collect();
     match authority
-        .create_invite(ws, op_id, request, at, NOW)
+        .invite(ws, owner_credential, &emails, &channels, at)
         .await
-        .expect("create_invite")
+        .expect("the invite op runs")
     {
-        CreateInviteOutcome::Created(invite) => invite.link,
-        CreateInviteOutcome::Denied(reason) => panic!("invite denied: {reason}"),
+        InviteOutcome::Invited { invited } => invited,
+        other => panic!("invite denied: {other:?}"),
     }
+}
+
+/// Drive the REAL client `follow <address>` **call 1** (fetch the protocol card over the real socket →
+/// re-root → device-authorize toward the ADDRESS name → the pending WAL) and complete the human identity
+/// leg IN-PROCESS via the authority's external-confirm op (the same lever a web verification page calls,
+/// so the flow is headless — the agent only ever polls). `email` is the identity proven on the
+/// verification page (the principal the redeem seats). Leaves the caller to resume
+/// (`resume_describe` / `resume_apply`), which polls (granted) → redeems → promotes → continues into the
+/// follow intent.
+pub(crate) fn begin_address_enroll(
+    plane: &Plane,
+    client: &FollowHarness,
+    address: &str,
+    email: &str,
+) {
+    let pending = client.follow(address).expect("follow call 1 (address)");
+    assert!(!pending.enrolled, "call 1 only begins enrollment");
+    let user_code = pending
+        .pending
+        .expect("the pending arm carries the verification handle")
+        .user_code;
+    let confirm = plane
+        .rt
+        .block_on(
+            plane
+                .authority
+                .confirm_external_identity(&user_code, email, NOW),
+        )
+        .expect("confirm the session identity");
+    assert!(matches!(confirm, ConfirmOutcome::Confirmed));
 }
 
 // ── shared bundle expectations ──────────────────────────────────────────────────────────────────────

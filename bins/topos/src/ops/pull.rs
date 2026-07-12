@@ -117,6 +117,9 @@ pub(crate) struct ReconcileOpts {
     /// Ack the delivered notices after collecting them (the interactive / `--json` update); the
     /// quiet hook fetches WITHOUT acking, so nothing is marked read that no one narrated.
     pub ack_notices: bool,
+    /// Adopt NEW arrivals as confirm-each followers (`follow --manual`): every later update is an
+    /// offer, never an auto-land. `false` = the auto default.
+    pub confirm_each: bool,
 }
 
 /// Run the currency check for `scope`.
@@ -845,7 +848,11 @@ fn install_new_arrival(
         &[FollowEntry {
             skill_id: ds.skill_id.clone(),
             workspace_id: ws.to_owned(),
-            mode: FollowModeDoc::Auto,
+            mode: if opts.confirm_each {
+                FollowModeDoc::ConfirmEach
+            } else {
+                FollowModeDoc::Auto
+            },
             review_required: ds.review_required,
             following: true,
             // A fresh delivery-driven arrival clears any prior per-device exclusion of this id.
@@ -854,7 +861,11 @@ fn install_new_arrival(
     )?;
     let follow = FollowContext {
         workspace_id: ws.to_owned(),
-        mode: FollowMode::Auto,
+        mode: if opts.confirm_each {
+            FollowMode::ConfirmEach
+        } else {
+            FollowMode::Auto
+        },
         review_required: ds.review_required,
         following: true,
     };
@@ -976,18 +987,33 @@ pub(crate) fn snapshot_and_clean(
 }
 
 fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
-    let sp = ctx.layout.published(sid);
     // Snapshot any draft into the sidecar store, then clean the agent dirs (keeping every sidecar
     // byte) — the shared machinery `remove` reuses for a per-device exclusion.
     let sync = snapshot_and_clean(ctx, sid, WithdrawReason::Upstream)?;
     // NOTE: no follow-state flip. The entry stays LIVE (a withdrawal is a delivery change, not a
     // subscription change): the sidecar keeps every byte + any draft, and the sync state is reset to
-    // the NEVER-RECEIVED baseline — the same all-zero sentinel `follow` lays. That reset is what
-    // makes a later re-delivery (a curator re-places the skill, an owner unarchives it) reinstall:
-    // without it, `applied == observed` and an absent placement read as "already current", and the
-    // skill would never come back. Re-arrival then passes the kernel's I-TOFU first-receive consent
-    // — an offer, disclosed, exactly as the original arrival was.
-    if let Some(prior) = sync.as_ref() {
+    // the NEVER-RECEIVED baseline — the same all-zero sentinel `follow` lays.
+    reset_to_never_received(ctx, sid, sync.as_ref())?;
+    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
+}
+
+/// Reset a skill's sync state to the NEVER-RECEIVED baseline — the same all-zero sentinel `follow`
+/// lays. The reset is what makes a later re-delivery (a curator re-places the skill, an owner
+/// unarchives it, a `follow` lifts this device's exclusion) REINSTALL: without it,
+/// `applied == observed` and an absent placement read as "already current", and the skill would
+/// never come back. Re-arrival then passes the kernel's I-TOFU first-receive consent — an offer,
+/// disclosed, exactly as the original arrival was. A skill with no prior sync state needs no reset
+/// (it already sits at the baseline).
+///
+/// # Errors
+/// A store/io failure writing the sync doc.
+pub(crate) fn reset_to_never_received(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    prior: Option<&SyncState>,
+) -> Result<(), ClientError> {
+    let sp = ctx.layout.published(sid);
+    if let Some(prior) = prior {
         let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
         doc::write_doc(
             ctx.fs,
@@ -1003,7 +1029,7 @@ fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientEr
             },
         )?;
     }
-    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
+    Ok(())
 }
 
 /// A row for a skill the sweep did NOT sync (frozen / withdrawn): last-known generations, no offer.

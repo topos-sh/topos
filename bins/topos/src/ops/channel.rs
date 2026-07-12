@@ -2,7 +2,7 @@
 //!
 //! Channel-first argument shape (parsed in `cli.rs` as an arg vector). Resolve EVERY named skill through
 //! the one grammar FIRST (all-or-none); a channel that does not exist yet is CREATED on the first `add`
-//! placement (the describe says "creates #<ch>"). `--yes` runs `PUT`/`DELETE
+//! placement (the describe says "creates `#<ch>`"). `--yes` runs `PUT`/`DELETE
 //! channels/{ch}/skills/{skill}` per skill. A CURATED channel gates placement by role (reviewer+); the
 //! server refuses a non-reviewer with `CURATED_ROLE_REQUIRED`, which surfaces as a typed refusal naming
 //! who can. Per-skill outcomes are reported honestly if a later placement fails after an earlier landed.

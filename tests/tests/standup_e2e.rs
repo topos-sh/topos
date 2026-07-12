@@ -29,8 +29,8 @@ mod common;
 
 use common::{Plane, SKILL, WS, expected, start_plane_mode};
 use plane_store::{
-    ApproveStandupOutcome, Authority, AuthorityError, ConfirmOutcome, CreateWorkspaceOutcome,
-    DeploymentMode, MintClaimOutcome, Principal, RedeemOutcome, WorkspaceId,
+    ApproveStandupOutcome, Authority, AuthorityError, CreateWorkspaceOutcome, DeploymentMode,
+    MintClaimOutcome, Principal, RedeemOutcome, WorkspaceId,
 };
 use topos::test_support::{Follow, FollowHarness, PublishResult, PullHarness, Scope};
 use topos_types::Generation;
@@ -76,6 +76,18 @@ fn workspace_row(plane: &Plane, ws: &str) -> (String, String) {
             .fetch_one(&plane.pool),
         )
         .expect("the workspace row exists")
+}
+
+/// The `workspace` row's ADDRESS `name` (the slug the standup/create minted).
+fn workspace_name(plane: &Plane, ws: &str) -> String {
+    plane
+        .rt
+        .block_on(
+            sqlx::query_scalar::<_, String>("SELECT name FROM workspace WHERE workspace_id = $1")
+                .bind(ws)
+                .fetch_one(&plane.pool),
+        )
+        .expect("the workspace row carries an address name")
 }
 
 /// The `workspace_member` row's `(role, status)`.
@@ -173,6 +185,7 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
             &pending.user_code,
             FOUNDER,
             None,
+            None,
             DeploymentMode::Cloud,
             wall_ms(),
             AT,
@@ -214,11 +227,24 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
         Some(FOUNDER),
         "hijack visibility: the receipt names who owns the workspace"
     );
+    // The genesis no longer mints an `/i/` link (invites are roster rows now) — it discloses the
+    // workspace ADDRESS as the share line: the receipt's `address` and the published skill's `share_line`.
+    let receipt_address = receipt
+        .address
+        .clone()
+        .expect("the standup receipt discloses the workspace address");
     assert!(
-        done.invite_link.is_some(),
-        "the genesis fold mints the owner's shareable /i/ link"
+        done.share_line.is_some(),
+        "the genesis publish discloses the skill's paste-able share line"
     );
     assert!(!client.wal_exists(), "the WAL is consumed at promote");
+    // A standup-born workspace has its ADDRESS name minted (a slug), and the receipt address roots on it.
+    let minted_name = workspace_name(&plane, ws);
+    assert!(!minted_name.is_empty(), "the standup minted an address name");
+    assert!(
+        receipt_address.ends_with(&format!("/{minted_name}")),
+        "the receipt address roots on the minted name: {receipt_address} vs {minted_name}"
+    );
 
     // The enrolled state the standup wrote: instance.json committed, seated principal, workspace.
     assert!(client.instance_written());
@@ -314,6 +340,7 @@ fn e2e_door1_first_publish_of_an_untracked_dir_auto_adds_and_stands_up() {
             &pending.user_code,
             FOUNDER,
             None,
+            None,
             DeploymentMode::Cloud,
             wall_ms(),
             AT,
@@ -356,11 +383,14 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     let plane = empty_plane("door2", DeploymentMode::Cloud);
 
     // The web door: create_workspace for an already-verified email (the authority op the cloud page calls).
+    // A `None` address name derives the slug from the display name; the outcome carries the ADDRESS (no link
+    // — the roster is the lock).
     let created = plane
         .rt
         .block_on(plane.authority.create_workspace(
             "req-door2-1",
             Some("Newco"),
+            None,
             OWNER_EMAIL,
             DeploymentMode::Cloud,
             AT,
@@ -379,14 +409,21 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
         member_row(&plane, &ws, OWNER_EMAIL),
         ("owner".to_owned(), "confirmed".to_owned())
     );
-    let self_invite = format!("{}/i/{}", plane.base_url, c.invite_token);
+    assert!(
+        c.address.ends_with(&format!("/{}", c.name)),
+        "the address roots on the minted name: {} vs {}",
+        c.address,
+        c.name
+    );
+    let owner_address = c.address.clone();
 
-    // A web retry (the SAME request id + owner) replays ONE workspace + the identical link.
+    // A web retry (the SAME request id + owner) replays ONE workspace + the identical ADDRESS.
     let replayed = plane
         .rt
         .block_on(plane.authority.create_workspace(
             "req-door2-1",
             Some("Newco"),
+            None,
             OWNER_EMAIL,
             DeploymentMode::Cloud,
             AT,
@@ -396,38 +433,24 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
         panic!("expected Replayed, got {replayed:?}");
     };
     assert_eq!(r.workspace_id.as_str(), ws);
-    assert_eq!(
-        r.invite_token, c.invite_token,
-        "the self-invite replays byte-identically"
-    );
+    assert_eq!(r.address, c.address, "the address replays byte-identically");
     assert_eq!(
         count(&plane, "SELECT COUNT(*) FROM workspace"),
         1,
         "one request = one workspace"
     );
 
-    // The owner's agent follows the self-invite: call 1 pending → the web-approve leg → resume redeems
-    // (the confirmed-owner roster row admits it).
+    // The owner's agent enrolls by ADDRESS: card → device flow → the web-approve leg → resume redeems
+    // (the confirmed-owner roster row admits it). No self-invite, no link.
     let owner = FollowHarness::new("standup-door2-owner");
-    let pending = owner.follow(&self_invite).expect("owner follow call 1");
-    assert!(!pending.enrolled);
-    let user_code = pending.pending.expect("the pending handle").user_code;
-    let confirmed = plane
-        .rt
-        .block_on(
-            plane
-                .authority
-                .confirm_external_identity(&user_code, OWNER_EMAIL, wall_ms()),
-        )
-        .expect("the web-approve leg (owner)");
-    assert!(matches!(confirmed, ConfirmOutcome::Confirmed));
-    let done = owner.resume().expect("owner follow --resume");
-    assert!(done.enrolled, "the confirmed owner's redeem is admitted");
-    assert_eq!(done.workspace_id, ws);
+    common::begin_address_enroll(&plane, &owner, &owner_address, OWNER_EMAIL);
+    let describe = owner.resume_describe().expect("owner resume enrolls");
+    assert!(describe.enrolled_now, "the confirmed owner's redeem is admitted");
+    assert_eq!(describe.workspace_id, ws);
     assert!(owner.instance_written());
     assert_eq!(owner.user_principal().as_deref(), Some(OWNER_EMAIL));
 
-    // The owner adopts + genesis-publishes over the wire.
+    // The owner adopts + genesis-publishes over the wire (into the structural `everyone`).
     owner.adopt(SKILL, DRAFT);
     let digest = owner.draft_digest(SKILL);
     let published = owner
@@ -442,45 +465,29 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     );
     assert!(
         genesis.standup.is_none(),
-        "an invite-rooted enrollment carries no standup receipt"
+        "an address-rooted enrollment carries no standup receipt"
     );
-    let version_id = genesis.version_id.expect("the genesis version id");
 
-    // The owner invites a member (the REAL governance verb — the owner's device credential authenticates
-    // it, nothing signed), pre-offering the skill.
-    let member_link = owner.invite(MEMBER_EMAIL, &[SKILL]).expect("invite");
+    // The owner invites a member (the REAL invitation op — the owner's device credential authenticates it,
+    // nothing signed). The invite seats the roster row and returns the workspace ADDRESS the member joins at.
+    let member_address = owner.invite(MEMBER_EMAIL, &[SKILL]).expect("invite");
     assert_eq!(
         member_row(&plane, &ws, MEMBER_EMAIL),
         ("member".to_owned(), "invited".to_owned()),
-        "the invite pre-seeds the roster row"
+        "the invite seats the roster row"
     );
 
-    // The member's two-call follow: pending → the web-approve leg (member) → redeem flips
-    // invited → confirmed.
+    // The member joins by ADDRESS: pending → the web-approve leg (member) → redeem flips invited →
+    // confirmed → the `--yes` apply lands the `everyone` genesis byte-exact (a batch-accepted first receive).
     let member = FollowHarness::new("standup-door2-member");
-    let mp = member.follow(&member_link).expect("member follow call 1");
-    let member_code = mp.pending.expect("the pending handle").user_code;
-    plane
-        .rt
-        .block_on(
-            plane
-                .authority
-                .confirm_external_identity(&member_code, MEMBER_EMAIL, wall_ms()),
-        )
-        .expect("the web-approve leg (member)");
-    let mdone = member.resume().expect("member resume");
-    assert!(mdone.enrolled);
+    common::begin_address_enroll(&plane, &member, &member_address, MEMBER_EMAIL);
+    let applied = member.resume_apply().expect("member resume enrolls + applies");
+    assert!(applied.enrolled_now);
     assert_eq!(
         member_row(&plane, &ws, MEMBER_EMAIL),
         ("member".to_owned(), "confirmed".to_owned()),
         "the redeem flips invited → confirmed"
     );
-
-    // The pull engine lands the genesis byte-exact on the second client (first-receive is an OFFER; the
-    // explicit approve places it through the same engine).
-    member
-        .approve(&plane.base_url, &[format!("{SKILL}@{version_id}")])
-        .expect("first-receive approve");
     assert_eq!(
         member.placement_files(SKILL),
         expected(DRAFT),
@@ -491,13 +498,14 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
 // ── cloud adversarial witnesses ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
+fn e2e_a_leaked_address_is_inert_off_roster_and_surfaces_request_access() {
     let plane = empty_plane("leak", DeploymentMode::Cloud);
     let created = plane
         .rt
         .block_on(plane.authority.create_workspace(
             "req-leak-1",
             Some("Newco"),
+            None,
             OWNER_EMAIL,
             DeploymentMode::Cloud,
             AT,
@@ -507,24 +515,16 @@ fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
         panic!("expected Created, got {created:?}");
     };
     let ws = c.workspace_id.as_str().to_owned();
-    let self_invite = format!("{}/i/{}", plane.base_url, c.invite_token);
+    let address = c.address.clone();
 
-    // The leak: a stranger's agent starts fine (the /i/ link is a public enrollment START)…
+    // The leak: a stranger's agent starts fine (the workspace ADDRESS is a public enrollment START) and
+    // signs in as an identity NOT on the roster (`begin_address_enroll` drives call 1 + the confirm).
     let stranger = FollowHarness::new("standup-leak");
-    let pending = stranger.follow(&self_invite).expect("call 1 starts");
-    let code = pending.pending.expect("pending").user_code;
-    // …and signs in as an identity NOT on the roster.
-    plane
-        .rt
-        .block_on(
-            plane
-                .authority
-                .confirm_external_identity(&code, "mallory@evil.test", wall_ms()),
-        )
-        .expect("the stranger confirms their own identity");
+    common::begin_address_enroll(&plane, &stranger, &address, "mallory@evil.test");
 
     // The redeem is DENIED — and the client surfaces the REQUEST_ACCESS ask-an-owner guidance, exactly as
-    // the production error envelope carries it.
+    // the production error envelope carries it (the ONE uniform membership refusal — the address resolved,
+    // the identity proved, but no seat).
     let denial = stranger.resume_expect_denied();
     assert_eq!(denial.code, "DENIED");
     assert_eq!(
@@ -555,7 +555,7 @@ fn e2e_a_leaked_self_invite_is_inert_off_roster_and_surfaces_request_access() {
             .fetch_one(&plane.pool),
         )
         .expect("count");
-    assert_eq!(mallory, 0, "a leaked self-invite seats no one off-roster");
+    assert_eq!(mallory, 0, "a leaked address seats no one off-roster");
 }
 
 #[test]
@@ -578,6 +578,7 @@ fn e2e_approve_standup_misses_are_uniform_and_double_approve_is_idempotent() {
         "XXXX-XXXX-XXXX-XXXX",
         FOUNDER,
         None,
+        None,
         DeploymentMode::Cloud,
         wall_ms(),
         AT,
@@ -593,6 +594,7 @@ fn e2e_approve_standup_misses_are_uniform_and_double_approve_is_idempotent() {
         .block_on(plane.authority.approve_standup(
             &code,
             FOUNDER,
+            None,
             None,
             DeploymentMode::Cloud,
             wall_ms(),
@@ -610,6 +612,7 @@ fn e2e_approve_standup_misses_are_uniform_and_double_approve_is_idempotent() {
             &code,
             FOUNDER,
             None,
+            None,
             DeploymentMode::Cloud,
             wall_ms(),
             AT,
@@ -624,6 +627,7 @@ fn e2e_approve_standup_misses_are_uniform_and_double_approve_is_idempotent() {
     let hijack = plane.rt.block_on(plane.authority.approve_standup(
         &code,
         "other@evil.test",
+        None,
         None,
         DeploymentMode::Cloud,
         wall_ms(),
@@ -650,6 +654,7 @@ fn e2e_the_fourth_create_for_one_identity_is_the_typed_cap_denial() {
             .block_on(plane.authority.create_workspace(
                 &format!("req-cap-{i}"),
                 None,
+                None,
                 FOUNDER,
                 DeploymentMode::Cloud,
                 AT,
@@ -665,6 +670,7 @@ fn e2e_the_fourth_create_for_one_identity_is_the_typed_cap_denial() {
         .block_on(plane.authority.create_workspace(
             "req-cap-4",
             None,
+            None,
             FOUNDER,
             DeploymentMode::Cloud,
             AT,
@@ -678,6 +684,32 @@ fn e2e_the_fourth_create_for_one_identity_is_the_typed_cap_denial() {
         "the denial names the cap: {reason}"
     );
     assert_eq!(count(&plane, "SELECT COUNT(*) FROM workspace"), 3);
+}
+
+#[test]
+fn e2e_create_workspace_refuses_a_reserved_address_name() {
+    let plane = empty_plane("reserved", DeploymentMode::Cloud);
+    // An explicit RESERVED slug is a typed refusal at the genesis door — nothing is created.
+    let denied = plane
+        .rt
+        .block_on(plane.authority.create_workspace(
+            "req-reserved-1",
+            Some("Acme"),
+            Some("api"),
+            OWNER_EMAIL,
+            DeploymentMode::Cloud,
+            AT,
+        ))
+        .expect("the op runs");
+    assert!(
+        matches!(denied, CreateWorkspaceOutcome::Denied(_)),
+        "a reserved address name is refused: {denied:?}"
+    );
+    assert_eq!(
+        count(&plane, "SELECT COUNT(*) FROM workspace"),
+        0,
+        "a refused create makes no workspace"
+    );
 }
 
 #[test]
@@ -732,6 +764,7 @@ fn e2e_a_standup_session_refuses_every_enroll_identity_leg_yet_stays_live() {
         .block_on(plane.authority.approve_standup(
             &code,
             FOUNDER,
+            None,
             None,
             DeploymentMode::Cloud,
             wall_ms(),
@@ -810,26 +843,23 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
         genesis.current_generation,
         Some(Generation { epoch: 1, seq: 1 })
     );
-    let version_id = genesis.version_id.expect("version id");
 
-    // invite → a second client's BEARER redeem: self-host sessions are born confirmed (device-rooted),
-    // so there is NO identity leg — call 1 then resume, and the roster gate does not apply.
-    let member_link = owner
+    // invite → the member joins by ADDRESS. Self-host now gates on the ROSTER exactly like cloud (the
+    // born-confirmed device-rooted shortcut died with the invite bearer token), so there IS an identity
+    // leg: the invited email proves itself, the redeem flips invited → confirmed, and the `--yes` apply
+    // lands the `everyone` genesis byte-exact.
+    let member_address = owner
         .invite("anyone@else.test", &[SKILL])
         .expect("the owner's invite");
     let member = FollowHarness::new("standup-claim-member");
-    let mp = member.follow(&member_link).expect("member call 1");
-    assert!(!mp.enrolled);
-    let mdone = member
-        .resume()
-        .expect("the bearer resume needs no identity leg");
-    assert!(
-        mdone.enrolled,
-        "self-host grants membership from the bearer"
+    common::begin_address_enroll(&plane, &member, &member_address, "anyone@else.test");
+    let applied = member.resume_apply().expect("member resume enrolls + applies");
+    assert!(applied.enrolled_now, "the invited identity joins on self-host");
+    assert_eq!(
+        member_row(&plane, WS, "anyone@else.test"),
+        ("member".to_owned(), "confirmed".to_owned()),
+        "the redeem flips invited → confirmed on self-host too"
     );
-    member
-        .approve(&plane.base_url, &[format!("{SKILL}@{version_id}")])
-        .expect("first-receive approve");
     assert_eq!(
         member.placement_files(SKILL),
         expected(DRAFT),
@@ -940,115 +970,4 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
             .is_err_and(|e| e.contains("invalid or has expired")),
         "an expired claim bootstraps the uniform NotFound: {dead_follow:?}"
     );
-}
-
-// ── cross-species isolation: a token never crosses doors, in either direction ──────────────────────
-
-#[test]
-fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
-    // A cloud plane with BOTH species live: a credential-authenticated invite (seeded owner) and a claim.
-    const P_OWNER: &str = "p_owner";
-    const OWNER_DKID: &str = "dk_owner";
-    const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
-    const OWNER_CRED: &str = "wc_owner_secret";
-    let plane = start_plane_mode(
-        "topos-standup",
-        "cross",
-        true,
-        DeploymentMode::Cloud,
-        async |authority: &Authority| {
-            let ws = WorkspaceId::parse(WS).unwrap();
-            authority
-                .seed_workspace(&ws, "Acme", "verified", "cloud")
-                .await
-                .expect("seed workspace");
-            // A confirmed owner holding OWNER_CRED — the credential the plane resolves to mint the invite.
-            common::seed_member(
-                authority,
-                &ws,
-                OWNER_DKID,
-                &OWNER_PUBKEY,
-                P_OWNER,
-                "owner",
-                OWNER_CRED,
-            )
-            .await;
-            let invite_link = common::mint_invite(
-                authority,
-                &ws,
-                OWNER_CRED,
-                "b0000000-0000-4000-8000-000000000001",
-                "alice@acme.test",
-                SKILL,
-                AT,
-            )
-            .await;
-            common::Seeded {
-                genesis: None,
-                invites: vec![invite_link],
-            }
-        },
-    );
-    let invite_token = plane
-        .invite(0)
-        .rsplit('/')
-        .next()
-        .expect("the /i/ link's token tail")
-        .to_owned();
-    let minted = plane
-        .rt
-        .block_on(plane.authority.mint_admin_claim(
-            &WorkspaceId::parse("w_newco").expect("ws id"),
-            Some("Newco"),
-            Some(OWNER_EMAIL),
-            DeploymentMode::Cloud,
-            3_600_000,
-            wall_ms(),
-            AT,
-        ))
-        .expect("mint the claim");
-    let MintClaimOutcome::Minted(claim) = minted else {
-        panic!("expected Minted, got {minted:?}");
-    };
-
-    let rig = FollowHarness::new("standup-cross");
-
-    // Direction 1: the CLAIM token POSTed as an invite to /v1/device/authorize fails EXACTLY like an
-    // unknown token (uniform — the miss discloses nothing about the token's species).
-    let claim_as_invite = rig
-        .device_authorize_attempt(&plane.base_url, &claim.token)
-        .expect_err("a claim token must not start an invite session");
-    let unknown_as_invite = rig
-        .device_authorize_attempt(&plane.base_url, "not-a-real-token")
-        .expect_err("an unknown token misses");
-    assert_eq!(
-        claim_as_invite, unknown_as_invite,
-        "the claim-as-invite miss is indistinguishable from an unknown token"
-    );
-
-    // Direction 2: the INVITE token POSTed to /v1/admin-claim fails EXACTLY like an unknown token.
-    let invite_as_claim = rig
-        .admin_claim_attempt(&plane.base_url, &invite_token)
-        .expect_err("an invite token must not redeem as a claim");
-    let unknown_as_claim = rig
-        .admin_claim_attempt(&plane.base_url, "not-a-real-token")
-        .expect_err("an unknown token misses");
-    assert_eq!(
-        invite_as_claim, unknown_as_claim,
-        "the invite-as-claim miss is indistinguishable from an unknown token"
-    );
-
-    // Neither cross-attempt consumed anything: the invite still starts a session, and the claim still
-    // bootstraps + redeems through its own door (even on a cloud plane — the break-glass posture).
-    let live_invite = rig
-        .device_authorize_attempt(&plane.base_url, &invite_token)
-        .expect("the invite survived the cross-species attempts");
-    assert!(!live_invite.is_empty(), "a real session user code");
-    let claim_owner = FollowHarness::new("standup-cross-claim");
-    let claimed = claim_owner
-        .follow(&format!("{}/i/{}", plane.base_url, claim.token))
-        .expect("the claim survived the cross-species attempts");
-    assert!(claimed.enrolled);
-    assert_eq!(claimed.workspace_id, "w_newco");
-    assert_eq!(claim_owner.user_principal().as_deref(), Some(OWNER_EMAIL));
 }

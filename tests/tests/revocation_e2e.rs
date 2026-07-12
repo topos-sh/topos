@@ -2,39 +2,36 @@
 //!
 //! The credential-model revocation story end to end, on the GENUINE client (`FollowHarness` driving the
 //! real `ureq` transports) against the GENUINE plane (`topos_plane::router` over a real `Authority`), via
-//! the shared `common` harness. One workspace, one skill, an owner, and one invited follower.
+//! the shared `common` harness. One workspace, one skill in `everyone`, an owner, and one invited follower.
 //!
-//! 1. The follower enrolls via the REAL two-call `follow` (device flow → confirm → redeem → the workspace
-//!    credential lands in `credentials.json`), places the offered genesis (v1), and a bare sweep is
-//!    up-to-date at v1.
+//! 1. The follower joins by ADDRESS — the real `follow <address>` (card → device flow → confirm → redeem →
+//!    the workspace credential lands in `credentials.json`) then `--yes` — and the reconcile lands the
+//!    `everyone` genesis (v1).
 //! 2. The owner REMOVES the member — `Authority::roster_remove` under the OWNER's Bearer credential (the
 //!    device-lane governance op the `DELETE /v1/workspaces/{ws}/roster/{email}` route composes) — deleting
 //!    the `workspace_member` row.
 //! 3. The owner ships v2; the removed follower's next `pull` FAILS CLOSED. The plane answers the uniform
-//!    404 for a non-member read; the pull engine maps that to a silent no-op and applies NOTHING — the
-//!    removed member is frozen at v1 and never receives v2 (no bytes change).
-//! 4. The owner RE-INVITES; the follower re-runs the REAL `follow` with the new `/i/` link. Its existing
-//!    (non-revoked) device re-redeems, the server flips the invited seat back to CONFIRMED and ROTATES the
-//!    credential — the registry `credential_sha256` changes, so the pre-rotation credential no longer
-//!    resolves to any row (it can never authenticate again).
+//!    404 for a non-member read; the pull engine maps that to a silent no-op and applies NOTHING — frozen
+//!    at v1, never v2 (no bytes change).
+//! 4. The owner RE-INVITES through the REAL invitation op; the follower re-runs `follow <address>`. Its
+//!    existing (non-revoked) device re-redeems, the server flips the invited seat back to CONFIRMED and
+//!    ROTATES the credential — the registry `credential_sha256` changes, so the pre-rotation credential no
+//!    longer resolves to any row.
 //! 5. The follower's next `pull` RECOVERS — it lands current (v2) byte-exact.
 //!
-//! CONVERSION-NOTE (the "old credential no longer authenticates" acceptance clause): the brief asks for
-//! a raw HTTP current-read with the OLD plaintext credential -> 404. The real-`follow`-minted credential is a
-//! server-side secret the `test-fixtures` facade deliberately never exposes to this crate (redacted from
-//! `FollowHarness`; `credentials.json` has no accessor), and `test_support` is out of scope to change — so
+//! CONVERSION-NOTE (the "old credential no longer authenticates" acceptance clause): the real-`follow`-minted
+//! credential is a server-side secret the `test-fixtures` facade deliberately never exposes to this crate, so
 //! the raw plaintext is unavailable. Rotation is instead witnessed at the database: the follower's
 //! `device_registry.credential_sha256` is captured before removal and after re-enrollment and asserted to
-//! have CHANGED (a fresh grant derived a fresh credential; the register upsert replaced the stored hash), so
-//! the pre-rotation credential matches no row and cannot authenticate. Combined with step 3 (the credential
-//! in-hand 404s the moment membership is revoked), this proves the full guarantee.
+//! have CHANGED. Combined with step 3 (the credential in-hand 404s the moment membership is revoked), this
+//! proves the full guarantee.
 
 mod common;
 
-use common::{NOW, Plane, SKILL, WS, expected_placement, genesis_files};
+use common::{NOW, Plane, SKILL, WS, expected_placement, genesis_files, ws_address};
 use plane_store::{
-    Authority, CommitId, ConfirmOutcome, GovernanceOp, GovernanceOutcome, GovernanceRequest, OpId,
-    Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, CommitId, GovernanceOp, GovernanceOutcome, GovernanceRequest, OpId, Principal,
+    SkillId, UploadedFile, WorkspaceId,
 };
 use topos::test_support::{FollowHarness, Scope};
 use topos_types::results::PullAction;
@@ -47,7 +44,7 @@ const OWNER_DKID: &str = "dk_owner";
 const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
 /// The owner's workspace Bearer credential — publishes v1/v2 and drives the removal + re-invite governance.
 const OWNER_CRED: &str = "wc_owner_secret";
-/// The follower is identified by an email — the cloud confirms it, and it becomes the seated principal.
+/// The follower is identified by an email — the plane confirms it, and it becomes the seated principal.
 const FOLLOWER: &str = "follower@newco.test";
 
 const AUTHOR: &str = "d_test";
@@ -55,8 +52,6 @@ const MSG: &str = "topos publish";
 const AT: &str = "2026-07-05T00:00:00Z";
 const GENESIS_OP: &str = "a0000000-0000-4000-8000-000000000001";
 const V2_OP: &str = "a0000000-0000-4000-8000-000000000002";
-const INVITE_OP_1: &str = "b0000000-0000-4000-8000-000000000001";
-const INVITE_OP_2: &str = "b0000000-0000-4000-8000-000000000002";
 const REMOVE_OP: &str = "c0000000-0000-4000-8000-000000000001";
 
 /// v2 — the owner's update the removed follower must NOT receive (then DOES, on recovery).
@@ -77,8 +72,8 @@ fn v2_files() -> Vec<UploadedFile> {
 }
 
 /// Stand the plane up via the shared harness (bind-first, enrollment-configured): the workspace + owner (a
-/// confirmed owner holding [`OWNER_CRED`]), the published genesis (v1), the invited follower, and the `/i/`
-/// invite link.
+/// confirmed owner holding [`OWNER_CRED`]), the genesis (v1) published into `everyone`, and the follower
+/// seated INVITED through the real invitation op.
 fn start_plane(tag: &str) -> Plane {
     common::start_plane(
         "topos-revoke-e2e",
@@ -87,7 +82,6 @@ fn start_plane(tag: &str) -> Plane {
         async |authority: &Authority| {
             let ws = WorkspaceId::parse(WS).unwrap();
             let skill = SkillId::parse(SKILL).unwrap();
-            let follower = Principal::parse(FOLLOWER).unwrap();
 
             authority
                 .seed_workspace(&ws, "Acme", "verified", "cloud")
@@ -113,8 +107,6 @@ fn start_plane(tag: &str) -> Plane {
                     genesis_files(),
                     AUTHOR,
                     MSG,
-                    // A real publish carries the folder name — surface it so the follower's local skill
-                    // name matches SKILL (else the offer falls back to the minted catalog name).
                     Some(SKILL),
                     AT,
                     NOW,
@@ -125,17 +117,11 @@ fn start_plane(tag: &str) -> Plane {
             assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
             let genesis = receipt.version_id.expect("genesis version id");
 
-            // Pre-seat the follower invited — the cloud redeem gate flips them invited → confirmed.
-            authority
-                .seed_workspace_member(&ws, &follower, "member", "invited")
-                .await
-                .expect("pre-roster the follower");
-            let invite =
-                common::mint_invite(authority, &ws, OWNER_CRED, INVITE_OP_1, FOLLOWER, SKILL, AT)
-                    .await;
+            // Seat the follower INVITED through the REAL invitation op — the redeem flips it to confirmed.
+            common::invite_member(authority, &ws, OWNER_CRED, &[FOLLOWER], &[], AT).await;
             common::Seeded {
                 genesis: Some(genesis),
-                invites: vec![invite],
+                invites: Vec::new(),
             }
         },
     )
@@ -200,57 +186,26 @@ fn publish_child(plane: &Plane, parent: CommitId, files: Vec<UploadedFile>, op: 
     })
 }
 
-/// The real two-call `follow`: begin (bootstrap → device-authorize), confirm the follower's identity
-/// headless (the authority op a web verification page composes), resume (redeem + promote). Used for both
-/// the first enrollment and the post-removal re-enrollment (the same device re-redeems).
-fn follow_and_confirm(plane: &Plane, client: &FollowHarness, invite: &str) {
-    let pending = client.follow(invite).expect("follow call 1");
-    assert!(!pending.enrolled, "call 1 only begins enrollment");
-    let user_code = pending
-        .pending
-        .as_ref()
-        .expect("the pending arm carries the verification handle")
-        .user_code
-        .clone();
-    let confirm = plane
-        .rt
-        .block_on(
-            plane
-                .authority
-                .confirm_external_identity(&user_code, FOLLOWER, NOW),
-        )
-        .expect("confirm the session identity");
-    assert!(matches!(confirm, ConfirmOutcome::Confirmed));
-    let done = client.resume().expect("follow --resume");
-    assert!(done.enrolled, "enrolled after the resume redeem");
-}
-
 // ── the keystone: fail-closed on removal, recover on re-enrollment ──────────────────────────────────
 
 #[test]
 fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
     let plane = start_plane("revoke");
     let client = FollowHarness::new("revoke");
+    let address = ws_address(&plane.base_url);
 
-    // ── 1 · The follower enrolls via the REAL two-call follow, places v1, and is up-to-date. ──
-    follow_and_confirm(&plane, &client, plane.invite(0));
-    client
-        .approve(
-            &plane.base_url,
-            &[format!("{SKILL}@{}", hex::encode(plane.genesis().0))],
-        )
-        .expect("first-receive approve places the genesis (v1)");
+    // ── 1 · The follower joins by ADDRESS (enroll + `--yes`), and the reconcile lands the `everyone` v1. ──
+    common::begin_address_enroll(&plane, &client, &address, FOLLOWER);
+    let applied = client.resume_apply().expect("the resume enrolls + applies");
+    assert!(applied.enrolled_now, "THIS invocation enrolled the device");
+    assert_eq!(applied.installed.len(), 1, "the everyone genesis landed: {:?}", applied.installed);
+    assert_eq!(applied.installed[0].skill_id, SKILL);
     assert_eq!(
         client.placement_files(SKILL),
         expected_placement(&genesis_files()),
         "v1 lands byte-exact"
     );
-    let sweep = client.pull(Scope::AllFollowed);
-    assert_eq!(sweep.skills[0].action, PullAction::UpToDate, "at v1");
-    assert_eq!(
-        client.sync_state(SKILL).applied,
-        Generation { epoch: 1, seq: 1 }
-    );
+    assert_eq!(client.sync_state(SKILL).applied, Generation { epoch: 1, seq: 1 });
 
     // The pre-rotation credential hash (the rotation witness — captured while the follower is a member).
     let hash_before = credential_hash(&plane, FOLLOWER);
@@ -289,12 +244,9 @@ fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
     // ── 3 · The owner ships v2; the REMOVED follower's next pull FAILS CLOSED — no bytes change. ──
     let v2 = publish_child(&plane, plane.genesis(), v2_files(), V2_OP);
     let sweep = client.pull(Scope::AllFollowed);
-    // CONVERSION-NOTE: the brief expected the fail-closed read to "surface a per-skill error/warning". The
-    // production pull engine instead maps a 404 on the `current` read (a removed member is a non-member, so
-    // the plane returns the uniform not-found) to `PullAction::UpToDate` — a SILENT no-op, not a warning
-    // (`ops::sync_engine`'s `Err(PlaneError::NotFound) => UpToDate` arm). That is still fail-closed: the
-    // removed follower observes/fetches/applies NOTHING and is frozen at v1. This asserts the actual
-    // fail-closed behavior (no-op + no bytes change), not a warning the engine does not emit.
+    // The production pull engine maps a 404 on the `current` read (a removed member is a non-member) to a
+    // SILENT no-op (`PullAction::UpToDate`) — still fail-closed: the removed follower observes/fetches/
+    // applies NOTHING and is frozen at v1.
     assert_eq!(
         sweep.skills[0].action,
         PullAction::UpToDate,
@@ -312,17 +264,20 @@ fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
         "applied never advanced toward v2"
     );
 
-    // ── 4 · The owner RE-INVITES; the follower re-runs the REAL follow (same device) and is re-admitted. ──
-    let invite2 = plane.rt.block_on(common::mint_invite(
+    // ── 4 · The owner RE-INVITES (the invitation op); the follower re-runs `follow <address>` and is
+    //        re-admitted. The re-enroll is BARE (describe only) — it rotates the credential without
+    //        re-subscribing (the skill's follow entry survived from step 1). ──
+    plane.rt.block_on(common::invite_member(
         &plane.authority,
         &plane.ws(),
         OWNER_CRED,
-        INVITE_OP_2,
-        FOLLOWER,
-        SKILL,
+        &[FOLLOWER],
+        &[],
         AT,
     ));
-    follow_and_confirm(&plane, &client, &invite2);
+    common::begin_address_enroll(&plane, &client, &address, FOLLOWER);
+    let describe = client.resume_describe().expect("the re-enroll describes");
+    assert!(describe.enrolled_now, "the existing device re-enrolled");
     assert_eq!(
         member_row(&plane, FOLLOWER),
         Some(("member".to_owned(), "confirmed".to_owned())),
@@ -330,7 +285,7 @@ fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
     );
 
     // The credential ROTATED: the stored hash changed, so the pre-rotation credential matches no registry
-    // row and can never authenticate again (see the module CONVERSION-NOTE for why this is the witness).
+    // row and can never authenticate again (see the module CONVERSION-NOTE).
     let hash_after = credential_hash(&plane, FOLLOWER);
     assert_ne!(
         hash_before, hash_after,

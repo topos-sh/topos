@@ -137,8 +137,13 @@ pub(crate) fn remove(
                 // 1) The server exclusion row — delivery stops on THIS device (the person keeps following).
                 directory.exclude_device(workspace_id, skill_id)?;
                 let sid = SkillId::parse(skill_id)?;
-                // 2) Snapshot any draft, then clean the agent dirs — KEEPING every sidecar byte.
-                snapshot_and_clean(ctx, &sid, WithdrawReason::RemoveExclusion)?;
+                // 2) Snapshot any draft, then clean the agent dirs — KEEPING every sidecar byte —
+                //    and reset the sync state to the never-received baseline, so a later `follow`
+                //    that lifts the exclusion actually re-materializes the bytes (without the
+                //    reset, `applied == observed` and the absent placement would read as "already
+                //    current" forever).
+                let prior = snapshot_and_clean(ctx, &sid, WithdrawReason::RemoveExclusion)?;
+                super::pull::reset_to_never_received(ctx, &sid, prior.as_ref())?;
                 // 3) The local exclusion cause marker (for `list`, offline).
                 enroll::set_excluded(ctx.fs, &ctx.layout, skill_id, true)?;
             }

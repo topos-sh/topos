@@ -2,7 +2,7 @@
 //! merged with the PLANE's version/proposal history when the skill is followed and this device enrolled.
 //!
 //! The plane half (`GET /skills/{skill}/log`) contributes the team's versions (newest first, with purge
-//! tombstones rendered "purged by <who> <when> — bytes gone"), the proposal events, and the archived
+//! tombstones rendered "purged by `<who>` `<when>` — bytes gone"), the proposal events, and the archived
 //! successor hint when the skill was resolved by a FREED base name. A channel-typed target is refused
 //! toward the web (curation history is a web surface). Un-enrolled / local-only skills keep today's
 //! purely-local log.

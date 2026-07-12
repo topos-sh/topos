@@ -40,8 +40,8 @@ use crate::enroll::{
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
 use crate::plane::{
-    CatalogSource, ContributeSource, EnrollSource, FollowContext, FollowMode, FollowSource,
-    GovernanceSource, InertFollow, InertPlane, PlaneSource,
+    CatalogSource, ContributeSource, DirectorySource, EnrollSource, FollowContext, FollowMode,
+    FollowSource, GovernanceSource, InertFollow, InertPlane, PlaneSource,
 };
 use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
 use crate::sidecar::Layout;
@@ -81,6 +81,63 @@ pub enum Scope {
         name: String,
         version_id_hex: String,
     },
+}
+
+/// One install a describe/apply names: the catalog identity, the consent digest, and WHY it arrives —
+/// the public face of the engine's internal `DescribedInstall`.
+#[derive(Debug, Clone)]
+pub struct InstallView {
+    pub skill_id: String,
+    pub name: String,
+    pub version_id: Option<String>,
+    pub bundle_digest: Option<String>,
+    /// The channels delivering it (`everyone` included when it delivers).
+    pub via_channels: Vec<String>,
+    /// Whether it arrives as a direct follow.
+    pub via_direct: bool,
+}
+
+/// The two-phase DESCRIBE a bare address subscribe answers with — the public face of `FollowDescribe`:
+/// who you are here, the workspace address block, what `--yes` would land, and the standing disclosures.
+#[derive(Debug, Clone)]
+pub struct FollowDescribeView {
+    pub workspace_id: String,
+    /// The workspace ADDRESS name (the slug).
+    pub workspace_name: String,
+    /// The full workspace address (the share link — server-built).
+    pub address: String,
+    /// The caller's role on the roster.
+    pub role: String,
+    /// Who invited the caller (present for an invited member).
+    pub invited_by: Option<String>,
+    /// Whether THIS invocation enrolled the device.
+    pub enrolled_now: bool,
+    /// The subscribe targets (`(kind, name)` — workspace / channel / skill).
+    pub targets: Vec<(String, String)>,
+    /// The installs `--yes` would land (pending first-receives included).
+    pub installs: Vec<InstallView>,
+    /// Channels the person is already placed into (an inviter's pre-placement; `everyone` excluded).
+    pub preplaced_channels: Vec<String>,
+    /// Following is person-scoped: every enrolled device receives the same set.
+    pub all_devices_note: String,
+    /// This device reports its applied versions to the workspace's fleet view.
+    pub reporting_note: String,
+}
+
+/// The `--yes` APPLY report — the public face of `FollowApplied`: the subscription rows written and the
+/// installs the reconcile actually landed.
+#[derive(Debug, Clone)]
+pub struct FollowAppliedView {
+    pub workspace_id: String,
+    /// The workspace ADDRESS name.
+    pub workspace_name: String,
+    pub enrolled_now: bool,
+    /// The subscription rows this apply wrote (`(kind, name)` — channel joins / direct follows).
+    pub subscribed: Vec<(String, String)>,
+    /// The installs the reconcile landed (batch-accepted first receives + refreshed knowns).
+    pub installed: Vec<InstallView>,
+    /// The reconcile's isolated warnings.
+    pub warnings: Vec<String>,
 }
 
 /// One followed skill's enrollment, as the harness holds it. The workspace credential is a secret
@@ -535,15 +592,18 @@ impl FollowHarness {
     }
 
     /// The `ops::follow` connector closures (a creds-free `ureq` enroll client + the read transport), built
-    /// EXACTLY as the production composition root builds them. Keeps the TYPED error — the public wrappers
-    /// stringify it; [`resume_expect_denied`](Self::resume_expect_denied) renders the production envelope.
-    fn run_follow(
+    /// EXACTLY as the production composition root builds them. Returns the RAW [`ops::FollowOutcome`] (the
+    /// classic wire payload, the two-phase describe, or the `--yes` apply) — the public wrappers project it:
+    /// [`run_follow`](Self::run_follow) unwraps the classic `Data`, the address-flow methods surface the
+    /// describe/apply. Keeps the TYPED error, which [`resume_expect_denied`](Self::resume_expect_denied)
+    /// renders through the production envelope.
+    fn run_follow_outcome(
         &self,
         plane: &dyn PlaneSource,
         follow: &dyn FollowSource,
         link: Option<String>,
         opts: ops::FollowOpts,
-    ) -> Result<topos_types::results::FollowData, crate::error::ClientError> {
+    ) -> Result<ops::FollowOutcome, crate::error::ClientError> {
         let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
             Box::new(UreqDeviceClient::new(base_url.to_owned(), HashMap::new()))
         };
@@ -598,18 +658,106 @@ impl FollowHarness {
                 plane,
                 follow,
             };
-            match ops::follow(
+            ops::follow(
                 &ctx,
                 &connectors,
                 link.clone().into_iter().collect(),
                 opts.clone(),
-            )? {
-                ops::FollowOutcome::Data { data, .. } => Ok(data),
-                _ => Err(crate::error::ClientError::InvalidArgument(
-                    "test_support: the facade drives only the classic follow flows".into(),
-                )),
-            }
+            )
         })
+    }
+
+    /// [`run_follow_outcome`](Self::run_follow_outcome) unwrapping the classic wire payload (the `Data`
+    /// variant) — the claim door, the skill-path accept, and an address enrollment's PENDING call 1 all
+    /// answer with it. A describe/apply outcome (the address subscribe's two phases) is a wiring error here
+    /// — the caller should drive `resume_describe` / `resume_apply` / `follow_apply` for those.
+    fn run_follow(
+        &self,
+        plane: &dyn PlaneSource,
+        follow: &dyn FollowSource,
+        link: Option<String>,
+        opts: ops::FollowOpts,
+    ) -> Result<topos_types::results::FollowData, crate::error::ClientError> {
+        match self.run_follow_outcome(plane, follow, link, opts)? {
+            ops::FollowOutcome::Data { data, .. } => Ok(data),
+            other => Err(crate::error::ClientError::InvalidArgument(format!(
+                "test_support::run_follow: expected the classic Data payload, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Resume a pending ADDRESS enrollment (poll → redeem → promote → continue into the recorded follow
+    /// intent) as the two-phase DESCRIBE (no `--yes`): the enrollment lands (`enrolled_now`), the
+    /// subscription + bytes still await the `--yes` consent. Returns the describe the e2e asserts on.
+    ///
+    /// # Errors
+    /// The follow op's typed error rendered to a string (a denied/expired redeem, a transport fault).
+    pub fn resume_describe(&self) -> Result<FollowDescribeView, String> {
+        match self
+            .run_follow_outcome(&InertPlane, &InertFollow, None, follow_opts(false))
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Described { describe, .. } => Ok(describe_view(&describe)),
+            other => Err(format!("test_support: expected a describe, got {other:?}")),
+        }
+    }
+
+    /// Resume a pending ADDRESS enrollment with `--yes`: promote, then APPLY in the same invocation — the
+    /// subscription rows (channel join / direct follow; a workspace target needs none — membership itself
+    /// entitles `everyone`) then the reconcile that lands the delivered set byte-exact. Returns the apply
+    /// report the e2e asserts on.
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe).
+    pub fn resume_apply(&self) -> Result<FollowAppliedView, String> {
+        match self
+            .run_follow_outcome(&InertPlane, &InertFollow, None, follow_opts(true))
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Applied(applied) => Ok(applied_view(&applied)),
+            other => Err(format!("test_support: expected an apply, got {other:?}")),
+        }
+    }
+
+    /// A fresh `follow <address>` (no `--yes`) on an ALREADY-enrolled install → the two-phase DESCRIBE
+    /// (resolve the address against the enrolled universe, assemble what `--yes` would land).
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe).
+    pub fn follow_describe(&self, target: &str) -> Result<FollowDescribeView, String> {
+        match self
+            .run_follow_outcome(
+                &InertPlane,
+                &InertFollow,
+                Some(target.to_owned()),
+                follow_opts(false),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Described { describe, .. } => Ok(describe_view(&describe)),
+            other => Err(format!("test_support: expected a describe, got {other:?}")),
+        }
+    }
+
+    /// A fresh `follow <address> --yes` on an ALREADY-enrolled install (the subscribe/apply path): resolve
+    /// the address against the enrolled universe, write the subscription rows, and reconcile the delivered
+    /// set this invocation. Returns the apply report.
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe).
+    pub fn follow_apply(&self, target: &str) -> Result<FollowAppliedView, String> {
+        match self
+            .run_follow_outcome(
+                &InertPlane,
+                &InertFollow,
+                Some(target.to_owned()),
+                follow_opts(true),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Applied(applied) => Ok(applied_view(&applied)),
+            other => Err(format!("test_support: expected an apply, got {other:?}")),
+        }
     }
 
     /// Call 1: `topos follow <link>` — fetch the bootstrap, guard one-plane, device-authorize, write the pending WAL.
@@ -809,6 +957,628 @@ impl FollowHarness {
         write_tree(&self.placement_dir(skill_id), files);
     }
 
+    /// The adapter's currency [`TriggerReport`] — a fresh, IDEMPOTENT re-probe of the same currency
+    /// install the enroll `promote` armed (the adapter's `install_currency_trigger` is idempotent: it
+    /// detects the already-installed hook and re-reports it, writing no duplicate). The two-phase ADDRESS
+    /// enroll does not surface the classic `FollowData.currency` on its describe/apply, so an e2e reads the
+    /// disclosure through this probe after enrolling.
+    #[must_use]
+    pub fn currency_report(&self) -> topos_types::TriggerReport {
+        self.with_adapter(|h| h.install_currency_trigger())
+    }
+
+    /// Re-record one followed skill's adoption MODE in `follows.json` (the exact doc shape a real
+    /// `follow --manual` records). The BRIDGE for an address-enrolled confirm-each drafter: the
+    /// enrollment WAL carries the human's `--manual` intent, but the reconcile's first-receive install
+    /// currently records `Auto` (threading the WAL mode into the install is the client's later work) —
+    /// so the e2e re-records the declared intent here, and the REAL subsequent sweeps then exercise the
+    /// engine's genuine confirm-each never-clobber contract.
+    ///
+    /// # Panics
+    /// If the skill has no follow entry (a test-precondition error).
+    pub fn set_follow_mode(&self, skill_id: &str, mode: Follow) {
+        let follows = enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .expect("follows.json exists after enrollment");
+        let mut entry = follows
+            .follows
+            .into_iter()
+            .find(|e| e.skill_id == skill_id)
+            .unwrap_or_else(|| panic!("test_support: {skill_id} has no follow entry"));
+        entry.mode = match mode {
+            Follow::Auto => FollowModeDoc::Auto,
+            Follow::ConfirmEach => FollowModeDoc::ConfirmEach,
+        };
+        enroll::write_follows_merged(&self.fs, &self.layout(), std::slice::from_ref(&entry))
+            .expect("write follows.json");
+    }
+
+    /// Record a follows.json entry for an AUTHORED (locally adopted + published) skill — the doc-level
+    /// shape `follow` writes — so the follow-scoped verbs (`revert`'s strict resolve, the workspace
+    /// inference) treat the author's own skill as followed in `workspace_id`. The real flow gets this
+    /// entry from the reconcile's install; an authoring rig that never re-received its own publish
+    /// records it here.
+    pub fn follow_locally(&self, skill_id: &str, workspace_id: &str) {
+        enroll::write_follows_merged(
+            &self.fs,
+            &self.layout(),
+            &[FollowEntry {
+                skill_id: skill_id.to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                mode: FollowModeDoc::Auto,
+                review_required: false,
+                following: true,
+                excluded_here: false,
+            }],
+        )
+        .expect("write follows.json");
+    }
+
+    // ── the enrolled VERB drivers (the reshaped surface an external e2e drives post-enroll) ────────
+    //
+    // Each builds the SAME connectors the production composition root builds (credentialed
+    // `UreqDeviceClient` / `UreqPlane` per base URL, credentials re-read fresh per build) and runs the
+    // REAL op. Ops whose payload types are client-internal (`unfollow`, the auth group) return the
+    // `--json`-equivalent `serde_json::Value`; ops with public `topos-types` payloads return them typed.
+
+    /// This rig's derived `device_key_id` (the non-secret device NAME receipts/audit carry) — for
+    /// row-level witnesses on per-device tables (exclusions, fleet state).
+    #[must_use]
+    pub fn device_key_id(&self) -> String {
+        DeviceSigner::load_or_generate(&self.fs, &self.layout())
+            .expect("load-or-generate device key")
+            .device_key_id()
+            .to_owned()
+    }
+
+    /// The enrolled plane base (`instance.json` — present after a completed enroll/login).
+    fn instance_base(&self) -> String {
+        enroll::read_instance(&self.fs, &self.layout())
+            .expect("read instance.json")
+            .expect("instance.json exists after enrollment")
+            .base_url
+    }
+
+    /// The wall clock in epoch millis (what the production composition root stamps).
+    fn wall_ms() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the wall clock is past the epoch")
+                .as_millis(),
+        )
+        .expect("epoch millis fit i64")
+    }
+
+    /// A credentialed directory-connector closure (the read seam most verbs resolve through).
+    fn dir_connect(&self) -> impl Fn(&str) -> Box<dyn DirectorySource> + '_ {
+        move |b: &str| -> Box<dyn DirectorySource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        }
+    }
+
+    /// A credentialed contribute-connector closure (the write seam).
+    fn contribute_connect(&self) -> impl Fn(&str) -> Box<dyn ContributeSource> + '_ {
+        move |b: &str| -> Box<dyn ContributeSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        }
+    }
+
+    /// The reconcile transport (delivery + report + the per-skill read lane, one object) built from
+    /// this rig's on-disk enrollment — fresh reads per call, so a verb that just wrote docs is seen.
+    fn reconcile_transport(&self) -> (UreqPlane, FileFollow) {
+        let follows = enroll::read_follows(&self.fs, &self.layout())
+            .expect("read follows.json")
+            .unwrap_or(Follows {
+                schema_version: 1,
+                follows: Vec::new(),
+            });
+        let creds = creds_doc(&self.fs, &self.layout());
+        let plane = UreqPlane::new(self.instance_base(), enroll::skill_creds(&follows, &creds))
+            .with_workspace_credentials(creds_map(&self.fs, &self.layout()));
+        let follow = FileFollow::new(enroll::follow_contexts(&follows));
+        (plane, follow)
+    }
+
+    /// Run one enrolled op over a fresh `Ctx` whose plane/follow seams are INERT (the directory /
+    /// contribute / delivery transports are built per-base inside each op).
+    fn with_inert_ctx<T>(
+        &self,
+        op: impl FnOnce(&Ctx<'_>) -> Result<T, crate::error::ClientError>,
+    ) -> Result<T, crate::error::ClientError> {
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())?;
+        let inert_plane = InertPlane;
+        let inert_follow = InertFollow;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &inert_plane,
+                follow: &inert_follow,
+            };
+            op(&ctx)
+        })
+    }
+
+    /// Run one enrolled op over a fresh `Ctx` with the REAL read transport + the on-disk follow seam
+    /// wired — what the follow-scoped verbs need (`review` resolves the followed skill through
+    /// `ctx.follow` and fetches proposal bytes through `ctx.plane`; `revert` reads the fresh current).
+    fn with_enrolled_ctx<T>(
+        &self,
+        op: impl FnOnce(&Ctx<'_>) -> Result<T, crate::error::ClientError>,
+    ) -> Result<T, crate::error::ClientError> {
+        let (plane, follow) = self.reconcile_transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())?;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &plane,
+                follow: &follow,
+            };
+            op(&ctx)
+        })
+    }
+
+    /// Run the REAL delivery-driven reconcile (the bare enrolled `update` sweep: one delivery call per
+    /// enrolled workspace, converge, report) over this rig's own enrollment docs. `ack_notices` selects
+    /// the interactive posture (narrate THEN ack) vs the quiet hook's fetch-without-ack.
+    ///
+    /// # Panics
+    /// If the reconcile errors (per-skill/per-workspace faults are isolated into warnings).
+    #[must_use]
+    pub fn reconcile(&self, ack_notices: bool) -> (PullData, Vec<String>) {
+        let (plane, follow) = self.reconcile_transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .expect("load-or-create device id");
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &plane,
+                follow: &follow,
+            };
+            let opts = ops::ReconcileOpts {
+                ack_notices,
+                ..ops::ReconcileOpts::default()
+            };
+            let out = ops::pull_reconcile_with(&ctx, &plane, &opts)
+                .unwrap_or_else(|e| panic!("test_support: reconcile failed: {e}"));
+            (out.data, out.warnings)
+        })
+    }
+
+    /// The `update --quiet` HOOK posture: run the bare reconcile (fetch WITHOUT acking) and return the
+    /// one-liner warnings the quiet hook would print. `Ok(lines)` ⇔ the hook exits 0 (an auth/transport
+    /// failure is soft — a warning line, never a failed session start); `Err` ⇔ a genuinely local
+    /// failure that exits nonzero.
+    ///
+    /// # Errors
+    /// The reconcile's typed error rendered to a string, ONLY when it is not hook-soft.
+    pub fn quiet_update(&self) -> Result<Vec<String>, String> {
+        let (plane, follow) = self.reconcile_transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        self.with_adapter(|harness| {
+            let ctx = Ctx {
+                fs: &self.fs,
+                ids: &self.ids,
+                clock: &self.clock,
+                device_id: device_id.clone(),
+                layout: self.layout(),
+                harness,
+                plane: &plane,
+                follow: &follow,
+            };
+            match ops::pull_reconcile_with(&ctx, &plane, &ops::ReconcileOpts::default()) {
+                Ok(out) => Ok(ops::quiet_hook_lines(
+                    &self.fs,
+                    &self.layout(),
+                    Self::wall_ms(),
+                    &out,
+                )),
+                Err(e) if ops::quiet_soft_failure(&e) => Ok(vec![format!("topos: {e}")]),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
+
+    /// Backdate one workspace's `state/sync_status.json` freshness entry — the staleness clock the
+    /// quiet hook's "last synced <age> ago" warning reads. Writes through the real doc protocol.
+    pub fn backdate_sync_status(&self, ws: &str, last_delivery_at_ms: i64, window_ms: u64) {
+        crate::sync_status::record(
+            &self.fs,
+            &self.layout(),
+            &[(
+                ws.to_owned(),
+                crate::sync_status::WorkspaceSync {
+                    last_delivery_at: Some(last_delivery_at_ms),
+                    last_report_at: None,
+                    staleness_window_ms: window_ms,
+                    delivered: std::collections::BTreeMap::new(),
+                },
+            )],
+        )
+        .expect("write sync_status.json");
+    }
+
+    /// Drive `unfollow <target> --yes` (the person-scoped detach) and return the applied report as its
+    /// `--json` value (`items` with kind/name/stops, `bytes_kept`).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn unfollow_apply(&self, target: &str) -> Result<serde_json::Value, String> {
+        let directory = self.dir_connect();
+        let fs = &self.fs;
+        let layout = self.layout();
+        let delivery = move |b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+            let follows = enroll::read_follows(fs, &layout)
+                .ok()
+                .flatten()
+                .unwrap_or(Follows {
+                    schema_version: 1,
+                    follows: Vec::new(),
+                });
+            let creds = creds_doc(fs, &layout);
+            Box::new(
+                UreqPlane::new(b.to_owned(), enroll::skill_creds(&follows, &creds))
+                    .with_workspace_credentials(creds_map(fs, &layout)),
+            )
+        };
+        let connectors = ops::UnfollowConnectors {
+            directory: &directory,
+            delivery: &delivery,
+        };
+        self.with_inert_ctx(|ctx| {
+            match ops::unfollow(ctx, &connectors, &[target.to_owned()], &[], &[], true)? {
+                ops::UnfollowOutcome::Applied(a) => {
+                    Ok(serde_json::to_value(&a).expect("serialize UnfollowApplied"))
+                }
+                ops::UnfollowOutcome::Described { .. } => {
+                    Err(crate::error::ClientError::InvalidArgument(
+                        "test_support: expected an unfollow apply, got a describe".into(),
+                    ))
+                }
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive `remove <target> --yes` (per-device exclusion for a followed skill) and return the typed
+    /// [`topos_types::results::RemoveData`].
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn remove_apply(&self, target: &str) -> Result<topos_types::results::RemoveData, String> {
+        let directory = self.dir_connect();
+        let connectors = ops::RemoveConnectors {
+            directory: &directory,
+        };
+        self.with_inert_ctx(|ctx| {
+            match ops::remove(ctx, &connectors, &[target.to_owned()], &[], None, true)? {
+                ops::RemoveOutcome::Applied(d) => Ok(d),
+                ops::RemoveOutcome::Described { .. } => {
+                    Err(crate::error::ClientError::InvalidArgument(
+                        "test_support: expected a remove apply, got a describe".into(),
+                    ))
+                }
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive `follow --skill <s>... --yes` (the kind-forced selector batch — resolve ALL-OR-NONE, then
+    /// subscribe + reconcile). One unresolvable name refuses the WHOLE invocation with nothing applied.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (the uniform not-found on any bad name).
+    pub fn follow_apply_skills(&self, skills: &[&str]) -> Result<FollowAppliedView, String> {
+        let opts = ops::FollowOpts {
+            manual: false,
+            workspace: None,
+            yes: true,
+            prefix_dirname: false,
+            channels: Vec::new(),
+            skills: skills.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        match self
+            .run_follow_outcome(&InertPlane, &InertFollow, None, opts)
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Applied(applied) => Ok(applied_view(&applied)),
+            other => Err(format!("test_support: expected an apply, got {other:?}")),
+        }
+    }
+
+    /// Drive `protect <target> [<level>]` (two-phase: `yes = false` describes — audience included —
+    /// `yes = true` applies). Bare level = tighten to the kind's protected default; `"open"` loosens.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (a role refusal NAMES the required role).
+    pub fn protect(
+        &self,
+        target: &str,
+        level: Option<&str>,
+        yes: bool,
+    ) -> Result<topos_types::results::ProtectData, String> {
+        let directory = self.dir_connect();
+        let connectors = ops::ProtectConnectors {
+            directory: &directory,
+        };
+        self.with_inert_ctx(
+            |ctx| match ops::protect(ctx, &connectors, target, level, None, yes)? {
+                ops::ProtectOutcome::Described { data, .. }
+                | ops::ProtectOutcome::Applied(data) => Ok(data),
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// The ROUTE-BACKED skill log (`GET …/skills/{skill}/log` over the real credentialed transport) —
+    /// versions with author/message + purge tombstones, proposal events, and the archived-name facts
+    /// (`base_name` vs `name`). This is the same wire read the `log` verb merges into its events; the
+    /// verb's own connectors type is module-private to the client, so the e2e drives the transport.
+    ///
+    /// # Errors
+    /// The transport's typed error rendered to a string.
+    pub fn skill_log_wire(
+        &self,
+        workspace_id: &str,
+        skill_id: &str,
+    ) -> Result<topos_types::requests::WireSkillLog, String> {
+        let client =
+            UreqDeviceClient::new(self.instance_base(), creds_map(&self.fs, &self.layout()));
+        DirectorySource::skill_log(&client, workspace_id, skill_id).map_err(|e| e.to_string())
+    }
+
+    /// Drive the bare `review` — the INBOX/OUTBOX across every enrolled workspace, author-message first.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn review_inbox(&self) -> Result<topos_types::results::ReviewIndexData, String> {
+        let directory = self.dir_connect();
+        let contribute = self.contribute_connect();
+        let connectors = ops::ReviewConnectors {
+            directory: &directory,
+            contribute: &contribute,
+        };
+        self.with_inert_ctx(
+            |ctx| match ops::review_dispatch(ctx, &connectors, None, None, None)? {
+                ops::ReviewOutcome::Inbox(data) => Ok(data),
+                other => Err(crate::error::ClientError::InvalidArgument(format!(
+                    "test_support: expected the review inbox, got {other:?}"
+                ))),
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive `review <skill>@<hash> --approve`. A stale base (current moved since the proposal) is the
+    /// typed CONFLICT — surfaced as `Err("CONFLICT: …")` through the production error envelope.
+    ///
+    /// # Errors
+    /// `"<WIRE_CODE>: <redacted message>"`.
+    pub fn review_approve(&self, target: &str) -> Result<ReviewData, String> {
+        self.review_verdict(target, ops::ReviewVerdict::Approve)
+    }
+
+    /// Drive `review <skill>@<hash> --reject -m <reason>` (the reason is REQUIRED and rides into the
+    /// author's verdict notice).
+    ///
+    /// # Errors
+    /// As [`review_approve`](Self::review_approve).
+    pub fn review_reject(&self, target: &str, reason: &str) -> Result<ReviewData, String> {
+        self.review_verdict(
+            target,
+            ops::ReviewVerdict::Reject {
+                reason: Some(reason.to_owned()),
+            },
+        )
+    }
+
+    fn review_verdict(
+        &self,
+        target: &str,
+        verdict: ops::ReviewVerdict,
+    ) -> Result<ReviewData, String> {
+        let directory = self.dir_connect();
+        let contribute = self.contribute_connect();
+        let connectors = ops::ReviewConnectors {
+            directory: &directory,
+            contribute: &contribute,
+        };
+        self.with_enrolled_ctx(|ctx| {
+            match ops::review_dispatch(ctx, &connectors, Some(target), Some(verdict), None)? {
+                ops::ReviewOutcome::Applied(data) => Ok(data),
+                other => Err(crate::error::ClientError::InvalidArgument(format!(
+                    "test_support: expected an applied verdict, got {other:?}"
+                ))),
+            }
+        })
+        .map_err(|e| {
+            let envelope = crate::render::err_envelope("review", &e);
+            let code = envelope
+                .error
+                .as_ref()
+                .map(|w| w.code.clone())
+                .unwrap_or_default();
+            format!("{code}: {}", crate::render::safe_message(&e))
+        })
+    }
+
+    /// Drive `revert <skill> --to <good>` from this (enrolled) rig.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (a purged `--to` target is a typed refusal).
+    pub fn revert(
+        &self,
+        skill: &str,
+        to: &str,
+        confirm: bool,
+    ) -> Result<topos_types::results::RevertData, String> {
+        let contribute = self.contribute_connect();
+        self.with_enrolled_ctx(|ctx| ops::revert(ctx, &contribute, skill, to, confirm, None))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Drive `invite <emails>... [--channel <c>]... --yes` and return the FULL applied invitation:
+    /// `(address, invited, mailed)` — `mailed` is the server's honest can-deliver flag (false on a
+    /// plane with no SMTP relay; the inviter pastes the address by hand).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn invite_full(
+        &self,
+        emails: &[&str],
+        channels: &[&str],
+    ) -> Result<(String, Vec<String>, bool), String> {
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let directory = self.dir_connect();
+        let connectors = ops::InviteConnectors {
+            governance: &governance,
+            directory: &directory,
+        };
+        self.with_inert_ctx(|ctx| {
+            match ops::invite(
+                ctx,
+                &connectors,
+                emails.iter().map(|e| (*e).to_owned()).collect(),
+                channels.iter().map(|c| (*c).to_owned()).collect(),
+                None,
+                true,
+            )? {
+                ops::InviteOutcome::Applied(d) => Ok((d.address, d.invited, d.mailed)),
+                other => Err(crate::error::ClientError::InvalidArgument(format!(
+                    "test_support: expected an invite apply, got {other:?}"
+                ))),
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive `auth login [server]` — call 1 answers `{"pending": {user_code, server}}` (the device flow
+    /// started; a WAL holds the session), a re-invoke after the identity leg answers `{"done": …}` (the
+    /// `POST /v1/login` redeem: one re-minted credential per confirmed seat, the docs written).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn auth_login(&self, server: Option<&str>) -> Result<serde_json::Value, String> {
+        let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+        };
+        let directory = self.dir_connect();
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let connectors = ops::AuthConnectors {
+            enroll: &enroll_c,
+            directory: &directory,
+            governance: &governance,
+            web_origin: server
+                .map(str::to_owned)
+                .unwrap_or_else(|| "https://topos.sh".to_owned()),
+        };
+        self.with_inert_ctx(|ctx| match ops::login(ctx, &connectors, server, false)? {
+            ops::AuthLoginOutcome::Pending(p) => Ok(serde_json::json!({
+                "pending": { "user_code": p.user_code, "server": p.server },
+            })),
+            ops::AuthLoginOutcome::Done(d) => Ok(serde_json::json!({
+                "done": serde_json::to_value(&d).expect("serialize AuthLoginData"),
+            })),
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive `auth logout --yes` (the apply: best-effort self device-revoke per workspace + delete
+    /// `credentials.json`; skills/follows/drafts stay). Returns the applied report as its `--json` value.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn auth_logout(&self) -> Result<serde_json::Value, String> {
+        let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+        };
+        let directory = self.dir_connect();
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let connectors = ops::AuthConnectors {
+            enroll: &enroll_c,
+            directory: &directory,
+            governance: &governance,
+            web_origin: "https://topos.sh".to_owned(),
+        };
+        self.with_inert_ctx(|ctx| match ops::logout(ctx, &connectors, true)? {
+            ops::AuthLogoutOutcome::Applied(d) => {
+                Ok(serde_json::to_value(&d).expect("serialize AuthLogoutData"))
+            }
+            ops::AuthLogoutOutcome::Described { .. } => {
+                Err(crate::error::ClientError::InvalidArgument(
+                    "test_support: expected a logout apply, got a describe".into(),
+                ))
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Drive the side-effect-free `auth status` and return it as its `--json` value (whoami, the
+    /// per-workspace credential probe verdicts, hook health, the reporting posture).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn auth_status(&self) -> Result<serde_json::Value, String> {
+        let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
+            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+        };
+        let directory = self.dir_connect();
+        let governance = |b: &str| -> Box<dyn GovernanceSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let connectors = ops::AuthConnectors {
+            enroll: &enroll_c,
+            directory: &directory,
+            governance: &governance,
+            web_origin: "https://topos.sh".to_owned(),
+        };
+        self.with_inert_ctx(|ctx| {
+            ops::status(ctx, &connectors)
+                .map(|d| serde_json::to_value(&d).expect("serialize AuthStatusData"))
+        })
+        .map_err(|e| e.to_string())
+    }
+
     /// The raw `settings.json` in the claude config home (`None` when absent or not in claude mode) — the
     /// e2e asserts the exact installed hook command against it.
     #[must_use]
@@ -980,7 +1750,22 @@ impl FollowHarness {
     /// # Errors
     /// The verb's typed error rendered to a string.
     pub fn publish(&self, standup_base_url: &str, approve: &str) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, approve, None)
+        self.publish_impl(standup_base_url, approve, None, None)
+    }
+
+    /// [`publish`](Self::publish) with a `-m <message>` — the author's commit message (it becomes the
+    /// candidate's recorded message: the review inbox leads with it, `log` carries it, and a verdict
+    /// notice names the change by it).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn publish_message(
+        &self,
+        standup_base_url: &str,
+        approve: &str,
+        message: &str,
+    ) -> Result<PublishResult, String> {
+        self.publish_impl(standup_base_url, approve, None, Some(message))
     }
 
     /// [`publish`](Self::publish) with an EXPLICIT `--workspace <id>` (the global flag) — disambiguates a
@@ -995,7 +1780,7 @@ impl FollowHarness {
         approve: &str,
         workspace: &str,
     ) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, approve, Some(workspace))
+        self.publish_impl(standup_base_url, approve, Some(workspace), None)
     }
 
     fn publish_impl(
@@ -1003,6 +1788,7 @@ impl FollowHarness {
         standup_base_url: &str,
         approve: &str,
         workspace: Option<&str>,
+        message: Option<&str>,
     ) -> Result<PublishResult, String> {
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .map_err(|e| e.to_string())?;
@@ -1057,7 +1843,7 @@ impl FollowHarness {
                 false,
                 None,
                 workspace,
-                None,
+                message,
             )
             .map_err(|e| e.to_string())?
             {
@@ -1070,55 +1856,38 @@ impl FollowHarness {
         })
     }
 
-    /// Drive the real `invite` verb: this (owner) rig signs the governance Invite op and POSTs it,
-    /// returning the minted `/i/` link. `skills` pre-offers the named skill ids to `email`.
+    /// Drive the real `invite <email> --yes` verb: this (owner) rig POSTs the invitation (a member-lane
+    /// roster write under the workspace Bearer credential) and returns the workspace ADDRESS the invitee
+    /// joins at (the invite carries no link — the roster is the lock). `skills` is accepted for call-site
+    /// compatibility but IGNORED: the reshaped invite pre-places CHANNELS, and the seeded genesis rides the
+    /// structural `everyone`, so an invitee needs no explicit placement.
     ///
     /// # Errors
-    /// The verb's typed error rendered to a string (a non-owner is DENIED).
+    /// The verb's typed error rendered to a string (a policy-DENIED surfaces as "not authorized").
     pub fn invite(&self, email: &str, skills: &[&str]) -> Result<String, String> {
-        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
-            .map_err(|e| e.to_string())?;
-        let governance = |b: &str| -> Box<dyn GovernanceSource> {
-            Box::new(UreqDeviceClient::new(
-                b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
-            ))
-        };
-        let inert_plane = InertPlane;
-        let inert_follow = InertFollow;
-        self.with_adapter(|harness| {
-            let ctx = Ctx {
-                fs: &self.fs,
-                ids: &self.ids,
-                clock: &self.clock,
-                device_id: device_id.clone(),
-                layout: self.layout(),
-                harness,
-                plane: &inert_plane,
-                follow: &inert_follow,
-            };
-            // The reshaped `invite` seats emails as invited members (no skill pre-offer, no `/i/` link);
-            // the pre-offer/channel-placement semantics belong to the tests/ rewrite. Compile-shaped here.
-            let _ = skills;
-            ops::invite(&ctx, &governance, vec![email.to_owned()], Vec::new(), None)
-                .map(|d| d.address)
-                .map_err(|e| e.to_string())
-        })
+        self.invite_impl(email, skills, None)
     }
 
-    /// Drive the real `invite` verb with an EXPLICIT `--workspace <id>` (the global flag). Otherwise
-    /// identical to [`invite`](Self::invite): signs the governance Invite op and POSTs it, returning the
-    /// `/i/` link. This is the AMBIENT-verb selector for an install that follows skills across several
-    /// workspaces — `invite` with no `--workspace` fails locally with a `WorkspaceSelection` there.
+    /// [`invite`](Self::invite) with an EXPLICIT `--workspace <id>` (the ambient-verb selector for an
+    /// install that follows skills across several workspaces).
     ///
     /// # Errors
-    /// The verb's typed error rendered to a string (a non-owner is DENIED; an unjoined `--workspace` id is
-    /// a local `WorkspaceSelection` that never reaches the plane).
+    /// As [`invite`](Self::invite); an unjoined `--workspace` id is a local `WorkspaceSelection` that never
+    /// reaches the plane.
     pub fn invite_in_workspace(
         &self,
         email: &str,
         skills: &[&str],
         workspace: &str,
+    ) -> Result<String, String> {
+        self.invite_impl(email, skills, Some(workspace))
+    }
+
+    fn invite_impl(
+        &self,
+        email: &str,
+        skills: &[&str],
+        workspace: Option<&str>,
     ) -> Result<String, String> {
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .map_err(|e| e.to_string())?;
@@ -1128,6 +1897,16 @@ impl FollowHarness {
                 creds_map(&self.fs, &self.layout()),
             ))
         };
+        let directory = |b: &str| -> Box<dyn DirectorySource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let connectors = ops::InviteConnectors {
+            governance: &governance,
+            directory: &directory,
+        };
         let inert_plane = InertPlane;
         let inert_follow = InertFollow;
         self.with_adapter(|harness| {
@@ -1142,15 +1921,21 @@ impl FollowHarness {
                 follow: &inert_follow,
             };
             let _ = skills;
-            ops::invite(
+            match ops::invite(
                 &ctx,
-                &governance,
+                &connectors,
                 vec![email.to_owned()],
                 Vec::new(),
-                Some(workspace),
+                workspace,
+                true,
             )
-            .map(|d| d.address)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
+            {
+                ops::InviteOutcome::Applied(data) => Ok(data.address),
+                other => Err(format!(
+                    "test_support: expected an invite apply, got {other:?}"
+                )),
+            }
         })
     }
 
@@ -1438,6 +2223,7 @@ impl ContributeHarness {
                     mode: FollowModeDoc::Auto,
                     review_required,
                     following: true,
+                    excluded_here: false,
                 }],
             },
         )
@@ -1601,21 +2387,57 @@ impl ContributeHarness {
         })
     }
 
-    /// Drive `review --approve | --reject` on `<skill>@<hash>`.
+    /// Drive `review <skill>@<hash> --approve | --reject` (the verdict is the consent). The reshaped verb
+    /// dispatches through `review_dispatch` over the directory (inbox/describe) + contribute (the write)
+    /// seams; a target + verdict applies directly, which is what this drives.
     ///
     /// # Errors
     /// The verb's typed error rendered to a string.
     pub fn review(&self, target: &str, approve: bool) -> Result<ReviewData, String> {
-        self.with_write_ctx(|ctx, contribute, _gov| {
-            let verdict = if approve {
-                ops::ReviewVerdict::Approve
-            } else {
-                ops::ReviewVerdict::Reject {
-                    reason: Some("test_support: rejected".to_owned()),
-                }
-            };
-            ops::review(ctx, contribute, target, verdict, None).map_err(|e| e.to_string())
-        })
+        let (plane, follow) = self.read_transport();
+        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
+            .map_err(|e| e.to_string())?;
+        let ctx = Ctx {
+            fs: &self.fs,
+            ids: &self.ids,
+            clock: &self.clock,
+            device_id,
+            layout: self.layout(),
+            harness: &self.harness,
+            plane: &plane,
+            follow: &follow,
+        };
+        let contribute = |b: &str| -> Box<dyn ContributeSource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let directory = |b: &str| -> Box<dyn DirectorySource> {
+            Box::new(UreqDeviceClient::new(
+                b.to_owned(),
+                creds_map(&self.fs, &self.layout()),
+            ))
+        };
+        let connectors = ops::ReviewConnectors {
+            directory: &directory,
+            contribute: &contribute,
+        };
+        let verdict = if approve {
+            ops::ReviewVerdict::Approve
+        } else {
+            ops::ReviewVerdict::Reject {
+                reason: Some("test_support: rejected".to_owned()),
+            }
+        };
+        match ops::review_dispatch(&ctx, &connectors, Some(target), Some(verdict), None)
+            .map_err(|e| e.to_string())?
+        {
+            ops::ReviewOutcome::Applied(data) => Ok(data),
+            other => Err(format!(
+                "test_support: expected an applied review verdict, got {other:?}"
+            )),
+        }
     }
 
     /// Drive `revert <skill> --to <good>`. The `approve` arg is the legacy `<skill>@<hash>` token the e2e
@@ -2017,6 +2839,78 @@ impl ReconcileHarness {
     /// upstream withdrawal snapshots it into the sidecar store.
     pub fn edit_placement(&self, skill_id: &str, files: &[(&str, bool, &[u8])]) {
         write_tree(&self.placement_dir(skill_id), files);
+    }
+}
+
+/// `follow`'s flags for the address-flow methods: the classic auto adoption, no workspace filter, no
+/// prefixing, no kind-forced selectors — just the `--yes` toggle the describe/apply split turns on.
+fn follow_opts(yes: bool) -> ops::FollowOpts {
+    ops::FollowOpts {
+        manual: false,
+        workspace: None,
+        yes,
+        prefix_dirname: false,
+        channels: Vec::new(),
+        skills: Vec::new(),
+    }
+}
+
+/// Project the engine's `FollowDescribe` into the public [`FollowDescribeView`] the external e2e reads.
+fn describe_view(d: &crate::ops::FollowDescribe) -> FollowDescribeView {
+    FollowDescribeView {
+        workspace_id: d.workspace.workspace_id.clone(),
+        workspace_name: d.workspace.name.clone(),
+        address: d.workspace.address.clone(),
+        role: d.role.clone(),
+        invited_by: d.invited_by.clone(),
+        enrolled_now: d.enrolled_now,
+        targets: d
+            .targets
+            .iter()
+            .map(|t| (t.kind.clone(), t.name.clone()))
+            .collect(),
+        installs: d
+            .installs
+            .iter()
+            .map(|i| InstallView {
+                skill_id: i.skill_id.clone(),
+                name: i.name.clone(),
+                version_id: i.version_id.clone(),
+                bundle_digest: i.bundle_digest.clone(),
+                via_channels: i.via_channels.clone(),
+                via_direct: i.via_direct,
+            })
+            .collect(),
+        preplaced_channels: d.preplaced_channels.clone(),
+        all_devices_note: d.all_devices_note.clone(),
+        reporting_note: d.reporting_note.clone(),
+    }
+}
+
+/// Project the engine's `FollowApplied` into the public [`FollowAppliedView`].
+fn applied_view(a: &crate::ops::FollowApplied) -> FollowAppliedView {
+    FollowAppliedView {
+        workspace_id: a.workspace_id.clone(),
+        workspace_name: a.workspace_name.clone(),
+        enrolled_now: a.enrolled_now,
+        subscribed: a
+            .subscribed
+            .iter()
+            .map(|t| (t.kind.clone(), t.name.clone()))
+            .collect(),
+        installed: a
+            .installed
+            .iter()
+            .map(|i| InstallView {
+                skill_id: i.skill_id.clone(),
+                name: i.name.clone(),
+                version_id: i.version_id.clone(),
+                bundle_digest: i.bundle_digest.clone(),
+                via_channels: i.via_channels.clone(),
+                via_direct: i.via_direct,
+            })
+            .collect(),
+        warnings: a.warnings.clone(),
     }
 }
 

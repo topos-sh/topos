@@ -1277,6 +1277,8 @@ fn subscribe(
         accept_first_receive: true,
         only_workspace: Some(ws_id.to_owned()),
         ack_notices: false,
+        // `--manual` threads through to the adopted entries: every later update is an offer.
+        confirm_each: opts.manual,
         ..ReconcileOpts::default()
     };
     for c in &describe.collisions {
