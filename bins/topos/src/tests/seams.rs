@@ -302,6 +302,57 @@ fn keep_as_yours_detached_with_a_draft_forks_in_place() {
 }
 
 #[test]
+fn keep_as_yours_fails_closed_on_ambiguous_drafts_and_loses_nothing() {
+    // Two draft snapshots on the base (a crash mid-snapshot, or repeated withdraw/refollow, can leave
+    // more than one) + a cleaned agent dir. Rendering only the base and retiring the sidecar would
+    // permanently destroy the un-rendered draft — the "nothing is ever lost" contract forbids it. So
+    // `--yes` must FAIL CLOSED, touching neither the follow entry nor the sidecar store.
+    let rig = Rig::new("kay-ambiguous");
+    let (old_id, dir) = rig.lay_followed("deploy", true);
+    let sid = crate::id::SkillId::parse(&old_id).unwrap();
+
+    // Snapshot two DISTINCT drafts onto the base.
+    {
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let ctx = rig.ctx(&plane, &follow);
+        let sp = ctx.layout.published(&sid);
+        let lock: Lock = doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+        for body in ["# deploy\ndraft one\n", "# deploy\ndraft two\n"] {
+            std::fs::write(dir.join("SKILL.md"), body).unwrap();
+            let scanned = crate::scan::scan(&dir).unwrap();
+            crate::ops::sync_engine::snapshot_draft(&ctx, &sp, &lock, &scanned).unwrap();
+        }
+    }
+    // The upstream withdrawal cleans the agent dir (the drafts survive only in the sidecar store).
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let plane = InertPlane;
+    let follow = InertFollow;
+    let ctx = rig.ctx(&plane, &follow);
+    // The describe still runs (a draft rides along — the user is not told "nothing to keep").
+    match ops::keep_as_yours(&ctx, "deploy", false).unwrap() {
+        Some(ops::KeepAsYoursOutcome::Described { data, .. }) => {
+            assert!(data.has_draft, "an ambiguous history still has a draft to keep");
+        }
+        other => panic!("expected a describe, got {other:?}"),
+    }
+    // `--yes` fails closed — and deletes NOTHING.
+    assert!(
+        matches!(ops::keep_as_yours(&ctx, "deploy", true), Err(ClientError::Corrupt(_))),
+        "an ambiguous retained history refuses the fork rather than lose a draft"
+    );
+    assert!(
+        rig.read_follows().iter().any(|f| f.skill_id == old_id),
+        "the follow entry survives the refused fork"
+    );
+    assert!(
+        rig.tracked_ids().contains(&old_id),
+        "the sidecar (with both drafts) survives — nothing was lost"
+    );
+}
+
+#[test]
 fn keep_as_yours_is_none_for_a_live_followed_skill() {
     let rig = Rig::new("kay-live");
     // A LIVE followed skill (following, dirs present, not excluded) is NOT a fork case — `add` stays the

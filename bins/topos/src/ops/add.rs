@@ -520,7 +520,10 @@ fn fork_has_draft(
     }
     let store = Store::open(&sp.store)?;
     let base = super::parse_hex32(&lock.base_commit)?;
-    Ok(retained_head(&store, base)?.is_some())
+    // Base ⇒ no draft; Draft or Ambiguous ⇒ a draft rides along (Ambiguous is refused at apply, but the
+    // describe must still say a draft exists so the user is not told "nothing rides along" and then
+    // blocked).
+    Ok(!matches!(retained_head(&store, base)?, RetainedTree::Base))
 }
 
 /// Render the retained tree (the draft snapshot if one rides along, else the base) back into `dest` — the
@@ -534,7 +537,22 @@ fn render_retained_into(
 ) -> Result<(), ClientError> {
     let store = Store::open(&sp.store)?;
     let base = super::parse_hex32(&lock.base_commit)?;
-    let head = retained_head(&store, base)?.unwrap_or(base);
+    let head = match retained_head(&store, base)? {
+        RetainedTree::Base => base,
+        RetainedTree::Draft(d) => d,
+        // FAIL CLOSED: more than one draft snapshot sits on the base and we cannot know which is the
+        // one to keep. Rendering only the base and then retiring the sidecar (the next step) would
+        // permanently destroy the other drafts — a silent loss the "nothing is ever lost" contract
+        // forbids. Refuse instead, touching nothing: the bytes stay retained for the user to inspect.
+        RetainedTree::Ambiguous => {
+            return Err(ClientError::Corrupt(
+                "this retained copy has more than one saved draft and cannot be re-forked \
+                 automatically — nothing was changed; inspect the copies under ~/.topos and adopt \
+                 the one you want by path (topos add <path>)"
+                    .to_owned(),
+            ));
+        }
+    };
     let leaves = store
         .read_tree_structure(head)
         .map_err(|e| ClientError::Corrupt(format!("read retained tree: {e:?}")))?;
@@ -561,10 +579,22 @@ fn render_retained_into(
     Ok(())
 }
 
-/// The retained head: the single draft snapshot parented on `base` (what a withdrawal snapshots), else
-/// `None` (the base is the retained tree). A rare multi-snapshot history at one base falls back to `None`
-/// (the base bytes are always a valid "keep as yours") rather than guessing which draft is current.
-fn retained_head(store: &Store, base: [u8; 32]) -> Result<Option<[u8; 32]>, ClientError> {
+/// What the sidecar retained for a withdrawn/excluded copy: just the base tree, exactly one draft
+/// snapshot on it (what a withdrawal saves), or several (which one is current is unknowable — a crash
+/// mid-snapshot or repeated withdraw/refollow cycles can leave more than one).
+enum RetainedTree {
+    /// No draft snapshot — the base bytes are the retained tree.
+    Base,
+    /// The one draft snapshot parented on the base.
+    Draft([u8; 32]),
+    /// More than one draft snapshot on the base — genuinely ambiguous; the fork must fail closed
+    /// rather than pick one and delete the rest.
+    Ambiguous,
+}
+
+/// Classify the retained tree at `base`. A single draft snapshot is the withdrawal's saved delta; more
+/// than one is [`RetainedTree::Ambiguous`] (the caller refuses the fork so nothing is lost).
+fn retained_head(store: &Store, base: [u8; 32]) -> Result<RetainedTree, ClientError> {
     let versions = store
         .list_versions()
         .map_err(|e| ClientError::Corrupt(format!("list retained versions: {e:?}")))?;
@@ -582,10 +612,11 @@ fn retained_head(store: &Store, base: [u8; 32]) -> Result<Option<[u8; 32]>, Clie
             drafts.push(v);
         }
     }
-    match drafts.as_slice() {
-        [one] => Ok(Some(*one)),
-        _ => Ok(None),
-    }
+    Ok(match drafts.as_slice() {
+        [] => RetainedTree::Base,
+        [one] => RetainedTree::Draft(*one),
+        _ => RetainedTree::Ambiguous,
+    })
 }
 
 /// Retire the retained skill's sidecar record + follow entry — the `keep-as-yours` fork re-adopts the

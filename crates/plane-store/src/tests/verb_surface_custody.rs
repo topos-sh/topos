@@ -547,3 +547,99 @@ async fn a_purged_version_is_never_a_revert_target_on_either_lane(pool: PgPool) 
         Some("TARGET_PURGED")
     );
 }
+
+/// A version's purge tombstone (`skill_commit.purged_at`).
+async fn purge_tombstone(pool: &PgPool, ws: &str, commit: &CommitId) -> Option<i64> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT purged_at FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2",
+    )
+    .bind(ws)
+    .bind(commit.0.as_slice())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
+    // A purged version's bytes can legitimately reappear (the publisher re-publishes the identical
+    // content — content addressing re-derives the SAME commit id). Re-rooting the bytes makes the
+    // version LIVE again, so its purge tombstone must clear: a stale `purged_at` would keep refusing a
+    // revert to now-present bytes and make a fresh purge see `already_purged`.
+    let fx = Fixture::new(pool.clone(), "vsc-repurge").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(69);
+    register(&fx, &w, &s, "dk_owner", &key, "alice@acme.com").await;
+    fx.authority
+        .db()
+        .seed_workspace_member(&w, &prin("alice@acme.com"), "owner", "confirmed")
+        .await
+        .unwrap();
+
+    // Genesis v1 (current) named "Deploy"; a proposal V rides on it (not current — purgeable).
+    let (staged, device) = prepare(
+        &fx,
+        &key,
+        "dk_owner",
+        &w,
+        &s,
+        DeviceOp::PublishDirect,
+        "69000000-0000-4000-8000-000000000001",
+        genesis(vec![file("SKILL.md", b"v1")]),
+        gn(0, 0),
+    )
+    .await;
+    crate::set_current::publish(
+        &fx.authority, &w, &s, &staged, &device, Some("Deploy"), None, CREATED_AT, NOW,
+    )
+    .await
+    .unwrap();
+    let v1 = current_commit(&fx, &w, &s).await;
+    let (rp, vcommit, _) = do_propose(
+        &fx,
+        &key,
+        "dk_owner",
+        &w,
+        &s,
+        "69000000-0000-4000-8000-000000000002",
+        child(v1, vec![file("SKILL.md", b"secret leaked")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(rp.outcome, TO::NeedsReview);
+
+    // Purge V (a proposal commit, never current — allowed): the tombstone lands, the proposal closes.
+    assert_eq!(
+        fx.authority
+            .purge_version_session(
+                &w, "alice@acme.com", "deploy", vcommit, DeploymentMode::Cloud, CREATED_AT, NOW,
+            )
+            .await
+            .unwrap(),
+        PurgeOutcome::Purged
+    );
+    assert!(
+        purge_tombstone(&pool, "w_acme", &vcommit).await.is_some(),
+        "the purge tombstones V"
+    );
+
+    // Re-propose the IDENTICAL draft over the same base → the SAME commit id V, re-ingesting its bytes.
+    let (rp2, vcommit2, _) = do_propose(
+        &fx,
+        &key,
+        "dk_owner",
+        &w,
+        &s,
+        "69000000-0000-4000-8000-000000000003",
+        child(v1, vec![file("SKILL.md", b"secret leaked")]),
+        gn(1, 1),
+    )
+    .await;
+    assert_eq!(rp2.outcome, TO::NeedsReview);
+    assert_eq!(vcommit2, vcommit, "content addressing re-derives the same id");
+    assert_eq!(
+        purge_tombstone(&pool, "w_acme", &vcommit).await,
+        None,
+        "re-introducing the bytes clears the tombstone — the version is live again"
+    );
+}

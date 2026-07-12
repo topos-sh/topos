@@ -156,21 +156,25 @@ async fn verification_context_discloses_the_session_device_and_workspace(pool: P
         .await
         .unwrap();
 
-    // The verification page discloses the device + the RESOLVED workspace's display name — no secret.
+    // The verification page discloses the device + the ECHOED requested address — never the resolved
+    // workspace's real display name or verified-domain facts (that would be an existence oracle: the
+    // page must not reveal whether the address resolved). So a RESOLVED address renders its own slug
+    // with `unverified`, exactly as an unresolved one does.
     let ctx = a
         .read_verification_context(&start.user_code, NOW)
         .await
         .unwrap();
     assert_eq!(ctx.machine_name, "alice-laptop");
-    assert_eq!(ctx.workspace_display_name, "Acme");
-    assert_eq!(ctx.verified_domain_status, "verified");
+    assert_eq!(ctx.workspace_display_name, addr(&w));
+    assert_eq!(ctx.verified_domain_status, "unverified");
+    assert_eq!(ctx.verified_domain, None);
     // The fingerprint is the leading 16 hex of sha256(device pubkey) — no secret, no `dk_` prefix.
     let expected_fp = &digest::to_hex(&digest::sha256(&dpub))[..16];
     assert_eq!(ctx.device_fingerprint, expected_fp);
     assert!(!ctx.device_fingerprint.starts_with("dk_"));
 
-    // An UNRESOLVED address echoes the REQUESTED name verbatim (charset-validated at authorize) — the
-    // page renders the same copy whether or not the name exists, so authorize discloses nothing.
+    // An UNRESOLVED address echoes its requested name the SAME way — the page renders identical copy
+    // (echoed name + `unverified`, no domain) whether or not the name exists, so it is no oracle.
     let ghost = a
         .start_device_auth("no-such-team", &dpub, "laptop", NOW, "t0")
         .await
@@ -181,6 +185,7 @@ async fn verification_context_discloses_the_session_device_and_workspace(pool: P
         .unwrap();
     assert_eq!(ctx.workspace_display_name, "no-such-team");
     assert_eq!(ctx.verified_domain_status, "unverified");
+    assert_eq!(ctx.verified_domain, None);
 
     // A malformed name is the typed parse-boundary refusal (never an existence answer).
     assert!(matches!(

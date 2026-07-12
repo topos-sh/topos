@@ -167,6 +167,10 @@ struct SessionRow {
     /// and for an ENROLL session whose requested address never resolved (the grant is issued anyway;
     /// the redeem answers the one uniform denial).
     workspace_id: Option<String>,
+    /// The ADDRESS name an enroll session was opened against — echoed (never the real workspace's
+    /// facts) at the verify page and the granted poll, so neither becomes a workspace-existence
+    /// oracle. `None` for standup/login sessions.
+    requested_workspace: Option<String>,
     intent: String,
     device_pubkey: Vec<u8>,
     device_key_id: String,
@@ -184,6 +188,7 @@ async fn read_session(
     let dc = device_code_sha256.as_slice();
     let row = sqlx::query!(
         r#"SELECT user_code AS "user_code!", workspace_id AS "workspace_id?",
+                  requested_workspace AS "requested_workspace?",
                   intent AS "intent!", device_pubkey AS "device_pubkey!: Vec<u8>",
                   device_key_id AS "device_key_id!", status AS "status!",
                   confirmed_principal AS "confirmed_principal?", expires_at AS "expires_at!: i64",
@@ -197,6 +202,7 @@ async fn read_session(
     Ok(row.map(|r| SessionRow {
         user_code: r.user_code,
         workspace_id: r.workspace_id,
+        requested_workspace: r.requested_workspace,
         intent: r.intent,
         device_pubkey: r.device_pubkey,
         device_key_id: r.device_key_id,
@@ -280,6 +286,26 @@ async fn poll_run(
 /// two redeem doors can never cross — and a workspace only when the session has one (a login grant is
 /// workspace-less by design; an enroll grant against an unresolved address is too, and the redeem
 /// answers the one uniform denial).
+/// A deterministic, UNRESOLVABLE workspace id (the real `w_<32 hex>` shape) for an enroll address that
+/// did not resolve. The granted poll then carries the same id shape it would for a real workspace, so
+/// it cannot become an existence oracle; the id is never a workspace row, so the redeem reads no
+/// workspace and answers the one uniform denial. Derived from the enrollment secret so a client cannot
+/// recompute it and probe (and it never collides with a real CSPRNG id).
+fn placeholder_workspace_id(secret: &[u8; 32], requested: &str) -> Result<WorkspaceId> {
+    let mac = enroll::sha256_token(&enroll::derive_token(
+        secret,
+        b"enroll-noresolve",
+        &[requested.as_bytes()],
+    ));
+    let mut hex = String::with_capacity(34);
+    hex.push_str("w_");
+    for b in &mac[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    WorkspaceId::parse(&hex).map_err(AuthorityError::internal)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn issue_grant(
     tx: &mut Transaction<'_, Postgres>,
@@ -290,23 +316,41 @@ async fn issue_grant(
     secret: &[u8; 32],
     link_base: &str,
 ) -> Result<GrantIssued> {
-    let ws = session
-        .workspace_id
-        .as_deref()
-        .map(WorkspaceId::parse)
-        .transpose()
-        .map_err(AuthorityError::integrity)?;
     let principal = session.confirmed_principal.as_deref().ok_or_else(|| {
         AuthorityError::integrity(EnrollCorrupt("confirmed session without principal"))
     })?;
-    // The workspace context rides with the grant — the client learns what it is joining from the poll
-    // ("" / None when the grant is workspace-less; the grant's authority fields never depend on it).
-    let (workspace_display_name, workspace_address) = match &ws {
-        Some(ws) => match read_workspace_in_tx(tx, ws).await? {
-            Some(w) => (w.display_name, Some(format!("{link_base}/{}", w.name))),
+    // The workspace context rides with the grant — the client learns what it is joining from the poll.
+    // An ENROLL-by-address poll must be a NON-oracle: it discloses the SAME shape whether or not the
+    // requested name resolved (an unresolved address is only ever denied at the redeem, uniformly). So
+    // the display name + address ECHO the requested name (never the real workspace row), and the bound
+    // id is the resolved id when it exists, else a deterministic, UNRESOLVABLE placeholder of the same
+    // `w_<hex>` shape — indistinguishable from a real id at the poll (a bare id reveals nothing without
+    // a membership credential), and the redeem's read of a placeholder finds no workspace and answers
+    // the one uniform denial. STANDUP (its approval created a real workspace) and LOGIN (workspace-less)
+    // keep their existing context.
+    let (ws, workspace_display_name, workspace_address) = if session.intent == "enroll" {
+        let requested = session.requested_workspace.clone().unwrap_or_default();
+        let ws = match session.workspace_id.as_deref() {
+            Some(id) => WorkspaceId::parse(id).map_err(AuthorityError::integrity)?,
+            None => placeholder_workspace_id(secret, &requested)?,
+        };
+        let address = Some(format!("{link_base}/{requested}"));
+        (Some(ws), requested, address)
+    } else {
+        let ws = session
+            .workspace_id
+            .as_deref()
+            .map(WorkspaceId::parse)
+            .transpose()
+            .map_err(AuthorityError::integrity)?;
+        let (display_name, address) = match &ws {
+            Some(ws) => match read_workspace_in_tx(tx, ws).await? {
+                Some(w) => (w.display_name, Some(format!("{link_base}/{}", w.name))),
+                None => (String::new(), None),
+            },
             None => (String::new(), None),
-        },
-        None => (String::new(), None),
+        };
+        (ws, display_name, address)
     };
 
     // The grant's intent: a standup session's approval created its workspace, so its grant redeems at

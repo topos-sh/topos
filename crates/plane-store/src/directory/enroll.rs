@@ -629,27 +629,36 @@ pub(crate) async fn read_verification_context(
     };
     let intent = SessionIntent::parse(&session.intent)
         .ok_or_else(|| AuthorityError::integrity(EnrollCorruptIntent))?;
-    // An enroll session against an UNRESOLVED address echoes the requested name verbatim (it was
-    // charset-validated at authorize, so it is safe to render — and whether it resolved is never
-    // disclosed here). A standup/login session has no workspace at all: the required display fields
-    // stay wire-stable ("" / empty) and the page renders that copy from `intent`.
+    // An ENROLL session echoes the requested name verbatim and discloses NO real-workspace facts —
+    // whether the address resolved is never revealed here (that is the redeem's one uniform denial), so
+    // the verify page cannot become a workspace-existence oracle. The name was charset-validated at
+    // authorize, so it is safe to render. A standup/login session has no workspace at all: the required
+    // display fields stay wire-stable ("" / empty) and the page renders that copy from `intent`.
     let (workspace_display_name, verified_domain, verified_domain_status) =
-        match &session.workspace_id {
-            Some(ws) => {
-                let Some(workspace) = authority.db().read_workspace(ws).await? else {
-                    return Err(AuthorityError::NotFound);
-                };
-                (
-                    workspace.display_name,
-                    workspace.verified_domain,
-                    workspace.verified_domain_status,
-                )
-            }
-            None => (
+        if matches!(intent, SessionIntent::Enroll) {
+            (
                 session.requested_workspace.clone().unwrap_or_default(),
                 None,
                 "unverified".to_owned(),
-            ),
+            )
+        } else {
+            match &session.workspace_id {
+                Some(ws) => {
+                    let Some(workspace) = authority.db().read_workspace(ws).await? else {
+                        return Err(AuthorityError::NotFound);
+                    };
+                    (
+                        workspace.display_name,
+                        workspace.verified_domain,
+                        workspace.verified_domain_status,
+                    )
+                }
+                None => (
+                    session.requested_workspace.clone().unwrap_or_default(),
+                    None,
+                    "unverified".to_owned(),
+                ),
+            }
         };
     Ok(VerificationContext {
         intent,

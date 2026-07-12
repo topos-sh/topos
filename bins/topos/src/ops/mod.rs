@@ -33,7 +33,7 @@ mod remove;
 mod revert;
 mod review;
 mod self_update;
-mod sync_engine;
+pub(crate) mod sync_engine;
 mod unfollow;
 
 pub(crate) use add::{

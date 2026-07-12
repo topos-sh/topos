@@ -34,10 +34,23 @@ BEGIN
     FOR ws IN SELECT workspace_id, display_name FROM workspace ORDER BY workspace_id LOOP
         v_slug := btrim(left(btrim(regexp_replace(lower(COALESCE(ws.display_name, '')),
                                                   '[^a-z0-9-]+', '-', 'g'), '-'), 63), '-');
+        -- The reserved set mirrors the runtime `RESERVED_WORKSPACE_NAMES` (the one Rust home the
+        -- creation ops enforce): a backfilled slug must not squat a route/product word, since
+        -- `<origin>/<name>` IS the share-link/route namespace. Kept in sync by hand — this is a
+        -- one-time backfill (there are no enrolled workspaces yet), and the runtime const is the
+        -- authority for every name created from here on.
         IF v_slug IS NULL OR v_slug = ''
            OR v_slug ~ '-archived-' OR v_slug ~ '^v[0-9]+$'
-           OR v_slug IN ('api', 'www', 'admin', 'topos', 'i', 'channels', 'skills',
-                         'workspaces', 'everyone', 'auth', 'login', 'verify', 'enroll') THEN
+           OR v_slug IN ('about', 'admin', 'admin-api', 'api', 'assets', 'auth', 'billing', 'blog',
+                         'callback', 'channels', 'delivery', 'device', 'devices', 'docs', 'email',
+                         'enroll', 'everyone', 'exclusions', 'follows', 'health', 'help', 'i',
+                         'install', 'invitations', 'invites', 'legal', 'login', 'logout', 'mail',
+                         'me', 'new', 'notices', 'oauth', 'oidc', 'org', 'policy', 'privacy',
+                         'proposals', 'publish', 'register', 'report', 'reverts', 'reviews', 'root',
+                         'roster', 'scim', 'security', 'session', 'sessions', 'settings', 'share',
+                         'signin', 'signup', 'skills', 'staff', 'static', 'status', 'support',
+                         'terms', 'topos', 'verify', 'webhook', 'webhooks', 'workspace',
+                         'workspaces', 'www') THEN
             v_slug := 'ws-' || substr(md5(ws.workspace_id), 1, 8);
         END IF;
         v_candidate := v_slug;

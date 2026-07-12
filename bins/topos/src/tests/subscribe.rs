@@ -1095,6 +1095,51 @@ fn notices_are_returned_and_acked_interactively_but_fetched_without_ack_by_the_h
 }
 
 #[test]
+fn an_excluded_skills_unreadable_sync_doc_warns_and_never_aborts_the_quiet_sweep() {
+    // The quiet hook must never die on one poisoned sidecar doc. An excluded skill whose sync.json is
+    // unreadable (e.g. a downgrade past a bumped doc schema) is isolated to a per-skill warning — the
+    // sweep still runs to completion and writes its freshness/report, exactly like the freeze and
+    // withdraw arms already do.
+    let rig = Rig::new("excluded-corrupt");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    // The skill is followed + excluded here, and NOT in the delivered set → the undelivered classifier
+    // hits the excluded arm, which reads its sync.json.
+    let follow = crate::plane_http::FileFollow::new(vec![(
+        "s_docs".to_owned(),
+        crate::plane::FollowContext {
+            workspace_id: WS.to_owned(),
+            mode: crate::plane::FollowMode::Auto,
+            review_required: false,
+            following: true,
+        },
+    )]);
+    // Poison the skill's sync.json with an unknown schema version — the fail-closed doc load refuses it.
+    let sp = rig.layout().published(&crate::id::SkillId::parse("s_docs").unwrap());
+    std::fs::create_dir_all(sp.sync.parent().unwrap()).unwrap();
+    std::fs::write(&sp.sync, br#"{"schema_version":9999}"#).unwrap();
+
+    let mut transport = FakeTransport::empty(log.clone());
+    transport.snapshot.excluded = vec!["s_docs".to_owned()];
+
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_p, &follow);
+    // The sweep completes (Ok, not Err): the corrupt doc is a per-skill warning, and the freshness doc
+    // still lands — the hook exits 0.
+    let out = ops::pull_reconcile_with(&ctx, &transport, &ops::ReconcileOpts::default()).unwrap();
+    assert!(
+        out.warnings.iter().any(|w| w.contains("s_docs")),
+        "the poisoned skill is a warning, not a fatal abort: {:?}",
+        out.warnings
+    );
+    let status = sync_status::read(&rig.fs, &rig.layout()).unwrap();
+    assert!(
+        status.workspaces.contains_key(WS),
+        "the sweep ran to completion and recorded freshness despite the poisoned skill"
+    );
+}
+
+#[test]
 fn the_pull_action_vocabulary_covers_the_applied_filter() {
     // A guard for the apply's landed filter: the actions it treats as "landed" exist and the
     // detached/excluded ones stay out (a rename in the vocabulary should break THIS test, not the

@@ -453,12 +453,12 @@ pub(crate) fn pull_reconcile_with(
                 // THIS DEVICE excludes it ("not on this device"). The `remove` verb already cleared
                 // the agent dirs here; the person keeps receiving it elsewhere. Report the true
                 // cause and touch nothing — mistaking this for an upstream withdrawal would narrate
-                // a lie (and re-run a clean that already happened).
-                Ok(undelivered_row(
-                    &sid,
-                    read_sync(ctx, &sid)?.as_ref(),
-                    PullAction::Excluded,
-                ))
+                // a lie (and re-run a clean that already happened). The sync read is fallible (a
+                // downgrade past a bumped doc schema can make it unreadable); keep it INSIDE the
+                // per-skill Result so a failure is isolated to this skill, never aborting the sweep
+                // (the quiet hook must not die on one poisoned doc).
+                read_sync(ctx, &sid)
+                    .map(|s| undelivered_row(&sid, s.as_ref(), PullAction::Excluded))
             } else {
                 // UPSTREAM withdrew it (archived, or its last delivering channel dropped it):
                 // managed distribution cleans what it managed. Flag it in the offline cache so

@@ -67,13 +67,20 @@ async fn every_not_yours_redeem_answers_the_one_uniform_denial(pool: PgPool) {
         .await
         .unwrap();
 
-    // (1) A NONEXISTENT address: the flow runs end-to-end (start → confirm → grant), and the redeem —
-    // wherever the client points it — answers the uniform denial.
+    // (1) A NONEXISTENT address: the flow runs end-to-end (start → confirm → grant), and the granted
+    // poll carries the SAME disclosure SHAPE a real address would — a `w_…` id (an unresolvable
+    // placeholder) and the echoed requested name as the address — so the poll is no existence oracle;
+    // the redeem, wherever the client points it, answers the uniform denial.
     let ghost_seed = [71u8; 32];
     let ghost_grant = flow_to_grant(a, "no-such-team", &ghost_seed, "alice@acme.com").await;
     assert!(
-        ghost_grant.workspace_id.is_none() && ghost_grant.workspace_address.is_none(),
-        "an unresolved address issues a workspace-less grant"
+        ghost_grant.workspace_id.is_some(),
+        "an unresolved address discloses a placeholder id, indistinguishable from a real one"
+    );
+    assert_eq!(
+        ghost_grant.workspace_address.as_deref(),
+        Some("https://plane.test/no-such-team"),
+        "the poll echoes the requested name, never a real workspace's facts"
     );
     let RedeemOutcome::Denied(nonexistent) =
         redeem(a, &w, &ghost_grant, device_pub(&ghost_seed)).await
@@ -84,6 +91,13 @@ async fn every_not_yours_redeem_answers_the_one_uniform_denial(pool: PgPool) {
     // (2) A WRONG-WORKSPACE redeem: alice's real grant for w_acme presented against w_other.
     let alice_seed = [72u8; 32];
     let alice_grant = flow_to_grant(a, &addr(&w), &alice_seed, "alice@acme.com").await;
+    // Even a RESOLVED address's poll echoes the requested slug, never the real display name ("Acme") —
+    // the poll for a real address is shaped identically to the ghost's, closing the last oracle bit.
+    assert_eq!(
+        alice_grant.workspace_display_name,
+        addr(&w),
+        "the granted poll echoes the requested name, not the workspace's real display name"
+    );
     let RedeemOutcome::Denied(wrong_ws) =
         redeem(a, &w2, &alice_grant, device_pub(&alice_seed)).await
     else {

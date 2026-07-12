@@ -1164,11 +1164,16 @@ async fn insert_skill_commit(
     // Backfill the digest if a row already exists with none (a commit recorded before the pointer-move
     // path, or by a digest-less writer) — otherwise that version, once current, could never be a revert
     // target. COALESCE keeps an existing digest (idempotent) and never changes the owning skill (the
-    // cross-skill-adoption check already ran, so the existing row is this skill's).
+    // cross-skill-adoption check already ran, so the existing row is this skill's). CLEAR any purge
+    // tombstone: reaching here means the candidate's bytes were just re-ingested and re-rooted, so this
+    // content-addressed version is LIVE again — a stale `purged_at` would wrongly refuse a revert to it
+    // and make a fresh purge see `already_purged`. Re-introducing purged bytes is the publisher's own
+    // act (they re-published the content); the version is real once its bytes are present.
     sqlx::query!(
         "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (workspace_id, commit_id) \
-         DO UPDATE SET bundle_digest = COALESCE(skill_commit.bundle_digest, excluded.bundle_digest)",
+         DO UPDATE SET bundle_digest = COALESCE(skill_commit.bundle_digest, excluded.bundle_digest), \
+                       purged_at = NULL, purged_by = NULL",
         ws_s,
         cid,
         skill_s,
