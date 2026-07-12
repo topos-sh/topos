@@ -14,9 +14,11 @@ directory is for what only a cross-crate loopback run can prove.
   uniquely-named database on `$DATABASE_URL` and runs the production migrations) plus the loopback-plane
   scaffold every suite stands on — `Scratch` / `Plane` / `start_plane` (bind-first, optional enrollment
   config, then serve `router(state)`; `start_plane_mode` picks the deployment posture, and the `Plane`
-  keeps its per-test pool for row-level witnesses), the shared seeding helpers (`seed_genesis_plane`, the
-  owner-credential `mint_invite` — the acting device key id the plane authenticates by registry lookup, no
-  signature), and the placement-expectation builders. Each suite keeps only its
+  keeps its per-test pool for row-level witnesses), the shared seeding helpers (`seed_member` — register a
+  device WITH its workspace Bearer credential + seat its principal as a confirmed member, the whole
+  authorization under the credential model; `seed_genesis_plane`; and `mint_invite`, whose acting
+  `owner_credential` the plane resolves to its registry row → owner-role gate, no signature), and the
+  placement-expectation builders. Each suite keeps only its
   scenario-specific seeding (a seed closure handed to `start_plane`). Each e2e runs a blocking
   `ureq` client on a plain thread beside a live `axum` server on a self-owned **multi-thread** runtime —
   which is why these tests cannot use `#[sqlx::test]` (its current-thread runtime would deadlock).
@@ -41,15 +43,17 @@ directory is for what only a cross-crate loopback run can prove.
   agent-instruction document over the real socket, and the client re-roots — only the bootstrap GET touches
   the link host; the device flow and the placing pull ride the declared API base.
 - **`tests/contribute_e2e.rs`** — the client write verbs (`publish` / `review` / `revert` / the
-  plane-sourced `diff`) over loopback HTTP — each body names the acting `device_key_id` (the op kind rides
-  the route, nothing is signed; the plane authenticates by registry-row lookup), with a separate follower
-  receiving the shipped bytes byte-exact; covers op-id idempotent retry and the four-eyes / review flow.
+  plane-sourced `diff`) over loopback HTTP — the acting device rides the request's workspace **Bearer
+  credential** (never a body field; the op kind rides the route, nothing is signed; the plane resolves the
+  credential to its registry row), with a separate follower receiving the shipped bytes byte-exact; covers
+  op-id idempotent retry and the four-eyes / review flow (a DISTINCT confirmed-member reviewer credential).
 - **`tests/catalog_e2e.rs`** — `list --remote` end to end: the client's device-credential catalog transport
-  (the acting `device_key_id` in the `Topos-Device-Key-Id` header, no signature) against the plane's
-  `GET /v1/workspaces/{ws}/skills` route — the happy-path round-trip (both skills' exact ids/digests), the
-  real `list --remote` merge (Following / Available), the confirmed-member gate (a non-member AND a revoked
-  device 404 → empty, where a bad signature used to be the denial vector), and the self-host lane (catalog
-  visibility == membership on both cloud and self-host).
+  (the workspace **Bearer credential** from `credentials.json`, no signature — each reading rig `enroll`s to
+  land it) against the plane's `GET /v1/workspaces/{ws}/skills` route — the happy-path round-trip (both
+  skills' exact ids/digests), the real `list --remote` merge (Following / Available), the confirmed-member
+  gate (a credential resolving to a non-member device AND a credential on a revoked device both 404 → empty,
+  where a bad signature used to be the denial vector), and the self-host lane (catalog visibility ==
+  membership on both cloud and self-host).
 - **`tests/multi_workspace_e2e.rs`** — one install, one plane, TWO workspaces: a single `follow` twice into
   the same sidecar, both memberships retained, every verb scoped to the right workspace (an authoring
   `publish` moves only its skill's OWN workspace; `invite --workspace` mints into the named one), and
@@ -73,6 +77,14 @@ directory is for what only a cross-crate loopback run can prove.
   idempotent double-approve (ONE workspace), the 4th-create cap, the standup-session intent guard
   (refused identity legs consume nothing), same-device claim replay vs different-device denial, claim
   expiry (+ `/i/` NotFound), and cross-species token isolation in both directions.
+- **`tests/revocation_e2e.rs`** — the credential-model revocation story: a follower enrolls via the REAL
+  two-call `follow` and pulls v1; the owner **removes** the member (`Authority::roster_remove` under the
+  owner's Bearer credential — the device-lane op the `DELETE …/roster/{email}` route composes); the owner
+  ships v2 and the removed follower's next `pull` **fails closed** (the plane's uniform 404 for a non-member
+  read maps to a silent no-op — nothing observed/fetched/applied, frozen at v1); the owner re-invites, the
+  follower re-runs `follow` (its existing device re-redeems, the seat flips invited → confirmed and the
+  workspace credential ROTATES — a `device_registry.credential_sha256` row-witness proves the old one is
+  dead); the follower's next `pull` recovers to v2 byte-exact.
 
 ## Running it
 

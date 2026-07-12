@@ -1,24 +1,25 @@
 //! CATALOG e2e — `list --remote` end to end over loopback HTTP: the REAL client catalog transport
-//! (device-signed) against the REAL composed plane route, on a real `127.0.0.1:0` socket.
+//! (workspace-credential Bearer) against the REAL composed plane route, on a real `127.0.0.1:0` socket.
 //!
 //! The one thing only a cross-crate loopback run can prove for the catalog read: that the client's
-//! `UreqDeviceClient::fetch_catalog` — naming the install's genuine device credential (the `device_key_id`
-//! its `DeviceSigner` derives) in the `Topos-Device-Key-Id` header, no signature — is accepted by the
-//! plane's `GET /v1/workspaces/{ws}/skills` route, whose `list_skills_device` authority resolves the
-//! non-revoked registered device, gates on confirmed workspace membership, and returns the `WireSkillIndex`.
-//! Everything below drives the GENUINE transport (via the client's `test-fixtures` facade) against a
-//! GENUINE `plane-store::Authority` seeded through its own `test-fixtures` shims.
+//! `UreqDeviceClient::fetch_catalog` — presenting the install's workspace **Bearer credential** (from
+//! `credentials.json`), no signature — is accepted by the plane's `GET /v1/workspaces/{ws}/skills` route,
+//! whose `list_skills_device` authority resolves the credential to its non-revoked registry row, gates on
+//! confirmed workspace membership, and returns the `WireSkillIndex`. Everything below drives the GENUINE
+//! transport (via the client's `test-fixtures` facade — each reading rig `enroll`s with its credential so
+//! the Bearer lands in `credentials.json`) against a GENUINE `plane-store::Authority` seeded through its own
+//! `test-fixtures` shims.
 //!
 //! 1. **Happy path** — a confirmed-member device reads the catalog: both published skills come back with
-//!    their exact `version_id`/`bundle_digest` (hex) and genesis generation, proving the whole
-//!    presented-credential → `Topos-Device-Key-Id` header → registry lookup → confirmed-member → catalog
-//!    round-trip.
+//!    their exact `version_id`/`bundle_digest` (hex) and genesis generation, proving the whole presented
+//!    Bearer credential → registry lookup → confirmed-member → catalog round-trip.
 //! 2. **Merge** — driving the real `topos::ops::list(.., Some(RemoteScope))` over the same live transport,
 //!    a followed skill (local == catalog current, after a real pull) annotates `Following` and an
 //!    unfollowed catalog skill annotates `Available`.
-//! 3. **Negative** — a registered-but-non-member device AND a REVOKED device are gated: the plane's 404
-//!    maps to an EMPTY index, while a confirmed member on the SAME plane still sees the full catalog (the
-//!    gate actually gates; an unknown/revoked device 404s where a bad signature used to).
+//! 3. **Negative** — a credential resolving to a non-member device AND a credential on a REVOKED device are
+//!    gated: the plane's 404 maps to an EMPTY index, while a confirmed member on the SAME plane still sees
+//!    the full catalog (the gate actually gates; an unknown/revoked credential 404s where a bad signature
+//!    used to).
 //! 4. **Self-host** — the device catalog lane consults NO deployment mode, so a member reads a self-host
 //!    workspace's catalog exactly as on cloud.
 
@@ -38,25 +39,47 @@ const WS: &str = "w_acme";
 const SA: &str = "s_alpha";
 const SB: &str = "s_beacon";
 
-/// The publisher — a distinct device, rostered on each skill so it can publish the genesis (its principal
-/// need not be a workspace member; the READING device is the one that must be a confirmed member).
+/// The local placeholder each reading rig adopts when it enrolls (the catalog read is follow-independent;
+/// enrollment is only how the workspace credential lands in `credentials.json`).
+const PLACEHOLDER: &[(&str, bool, &[u8])] = &[("SKILL.md", false, b"# placeholder\n")];
+
+/// The publisher — a confirmed member holding [`PUB_CRED`] (a write now needs confirmed membership; the
+/// per-skill roster grants nothing). The READING principal below is a DISTINCT member.
 const PUBLISHER: &str = "p_author";
 const PUB_DKID: &str = "dk_pub";
 /// The publisher device's registered 32-byte public key (a fixed test value; nothing verifies against it).
 const PUB_PUBKEY: [u8; 32] = [41u8; 32];
+/// The publisher's workspace Bearer credential (used only to seed the two genesis publishes).
+const PUB_CRED: &str = "wc_pub_secret";
 
 /// The reading principal (email-shaped — canonical-folded to lowercase), seated as a confirmed member.
 const READER: &str = "reader@acme.test";
-/// A registered device whose principal is NOT a workspace member (the negative-case witness).
+const MEMBER_DKID: &str = "dk_reader";
+/// The reader device's registered 32-byte public key (a fixed test value; the credential authenticates).
+const MEMBER_PUBKEY: [u8; 32] = [42u8; 32];
+/// The reader's workspace Bearer credential — resolves to a confirmed member.
+const MEMBER_CRED: &str = "wc_reader_secret";
+
+/// A principal whose device is registered but is NOT a workspace member (the negative-case witness).
 const STRANGER: &str = "stranger@acme.test";
+const STRANGER_DKID: &str = "dk_stranger";
+/// The stranger device's registered 32-byte public key (a fixed test value).
+const STRANGER_PUBKEY: [u8; 32] = [43u8; 32];
+/// The stranger's workspace Bearer credential — resolves to a real device with NO confirmed seat.
+const STRANGER_CRED: &str = "wc_stranger_secret";
+
+const REVOKED_DKID: &str = "dk_revoked";
+/// The revoked device's registered 32-byte public key (a fixed test value).
+const REVOKED_PUBKEY: [u8; 32] = [44u8; 32];
+/// A workspace Bearer credential on a REVOKED device (bound to the confirmed member READER) — the resolve
+/// short-circuits on the revoked row, so even a member's revoked device reads nothing.
+const REVOKED_CRED: &str = "wc_revoked_secret";
 
 const GENESIS_OP_A: &str = "c0000000-0000-4000-8000-000000000001";
 const GENESIS_OP_B: &str = "c0000000-0000-4000-8000-000000000002";
 const AUTHOR: &str = "d_seed";
 const MSG: &str = "topos publish";
 const AT: &str = "2026-07-07T00:00:00Z";
-/// The reader's per-skill read token for skill A (the merge case pulls A onto the plane's current).
-const RT_A: &str = "rt_reader_alpha";
 
 /// Skill A's genesis bundle — its own distinct bytes (so a cross-skill mix-up would be visible).
 fn files_a() -> Vec<UploadedFile> {
@@ -97,8 +120,8 @@ async fn empty_seed(_authority: &Authority) -> Seeded {
 
 // ── the shared seeding (run post-startup on `plane.rt` against the live authority) ───────────────────
 
-/// Seed the workspace at `deployment_mode` (`"cloud"` / `"self_host"`), the publisher device rostered on
-/// both skills, and a signed genesis for each at `(1,1)`. Returns the two skills' catalog facts.
+/// Seed the workspace at `deployment_mode` (`"cloud"` / `"self_host"`), the publisher as a confirmed member
+/// holding [`PUB_CRED`], and a genesis for each skill at `(1,1)`. Returns the two skills' catalog facts.
 async fn seed_two_published_skills(
     authority: &Authority,
     deployment_mode: &str,
@@ -106,31 +129,30 @@ async fn seed_two_published_skills(
     let ws = WorkspaceId::parse(WS).unwrap();
     let sa = SkillId::parse(SA).unwrap();
     let sb = SkillId::parse(SB).unwrap();
-    let publisher = Principal::parse(PUBLISHER).unwrap();
 
     authority
         .seed_workspace(&ws, "Acme", "verified", deployment_mode)
         .await
         .expect("seed workspace");
-    authority
-        .seed_device(&ws, PUB_DKID, &PUB_PUBKEY, &publisher, false)
-        .await
-        .expect("seed publisher device");
-    authority
-        .seed_roster(&ws, &sa, &publisher)
-        .await
-        .expect("roster publisher on A");
-    authority
-        .seed_roster(&ws, &sb, &publisher)
-        .await
-        .expect("roster publisher on B");
+    // The publisher must be a confirmed member to publish (per-skill roster grants nothing now); its
+    // credential authenticates the two genesis writes.
+    common::seed_member(
+        authority,
+        &ws,
+        PUB_DKID,
+        &PUB_PUBKEY,
+        PUBLISHER,
+        "member",
+        PUB_CRED,
+    )
+    .await;
 
     let a = publish_genesis(authority, &ws, &sa, GENESIS_OP_A, files_a()).await;
     let b = publish_genesis(authority, &ws, &sb, GENESIS_OP_B, files_b()).await;
     (a, b)
 }
 
-/// Drive one signed genesis publish and return its server-trusted hex facts.
+/// Drive one genesis publish (authenticated by [`PUB_CRED`]) and return its server-trusted hex facts.
 async fn publish_genesis(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -142,7 +164,7 @@ async fn publish_genesis(
         .seed_published_genesis(
             ws,
             skill,
-            PUB_DKID,
+            PUB_CRED,
             &OpId::parse(op_id).unwrap(),
             files,
             AUTHOR,
@@ -160,40 +182,19 @@ async fn publish_genesis(
     }
 }
 
-/// Register `device_key_id` (holding `public_key`, bound to `principal`) and seat that principal as a
-/// CONFIRMED workspace member — the exact shape the catalog read authorizes.
-async fn seat_member_device(
-    authority: &Authority,
-    device_key_id: &str,
-    public_key: [u8; 32],
-    principal: &str,
-) {
-    let ws = WorkspaceId::parse(WS).unwrap();
-    let p = Principal::parse(principal).unwrap();
-    authority
-        .seed_device(&ws, device_key_id, &public_key, &p, false)
-        .await
-        .expect("seed member device");
-    authority
-        .seed_workspace_member(&ws, &p, "member", "confirmed")
-        .await
-        .expect("seat confirmed member");
-}
-
-/// Register a non-revoked device with a valid principal but NO workspace-member seat — a resolvable device
-/// with a valid credential that must still be gated out of the catalog.
-async fn register_non_member_device(
-    authority: &Authority,
-    device_key_id: &str,
-    public_key: [u8; 32],
-    principal: &str,
-) {
-    let ws = WorkspaceId::parse(WS).unwrap();
-    let p = Principal::parse(principal).unwrap();
-    authority
-        .seed_device(&ws, device_key_id, &public_key, &p, false)
-        .await
-        .expect("seed non-member device");
+/// Seat the READER as a CONFIRMED member holding [`MEMBER_CRED`] on the [`MEMBER_DKID`] device — the exact
+/// shape the catalog read authorizes (a confirmed member's non-revoked credential).
+async fn seat_reader(authority: &Authority) {
+    common::seed_member(
+        authority,
+        &WorkspaceId::parse(WS).unwrap(),
+        MEMBER_DKID,
+        &MEMBER_PUBKEY,
+        READER,
+        "member",
+        MEMBER_CRED,
+    )
+    .await;
 }
 
 // ── 1. the happy path: the REAL device-credential catalog round-trip over loopback HTTP ──────────────
@@ -201,19 +202,19 @@ async fn register_non_member_device(
 #[test]
 fn a_member_device_reads_the_workspace_catalog_over_loopback() {
     let plane = common::start_plane("topos-catalog-e2e", "member-ok", false, empty_seed);
-    let rig = ContributeHarness::new("cat-member");
-    // The plane must register THIS install's genuine device key + id (the signer the round-trip uses).
-    let reader_pk = rig.device_pubkey();
-    let reader_dkid = rig.device_key_id();
+    let mut rig = ContributeHarness::new("cat-member");
 
     let (fa, fb) = plane.rt.block_on(async {
         let authority: &Authority = &plane.authority;
         let facts = seed_two_published_skills(authority, "cloud").await;
-        seat_member_device(authority, &reader_dkid, reader_pk, READER).await;
+        seat_reader(authority).await;
         facts
     });
 
-    // presented credential → Topos-Device-Key-Id header → registry lookup → confirmed-member gate.
+    // Enroll so the member's workspace credential lands in credentials.json (the Bearer the catalog presents).
+    rig.enroll(&plane.base_url, WS, SA, MEMBER_CRED, false, PLACEHOLDER);
+
+    // presented Bearer credential → registry lookup → confirmed-member gate → the catalog.
     let idx = rig
         .fetch_catalog(&plane.base_url, WS)
         .expect("the real catalog round-trip succeeds");
@@ -249,36 +250,17 @@ fn a_member_device_reads_the_workspace_catalog_over_loopback() {
 fn list_remote_merges_the_catalog_with_local_follow_state() {
     let plane = common::start_plane("topos-catalog-e2e", "merge", false, empty_seed);
     let mut rig = ContributeHarness::new("cat-merge");
-    let reader_pk = rig.device_pubkey();
-    let reader_dkid = rig.device_key_id();
 
     plane.rt.block_on(async {
         let authority: &Authority = &plane.authority;
         seed_two_published_skills(authority, "cloud").await;
-        seat_member_device(authority, &reader_dkid, reader_pk, READER).await;
-        // The reader will FOLLOW skill A: roster it + mint its read token so a real pull lands A's current.
-        let ws = WorkspaceId::parse(WS).unwrap();
-        let sa = SkillId::parse(SA).unwrap();
-        let reader = Principal::parse(READER).unwrap();
-        authority
-            .seed_roster(&ws, &sa, &reader)
-            .await
-            .expect("roster reader on A");
-        authority
-            .mint_read_token(&ws, &sa, &reader, RT_A)
-            .await
-            .expect("mint reader read token for A");
+        // The reader is a confirmed member holding MEMBER_CRED — that alone lets it read A on the real pull
+        // (a confirmed member reads every skill; no per-skill roster / read token exists anymore).
+        seat_reader(authority).await;
     });
 
     // Enroll following ONLY skill A (a placeholder bundle), then pull so local A == the plane's current.
-    rig.enroll(
-        &plane.base_url,
-        WS,
-        SA,
-        RT_A,
-        false,
-        &[("SKILL.md", false, b"placeholder\n")],
-    );
+    rig.enroll(&plane.base_url, WS, SA, MEMBER_CRED, false, PLACEHOLDER);
     let pulled = rig.pull();
     assert_eq!(
         pulled.skills.len(),
@@ -329,35 +311,46 @@ fn list_remote_merges_the_catalog_with_local_follow_state() {
 #[test]
 fn a_non_member_device_is_gated_to_an_empty_catalog() {
     let plane = common::start_plane("topos-catalog-e2e", "gate", false, empty_seed);
-    let member = ContributeHarness::new("cat-gate-member");
-    let stranger = ContributeHarness::new("cat-gate-stranger");
-    let revoked = ContributeHarness::new("cat-gate-revoked");
-    let member_pk = member.device_pubkey();
-    let member_dkid = member.device_key_id();
-    let stranger_pk = stranger.device_pubkey();
-    let stranger_dkid = stranger.device_key_id();
-    let revoked_pk = revoked.device_pubkey();
-    let revoked_dkid = revoked.device_key_id();
+    let mut member = ContributeHarness::new("cat-gate-member");
+    let mut stranger = ContributeHarness::new("cat-gate-stranger");
+    let mut revoked = ContributeHarness::new("cat-gate-revoked");
 
     plane.rt.block_on(async {
         let authority: &Authority = &plane.authority;
         seed_two_published_skills(authority, "cloud").await;
-        seat_member_device(authority, &member_dkid, member_pk, READER).await;
-        // A resolvable, non-revoked device with a valid credential — but no confirmed workspace seat.
-        register_non_member_device(authority, &stranger_dkid, stranger_pk, STRANGER).await;
-        // A REVOKED device bound to the confirmed member READER — revocation short-circuits the resolve, so
-        // even a member's revoked device reads nothing (the 404-shaped denial that replaced bad-signature).
+        seat_reader(authority).await;
+        let ws = WorkspaceId::parse(WS).unwrap();
+        // A resolvable, non-revoked device with a valid credential — but NO confirmed workspace seat.
         authority
             .seed_device(
-                &WorkspaceId::parse(WS).unwrap(),
-                &revoked_dkid,
-                &revoked_pk,
+                &ws,
+                STRANGER_DKID,
+                &STRANGER_PUBKEY,
+                &Principal::parse(STRANGER).unwrap(),
+                false,
+                STRANGER_CRED,
+            )
+            .await
+            .expect("seed non-member device");
+        // A REVOKED device bound to the confirmed member READER — revocation short-circuits the resolve, so
+        // even a member's revoked credential reads nothing (the 404-shaped denial that replaced bad-signature).
+        authority
+            .seed_device(
+                &ws,
+                REVOKED_DKID,
+                &REVOKED_PUBKEY,
                 &Principal::parse(READER).unwrap(),
                 true,
+                REVOKED_CRED,
             )
             .await
             .expect("seed revoked member device");
     });
+
+    // Each rig enrolls with its own credential so the presented Bearer is exactly the one under test.
+    member.enroll(&plane.base_url, WS, SA, MEMBER_CRED, false, PLACEHOLDER);
+    stranger.enroll(&plane.base_url, WS, SA, STRANGER_CRED, false, PLACEHOLDER);
+    revoked.enroll(&plane.base_url, WS, SA, REVOKED_CRED, false, PLACEHOLDER);
 
     // The confirmed member sees the full catalog...
     let member_idx = member
@@ -365,8 +358,8 @@ fn a_non_member_device_is_gated_to_an_empty_catalog() {
         .expect("member catalog round-trip");
     assert_eq!(member_idx.skills.len(), 2, "the member sees both skills");
 
-    // ...while the registered-but-non-member device is gated: the plane's 404 → an EMPTY index (the
-    // transport's degradation contract), NOT a leaked catalog and NOT a hard error.
+    // ...while the credential resolving to a non-member device is gated: the plane's 404 → an EMPTY index
+    // (the transport's degradation contract), NOT a leaked catalog and NOT a hard error.
     let stranger_idx = stranger
         .fetch_catalog(&plane.base_url, WS)
         .expect("the 404→empty mapping is not an error");
@@ -376,7 +369,7 @@ fn a_non_member_device_is_gated_to_an_empty_catalog() {
         stranger_idx.skills
     );
 
-    // ...and a REVOKED device (even one bound to a confirmed member) is likewise gated to an empty catalog.
+    // ...and a REVOKED device's credential (even one bound to a confirmed member) is likewise gated to empty.
     let revoked_idx = revoked
         .fetch_catalog(&plane.base_url, WS)
         .expect("the 404→empty mapping is not an error");
@@ -401,16 +394,16 @@ fn the_catalog_serves_a_member_on_a_self_host_plane() {
         DeploymentMode::SelfHost,
         empty_seed,
     );
-    let rig = ContributeHarness::new("cat-selfhost");
-    let reader_pk = rig.device_pubkey();
-    let reader_dkid = rig.device_key_id();
+    let mut rig = ContributeHarness::new("cat-selfhost");
 
     let (fa, fb) = plane.rt.block_on(async {
         let authority: &Authority = &plane.authority;
         let facts = seed_two_published_skills(authority, "self_host").await;
-        seat_member_device(authority, &reader_dkid, reader_pk, READER).await;
+        seat_reader(authority).await;
         facts
     });
+
+    rig.enroll(&plane.base_url, WS, SA, MEMBER_CRED, false, PLACEHOLDER);
 
     let idx = rig
         .fetch_catalog(&plane.base_url, WS)

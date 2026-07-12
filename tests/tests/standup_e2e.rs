@@ -30,7 +30,7 @@ mod common;
 use common::{Plane, SKILL, WS, expected, start_plane_mode};
 use plane_store::{
     ApproveStandupOutcome, Authority, AuthorityError, ConfirmOutcome, CreateWorkspaceOutcome,
-    DeploymentMode, MintClaimOutcome, Principal, RedeemOutcome, SkillId, WorkspaceId,
+    DeploymentMode, MintClaimOutcome, Principal, RedeemOutcome, WorkspaceId,
 };
 use topos::test_support::{Follow, FollowHarness, PublishResult, PullHarness, Scope};
 use topos_types::Generation;
@@ -244,19 +244,23 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
         "the cloud self-serve chain minted no operator claim"
     );
 
-    // The landed genesis object is byte-exact OVER THE WIRE: a follower pulls it (the read token is a
-    // fixture-minted read-side witness aid; the chain above is untouched by it).
+    // The landed genesis object is byte-exact OVER THE WIRE: a follower pulls it with a workspace credential
+    // seeded on a witness device bound to FOUNDER (a confirmed owner from the standup — a confirmed member
+    // reads every skill; per-skill read tokens are gone). The credential is a read-side witness aid; the
+    // chain above is untouched by it.
     plane
         .rt
-        .block_on(plane.authority.mint_read_token(
+        .block_on(plane.authority.seed_device(
             &WorkspaceId::parse(ws).expect("the server-minted ws id parses"),
-            &SkillId::parse(SKILL).expect("skill id"),
+            "dk_standup_witness",
+            &[55u8; 32],
             &Principal::parse(FOUNDER).expect("principal"),
-            "rt_standup_witness",
+            false,
+            "wc_standup_witness",
         ))
-        .expect("mint the witness read token");
+        .expect("seed the witness device credential");
     let mut follower = PullHarness::new("standup-door1-f");
-    follower.adopt_followed(SKILL, ws, "rt_standup_witness", Follow::Auto, PLACEHOLDER);
+    follower.adopt_followed(SKILL, ws, "wc_standup_witness", Follow::Auto, PLACEHOLDER);
     let pulled = follower.run_pull(&plane.base_url, Scope::AllFollowed);
     assert_eq!(pulled.skills[0].action, PullAction::FastForwarded);
     assert_eq!(pulled.skills[0].applied, Generation { epoch: 1, seq: 1 });
@@ -946,6 +950,7 @@ fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
     const P_OWNER: &str = "p_owner";
     const OWNER_DKID: &str = "dk_owner";
     const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
+    const OWNER_CRED: &str = "wc_owner_secret";
     let plane = start_plane_mode(
         "topos-standup",
         "cross",
@@ -953,23 +958,25 @@ fn e2e_cross_species_tokens_fail_uniformly_in_both_directions() {
         DeploymentMode::Cloud,
         async |authority: &Authority| {
             let ws = WorkspaceId::parse(WS).unwrap();
-            let owner = Principal::parse(P_OWNER).unwrap();
             authority
                 .seed_workspace(&ws, "Acme", "verified", "cloud")
                 .await
                 .expect("seed workspace");
-            authority
-                .seed_workspace_member(&ws, &owner, "owner", "confirmed")
-                .await
-                .expect("seed owner");
-            authority
-                .seed_device(&ws, OWNER_DKID, &OWNER_PUBKEY, &owner, false)
-                .await
-                .expect("seed owner device");
-            let invite_link = common::mint_invite(
+            // A confirmed owner holding OWNER_CRED — the credential the plane resolves to mint the invite.
+            common::seed_member(
                 authority,
                 &ws,
                 OWNER_DKID,
+                &OWNER_PUBKEY,
+                P_OWNER,
+                "owner",
+                OWNER_CRED,
+            )
+            .await;
+            let invite_link = common::mint_invite(
+                authority,
+                &ws,
+                OWNER_CRED,
                 "b0000000-0000-4000-8000-000000000001",
                 "alice@acme.test",
                 SKILL,

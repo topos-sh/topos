@@ -46,7 +46,9 @@ const WS: &str = "w_acme";
 const SKILL: &str = "s_deploy";
 const DKID: &str = "dk_a";
 const PRINCIPAL: &str = "p_dev";
-const READ_TOKEN: &str = "rt_restore_secret_value";
+/// The publisher device's workspace Bearer credential — and the one the follower presents to read (a
+/// confirmed member reads every skill; per-skill read tokens are gone).
+const CRED: &str = "wc_restore_secret_value";
 const AUTHOR: &str = "d_test";
 const MESSAGE: &str = "topos publish";
 const CREATED_AT: &str = "2026-07-01T00:00:00Z";
@@ -138,7 +140,7 @@ impl Plane {
                 .seed_published_child(
                     &ws,
                     &skill,
-                    DKID,
+                    CRED,
                     &OpId::parse(op).unwrap(),
                     parent,
                     files,
@@ -155,8 +157,8 @@ impl Plane {
     }
 }
 
-/// Seed a real authority (device → roster → v1 genesis → read token), then serve `router(state)` on a real
-/// loopback socket on a background runtime.
+/// Seed a real authority (device+credential+confirmed-member → v1 genesis), then serve `router(state)` on a
+/// real loopback socket on a background runtime.
 fn start_plane(tag: &str) -> Plane {
     let dir = Scratch::new(tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -174,19 +176,22 @@ fn start_plane(tag: &str) -> Plane {
         let skill = SkillId::parse(SKILL).unwrap();
         let principal = Principal::parse(PRINCIPAL).unwrap();
 
+        // Register the publisher device WITH its workspace credential + seat its principal as a confirmed
+        // member — the whole authorization for the genesis/child WRITES and the follower's READS (per-skill
+        // roster grants nothing; the follower presents this same credential).
         authority
-            .seed_device(&ws, DKID, &DEVICE_PUBKEY, &principal, false)
+            .seed_device(&ws, DKID, &DEVICE_PUBKEY, &principal, false, CRED)
             .await
             .expect("seed device");
         authority
-            .seed_roster(&ws, &skill, &principal)
+            .seed_workspace_member(&ws, &principal, "member", "confirmed")
             .await
-            .expect("seed roster");
+            .expect("seat confirmed member");
         let receipt = authority
             .seed_published_genesis(
                 &ws,
                 &skill,
-                DKID,
+                CRED,
                 &OpId::parse(GENESIS_OP).unwrap(),
                 bundle("v1"),
                 AUTHOR,
@@ -199,10 +204,6 @@ fn start_plane(tag: &str) -> Plane {
         assert_eq!(receipt.outcome, TerminalOutcome::Ok);
         assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
         let genesis = receipt.version_id.expect("genesis version id");
-        authority
-            .mint_read_token(&ws, &skill, &principal, READ_TOKEN)
-            .await
-            .expect("mint read token");
         (authority, pool, genesis)
     });
 
@@ -312,7 +313,7 @@ fn rewind_to(plane: &Plane, snapshot: &CurrentRowSnapshot, newer: CommitId, newe
 /// database is rewound to the captured v1 row. Returns the client + the v2 commit.
 fn rehearse_to_restored(plane: &Plane) -> (PullHarness, CommitId) {
     let mut client = PullHarness::new("restore");
-    client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
+    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
 
     // The follower lands v1 at (1,1)...
     let ff = client.run_pull(&plane.base_url, Scope::AllFollowed);

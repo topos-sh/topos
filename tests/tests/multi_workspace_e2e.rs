@@ -50,6 +50,9 @@ const OWNER_DKID_A: &str = "dk_owner_a";
 const OWNER_DKID_B: &str = "dk_owner_b";
 const OWNER_A: &str = "p_owner_a";
 const OWNER_B: &str = "p_owner_b";
+/// Each bootstrap owner's workspace Bearer credential (authenticates its genesis publish + invite mint).
+const OWNER_CRED_A: &str = "wc_owner_a_secret";
+const OWNER_CRED_B: &str = "wc_owner_b_secret";
 const GENESIS_OP_A: &str = "a0000000-0000-4000-8000-000000000001";
 const GENESIS_OP_B: &str = "a0000000-0000-4000-8000-000000000002";
 const INVITE_OP_A: &str = "b0000000-0000-4000-8000-000000000001";
@@ -103,6 +106,7 @@ struct WsSeed<'a> {
     owner: &'a str,
     owner_dkid: &'a str,
     owner_pubkey: &'a [u8; 32],
+    owner_credential: &'a str,
     genesis_op: &'a str,
     invite_op: &'a str,
     files: Vec<UploadedFile>,
@@ -111,37 +115,37 @@ struct WsSeed<'a> {
     offered_name: Option<&'a str>,
 }
 
-/// Stand ONE workspace up on the shared authority: the workspace row, its bootstrap owner (rostered on the
-/// skill so it can publish the genesis, and the signer of the invite), a published genesis at `(1,1)`, the
-/// invitee pre-rostered as an OWNER (so a redeem confirms them owner — able to author + invite within it),
-/// and an owner-role `/i/` invite offering the skill. Returns the minted invite link.
+/// Stand ONE workspace up on the shared authority: the workspace row, its bootstrap owner (a confirmed
+/// owner holding `owner_credential` — that credential publishes the genesis and mints the invite), a
+/// published genesis at `(1,1)`, the invitee pre-seated as an OWNER (so a redeem confirms them owner — able
+/// to author + invite within it), and an owner-role `/i/` invite offering the skill. Returns the minted
+/// invite link.
 async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> String {
     let ws = WorkspaceId::parse(s.ws).unwrap();
     let skill = SkillId::parse(s.skill).unwrap();
-    let owner = Principal::parse(s.owner).unwrap();
     let invitee = Principal::parse(INVITEE).unwrap();
 
     authority
         .seed_workspace(&ws, s.display, "verified", "cloud")
         .await
         .expect("seed workspace");
-    authority
-        .seed_workspace_member(&ws, &owner, "owner", "confirmed")
-        .await
-        .expect("seed bootstrap owner");
-    authority
-        .seed_device(&ws, s.owner_dkid, s.owner_pubkey, &owner, false)
-        .await
-        .expect("seed owner device");
-    authority
-        .seed_roster(&ws, &skill, &owner)
-        .await
-        .expect("roster the owner so it can publish the genesis");
+    // The bootstrap owner: a confirmed owner holding its credential (a genesis publish needs confirmed
+    // membership now — per-skill roster grants nothing; the credential also mints the invite).
+    common::seed_member(
+        authority,
+        &ws,
+        s.owner_dkid,
+        s.owner_pubkey,
+        s.owner,
+        "owner",
+        s.owner_credential,
+    )
+    .await;
     let receipt = authority
         .seed_published_genesis(
             &ws,
             &skill,
-            s.owner_dkid,
+            s.owner_credential,
             &OpId::parse(s.genesis_op).unwrap(),
             s.files,
             AUTHOR,
@@ -154,8 +158,8 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
     assert_eq!(receipt.outcome, TerminalOutcome::Ok);
     assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
 
-    // Pre-roster the invitee (as an OWNER — the cloud redeem gate needs a rostered member, and an owner can
-    // itself mint invites for item 5). The redeem then rosters them on the OFFERED skill (item 4's write).
+    // Pre-seat the invitee (as an OWNER — the cloud redeem gate needs a seated member, and an owner can
+    // itself mint invites for item 5). The redeem then seats them on the OFFERED skill (item 4's write).
     authority
         .seed_workspace_member(&ws, &invitee, "owner", "invited")
         .await
@@ -164,7 +168,7 @@ async fn seed_workspace_with_invite(authority: &Authority, s: WsSeed<'_>) -> Str
     common::mint_invite_with_role(
         authority,
         &ws,
-        s.owner_dkid,
+        s.owner_credential,
         s.invite_op,
         INVITEE,
         s.skill,
@@ -186,6 +190,7 @@ async fn seed_two_workspaces(authority: &Authority) -> Seeded {
             owner: OWNER_A,
             owner_dkid: OWNER_DKID_A,
             owner_pubkey: &OWNER_PUBKEY_A,
+            owner_credential: OWNER_CRED_A,
             genesis_op: GENESIS_OP_A,
             invite_op: INVITE_OP_A,
             files: files_a(),
@@ -202,6 +207,7 @@ async fn seed_two_workspaces(authority: &Authority) -> Seeded {
             owner: OWNER_B,
             owner_dkid: OWNER_DKID_B,
             owner_pubkey: &OWNER_PUBKEY_B,
+            owner_credential: OWNER_CRED_B,
             genesis_op: GENESIS_OP_B,
             invite_op: INVITE_OP_B,
             files: files_b(),
@@ -486,6 +492,7 @@ async fn seed_two_shared_name_workspaces(authority: &Authority) -> Seeded {
             owner: OWNER_A,
             owner_dkid: OWNER_DKID_A,
             owner_pubkey: &OWNER_PUBKEY_A,
+            owner_credential: OWNER_CRED_A,
             genesis_op: GENESIS_OP_A,
             invite_op: INVITE_OP_A,
             files: files_a(),
@@ -502,6 +509,7 @@ async fn seed_two_shared_name_workspaces(authority: &Authority) -> Seeded {
             owner: OWNER_B,
             owner_dkid: OWNER_DKID_B,
             owner_pubkey: &OWNER_PUBKEY_B,
+            owner_credential: OWNER_CRED_B,
             genesis_op: GENESIS_OP_B,
             invite_op: INVITE_OP_B,
             files: files_b(),

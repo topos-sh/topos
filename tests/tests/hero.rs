@@ -23,7 +23,9 @@ use topos_types::{Generation, TerminalOutcome};
 // ── shared constants ──────────────────────────────────────────────────────────────────────────────
 const DKID: &str = "dk_a";
 const PRINCIPAL: &str = "p_dev";
-const READ_TOKEN: &str = "rt_hero_secret_value";
+/// The publisher device's workspace Bearer credential — and the one the follower presents to read (a
+/// confirmed member reads every skill; per-skill read tokens are gone).
+const CRED: &str = "wc_hero_secret_value";
 const AUTHOR: &str = "d_test";
 const MESSAGE: &str = "topos publish";
 const CREATED_AT: &str = "2026-06-29T00:00:00Z";
@@ -52,7 +54,7 @@ fn v2_files() -> Vec<UploadedFile> {
 /// first pull genuinely fast-forwards onto — and materializes — the plane's bytes).
 const LOCAL_PLACEHOLDER: &[(&str, bool, &[u8])] = &[("SKILL.md", false, b"# local placeholder\n")];
 
-/// Seed a real authority (device → roster → signed genesis → read token), then serve `router(state)` on a
+/// Seed a real authority (device+credential+confirmed-member → genesis), then serve `router(state)` on a
 /// real loopback socket on a background runtime — all via the shared harness. Returns the live [`Plane`].
 fn start_plane(tag: &str) -> Plane {
     common::start_plane(
@@ -71,7 +73,7 @@ fn start_plane(tag: &str) -> Plane {
                     author: AUTHOR,
                     message: MESSAGE,
                     created_at: CREATED_AT,
-                    read_token: READ_TOKEN,
+                    credential: CRED,
                 },
             )
             .await;
@@ -89,7 +91,7 @@ fn start_plane(tag: &str) -> Plane {
 fn first_pull_fast_forwards_byte_exact() {
     let plane = start_plane("ff");
     let mut client = PullHarness::new("ff");
-    client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
+    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
 
     let data = client.run_pull(&plane.base_url, Scope::AllFollowed);
 
@@ -129,7 +131,7 @@ fn first_pull_fast_forwards_byte_exact() {
 fn second_pull_is_a_304_no_op() {
     let plane = start_plane("304");
     let mut client = PullHarness::new("304");
-    client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
+    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
 
     // First pull fast-forwards to (1,1).
     let first = client.run_pull(&plane.base_url, Scope::AllFollowed);
@@ -165,7 +167,7 @@ fn second_pull_is_a_304_no_op() {
 fn a_forward_move_to_v2_applies_byte_exact() {
     let plane = start_plane("v2");
     let mut client = PullHarness::new("v2");
-    client.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, LOCAL_PLACEHOLDER);
+    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
 
     // Reach the genesis (1,1).
     let ff = client.run_pull(&plane.base_url, Scope::AllFollowed);
@@ -185,7 +187,7 @@ fn a_forward_move_to_v2_applies_byte_exact() {
             .seed_published_child(
                 &ws,
                 &skill,
-                DKID,
+                CRED,
                 &OpId::parse(CHILD_OP).unwrap(),
                 genesis,
                 v2_files(),

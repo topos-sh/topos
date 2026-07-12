@@ -40,7 +40,7 @@
 mod common;
 
 use common::{NOW, Plane, SKILL, WS, expected};
-use plane_store::{Authority, ConfirmOutcome, Principal, SkillId, WorkspaceId};
+use plane_store::{Authority, ConfirmOutcome, Principal, WorkspaceId};
 use topos::test_support::{ContributeHarness, FollowHarness, PublishResult, Scope};
 use topos_types::results::PullAction;
 use topos_types::{CurrencyKind, Generation, TriggerReport, TriggerState};
@@ -52,9 +52,13 @@ const ADMIN: &str = "p_admin";
 const ADMIN_DKID: &str = "dk_admin";
 /// The admin device's registered 32-byte public key (a fixed test value; nothing verifies against it).
 const ADMIN_PUBKEY: [u8; 32] = [9u8; 32];
+/// The admin owner's workspace Bearer credential — the acting credential the plane resolves to mint invites.
+const ADMIN_CRED: &str = "wc_admin_secret";
 /// The author — a plain confirmed MEMBER (not an owner); their device key is the client rig's own.
 const AUTHOR: &str = "p_author";
-const AUTHOR_RT: &str = "rt_author_secret";
+/// The author's workspace Bearer credential — authenticates the author's genesis publish (which stands up
+/// the skill roster row in the same transaction).
+const AUTHOR_CRED: &str = "wc_author_secret";
 /// The two followers, identified by email (the cloud confirms each at the verification step).
 const FOLLOWER1: &str = "dev@acme.test";
 const FOLLOWER2: &str = "eve@acme.test";
@@ -224,7 +228,6 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
         true,
         async |authority: &Authority| {
             let ws = WorkspaceId::parse(WS).unwrap();
-            let skill = SkillId::parse(SKILL).unwrap();
             let admin = Principal::parse(ADMIN).unwrap();
             let author = Principal::parse(AUTHOR).unwrap();
 
@@ -232,31 +235,34 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
                 .seed_workspace(&ws, "Acme", "verified", "cloud")
                 .await
                 .expect("seed workspace");
-            // The admin owner (governance authority — mints the invites).
+            // The admin owner (governance authority — mints the invites) holding ADMIN_CRED.
             authority
                 .seed_workspace_member(&ws, &admin, "owner", "confirmed")
                 .await
                 .expect("seed admin");
             authority
-                .seed_device(&ws, ADMIN_DKID, &ADMIN_PUBKEY, &admin, false)
+                .seed_device(&ws, ADMIN_DKID, &ADMIN_PUBKEY, &admin, false, ADMIN_CRED)
                 .await
                 .expect("seed admin device");
 
-            // The author: a plain confirmed MEMBER with a registered device — and deliberately NO per-skill
-            // roster row and NO published genesis. Their first publish must stand both up.
+            // The author: a plain confirmed MEMBER holding AUTHOR_CRED — and deliberately NO per-skill roster
+            // row and NO published genesis. Their first publish (authenticated by AUTHOR_CRED → confirmed
+            // member) must stand both up. Their device key is the client rig's own.
             authority
                 .seed_workspace_member(&ws, &author, "member", "confirmed")
                 .await
                 .expect("seed author member");
             authority
-                .seed_device(&ws, &author_dkid, &author_pubkey, &author, false)
+                .seed_device(
+                    &ws,
+                    &author_dkid,
+                    &author_pubkey,
+                    &author,
+                    false,
+                    AUTHOR_CRED,
+                )
                 .await
                 .expect("seed author device");
-            // The author's read credential (usable once the skill exists — reads are rostered ∧ reachable).
-            authority
-                .mint_read_token(&ws, &skill, &author, AUTHOR_RT)
-                .await
-                .expect("mint author read token");
 
             // The followers are invited members; each confirms their email at the verification step.
             for email in [FOLLOWER1, FOLLOWER2] {
@@ -273,7 +279,7 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
             let invite1 = common::mint_invite(
                 authority,
                 &ws,
-                ADMIN_DKID,
+                ADMIN_CRED,
                 INVITE_OP_1,
                 FOLLOWER1,
                 SKILL,
@@ -283,7 +289,7 @@ fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
             let invite2 = common::mint_invite(
                 authority,
                 &ws,
-                ADMIN_DKID,
+                ADMIN_CRED,
                 INVITE_OP_2,
                 FOLLOWER2,
                 SKILL,
@@ -348,7 +354,7 @@ fn run_distribute_hero(case: &AdapterCase) {
 
     // ── 1 · The author's FIRST publish of a brand-new skill: the genesis standup over the wire. ──
     let mut author = author;
-    author.enroll(&plane.base_url, WS, SKILL, AUTHOR_RT, false, V1);
+    author.enroll(&plane.base_url, WS, SKILL, AUTHOR_CRED, false, V1);
     let published = author
         .publish(false, &format!("{SKILL}@{}", author.draft_digest()))
         .expect("the genesis publish must succeed for a confirmed member (the roster standup)");

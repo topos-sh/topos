@@ -3,25 +3,27 @@
 //! One real `plane-store` [`Authority`] (seeded through the feature-gated fixtures) served by the composed
 //! [`topos_plane::router`] on a real loopback socket, via the shared `common` harness. A PUBLISHER drives
 //! the GENUINE write verbs (`publish`/`review`/`revert`/`diff` via `topos::test_support::ContributeHarness`)
-//! over the GENUINE `ureq` transport — each body names the acting `device_key_id`, the op kind rides the
-//! route, nothing is signed; a separate FOLLOWER drives the GENUINE pull engine
-//! ([`topos::test_support::PullHarness`]) and must receive the shipped bytes byte-exact. The publisher's
-//! device key is minted by the harness and registered on the plane (the realistic flow), so the plane
-//! authenticates its writes by resolving the registered non-revoked registry row. These cover the
-//! review_required-OFF loop; the review_required gate + the proposals-list route are exercised in their own
-//! tests.
+//! over the GENUINE `ureq` transport — the acting device rides the request's workspace **Bearer credential**
+//! (never a body field), the op kind rides the route, nothing is signed; a separate FOLLOWER drives the
+//! GENUINE pull engine ([`topos::test_support::PullHarness`]) and must receive the shipped bytes byte-exact.
+//! The publisher enrolls with the workspace credential the genesis seed registered on a confirmed-member
+//! device, so the plane authenticates its writes by resolving that credential to its registry row. These
+//! cover the review_required-OFF loop; the review_required gate + the proposals-list route are exercised in
+//! their own tests.
 
 mod common;
 
 use common::{Plane, SKILL, WS, expected};
-use plane_store::{Authority, FileMode, Principal, SkillId, UploadedFile};
+use plane_store::{Authority, FileMode, UploadedFile};
 use topos::test_support::{ContributeHarness, Follow, PublishResult, PullHarness, Scope};
 use topos_types::Generation;
 use topos_types::results::{DiffSource, PullAction};
 
 const GENESIS_DKID: &str = "dk_genesis";
 const PRINCIPAL: &str = "p_dev";
-const READ_TOKEN: &str = "rt_contribute_secret";
+/// The publisher's workspace Bearer credential (the genesis seed registers it on a confirmed-member
+/// device; the publisher enrolls with it, the follower reads with it).
+const CRED: &str = "wc_contribute_secret";
 const AUTHOR: &str = "d_genesis";
 const MESSAGE: &str = "topos: add";
 const CREATED_AT: &str = "2026-06-30T00:00:00Z";
@@ -56,9 +58,10 @@ const DRAFT: &[(&str, bool, &[u8])] = &[
 
 // ── the loopback plane (the shared harness + this suite's scenario seeding) ─────────────────────────
 
-/// Seed a real authority (genesis device → roster → signed genesis → read token) + serve `router(state)`
-/// on a loopback socket via the shared harness. The publisher registers its OWN device key afterward via
-/// [`register_device`].
+/// Seed a real authority (genesis device+credential+confirmed-member → genesis) + serve `router(state)` on
+/// a loopback socket via the shared harness. The publisher enrolls with the SAME genesis credential
+/// afterward (via [`drafting_publisher`]) — the credential IS the authenticator, so no separate device
+/// registration is needed.
 fn start_plane(tag: &str) -> Plane {
     common::start_plane(
         "topos-contrib",
@@ -76,7 +79,7 @@ fn start_plane(tag: &str) -> Plane {
                     author: AUTHOR,
                     message: MESSAGE,
                     created_at: CREATED_AT,
-                    read_token: READ_TOKEN,
+                    credential: CRED,
                 },
             )
             .await;
@@ -86,20 +89,6 @@ fn start_plane(tag: &str) -> Plane {
             }
         },
     )
-}
-
-/// Register a contribute client's minted device key under `principal` (rostered), so the plane
-/// authenticates its writes by registry-row lookup (the realistic enrollment outcome).
-fn register_device(plane: &Plane, device_key_id: &str, device_pubkey: &[u8; 32], principal: &str) {
-    let ws = plane.ws();
-    let principal = Principal::parse(principal).unwrap();
-    plane.rt.block_on(async {
-        plane
-            .authority
-            .seed_device(&ws, device_key_id, device_pubkey, &principal, false)
-            .await
-            .expect("seed device");
-    });
 }
 
 /// Turn the workspace `review_required` gate on/off (the anti-poisoning policy).
@@ -114,49 +103,35 @@ fn set_review_required(plane: &Plane, on: bool) {
     });
 }
 
-/// Roster a second principal + mint its read token (a distinct reviewer for four-eyes).
-fn seed_reviewer_principal(plane: &Plane) {
-    let ws = plane.ws();
-    let skill = SkillId::parse(SKILL).unwrap();
-    let principal = Principal::parse(P_REVIEWER).unwrap();
-    plane.rt.block_on(async {
-        plane
-            .authority
-            .seed_roster(&ws, &skill, &principal)
-            .await
-            .unwrap();
-        plane
-            .authority
-            .mint_read_token(&ws, &skill, &principal, RT_REVIEWER)
-            .await
-            .unwrap();
-    });
-}
-
 const P_REVIEWER: &str = "p_reviewer";
-const RT_REVIEWER: &str = "rt_reviewer_secret";
+const REVIEWER_DKID: &str = "dk_reviewer";
+/// The reviewer device's registered 32-byte public key (a fixed test value; the credential authenticates).
+const REVIEWER_PUBKEY: [u8; 32] = [11u8; 32];
+/// The reviewer's workspace Bearer credential — a DISTINCT confirmed member (for four-eyes).
+const REVIEWER_CRED: &str = "wc_reviewer_secret";
 
-/// An enrolled reviewer under a DISTINCT principal (four-eyes), with the skill adopted + its device
-/// registered + a read token — able to `review` a proposal.
+/// An enrolled reviewer under a DISTINCT principal (four-eyes), seated as a confirmed member holding
+/// [`REVIEWER_CRED`] with the skill adopted — able to `review` a proposal.
 fn enrolled_reviewer(plane: &Plane, tag: &str) -> ContributeHarness {
     let mut h = ContributeHarness::new(tag);
-    seed_reviewer_principal(plane);
-    register_device(plane, &h.device_key_id(), &h.device_pubkey(), P_REVIEWER);
-    h.enroll(&plane.base_url, WS, SKILL, RT_REVIEWER, true, PLACEHOLDER);
+    plane.rt.block_on(common::seed_member(
+        &plane.authority,
+        &plane.ws(),
+        REVIEWER_DKID,
+        &REVIEWER_PUBKEY,
+        P_REVIEWER,
+        "member",
+        REVIEWER_CRED,
+    ));
+    h.enroll(&plane.base_url, WS, SKILL, REVIEWER_CRED, true, PLACEHOLDER);
     h
 }
 
-/// An enrolled publisher with its device key registered on `plane`, sitting at `current` (pulled), with
-/// `DRAFT` staged as a local edit.
+/// An enrolled publisher authenticating with the genesis workspace credential (the genesis seed registered
+/// it on a confirmed-member device), sitting at `current` (pulled), with `DRAFT` staged as a local edit.
 fn drafting_publisher(plane: &Plane, tag: &str) -> ContributeHarness {
     let mut pub_h = ContributeHarness::new(tag);
-    register_device(
-        plane,
-        &pub_h.device_key_id(),
-        &pub_h.device_pubkey(),
-        PRINCIPAL,
-    );
-    pub_h.enroll(&plane.base_url, WS, SKILL, READ_TOKEN, false, PLACEHOLDER);
+    pub_h.enroll(&plane.base_url, WS, SKILL, CRED, false, PLACEHOLDER);
     // Reach the plane's current (1,1), then stage the draft.
     let pulled = pub_h.pull();
     assert_eq!(
@@ -172,10 +147,11 @@ fn approve_token(skill: &str, digest: &str) -> String {
     format!("{skill}@{digest}")
 }
 
-/// A fresh follower that has adopted + follows the skill (a placeholder); a pull lands `current`.
+/// A fresh follower that has adopted + follows the skill (a placeholder); a pull lands `current`. It reads
+/// with the workspace credential (a confirmed member reads every skill).
 fn follower(tag: &str) -> PullHarness {
     let mut f = PullHarness::new(tag);
-    f.adopt_followed(SKILL, WS, READ_TOKEN, Follow::Auto, PLACEHOLDER);
+    f.adopt_followed(SKILL, WS, CRED, Follow::Auto, PLACEHOLDER);
     f
 }
 

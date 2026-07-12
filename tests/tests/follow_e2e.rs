@@ -21,12 +21,16 @@ const OWNER: &str = "p_owner";
 const OWNER_DKID: &str = "dk_owner";
 /// The owner device's registered 32-byte public key (a fixed test value; nothing verifies against it).
 const OWNER_PUBKEY: [u8; 32] = [9u8; 32];
+/// The owner's workspace Bearer credential — the acting credential the plane resolves to mint the invite.
+const OWNER_CRED: &str = "wc_owner_secret";
 /// The invitee is identified by an email — the cloud confirms it, and it becomes the rostered principal.
 const INVITEE: &str = "alice@acme.test";
-/// The publisher of the offered skill (a distinct principal — the invitee reads it through the granted roster).
+/// The publisher of the offered skill (a distinct principal — the invitee reads it once it is a member).
 const PUB_PUBKEY: [u8; 32] = [7u8; 32];
 const PUB_DKID: &str = "dk_pub";
 const PUB_PRINCIPAL: &str = "p_pub";
+/// The publisher's workspace Bearer credential — authenticates the genesis publish.
+const PUB_CRED: &str = "wc_pub_secret";
 const AUTHOR: &str = "d_test";
 const MSG: &str = "topos publish";
 const AT: &str = "2026-06-30T00:00:00Z";
@@ -51,10 +55,9 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
         let ws = WorkspaceId::parse(WS).unwrap();
         let skill = SkillId::parse(SKILL).unwrap();
         let owner = Principal::parse(OWNER).unwrap();
-        let publisher = Principal::parse(PUB_PRINCIPAL).unwrap();
         let invitee = Principal::parse(INVITEE).unwrap();
 
-        // The workspace + the owner (with a registered device so the owner can mint the invite).
+        // The workspace + the owner (a confirmed owner holding OWNER_CRED so it can mint the invite).
         authority
             .seed_workspace(&ws, "Acme", "verified", "cloud")
             .await
@@ -64,24 +67,27 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
             .await
             .expect("seed owner");
         authority
-            .seed_device(&ws, OWNER_DKID, &OWNER_PUBKEY, &owner, false)
+            .seed_device(&ws, OWNER_DKID, &OWNER_PUBKEY, &owner, false, OWNER_CRED)
             .await
             .expect("seed owner device");
 
-        // The published skill the invite offers.
-        authority
-            .seed_device(&ws, PUB_DKID, &PUB_PUBKEY, &publisher, false)
-            .await
-            .expect("seed publisher device");
-        authority
-            .seed_roster(&ws, &skill, &publisher)
-            .await
-            .expect("seed publisher roster");
+        // The published skill the invite offers — its publisher is a confirmed member holding PUB_CRED
+        // (a write needs confirmed membership now; per-skill roster grants nothing).
+        common::seed_member(
+            authority,
+            &ws,
+            PUB_DKID,
+            &PUB_PUBKEY,
+            PUB_PRINCIPAL,
+            "member",
+            PUB_CRED,
+        )
+        .await;
         let receipt = authority
             .seed_published_genesis(
                 &ws,
                 &skill,
-                PUB_DKID,
+                PUB_CRED,
                 &OpId::parse(GENESIS_OP).unwrap(),
                 genesis_files(),
                 AUTHOR,
@@ -103,7 +109,7 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
             .expect("pre-roster invitee");
 
         let invite_link =
-            common::mint_invite(authority, &ws, OWNER_DKID, INVITE_OP, INVITEE, SKILL, AT).await;
+            common::mint_invite(authority, &ws, OWNER_CRED, INVITE_OP, INVITEE, SKILL, AT).await;
         common::Seeded {
             genesis: Some(genesis),
             invites: vec![invite_link],

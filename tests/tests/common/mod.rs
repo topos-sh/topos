@@ -258,12 +258,40 @@ fn start_plane_impl(
 
 // ── shared seeding helpers ──────────────────────────────────────────────────────────────────────────
 
+/// Register a device holding `credential` (bound to `principal`, non-revoked) AND seat that principal as a
+/// CONFIRMED `workspace_member` at `role` — the ONE call that authorizes a device to read AND write in `ws`
+/// under the workspace-credential model. Per-skill `roster` grants nothing now; the presented credential
+/// (resolved by its sha256 to this registry row) plus the confirmed membership seat are the whole
+/// authorization, on every lane. `role` ∈ {`owner`,`reviewer`,`member`}. Both seed shims UPSERT, so a
+/// principal already seated (e.g. by a genesis seed) is simply refreshed.
+pub(crate) async fn seed_member(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    dkid: &str,
+    pubkey: &[u8; 32],
+    principal: &str,
+    role: &str,
+    credential: &str,
+) {
+    let p = Principal::parse(principal).unwrap();
+    authority
+        .seed_device(ws, dkid, pubkey, &p, false, credential)
+        .await
+        .expect("seed member device");
+    authority
+        .seed_workspace_member(ws, &p, role, "confirmed")
+        .await
+        .expect("seat confirmed member");
+}
+
 /// The distribute-plane standup (what the HERO + contribute scenarios share): register the publishing
-/// device, roster its principal, publish a signed genesis at `(1,1)`, and mint the follower read token.
+/// device WITH its workspace credential, seat its principal as a confirmed member, and publish a genesis at
+/// `(1,1)`. The one `credential` authenticates BOTH the genesis WRITE and the follower's later READ (a
+/// confirmed member reads every skill in the workspace — the follower presents this same credential).
 pub(crate) struct GenesisSpec<'a> {
     pub(crate) dkid: &'a str,
-    /// The device's registered 32-byte public key — the write authz resolves the registry row by `dkid`;
-    /// nothing verifies against this key (git/GitHub-level trust).
+    /// The device's registered 32-byte public key — a stable non-secret NAME; nothing verifies against it
+    /// (git/GitHub-level trust). Authorization is the presented credential's registry-row lookup.
     pub(crate) device_pubkey: &'a [u8; 32],
     pub(crate) op_id: &'a str,
     pub(crate) files: Vec<UploadedFile>,
@@ -271,28 +299,33 @@ pub(crate) struct GenesisSpec<'a> {
     pub(crate) author: &'a str,
     pub(crate) message: &'a str,
     pub(crate) created_at: &'a str,
-    pub(crate) read_token: &'a str,
+    /// The workspace Bearer credential the publisher device holds — and the one a follower presents to read
+    /// (it replaced the per-skill read token, which is gone).
+    pub(crate) credential: &'a str,
 }
 
 /// Run a [`GenesisSpec`] against a fresh authority; returns the genesis version id.
 pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<'_>) -> CommitId {
     let ws = WorkspaceId::parse(WS).unwrap();
     let skill = SkillId::parse(SKILL).unwrap();
-    let principal = Principal::parse(spec.principal).unwrap();
 
-    authority
-        .seed_device(&ws, spec.dkid, spec.device_pubkey, &principal, false)
-        .await
-        .expect("seed device");
-    authority
-        .seed_roster(&ws, &skill, &principal)
-        .await
-        .expect("seed roster");
+    // The publisher device + its credential + a confirmed-member seat — the whole authorization for the
+    // genesis write and every subsequent read under this credential (per-skill roster grants nothing).
+    seed_member(
+        authority,
+        &ws,
+        spec.dkid,
+        spec.device_pubkey,
+        spec.principal,
+        "member",
+        spec.credential,
+    )
+    .await;
     let receipt = authority
         .seed_published_genesis(
             &ws,
             &skill,
-            spec.dkid,
+            spec.credential,
             &OpId::parse(spec.op_id).unwrap(),
             spec.files,
             spec.author,
@@ -304,22 +337,18 @@ pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<
         .expect("seed genesis");
     assert_eq!(receipt.outcome, TerminalOutcome::Ok);
     assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
-    let genesis = receipt.version_id.expect("genesis version id");
-    authority
-        .mint_read_token(&ws, &skill, &principal, spec.read_token)
-        .await
-        .expect("mint read token");
-    genesis
+    receipt.version_id.expect("genesis version id")
 }
 
 /// Mint an owner-driven `/i/` invite pre-offering `skill` to `email` at the `Member` role. The acting
-/// `owner_dkid` is the presented credential the plane authenticates by registry-row lookup (nothing is
-/// signed — git/GitHub-level trust). See [`mint_invite_with_role`] for the role-selectable form (the
-/// multi-workspace e2e mints owner-role invites so the joiner can itself invite).
+/// `owner_credential` is the presented workspace Bearer credential the plane resolves to its registry row →
+/// principal → OWNER role gate (nothing is signed — authority is the directory rows). See
+/// [`mint_invite_with_role`] for the role-selectable form (the multi-workspace e2e mints owner-role invites
+/// so the joiner can itself invite).
 pub(crate) async fn mint_invite(
     authority: &Authority,
     ws: &WorkspaceId,
-    owner_dkid: &str,
+    owner_credential: &str,
     op_id: &str,
     email: &str,
     skill: &str,
@@ -328,7 +357,7 @@ pub(crate) async fn mint_invite(
     mint_invite_with_role(
         authority,
         ws,
-        owner_dkid,
+        owner_credential,
         op_id,
         email,
         skill,
@@ -339,9 +368,9 @@ pub(crate) async fn mint_invite(
     .await
 }
 
-/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The request names
-/// the acting `owner_dkid`; the plane resolves its non-revoked registry row → principal → OWNER role gate
-/// (no signature — authority is the directory rows). The offered `name` is advisory (it becomes the
+/// [`mint_invite`] with an explicit `role` and an optional OFFERED NAME for the skill. The request presents
+/// the acting `owner_credential`; the plane resolves its non-revoked registry row → principal → OWNER role
+/// gate (no signature — authority is the directory rows). The offered `name` is advisory (it becomes the
 /// follower's local skill name, never part of the request identity — the deterministic link binds skill
 /// ids only), so the multi-workspace e2e uses it to give a skill the SAME name in two workspaces and prove
 /// `--workspace` disambiguation.
@@ -349,7 +378,7 @@ pub(crate) async fn mint_invite(
 pub(crate) async fn mint_invite_with_role(
     authority: &Authority,
     ws: &WorkspaceId,
-    owner_dkid: &str,
+    owner_credential: &str,
     op_id: &str,
     email: &str,
     skill: &str,
@@ -358,7 +387,7 @@ pub(crate) async fn mint_invite_with_role(
     at: &str,
 ) -> String {
     let request = GovernanceRequest {
-        device_key_id: owner_dkid.to_owned(),
+        credential: owner_credential.to_owned(),
         op: GovernanceOp::Invite {
             role,
             expires_at: None,
