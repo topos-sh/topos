@@ -1,8 +1,8 @@
 //! The session-read lane's one new query — the per-workspace skill index. A child of `mod db`; no
 //! `sqlx` type crosses the boundary. Everything else the session lane reads goes through the existing
-//! reachability statements (`object_witness` / `version_readable` / `open_proposal_rows`), re-gated by
-//! [`crate::db::ReadLane::WorkspaceMember`] — this file exists only for the index join no token-scoped read
-//! ever needed.
+//! reachability statements (`object_witness` / `version_readable` / `open_proposal_rows`), gated by the
+//! ONE membership predicate (`read_gate`) both read lanes share — this file exists only for the index
+//! join the catalog read needs.
 
 use topos_types::Generation;
 

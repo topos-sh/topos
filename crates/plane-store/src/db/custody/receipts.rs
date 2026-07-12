@@ -190,6 +190,22 @@ impl Db {
             Some(stored) if stored.outcome == TerminalOutcome::Ok
         ))
     }
+
+    /// Whether a durable receipt already exists for this device's `op_id` (a pool read). The **revoked-device
+    /// gate**: a since-revoked device is admitted past `resolve_device_op` ONLY when it has a receipt to
+    /// replay, so it still gets its stored outcome byte-identically (OK-publish or a stored typed failure);
+    /// genuinely FRESH revoked work has no receipt here and is synthesized-denied at the front door, minting
+    /// nothing durable on ANY path (the pre-txn typed-failure guards + the in-txn `denied_preauth` agree).
+    pub(crate) async fn device_receipt_exists(
+        &self,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+        op_id: &str,
+    ) -> Result<bool> {
+        Ok(get_receipt(self.pool(), ws, device_key_id, op_id)
+            .await?
+            .is_some())
+    }
 }
 
 /// The body of [`Db::record_pretxn`], factored out so the pointer-move runner can re-run it on a

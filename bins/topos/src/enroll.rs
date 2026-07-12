@@ -69,8 +69,8 @@ pub(crate) struct Instance {
 
 /// One workspace this install has joined on the pinned plane — the per-workspace half of an enrollment.
 /// A single `user.json` carries a `Vec<Membership>`, so following skills from a second workspace ADDS a
-/// membership rather than overwriting the first. Non-secret metadata only (the read tokens live in
-/// `follows.json`); derives `Serialize`/`Deserialize` with NO `deny_unknown_fields` (forward-compatible).
+/// membership rather than overwriting the first. Non-secret metadata only (the workspace credential lives
+/// in `identity/credentials.json`); derives `Serialize`/`Deserialize` with NO `deny_unknown_fields` (forward-compatible).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Membership {
     /// The workspace id (a path-safe identifier — the signed-pointer scope + the write op's workspace).
@@ -174,8 +174,11 @@ pub(crate) fn read_follows(
     let Some(raw) = fs.read_opt(&path)? else {
         return Ok(None);
     };
-    let follows: Follows = doc::read_doc_private(fs, &path)?
-        .expect("read_opt found the file, so read_doc_private parses the same bytes");
+    // A concurrent `uninstall` (or any racing removal) could unlink the file between the two reads; treat
+    // a now-absent file as an honest "no follows", never a panic.
+    let Some(follows): Option<Follows> = doc::read_doc_private(fs, &path)? else {
+        return Ok(None);
+    };
     let mut seen: HashMap<&str, &str> = HashMap::new();
     for entry in &follows.follows {
         crate::id::SkillId::parse(&entry.skill_id)?;
@@ -1091,6 +1094,37 @@ mod tests {
         assert_eq!(
             read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
             2
+        );
+    }
+
+    #[test]
+    fn read_follows_scrubs_a_mixed_legacy_and_migrated_file() {
+        // A MIXED file — one entry still carrying a legacy `read_token`, one already tokenless (e.g. an
+        // interrupted prior migration, or a new follow appended by a post-migration writer). The `any()`
+        // trigger fires on the one legacy entry; both follows survive and the file ends tokenless.
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("mixed-follows"));
+        let mixed = format!(
+            "{{\"schema_version\":1,\"follows\":[\
+               {{\"skill_id\":\"s_legacy\",\"workspace_id\":\"w_acme\",\
+                 \"{tok}\":\"rt_still_here\",\"mode\":\"auto\",\
+                 \"review_required\":false,\"following\":true}},\
+               {{\"skill_id\":\"s_migrated\",\"workspace_id\":\"w_acme\",\
+                 \"mode\":\"confirm_each\",\"review_required\":true,\"following\":true}}]}}",
+            tok = "read_token",
+        );
+        fs.write_private(&layout.follows_path(), mixed.as_bytes())
+            .unwrap();
+
+        let follows = read_follows(&fs, &layout).unwrap().unwrap();
+        assert_eq!(follows.follows.len(), 2);
+        assert_eq!(follows.follows[0].skill_id, "s_legacy");
+        assert_eq!(follows.follows[1].skill_id, "s_migrated");
+        assert!(follows.follows[1].review_required);
+        let on_disk = std::fs::read_to_string(layout.follows_path()).unwrap();
+        assert!(
+            !on_disk.contains("read_token") && !on_disk.contains("rt_still_here"),
+            "the one legacy token in a mixed file must be scrubbed: {on_disk}"
         );
     }
 

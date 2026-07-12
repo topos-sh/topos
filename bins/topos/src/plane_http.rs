@@ -874,7 +874,8 @@ impl CatalogSource for UreqDeviceClient {
 /// Map a contribute-write response — the all-outcome **200 envelope** — to a typed [`WriteReceipt`]. EVERY
 /// parsed 200 is an `Ok(WriteReceipt)` (OK / NEEDS_REVIEW / CONFLICT / APPROVAL_REQUIRED / DENIED are all
 /// terminal protocol outcomes the verb acts on); only a non-200 (transport/auth/integrity) or an
-/// unparseable envelope is a [`ClientError`]. The signed `current` pointer rides `data` ONLY when a pointer
+/// unparseable envelope is a [`ClientError`]. The `current` pointer record (unsigned — nothing signs) rides
+/// `data` ONLY when a pointer
 /// moved — NEEDS_REVIEW, an OK `review --reject`, and every failure carry `{}`, so it is parsed leniently
 /// (`.ok()`), never assuming `outcome == Ok ⟹ data is a record`. **Pure** (status + bytes), so every arm is
 /// unit-tested without a socket (mirrors [`map_invite_envelope`]).

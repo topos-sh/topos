@@ -860,6 +860,10 @@ async fn drive(
 /// in-transaction read+lock remains the authoritative source of truth (policy may flip between here and the
 /// txn). Returns `None` when the caller may proceed to ingest.
 ///
+/// The acting device is already LIVE here: a revoked device is synthesized-DENIED at the shared
+/// `resolve_device_op` front door (unless it is replaying a stored receipt, which the replay probes below
+/// then serve), so this gate's durable `APPROVAL_REQUIRED` write only ever fires for a live device.
+///
 /// # Errors
 /// [`AuthorityError::Internal`] on a database fault.
 #[allow(clippy::too_many_arguments)]

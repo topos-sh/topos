@@ -752,6 +752,108 @@ async fn review_required_gates_a_direct_publish(pool: PgPool) {
     );
 }
 
+/// A REVOKED device's genuinely FRESH write is DENIED at the shared `resolve_device_op` front door —
+/// SYNTHESIZED, never a durable receipt — uniformly across every pre-transaction path, INCLUDING the
+/// review-required preflight (before this was fixed, the preflight persisted an `APPROVAL_REQUIRED` row
+/// for the revoked device, letting a de-authorized principal grow `op_receipts` unbounded). The revoked
+/// device is admitted only to REPLAY a receipt it minted while authorized — pinned by the sibling OK-replay
+/// assertion below.
+#[sqlx::test]
+async fn a_revoked_device_fresh_write_is_denied_but_still_replays_a_stored_receipt(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sc-gate-revoked").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    let key = dev_key(52);
+    register(&fx, &w, &s, "dk_a", &key, "p_dev").await;
+
+    // A genesis publish (while authorized) leaves a stored OK receipt to replay later, and a `current` base.
+    let genesis_op = "52000000-0000-4000-8000-000000000000";
+    let g = fx
+        .authority
+        .publish(
+            &w,
+            &s,
+            &op(genesis_op),
+            genesis(vec![file("f", b"0")]),
+            DeviceOpAuth {
+                credential: cred(&w, "dk_a"),
+                op: DeviceOp::PublishDirect,
+                expected: gn(0, 0),
+            },
+            None,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(g.current, Some(gn(1, 1)));
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
+    // Turn review-required ON so a live fresh child publish WOULD mint a durable APPROVAL_REQUIRED — the
+    // exact row the pre-fix revoked device could grow.
+    fx.authority.set_review_required(&w, true).await.unwrap();
+
+    // Revoke the device, then drive a FRESH child publish. It is DENIED (not APPROVAL_REQUIRED), the pointer
+    // does not move, and NOTHING durable is minted — the revoked device gains no audit-row growth vector.
+    fx.authority.db().revoke_device(&w, "dk_a").await.unwrap();
+    let fresh_op = "52000000-0000-4000-8000-000000000001";
+    let r = fx
+        .authority
+        .publish(
+            &w,
+            &s,
+            &op(fresh_op),
+            child(c0, vec![file("f", b"1")]),
+            DeviceOpAuth {
+                credential: cred(&w, "dk_a"),
+                op: DeviceOp::PublishDirect,
+                expected: gn(1, 1),
+            },
+            None,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, TerminalOutcome::Denied);
+    assert_eq!(
+        fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
+        Some(c0)
+    );
+    assert_eq!(
+        receipt_rows(&pool, fresh_op).await,
+        0,
+        "a revoked device's fresh write must not mint a durable receipt row"
+    );
+
+    // The replay property survives revocation: retrying the genesis op_id (submitted while authorized)
+    // still replays its stored OK byte-identically — the revoked device is admitted for the replay only.
+    let replay = fx
+        .authority
+        .publish(
+            &w,
+            &s,
+            &op(genesis_op),
+            genesis(vec![file("f", b"0")]),
+            DeviceOpAuth {
+                credential: cred(&w, "dk_a"),
+                op: DeviceOp::PublishDirect,
+                expected: gn(0, 0),
+            },
+            None,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.outcome, TerminalOutcome::Ok);
+    assert_eq!(replay.current, g.current);
+}
+
 /// Once `review_required` is MUTABLE (the public set-policy op exists), a gated direct publish must REPLAY
 /// its original `APPROVAL_REQUIRED` even when the policy is turned OFF between a lost-ack and a same-`op_id`
 /// retry. The preflight gate binds `commit = None`, so without the pre-txn replay the retry would fall

@@ -100,7 +100,7 @@ pub struct DeviceAuthStart {
 }
 
 /// An issued single-use enrollment grant + the binding fields the redeem checks the presented device against.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GrantIssued {
     /// The SECRET grant token to redeem (the plaintext appears ONLY here; only its sha256 is stored).
     pub grant_token: String,
@@ -115,6 +115,22 @@ pub struct GrantIssued {
     pub device_key_id: String,
     /// The grant expiry (epoch-ms).
     pub expires_at: i64,
+}
+
+// `grant_token` is a LIVE single-use bearer secret — redact it so a formatted value (a debug trace, a
+// panic message) can never mint a second custody surface for it (the same redaction discipline the
+// workspace-credential carriers follow).
+impl std::fmt::Debug for GrantIssued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantIssued")
+            .field("grant_token", &"<redacted>")
+            .field("workspace_id", &self.workspace_id)
+            .field("workspace_display_name", &self.workspace_display_name)
+            .field("device_auth_id", &self.device_auth_id)
+            .field("device_key_id", &self.device_key_id)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// The outcome of polling a device-authorization session.

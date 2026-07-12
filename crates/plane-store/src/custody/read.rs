@@ -258,7 +258,7 @@ pub(crate) async fn serve_object(
 /// scope/path match, parses the version id (a bad hex is the uniform not-found), R1-authorizes the version
 /// read, then assembles the metadata WITHOUT reading any blob bytes.
 ///
-/// Authorization is [`crate::db::Db::authorize_version_read`] (rostered ∧ accepted-trunk-or-open-non-
+/// Authorization is [`crate::db::Db::authorize_version_read`] (confirmed member ∧ accepted-trunk-or-open-non-
 /// stale-proposal); an empty/unauthorized result is the single indistinguishable [`AuthorityError::NotFound`]
 /// (never a `403`, never a probe). Every fault in the assembly below is reachable ONLY after authz, so an
 /// [`AuthorityError::Integrity`] there discloses nothing about existence (mirroring [`read_object`]).
@@ -350,12 +350,13 @@ pub(crate) async fn read_version_metadata(
 
 /// List a skill's OPEN, non-stale proposals for an authenticated scope (the proposals-listing route's core).
 /// Asserts the scope/path match (the cross-skill/workspace leak guard — the **FIRST** thing it does, copied
-/// verbatim from [`serve_object`] / [`read_version_metadata`]), then enumerates the rostered ∧
+/// verbatim from [`serve_object`] / [`read_version_metadata`]), then enumerates the member-gated ∧
 /// `open ∧ base == current` rows. Returns only `(version_id, base, created_at)` per proposal — NO bytes, NO
 /// proposer.
 ///
-/// The roster JOIN inside the query **is** the authorization, so a NON-rostered principal (a valid token, not
-/// on this skill's roster) yields `Ok(empty)`, NOT a not-found — there is no per-row authorize call to probe.
+/// The membership gate inside the query **is** the authorization, so a NON-member (a valid credential whose
+/// principal has no confirmed seat) yields `Ok(empty)`, NOT a not-found — there is no per-row authorize
+/// call to probe.
 /// A staled proposal vanishes from the list on the SAME `open ∧ base == current` predicate the object/version
 /// reads use, so keep == read == list.
 ///

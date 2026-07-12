@@ -132,7 +132,7 @@ where
 
 impl Db {
     /// A CONFIRMED `workspace_member` row exists — the session legs' pool-level preamble probe (the same
-    /// predicate the [`ReadLane::WorkspaceMember`] gate runs; exposed separately so a preamble can deny
+    /// predicate the [`read_gate`](AccessWitness::read_gate) runs; exposed separately so a preamble can deny
     /// BEFORE any per-skill work).
     pub(crate) async fn confirmed_member(
         &self,

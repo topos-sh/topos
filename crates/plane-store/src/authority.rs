@@ -263,8 +263,8 @@ impl Authority {
 
     /// Read a version's authenticated metadata for a [`ReadScope`] (the version-metadata route's core):
     /// `(version_id, parents, author, message, bundle_digest, files)`, assembled WITHOUT reading any blob
-    /// bytes. Asserts the scope/path match, R1-authorizes the version read (rostered ∧ accepted-trunk or
-    /// open-non-stale proposal), and returns the single indistinguishable [`AuthorityError::NotFound`] for an
+    /// bytes. Asserts the scope/path match, R1-authorizes the version read (confirmed member ∧ accepted-trunk
+    /// or open-non-stale proposal), and returns the single indistinguishable [`AuthorityError::NotFound`] for an
     /// unauthorized/unreachable version (never a `403`).
     ///
     /// # Errors
@@ -284,9 +284,9 @@ impl Authority {
     /// List a skill's OPEN, non-stale proposals for an authenticated [`ReadScope`] (the proposals-listing
     /// route's core): each `(version_id, base, created_at)` — **NO bytes, NO proposer, NO roles, NO rendered
     /// view**. Asserts the scope/path match (the cross-skill/workspace leak guard) and enumerates the
-    /// rostered ∧ `open ∧ base == current` rows, so a staled proposal vanishes exactly as it drops out of the
-    /// object/version reads (keep == read == list). A NON-rostered principal with a valid token yields an
-    /// EMPTY list, never a not-found (the roster JOIN is the authz; there is no per-row probe); a scope/path
+    /// member ∧ `open ∧ base == current` rows, so a staled proposal vanishes exactly as it drops out of the
+    /// object/version reads (keep == read == list). A NON-member with a valid credential yields an
+    /// EMPTY list, never a not-found (the membership gate is the authz; there is no per-row probe); a scope/path
     /// mismatch is the single indistinguishable [`AuthorityError::NotFound`]. This is a READ — nothing is
     /// moved, no governance is consulted, no body is taken.
     ///
@@ -316,13 +316,16 @@ impl Authority {
         crate::lineage::check_lineage(self, ws, skill, candidates).await
     }
 
-    /// Resolve a device-lane op's presented workspace credential over the POOL — the pre-transaction
-    /// resolution the pre-txn receipt machinery keys on (the transaction re-authenticates
-    /// in-transaction; this read is advisory). `Err(receipt)` is the SYNTHESIZED pre-auth DENIED for
-    /// an unknown credential — never persisted (an unauthenticated caller must not mint durable
-    /// rows), mirroring the transaction's own `denied_preauth`. A REVOKED credential still resolves:
-    /// the pre-txn replay probes must serve a since-revoked device its stored receipts; the
-    /// in-transaction authz denies its fresh work.
+    /// Resolve a device-lane op's presented workspace credential over the POOL — the shared front door for
+    /// every write verb (the transaction re-authenticates in-transaction; this read is advisory for the
+    /// pre-txn receipt machinery). `Err(receipt)` is the SYNTHESIZED pre-auth DENIED — never persisted (an
+    /// un/deauthenticated caller must mint no durable rows), mirroring the transaction's `denied_preauth`:
+    /// - an **UNKNOWN** credential resolves to no row → synthesized DENIED;
+    /// - a **REVOKED** credential still RESOLVES (a since-revoked device must be able to replay a stored
+    ///   receipt byte-identically), so it is admitted **only when a receipt already exists** for this
+    ///   `(ws, device_key_id, op_id)`; genuinely FRESH revoked work has no receipt and is synthesized-DENIED
+    ///   here, uniformly closing every pre-txn typed-failure path (bad-digest / op-mismatch / no-current /
+    ///   the review-required preflight) as well as the in-txn arm, so a revoked device mints nothing durable.
     async fn resolve_device_op(
         &self,
         ws: &WorkspaceId,
@@ -332,30 +335,57 @@ impl Authority {
         created_at: &str,
     ) -> Result<std::result::Result<crate::set_current::DeviceOpRequest, SetCurrentReceipt>> {
         let credential_sha256 = topos_core::digest::sha256(auth.credential.as_bytes());
-        match self
+        let Some(identity) = self
             .db()
             .resolve_device_credential(ws, &credential_sha256)
             .await?
+        else {
+            return Ok(Err(
+                self.synthesized_device_denied(skill, op_id, auth, created_at)
+            ));
+        };
+        // A revoked device proceeds ONLY to replay a stored receipt; fresh revoked work mints nothing durable.
+        if identity.revoked
+            && !self
+                .db()
+                .device_receipt_exists(ws, &identity.device_key_id, op_id.as_str())
+                .await?
         {
-            Some(identity) => Ok(Ok(crate::set_current::DeviceOpRequest {
-                credential_sha256,
-                device_key_id: identity.device_key_id,
-                op: auth.op,
-                expected: auth.expected,
-            })),
-            None => Ok(Err(SetCurrentReceipt {
-                op_id: op_id.as_str().to_owned(),
-                command: crate::set_current::device_op_command(auth.op).to_owned(),
-                skill_id: skill.as_str().to_owned(),
-                version_id: None,
-                bundle_digest: None,
-                expected: auth.expected,
-                outcome: topos_types::TerminalOutcome::Denied,
-                current: None,
-                record: None,
-                created_at: created_at.to_owned(),
-                details: crate::set_current::detail_msg("device unknown or revoked"),
-            })),
+            return Ok(Err(
+                self.synthesized_device_denied(skill, op_id, auth, created_at)
+            ));
+        }
+        Ok(Ok(crate::set_current::DeviceOpRequest {
+            credential_sha256,
+            device_key_id: identity.device_key_id,
+            op: auth.op,
+            expected: auth.expected,
+        }))
+    }
+
+    /// The SYNTHESIZED (never-persisted) DENIED receipt for an unknown/revoked device on a device-lane
+    /// write — the pre-transaction twin of the transaction's `denied_preauth`, so an unauthenticated OR
+    /// deauthenticated caller mints nothing durable on ANY path (the in-txn arm and the pre-txn
+    /// review-required preflight agree).
+    fn synthesized_device_denied(
+        &self,
+        skill: &SkillId,
+        op_id: &OpId,
+        auth: &crate::set_current::DeviceOpAuth,
+        created_at: &str,
+    ) -> SetCurrentReceipt {
+        SetCurrentReceipt {
+            op_id: op_id.as_str().to_owned(),
+            command: crate::set_current::device_op_command(auth.op).to_owned(),
+            skill_id: skill.as_str().to_owned(),
+            version_id: None,
+            bundle_digest: None,
+            expected: auth.expected,
+            outcome: topos_types::TerminalOutcome::Denied,
+            current: None,
+            record: None,
+            created_at: created_at.to_owned(),
+            details: crate::set_current::detail_msg("device unknown or revoked"),
         }
     }
 
@@ -402,6 +432,9 @@ impl Authority {
             )
             .await;
         }
+        // A revoked device is already synthesized-DENIED at `resolve_device_op` (unless it is replaying a
+        // stored receipt, which the preflight's own replay path then serves), so the preflight below runs
+        // its durable-minting arm only for a LIVE device.
         if let Some(receipt) = crate::set_current::publish_preflight(
             self,
             ws,
@@ -993,10 +1026,11 @@ impl Authority {
 
     /// **Redeem** an enrollment grant — THE central op. The GRANT is the bearer credential (a
     /// deterministic HMAC secret, stored only as its sha256). In one transaction: re-derive the device key
-    /// id, check the grant binds exactly this presented device key, apply the roster gate (cloud requires
-    /// a confirmed identity; self-host grants membership), register the device, and mint per-skill read
-    /// tokens. **Returns no user token, ever.** Naturally idempotent — a replay re-derives identical read
-    /// tokens.
+    /// id, check the grant binds exactly this presented device key, apply the membership gate (cloud requires
+    /// a confirmed identity; self-host grants membership), and register the device WITH its ONE minted
+    /// **workspace credential** (`derive_token(b"wscred", …)`, stored only as its sha256 on the registry
+    /// row). **Returns no user token, ever; no per-skill token, ever.** Naturally idempotent — a replay
+    /// re-derives the identical workspace credential.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1169,8 +1203,10 @@ impl Authority {
 
     /// **Remove a member from a verified owner session.** Same acting gate + idempotency shape as
     /// [`invite_members_session`](Self::invite_members_session); reuses the device lane's
-    /// last-owner-lockout guard and its exact instant-revoke transaction (membership + per-skill roster +
-    /// read tokens dropped in one txn — removal severs read access as a consequence of losing the seat).
+    /// last-owner-lockout guard and its exact removal transaction (the `workspace_member` seat + the
+    /// principal's per-skill roster rows dropped in one txn — every read/write gate joins the seat, so
+    /// removal severs access the instant it commits; the device's credential row stays, gating nothing
+    /// without a seat).
     /// Removing a merely-invited seat un-invites it; removing an absent principal is an idempotent `Ok`.
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
@@ -1427,7 +1463,7 @@ impl Authority {
         crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
     }
 
-    /// **Revoke** a registered device — flip `revoked` AND drop its read tokens in one transaction (instant
+    /// **Revoke** a registered device — flip `revoked` in one transaction (instant
     /// per-device revoke). Owner OR the device's own principal may act. Device-credential authenticated +
     /// `op_id`-idempotent. The target device key id comes from `request.op` (a `GovernanceOp::DeviceRevoke`).
     ///
