@@ -32,7 +32,12 @@
   **workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog —
   a missing/blank credential folding to the uniform 404;
   calls `Authority::list_skills_device` → `WireSkillIndex`; the FIRST HTTP-routed member-scoped read, serving
-  cloud AND self-host), and the device-credential writes
+  cloud AND self-host), **the DELIVERY read** `GET /v1/workspaces/{ws}/delivery` (→
+  `Authority::delivery` → `WireDelivery`: the entitled set — skill id + catalog name + resolved
+  protection + pinned version + `via` attribution — plus the person's detached ids, the unacked
+  notices feed, and the open-proposal count; `Cache-Control: no-store` — per-device, hot, never
+  cacheable), **the fleet report** `PUT /v1/workspaces/{ws}/report` (`WireAppliedReport` → 204;
+  the device's post-reconcile applied snapshot, small-body-capped), and the device-credential writes
   `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (bodies carry NO credential material — the
   Bearer credential is resolved in-transaction by registry-row lookup; keeping the secret out of bodies
   keeps it out of receipt request identities and the client's persisted op-WAL). Each handler is parse → call
@@ -152,8 +157,8 @@
   `list_proposals_session` (PRE-SERIALIZED wire JSON via the SAME mappers the token-scoped `/v1`
   routes use — parity by construction, a composing route relays the bytes verbatim), and
   `read_object_session` (verified raw bytes). Same strict-mode threading; the authority ops uniformly
-  deny a self-host plane and gate on a CONFIRMED workspace member (any role — deliberately broader
-  than the device lane's per-skill roster).
+  deny a self-host plane and gate on a CONFIRMED workspace member (any role — the SAME membership
+  gate the device lane runs).
 - **The session-review wrappers** (`session_review_cmd.rs`) — the write twin of the session-read
   wrappers, the same leak-free, LIB-ONLY surface for the PRIVILEGED web-session review ops (a downstream
   composition's authenticated admin routes call them with a session-verified acting email; there is NO

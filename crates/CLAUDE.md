@@ -11,11 +11,12 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
 - **`topos-harness/`** — the `HarnessAdapter` port + its three impls, all built (Claude Code the
   reference; OpenClaw's concrete config bytes and Hermes's per-turn-injection claim stay provisional
   behind their pilot readiness probes). The one client-side port. Depends on `topos-core` + `topos-types`.
-- **`plane-store/`** — the server authority boundary: private SQL + skill-scoped authorization + the atomic
-  publish transaction, split into **custody** (bytes/versions/pointers/GC) and **directory**
-  (identity/policy) — custody consults access ONLY through the in-transaction **access-witness** trait the
-  directory implements (a one-way seam `check-arch` enforces). Depends on `topos-core` + `topos-types` +
-  `topos-gitstore`.
+- **`plane-store/`** — the server authority boundary: private SQL + membership-scoped authorization + the
+  atomic publish transaction, split into **custody** (bytes/versions/pointers/GC) and **directory**
+  (identity/policy: the catalog, channels, person-scoped subscriptions, the entitlement predicate, the
+  guarded `topos_*` policy functions) — custody consults access ONLY through the in-transaction
+  **access-witness** trait the directory implements (a one-way seam `check-arch` enforces). Depends on
+  `topos-core` + `topos-types` + `topos-gitstore`.
 
 **The rule that keeps the graph legible:** a trust decision is written once, in `topos-core`. Everything
 links it; nothing re-implements digest / consent / sync. (The `(epoch,seq)` CAS *decision* is the named

@@ -16,7 +16,10 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
   `bundle_digest`.
 - `commit` — snapshot a tree as a commit under `refs/topos/versions/<version_id>`; **re-derives the
   `version_id` through the kernel `commit_id` and refuses a lying ref**; maps parent `version_id`s → git
-  commits (a missing parent is typed).
+  commits (a missing parent is typed). `commit_backfill` is the FOLLOWER-BACKFILL variant: a locally
+  absent parent is omitted from the git linkage (shallow history past a purged/pruned ancestor — the
+  identity re-derivation is over the frame's parent ids, so a lying ref is still refused); authoring
+  paths keep the strict form.
 - `render_verified` — resolve → recursively walk the tree → re-hash **every** blob through the kernel
   sha256 → recompute the canonical `bundle_digest` → assert it equals the caller's pin. A flipped/forged
   byte, a non-UTF-8 name, or a non-blob entry fails **typed** (verify-on-read; the put→render round-trip is

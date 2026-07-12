@@ -133,7 +133,21 @@ renderer over the SAME typed outcomes (one value, two presentations).
   all-zero `observed_version_id` sentinel) is a state-② offer the engine OFFERS on a bare sweep (never
   auto-lands — I-TOFU first-receive consent, even for an `auto` follower) and PLACES on an explicit accept /
   `follow <skill>`. There is **no pointer signing, no client-side verification, no anti-rollback floor, no
-  key pinning** — the trust level is the same a team extends to its git host + CI.
+  key pinning** — the trust level is the same a team extends to its git host + CI. **The bare enrolled
+  sweep is now the DELIVERY-DRIVEN RECONCILE** (`ops/pull::pull_reconcile` + the `DeliverySource` seam on
+  `UreqPlane`, keyed by the per-workspace credentials): ONE `GET /v1/workspaces/{ws}/delivery` per
+  enrolled workspace answers "what should this device have", and the engine converges — new arrivals lay
+  a first-receive baseline under the skill's CATALOG name and still pass the kernel's I-TOFU offer;
+  known skills sync against the delivery's already-resolved target (`sync_one_with` — no second pointer
+  GET); the undelivered remainder splits by WHO ACTED (the served `detached` set = the person's
+  unfollow/lapse → freeze in place, `PullAction::Detached`; otherwise upstream withdrew it → snapshot
+  any draft, CLEAN the agent dirs, keep every sidecar byte, `PullAction::Withdrawn`); a whole-workspace
+  404 (removed / revoked) freezes everything with a warning, never a clean. Each workspace then gets the
+  device's post-reconcile applied snapshot (`PUT /v1/workspaces/{ws}/report`) — best-effort fleet
+  visibility, never a sync blocker. Targeted pulls and the un-enrolled state keep the classic per-skill
+  engine; the ancestor backfill SHALLOW-STOPS at a version the plane no longer serves (a purged
+  ancestor's tombstoned history) via `commit_backfill`, so fresh installs of live descendants survive a
+  purge.
 - **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft (not just detects it).
   Reachable only through a `DivergedWitness` capability token minted in the sync engine's diverged arm (the
   structural author-only gate; followers never reach merge code). The kernel `topos-core::merge` plans +
@@ -197,9 +211,9 @@ are asserted byte-equal in tests.
   **`ContributeSource`** transport seam (mirroring
   `GovernanceSource` on `UreqDeviceClient`) POSTs the four write routes; `map_write_envelope` maps the
   **all-outcome 200 envelope** to a typed `WriteReceipt` (every protocol outcome — OK / NEEDS_REVIEW /
-  CONFLICT / APPROVAL_REQUIRED / DENIED — is an `Ok(WriteReceipt)`; only a transport/non-200/malformed body
+  CONFLICT / DENIED — is an `Ok(WriteReceipt)`; only a transport/non-200/malformed body
   is an `Err`; the served pointer (`wire_record`) is parsed leniently because an OK `review --reject`
-  carries `data: {}`). **`publish [--propose] <target>[@<digest>]`** first runs the
+  carries `data: {}`). **`publish [--propose] [--to <channel>] <target>[@<digest>]`** first runs the
   **auto-add pre-step** (`ensure_tracked`): an EXACT tracked name wins straight through, else the target is
   an untracked LOCAL source it adopts before publishing — a discovered `<name>` / `<name>@<harness>`
   (reusing `add`'s `resolve_add_target`) or a `<dir>` (adopted in place via `ops::add`); a remote
@@ -212,9 +226,12 @@ are asserted byte-equal in tests.
   the computed digest just ships), computes the byte-identical `commit_id`/`bundle_digest`
   via the kernel (**I-COMMIT-PARITY** — author = `ctx.device_id`, message = a fixed `"topos: publish"`), pins
   the candidate in the store, persists an **op-WAL** (the extended `OpRecord`, `0600`) BEFORE the first send,
-  POSTs, and maps the outcome (OK advances local state read-your-writes; APPROVAL_REQUIRED surfaces the
-  `publish --propose` next-action; CONFLICT surfaces rebase; a genesis publish folds in a best-effort,
-  owner-gated `/i/` link). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
+  POSTs, and maps the outcome (OK advances local state read-your-writes; a NEEDS_REVIEW with the `downgraded` detail is the
+  protection gate REROUTING a member's direct publish into a proposal — surfaced as Proposed, never an
+  error; CONFLICT surfaces rebase; a genesis publish folds in a best-effort, owner-gated `/i/` link).
+  `--to <channel>` rides the wire body + the op-WAL (a replay re-sends the identical placement; the
+  channel's mode gates it server-side, independently of the version gate; a brand-new skill with no
+  `--to` lands in `everyone`). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
   identity at `expected` = the FRESH `current` (a reviewable proposal's base). **`revert --to <good>`** binds
   the forward commit `{parents:[FRESH current], tree: good.tree}` (a stale local parent would be a DENIED, so
   it reads the live current). An UNCERTAIN send keeps the WAL so the next attempt **replays the SAME `op_id`**
@@ -252,8 +269,10 @@ are asserted byte-equal in tests.
   typed ask-an-owner error (`REQUEST_ACCESS`), and the invite follow now persists + re-emits the
   server-built `verification_uri_complete` verbatim (reconstruction is only the older-plane fallback).
 
-- **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. Local-only and
-  byte-inert: it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
+- **The `unfollow` verb** (`ops/unfollow`) — stop following `current`, KEEP the bytes. STILL LOCAL-ONLY
+  and byte-inert (the plane's person-scoped `skill_unfollows` rows + `Authority::unfollow_skill` exist —
+  the verb's server half is the verb-reshape increment's; until then a local unfollow freezes THIS
+  install and the reconcile respects it, while other devices keep receiving): it flips `following = false` in `follows.json` via the same identity-locked read-merge-write
   the enrollment uses (retaining the workspace / mode so a later
   `follow <skill>` resumes — flipping the flag back on and, if a first-receive offer is still
   pending, placing it; the workspace credential stays in `credentials.json`),

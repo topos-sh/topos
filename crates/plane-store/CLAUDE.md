@@ -36,14 +36,33 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
 - `db/custody/proposals.rs` — the contribute tables' SQL.
 - `db/custody/witness.rs` — **the `AccessWitness` TRAIT** custody declares and consumes: `device` (resolve
   a presented workspace credential — by its sha256 — to its registry row, INSIDE the live transaction;
-  the lookup IS the authentication), `confirmed_member` (the ONE write gate), `session_write_gate` (the
-  three-way session outcome — the role matrix itself lives directory-side), `review_required`,
-  `seat_roster` (the one genesis directory write the pointer-move makes), and the pool-level `read_gate`
-  (the membership gate, shared by both read lanes).
+  the lookup IS the authentication), `confirmed_member` + `member_role` (the ONE membership gate + the
+  role band the protection gate consumes), `session_write_gate` (the three-way session outcome — the
+  role matrix itself lives directory-side), `skill_gate` (the catalog's lifecycle status + the resolved
+  per-bundle protection cascade), the few directory WRITES the pointer-move makes atomically
+  (`register_publish` — catalog registration + `everyone`/`--to` placement + the author self-follow;
+  `place_skill`; `set_display_name`; `notify_verdict`), and the pool-level `read_gate` (the membership
+  gate, shared by both read lanes).
   Its in-transaction methods take the live write transaction, so a directory row-write is instantly
   effective against byte ops (revoke-blocks-promotion) — no duplicated enforcement, no cache to invalidate.
 
 **Directory** (`directory/` + `db/directory/`) — access/identity/policy:
+- `catalog.rs` / `db/directory/catalog.rs` — the skill LIFECYCLE session ops (archive / unarchive /
+  delete / purge): owner-gated in the guarded SQL functions, self-host denied like every session op;
+  the db twin runs the row policy + the CUSTODY halves (delete un-roots every commit's edges + drops
+  `current`; purge un-roots one version's) in ONE transaction, so the shipped GC keep-set reclaims
+  exactly what dropped out.
+- `channels.rs` / `db/directory/channels.rs` — the device-lane channel-era ops: curation
+  (place/unplace, create-on-first-use), self-serve channel join/leave, person-scoped
+  follow/unfollow, the device exclusion, the `protect` setter (+ session twins for join/leave).
+  Every policy decision is a guarded `topos_*` SQL function call (0015) — the ONE implementation
+  Rust calls today and the web tier calls at the door cutover; the db twin only resolves the
+  user-facing NAMES to ids and maps outcome codes. Naturally idempotent row ops (no receipts);
+  the channel audit is TRIGGER-emitted, so no write path can skip it.
+- `delivery.rs` / `db/directory/delivery.rs` — the delivery read ("what should THIS device have":
+  the ONE entitlement SRF + via attribution + the person's detached set + the unacked notices feed
+  + the open-proposal count) and the fleet's applied-state report (snapshot upsert; detach records
+  immutable; `last_report_at` the staleness clock).
 - `enroll.rs` / `db/directory/enroll.rs` — enrollment issuance (invites-bootstrap read, device-auth,
   passcodes, grants, the central redeem — which mints the ONE **workspace credential** per device) and
   the device READ lane's resolver (`resolve_read_scope`). The shared credential derivations (HMAC mint,
@@ -111,6 +130,18 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   migrations (`0009`–`0012`): `current.signed_record → current.record` with the signature block stripped,
   `op_receipts` likewise + its `key_id` column dropped, and the receipt/audit `method` discriminant
   `device_signed → device` (nothing signs; the receipt's actor is the presented device credential's key id).
+  **`0015` is the CHANNELS schema**: `catalog` (the first real name→skill mapping — `skill_id` stays the
+  immutable custody key, `name` the mutable user-facing key, `display_name` absorbed off `current`,
+  `status` active|archived|deleted, `protection` the per-bundle pin over the `workspace_policy` default),
+  `channels`/`channel_skills`/`channel_members` (the structural `everyone`: builtin, roster-derived
+  membership, trigger-guarded undeletable/unrenameable/unjoinable), the trigger-emitted `channel_events`
+  audit, person-scoped `skill_follows`/`skill_unfollows`, per-device `device_exclusions`, person-scoped
+  `notices` with read-state, the fleet `device_skill_state` (+ `device_registry.last_report_at`), version
+  purge tombstone columns on `skill_commit`, the `closed` proposal status, the guarded `topos_*` POLICY
+  FUNCTIONS (curation, membership, subscriptions, protect, lifecycle, the lapse-detach/re-attach
+  reconciles) + the `topos_person_entitled`/`topos_entitled_skills` entitlement SRFs — and the inc-2→inc-3
+  handoff: the interim per-skill `roster` rows lifted into person-scoped direct follows, then
+  **`DROP TABLE roster`**.
 - **`Authority::read_object`** — the skill-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
@@ -231,11 +262,17 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   candidate is re-verified **renderable** before the txn (the migrate path defers that re-check to here).
   **`revert --to <good>`** is a **forward** commit `{tree: good.tree, parents: [current]}` (`seq` advances,
   the pointer never moves backward); good's tree digest is read from its provenance row (migration `0003`
-  added a `bundle_digest` column — the git commit does not persist it). The **review-required typed-fail
-  gate** is built (a direct publish under the policy short-circuits to `APPROVAL_REQUIRED` having ingested
-  nothing; genesis + revert bypass it); the policy is set by the public **`Authority::set_review_required(ws,
-  bool)`** (a `workspace_policy` upsert — the test-only `seed_review_required` now delegates to it; a
-  device-credential `PUT /policy` governance route over it is later work). The cross-skill lineage predicate is now
+  added a `bundle_digest` column — the git commit does not persist it). The **protection gate REROUTES
+  instead of refusing**: a device-lane direct publish (or revert) on an effectively-REVIEWED bundle — the
+  per-bundle pin, else the `workspace_policy.review_required` default (`topos_effective_protection`, the
+  one cascade) — by a plain MEMBER runs the propose arm and answers NEEDS_REVIEW with a `downgraded`
+  detail (never a rejection); reviewer+ lands directly; genesis always lands; `APPROVAL_REQUIRED` and its
+  preflight are DELETED. The catalog gate refuses every pointer write on an archived/deleted skill, typed.
+  A registering publish also writes the directory rows atomically through the witness (catalog row + name
+  mint, `everyone`/`--to` placement — gated by the CHANNEL's mode independently of the version gate, the
+  outcome riding the receipt details — and the author's self-follow); the workspace default is still set
+  by **`Authority::set_review_required(ws, bool)`** (a device-credential `PUT /policy` governance route
+  over it is later work). The cross-skill lineage predicate is now
   **enforced transactionally** here. Migration `0003` adds `op_receipts` + `workspace_policy` + a fixture-seeded
   `device_registry`. Two-parent author merges are rejected wholesale (a later increment). Driven in-process
   by the interleaving tests (concurrent-publish → one OK + one stable CONFLICT; the ABA traps; lost-ack
@@ -396,7 +433,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   role, reads the workspace's full catalog and every skill's
   content, on the session lane AND the device lane (the lanes differ only in authentication: verified
   session email vs. presented workspace credential; the earlier lane asymmetry — per-skill roster on
-  the device lane — is deleted, and per-skill `roster` gates nothing). Mechanically, the read
+  the device lane — is deleted, and the per-skill `roster` table is GONE, lifted into person-scoped
+  `skill_follows` by 0015). Mechanically, the read
   authorizations are split into the ONE membership GATE (`read_gate`) and ONE lane-blind
   reachability statement each (`object_witness` / `version_readable` / `open_proposal_rows`), so both
   lanes share identical reachability SQL and the `open ∧ base == current` staleness predicate stays at
@@ -442,8 +480,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   device_key_id)` and the txn asserts the in-txn resolution names exactly that device. Revocation is a
   directory row-write, effective in-transaction: a device revoke flips `revoked` (the row + hash stay —
   replay survives, fresh work dies, re-enrollment is refused); a member removal deletes the
-  `workspace_member` row (every read/write gate joins it — access dies the moment it commits; the
-  member's per-skill roster rows go too). Rotation = re-enrollment (a fresh grant derives a fresh
+  `workspace_member` row (every read/write gate joins it — access dies the moment it commits) and runs
+  the lapse-detach reconcile (the person's devices' fleet rows get their final detach records — the
+  removed-member blind-spot the fleet page names). Rotation = re-enrollment (a fresh grant derives a fresh
   credential and the register upsert replaces the column). NO expiry (journaled: revoke + re-enroll is
   the rotation).
 - **The web-session REVIEW leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
@@ -519,6 +558,31 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   tests in `src/tests/enrollment_governance.rs` + `src/tests/session_roster.rs` and the
   migration-logic probe in `src/tests/canonical_migration.rs`.
 
+- **The channels model (increment 3): the catalog + channels + person-scoped subscriptions + the
+  delivery predicate + the skill lifecycle.** Migration `0015` (see the schema bullet) puts EVERY policy
+  decision in guarded `topos_*` SQL functions — the one implementation Rust calls today and the web tier
+  calls at the door cutover — with the channel audit TRIGGER-emitted so no write path can skip it, and
+  `everyone` structural (builtin row; membership derived from the confirmed roster; undeletable,
+  unrenameable, unjoinable/unleavable — DB-held invariants). **Delivery is ONE SQL home**
+  (`topos_entitled_skills`, extending the confirmed-membership predicate): DISTINCT union of
+  roster-derived `everyone` ∪ followed channels ∪ direct follows − unfollowed skills − this device's
+  exclusions, active + current-holding skills only, with `via` attribution and the resolved protection —
+  served by `Authority::delivery` (+ the person's detached set, the unacked notices feed, the
+  open-proposal count) and written back by `Authority::report_applied` (snapshot upsert; detach records
+  immutable; `last_report_at` the staleness clock). The WHO-ACTS placement is server-legible: unfollow /
+  channel-leave / member-removal run the lapse-detach reconcile (final per-device detach records,
+  reference-counted via the union); `follow`/join re-attach. Curation is member-level on `open` channels,
+  reviewer+ on `curated`; `protect` tightens at reviewer+ and loosens only at owner, per kind. The
+  LIFECYCLE session ops (owner; self-host denied like every session op): archive renames
+  (`<name>-archived-<date>`, counter on repeats) FREEING the base name (id-keyed references make a reused
+  name a new identity), unplaces everywhere, auto-closes open proposals with author NOTICES; unarchive
+  renames back or refuses typed (`NameTaken`); delete (archive-first) tombstones the catalog row and
+  un-roots all content for the shipped GC; purge un-roots ONE version's bytes (refused while `current`;
+  the hash stays as a who/when tombstone; only blobs unreachable from live versions drop — no
+  object-denylist, content-addressed bytes may legitimately reappear). Verdict + closure notices are
+  person-scoped rows written IN the deciding transaction. Driven by `src/tests/channels_*.rs` + the
+  adapted `set_current`/`contribute`/`session_*` suites.
+
 ## Backend shape (Postgres-only)
 
 `Authority` holds a concrete `db::Db` directly — no trait, no `sqlx::Any`, no dialect enum: SQLite was
@@ -545,8 +609,9 @@ rotation** in the `current` path (the workspace credential has NO expiry by deci
 re-enroll IS the rotation; an in-place rotate-without-re-enroll op is later work if ever needed);
 domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest encryption / KMS of the enrollment secret** (a plaintext `0600` seed for
-now); the `purge` verb + force-unlink (the tombstones table + denylist check already exist); two-parent
-author merges; per-skill encryption-at-rest.
+now); the `purge`/lifecycle WEB CEREMONIES (the authority ops + guarded functions are BUILT; the step-up
+pages are increment 5's); notices ACK (the read-state column exists; the fetch-without-ack rides
+delivery; the ack write is increment 4's route); two-parent author merges; per-skill encryption-at-rest.
 
 ## Build note
 
