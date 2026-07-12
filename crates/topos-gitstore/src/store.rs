@@ -159,14 +159,52 @@ impl Store {
         author: &str,
         message: &str,
     ) -> Result<gix::ObjectId, GitstoreError> {
-        // Map parent version_ids -> git commits (fail closed on a missing parent).
+        self.commit_inner(version_id, parents, tree, author, message, false)
+    }
+
+    /// [`Self::commit`] for a FOLLOWER'S BACKFILL of served history: a parent version absent from
+    /// this store is OMITTED from the **git** parent list (shallow local history) instead of a
+    /// typed error. The identity re-derivation is UNAFFECTED — the kernel `commit_id` is over the
+    /// frame's parent `version_id`s (which the wire supplied), never git OIDs — so a lying ref is
+    /// still refused. Exists for exactly one case: an ancestor the plane no longer serves (a purged
+    /// version's tombstoned history, upstream pruning), where the follower must still be able to
+    /// install the LIVE descendants; local `log`/`diff`/merge walks simply stop at the gap, which is
+    /// the honest shape of purged history. Authoring paths keep the strict [`Self::commit`].
+    ///
+    /// # Errors
+    /// As [`Self::commit`], minus [`GitstoreError::MissingParent`].
+    pub fn commit_backfill(
+        &self,
+        version_id: [u8; 32],
+        parents: &[[u8; 32]],
+        tree: &TreeHandle,
+        author: &str,
+        message: &str,
+    ) -> Result<gix::ObjectId, GitstoreError> {
+        self.commit_inner(version_id, parents, tree, author, message, true)
+    }
+
+    fn commit_inner(
+        &self,
+        version_id: [u8; 32],
+        parents: &[[u8; 32]],
+        tree: &TreeHandle,
+        author: &str,
+        message: &str,
+        allow_missing_parents: bool,
+    ) -> Result<gix::ObjectId, GitstoreError> {
+        // Map parent version_ids -> git commits (fail closed on a missing parent, unless this is a
+        // backfill of served history shallow-stopping at a version the plane no longer serves).
         let mut parent_git: Vec<gix::ObjectId> = Vec::with_capacity(parents.len());
         for p in parents {
-            let oid = self
+            match self
                 .resolve_version(p)
                 .map_err(|e| GitstoreError::Gix(format!("{e}")))?
-                .ok_or(GitstoreError::MissingParent)?;
-            parent_git.push(oid);
+            {
+                Some(oid) => parent_git.push(oid),
+                None if allow_missing_parents => {}
+                None => return Err(GitstoreError::MissingParent),
+            }
         }
 
         // Re-derive the version_id and refuse a lying ref.

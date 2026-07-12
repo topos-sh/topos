@@ -207,7 +207,8 @@ pub(crate) fn sync_one(
     let target_commit = super::parse_hex32(&sync.observed_version_id)?;
     let store = Store::open(&sp.store)?;
     let mut written = WriteBatch::default();
-    let target_digest = ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written)?;
+    let target_digest = ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written)?
+        .unwrap_or_else(|| unreachable!("depth-0 ensure_local errors instead of shallow-stopping"));
     // Once, after the whole backfill — exactly the versions THIS op wrote (plus the target's own set when
     // already local), durable before any JSON records the target. Never the whole store: the per-pull
     // fsync cost is bounded by the fetched bytes, not lifetime history.
@@ -653,7 +654,7 @@ fn ensure_local(
     version_id: [u8; 32],
     depth: usize,
     written: &mut WriteBatch,
-) -> Result<[u8; 32], ClientError> {
+) -> Result<Option<[u8; 32]>, ClientError> {
     if depth > MAX_BACKFILL {
         return Err(ClientError::Corrupt(
             "version lineage too deep to backfill".into(),
@@ -661,14 +662,33 @@ fn ensure_local(
     }
     if let Some(existing) = store_bundle_digest_opt(store, version_id)? {
         written.extend(store.version_durability(&version_id)?);
-        return Ok(existing);
+        return Ok(Some(existing));
     }
-    let fetched = fetch(ctx, skill_id, version_id)?;
-    // Walk EVERY parent — unconditionally. An absent parent is backfilled (so `commit` sees its
+    let Some(fetched) = fetch_served(ctx, skill_id, version_id)? else {
+        if depth == 0 {
+            // The TARGET must be served — a miss here is the ordinary not-served error, never a
+            // silent shallow stop.
+            return Err(ClientError::Plane(format!(
+                "version {} not served",
+                to_hex(&version_id)
+            )));
+        }
+        return Ok(None);
+    };
+    // Walk EVERY parent — unconditionally. An absent parent is backfilled (so the commit sees its
     // parents); a PRESENT parent still contributes its durability set via the early-return arm above,
     // because present ≠ durable (a prior pull may have crashed after the parent's write but before its
     // fsync, and this pull is about to record a child that names it). The present arm returns before
     // its own parent walk, so a present parent never recurses further.
+    //
+    // SHALLOW STOP: an ANCESTOR the plane no longer serves (its version was purged — the tombstone
+    // story — or upstream pruned history) must not wedge the install of the LIVE target: the walk
+    // stops at that branch (the recursive call answers `None`) and `commit_backfill` below omits
+    // the absent parent from the local git linkage — identity is unaffected, the version id is
+    // over the frame's parent ids, which the wire supplied. Local `log`/`diff`/merge simply end at
+    // the gap, the honest shape of purged history. Only a NOT-SERVED miss shallow-stops; a
+    // transport/availability fault still fails the pull (retry later), and the TARGET itself
+    // (depth 0) is never skipped — its miss stays the hard error below.
     for parent in &fetched.parents {
         ensure_local(ctx, store, skill_id, *parent, depth + 1, written)?;
     }
@@ -682,10 +702,11 @@ fn ensure_local(
         })
         .collect();
     let tree = store.write_bundle(&import)?;
-    // `commit` re-derives the version_id from (parents, tree.bundle_digest, author, message) and refuses a
-    // ref that lies about its identity — so tampered bytes / metadata fail here (recompute == version_id).
+    // `commit_backfill` re-derives the version_id from (parents, tree.bundle_digest, author, message) and
+    // refuses a ref that lies about its identity — so tampered bytes / metadata fail here (recompute ==
+    // version_id); a parent the shallow stop above skipped is omitted from the local git linkage only.
     store
-        .commit(
+        .commit_backfill(
             version_id,
             &fetched.parents,
             &tree,
@@ -701,7 +722,7 @@ fn ensure_local(
     // No fsync here — name what this commit created and let the caller fsync ONCE after the whole
     // backfill, so durability cost is proportional to the bytes written, not paid per ancestor commit.
     written.extend(store.version_durability(&version_id)?);
-    Ok(tree.bundle_digest)
+    Ok(Some(tree.bundle_digest))
 }
 
 /// The `bundle_digest` of a stored version, or `None` if it is not present **or not readable**. A present
@@ -818,16 +839,26 @@ fn fetch(
     skill_id: &str,
     version_id: [u8; 32],
 ) -> Result<crate::plane::FetchedVersion, ClientError> {
-    ctx.plane
-        .fetch_version(skill_id, version_id)
-        .map_err(|e| match e {
-            PlaneError::NotFound => {
-                ClientError::Plane(format!("version {} not served", to_hex(&version_id)))
-            }
-            PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
-                ClientError::Plane(m)
-            }
-        })
+    fetch_served(ctx, skill_id, version_id)?.ok_or_else(|| {
+        ClientError::Plane(format!("version {} not served", to_hex(&version_id)))
+    })
+}
+
+/// [`fetch`] distinguishing the NOT-SERVED miss (`Ok(None)` — the backfill's shallow-stop signal:
+/// a purged/pruned ancestor) from real faults (transport, availability, malformed — all still
+/// errors: the state is retryable, never silently shallow).
+fn fetch_served(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    version_id: [u8; 32],
+) -> Result<Option<crate::plane::FetchedVersion>, ClientError> {
+    match ctx.plane.fetch_version(skill_id, version_id) {
+        Ok(v) => Ok(Some(v)),
+        Err(PlaneError::NotFound) => Ok(None),
+        Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m)) => {
+            Err(ClientError::Plane(m))
+        }
+    }
 }
 
 /// Whether `g` is the genesis sentinel `(0,0)`.
