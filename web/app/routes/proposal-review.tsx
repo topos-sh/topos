@@ -18,7 +18,12 @@ import { MemberReadOnlyNote } from "@/components/review/ReviewNotes";
 import { TrustPanel } from "@/components/review/TrustPanel";
 import { Card } from "@/components/ui";
 import { notFound, requireMember, requireReviewer } from "@/lib/auth/guards.server";
-import { insertProposalComment, proposalCommentsFor, skillIndexRow } from "@/lib/db/queries.server";
+import {
+  insertProposalComment,
+  proposalCommentsFor,
+  proposalExists,
+  skillIndexRow,
+} from "@/lib/db/queries.server";
 import { loadDiffContents } from "@/lib/diff/load.server";
 import { type DiffFileMode, type FileDiffModel, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
 import { computeDiffPlan, type PlanFile } from "@/lib/diff/plan";
@@ -510,6 +515,11 @@ async function commentAction(
   }
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
+    return data<CommentFormState>({ status: "error", submittedBody: body });
+  }
+  // A thread exists only under a REAL proposal — never a free write lane keyed by an arbitrary
+  // hex id (the loader 404s never-proposed candidates; the action holds the same line).
+  if (!(await proposalExists(actor, row.skillId, versionId))) {
     return data<CommentFormState>({ status: "error", submittedBody: body });
   }
   try {

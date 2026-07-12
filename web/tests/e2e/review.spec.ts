@@ -155,9 +155,7 @@ test.describe("the rendered review page", () => {
     // CURRENT_ID is a real, readable version — but no proposal row exists for it, so the proposal
     // URL misses uniformly (the version stays viewable under …/versions/).
     await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${CURRENT_ID}`);
-    await expect(
-      page.getByRole("heading", { name: "Not found" }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
     await expect(page.getByRole("heading", { name: SKILL })).toHaveCount(0);
   });
 });

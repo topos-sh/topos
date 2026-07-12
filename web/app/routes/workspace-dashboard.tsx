@@ -11,6 +11,7 @@ import {
   type SkillIndexRow,
   skillIndexOf,
 } from "@/lib/db/queries.server";
+import { followBase } from "@/lib/plane/follow-base.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `${params.ws ?? "Workspace"} · Topos` }];
@@ -42,7 +43,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     ws,
     name,
     address,
-    origin: new URL(request.url).origin,
+    origin: followBase(request),
     index,
     memberCount,
   };

@@ -18,6 +18,11 @@ const serverSchema = z.object({
    * vault answers 404 on the whole lane when its side is unset.
    */
   PLANE_INTERNAL_TOKEN: z.string().min(1),
+  /**
+   * The PUBLIC base a `topos follow` command should dial (see follow-base.server.ts). Set it
+   * while the plane is still directly exposed; unset, follow commands use this app's origin.
+   */
+  PLANE_PUBLIC_URL: z.url().optional(),
   /** Path the /install route serves; defaults to the repo's own installer. */
   INSTALL_SH_PATH: z.string().default("../scripts/install.sh"),
   APP_ENV: z.enum(["production", "development", "test"]).default("development"),

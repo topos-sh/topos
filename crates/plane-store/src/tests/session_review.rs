@@ -490,39 +490,27 @@ async fn unproven_callers_get_one_uniform_denial_and_a_confirmed_owner_passes(po
     assert_eq!(msg_of(&rg).as_deref(), Some(UNIFORM));
     assert!(receipts_for(&pool, "w_ghost", ghost_rid).await.is_empty());
 
-    // A self-host plane denies uniformly even for the seated reviewer (session review is cloud-only).
-    let sh_rid = "64000000-0000-4000-8000-000000000302";
-    let rsh = a
+    // Nothing moved through the denials — the proposal is still open at genesis.
+    assert_eq!(current_commit(&fx, &w, &s).await, g);
+
+    // A confirmed OWNER passes the gate like a reviewer — and a SELF-HOST plane ANSWERS the op exactly
+    // like a hosted one: the acting gate is the confirmed-seat role check, identical on both postures
+    // (no blanket self-host denial). The owner approving on self-host lands the pointer.
+    seat(&fx, &w, "owner2@acme.com", "owner").await;
+    let ok = a
         .review_approve_session(
             &w,
             &s,
             cp,
             gn(1, 1),
-            sh_rid,
-            "reviewer@acme.com",
+            "64000000-0000-4000-8000-000000000303",
+            "owner2@acme.com",
             DeploymentMode::SelfHost,
             CREATED_AT,
             NOW,
         )
         .await
         .unwrap();
-    assert_eq!(rsh.outcome, TerminalOutcome::Denied);
-    assert_eq!(msg_of(&rsh).as_deref(), Some(UNIFORM));
-    assert!(receipts_for(&pool, "w_acme", sh_rid).await.is_empty());
-
-    // Nothing moved through any of it — and a confirmed OWNER passes the gate like a reviewer.
-    assert_eq!(current_commit(&fx, &w, &s).await, g);
-    seat(&fx, &w, "owner2@acme.com", "owner").await;
-    let ok = approve_session(
-        &fx,
-        &w,
-        &s,
-        cp,
-        gn(1, 1),
-        "64000000-0000-4000-8000-000000000303",
-        "owner2@acme.com",
-    )
-    .await;
     assert!(ok.is_ok());
     assert_eq!(current_commit(&fx, &w, &s).await, cp);
 }
@@ -1184,7 +1172,7 @@ async fn the_detail_read_discloses_proposer_and_resolution_to_confirmed_members_
     assert_eq!(d.resolved_reason.as_deref(), Some("needs a runbook link"));
     assert_eq!(d.resolved_at.as_deref(), Some(CREATED_AT));
 
-    // Every pre-gate miss is the ONE uniform NotFound: a stranger, an invited seat, self-host.
+    // Every pre-gate miss is the ONE uniform NotFound: a stranger, an invited seat.
     fx.authority
         .db()
         .seed_workspace_member(&w, &prin("invited@acme.com"), "member", "invited")
@@ -1197,17 +1185,20 @@ async fn the_detail_read_discloses_proposer_and_resolution_to_confirmed_members_
             Err(AuthorityError::NotFound)
         ));
     }
-    assert!(matches!(
-        a.read_proposal_detail_session(
+    // A self-host plane ANSWERS this read for a confirmed member exactly like a hosted one — the acting
+    // gate is the confirmed-seat check, identical on both postures.
+    let sh_detail = a
+        .read_proposal_detail_session(
             &w,
             "s_deploy",
             &cp_hex,
             "member@acme.com",
-            DeploymentMode::SelfHost
+            DeploymentMode::SelfHost,
         )
-        .await,
-        Err(AuthorityError::NotFound)
-    ));
+        .await
+        .unwrap()
+        .expect("self-host serves the confirmed member the same detail");
+    assert_eq!(sh_detail.status, "rejected");
     // A malformed version id is the same member-lane miss; an UNKNOWN candidate is the member-
     // entitled `Ok(None)` (the composing wrapper folds it into its uniform miss).
     assert!(matches!(
@@ -1801,13 +1792,13 @@ async fn a_device_revert_cannot_reuse_a_session_reverts_request_id(pool: PgPool)
 }
 
 #[sqlx::test]
-async fn revert_session_is_uniformly_denied_on_self_host(pool: PgPool) {
+async fn revert_session_answers_a_reviewer_on_self_host(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "srv-rev-selfhost").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     let key = dev_key(75);
     register(&fx, &w, &s, "dk", &key, "author@acme.com").await;
     seat(&fx, &w, "reviewer@acme.com", "reviewer").await;
-    let (v0, v1, _d) = two_versions(
+    let (v0, v1, v0_digest) = two_versions(
         &fx,
         &w,
         &s,
@@ -1817,8 +1808,10 @@ async fn revert_session_is_uniformly_denied_on_self_host(pool: PgPool) {
     )
     .await;
 
-    // Self-host review stays the CLI: the session revert is uniformly denied in-op, synthesized, and
-    // moves nothing (self-host membership is the bearer/invite chain, not a web session).
+    // A self-host plane ANSWERS the session revert for a confirmed reviewer exactly like a hosted one:
+    // the acting gate is the confirmed owner|reviewer seat, identical on both postures (the product app
+    // serves self-hosted deployments through this session lane). The revert lands a FORWARD commit
+    // carrying v0's bytes — the pointer never moves backward.
     let rid = "75000000-0000-4000-8000-000000000003";
     let r = fx
         .authority
@@ -1835,7 +1828,16 @@ async fn revert_session_is_uniformly_denied_on_self_host(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(r.outcome, TerminalOutcome::Denied);
-    assert!(receipts_for(&pool, "w_acme", rid).await.is_empty());
-    assert_eq!(current_commit(&fx, &w, &s).await, v1, "current is unmoved");
+    assert_eq!(r.outcome, TerminalOutcome::Ok);
+    assert_eq!(r.current, Some(gn(1, 3)));
+    assert_eq!(
+        r.bundle_digest,
+        Some(v0_digest),
+        "the forward commit restores v0's bytes"
+    );
+    let forward = r.version_id.expect("an OK revert names its forward commit");
+    assert_ne!(forward, v0, "revert is a NEW forward commit, not v0 itself");
+    assert_ne!(forward, v1, "current moved off v1");
+    assert_eq!(current_commit(&fx, &w, &s).await, forward);
+    assert_eq!(receipts_for(&pool, "w_acme", rid).await.len(), 1);
 }

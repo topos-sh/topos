@@ -48,9 +48,11 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
 
 **Directory** (`directory/` + `db/directory/`) — access/identity/policy:
 - `catalog.rs` / `db/directory/catalog.rs` — the skill LIFECYCLE session ops (archive / unarchive /
-  delete / purge): owner-gated in the guarded SQL functions, self-host denied like the roster/review/read
-  session legs (the channel join/leave session twins deliberately do NOT deny — they are the same guarded
-  functions the device lane calls, and self-host runs the whole loop);
+  delete / purge): owner-gated in the guarded SQL functions, answered on both postures like the
+  roster/review/read session legs — the acting gate is the confirmed-seat check, identical on a self-host
+  plane and a hosted one (the product app serves self-hosted deployments through this session lane; the
+  channel join/leave twins call the same guarded functions the device lane calls, and self-host runs the
+  whole loop);
   the db twin runs the row policy + the CUSTODY halves (delete un-roots every commit's edges + drops
   `current`; purge un-roots one version's) in ONE transaction, so the shipped GC keep-set reclaims
   exactly what dropped out.
@@ -88,7 +90,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   or-reviewer / remove / roster read — an invitation is a ROSTER WRITE, and the ops disclose the
   workspace ADDRESS, never a tokened link), authorized by an in-transaction
   confirmed-OWNER acting gate (the composing caller's session verification is the authentication),
-  `request_id`-idempotent through the `workspace_events` slot, uniformly denied on self-host.
+  `request_id`-idempotent through the `workspace_events` slot, answered identically on a self-host plane
+  and a hosted one (the mode no longer gates the op — the acting gate is the confirmed-OWNER seat check).
 - `session_review.rs` (+ `actor.rs`) — the web-session review leg: approve/reject/revert from a verified
   session, orchestration ONLY with **no db twin** — the write terminates in the SAME
   `db/custody/set_current.rs` transaction (branching on the `WriteActor` lane at its authorization step
@@ -430,8 +433,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   same-device replay + racing double redeem (exactly one owner row), the cap at the 4th create, the
   cross-door token separation, and the intent/first-writer-wins guards.
 - **The web-session roster leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
-  a hosted composition's authenticated admin routes call them; self-host is uniformly denied in-op —
-  self-host joining is the device lane): **`invite_members_session`** (seats
+  a hosted composition's authenticated admin routes call them; the acting gate is the confirmed-OWNER
+  seat, the same on a self-host plane and a hosted one — the product app serves self-hosted deployments
+  through this session lane): **`invite_members_session`** (seats
   emails at member|reviewer — owner is unrepresentable in `SessionInviteRole` — through the shared
   never-demote row-writer; an invitation is a ROSTER WRITE and nothing more, and what comes back is the
   workspace ADDRESS), **`roster_remove_session`**
@@ -450,7 +454,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   the audit trail says which leg acted, forever. Driven in-process by `src/tests/session_roster.rs`:
   the uniform acting gate + recording rule, role-on-the-seat seeding (a reviewer invitee redeems
   through the ADDRESS into a confirmed reviewer while a verified stranger dies at the roster gate),
-  self-host denial, identical replay / divergent-payload + cross-leg key reuse in both directions,
+  self-host answering the ops identically, identical replay / divergent-payload + cross-leg key reuse in both directions,
   lockout + the raced mutual removes, canonical-principal folding, and the receipt method/actor matrix.
 - **The web-session READ lane (member-scoped session reads).** Five PRIVILEGED lib-level read ops
   (no OSS HTTP route — a hosted composition's authenticated admin routes call them):
@@ -458,9 +462,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   pointer generation, epoch-ms update time, consent `bundle_digest`, and OPEN non-stale proposal
   count), **`read_current_session`**, **`serve_object_session`**, **`read_version_metadata_session`**,
   and **`list_open_proposals_session`**. ONE shared `member_gate` preamble authorizes them all —
-  self-host uniformly denied, canonical principal fold, then a CONFIRMED `workspace_member` probe —
-  and every pre-gate miss (self-host / malformed email or skill / unknown workspace / non-member /
-  invited-unconfirmed) is the single indistinguishable `NotFound`. **Both lanes now run the SAME gate:
+  canonical principal fold, then a CONFIRMED `workspace_member` probe (the acting gate is the confirmed
+  seat, identical on a self-host plane and a hosted one) — and every pre-gate miss (malformed email or
+  skill / unknown workspace / non-member / invited-unconfirmed) is the single indistinguishable `NotFound`. **Both lanes now run the SAME gate:
   access IS workspace membership** — any confirmed member, any
   role, reads the workspace's full catalog and every skill's
   content, on the session lane AND the device lane (the lanes differ only in authentication: verified
@@ -518,7 +522,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   credential and the register upsert replaces the column). NO expiry (journaled: revoke + re-enroll is
   the rotation).
 - **The web-session REVIEW leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
-  a hosted composition's authenticated admin routes call them; self-host uniformly denied in-op):
+  a hosted composition's authenticated admin routes call them; the acting gate is the confirmed
+  owner|reviewer seat, the same on a self-host plane and a hosted one):
   **`review_approve_session`** / **`review_reject_session`** (approve / reject an OPEN proposal from a
   verified session) + **`read_proposal_detail_session`** (the review surface's read). The write
   TERMINATES in the SAME serializable pointer-move transaction the device lane runs (`db/set_current.rs`'s
@@ -529,7 +534,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   in-transaction confirmed **owner|reviewer** workspace-seat gate — **the FIRST enforcement of the
   reviewer role** (the remaining lane asymmetry is ROLE alone — deliberate, for now:
   CLI approve/reject takes any confirmed member + four-eyes; finer role gating is later work). Orchestration
-  (`session_review.rs`) mirrors the roster leg's trust shape: uniform self-host deny, a canonical-UUID
+  (`session_review.rs`) mirrors the roster leg's trust shape: a confirmed-seat acting gate identical on both postures, a canonical-UUID
   `request_id` idempotency under a fresh `TOPOS_SESSION_REVIEW_V1` domain tag (distinct from every kernel
   and roster tag, so no stored identity from another domain can byte-match a review request), a
   POOL-LEVEL confirmed-member pre-gate BEFORE any proposal/digest/render work (the in-txn role gate stays
@@ -572,7 +577,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   races, the detail read incl. the open-row preference, **and the revert leg: reviewer happy path +
   byte-identical replay, the owner|reviewer/member/stranger role matrix with the member's synthesized
   refusal, the not-accepted-target refusal, the stale CAS CONFLICT, cross-lane op-id closure, and
-  self-host deny**) and `src/tests/receipts_migration.rs` (the 0012
+  self-host answering the reviewer identically**) and `src/tests/receipts_migration.rs` (the 0012
   probe: rename/backfill/CHECKs/index), plus the request-identity unit tests (`session_review.rs`) and
   the wrapper classification-table test (`topos-plane`).
 - **Canonical principal form — one mailbox, one identity.** `Principal::parse` folds every principal
@@ -606,7 +611,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   channel-leave / member-removal run the lapse-detach reconcile (final per-device detach records,
   reference-counted via the union); `follow`/join re-attach. Curation is member-level on `open` channels,
   reviewer+ on `curated`; `protect` tightens at reviewer+ and loosens only at owner, per kind. The
-  LIFECYCLE session ops (owner; self-host denied like every session op): archive renames
+  LIFECYCLE session ops (owner; answered on a self-host plane exactly like a hosted one, the acting gate
+  the confirmed-seat check): archive renames
   (`<name>-archived-<date>`, counter on repeats) FREEING the base name (id-keyed references make a reused
   name a new identity), unplaces everywhere, auto-closes open proposals with author NOTICES; unarchive
   renames back or refuses typed (`NameTaken`); delete (archive-first) tombstones the catalog row and

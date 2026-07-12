@@ -213,10 +213,6 @@ fn internal_session_routes() -> Router<PlaneState> {
             post(routes::internal::remove_member),
         )
         .route(
-            "/internal/v1/workspaces/{ws}/policy/review-required",
-            put(routes::internal::set_review_required),
-        )
-        .route(
             "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/approve",
             post(routes::internal::approve_proposal),
         )

@@ -269,15 +269,18 @@ async fn invited_seats_redeem_through_the_address_with_their_seeded_role(pool: P
 // ── posture ─────────────────────────────────────────────────────────────────────────────────────
 
 #[sqlx::test]
-async fn all_session_roster_ops_deny_on_self_host(pool: PgPool) {
+async fn all_session_roster_ops_answer_on_self_host(pool: PgPool) {
     let fx = Fixture::new(pool, "sr-selfhost").await;
     let a = &fx.authority;
     let w = ws("w_sh");
     let (_seed, owner, _dk) = seat_owner(a, &w, "self_host").await;
     let sh = DeploymentMode::SelfHost;
 
-    assert!(matches!(
-        a.invite_members_session(
+    // A self-host plane ANSWERS these ops for a confirmed owner exactly like a hosted one — the acting
+    // gate is the confirmed-owner seat check, identical on both postures (the product app serves
+    // self-hosted deployments through this session lane), so the mode no longer gates these ops.
+    let invited = a
+        .invite_members_session(
             &w,
             &op_id(1),
             owner.as_str(),
@@ -285,22 +288,30 @@ async fn all_session_roster_ops_deny_on_self_host(pool: PgPool) {
             SessionInviteRole::Member,
             sh,
             T0,
-            NOW
+            NOW,
         )
         .await
-        .unwrap(),
-        SessionInviteOutcome::Denied(_)
+        .unwrap();
+    assert!(matches!(
+        invited,
+        SessionInviteOutcome::Invited { seated: 1, .. }
     ));
+
+    // Removing the just-invited seat succeeds (the owner is untouched, so no last-owner lockout).
     assert!(matches!(
         a.roster_remove_session(&w, &op_id(2), owner.as_str(), "a@x.com", sh, T0, NOW)
             .await
             .unwrap(),
-        GovernanceOutcome::Denied(_)
+        GovernanceOutcome::Ok
     ));
-    assert!(matches!(
-        a.read_roster(&w, owner.as_str(), sh).await,
-        Err(AuthorityError::NotFound)
-    ));
+
+    // The owner reads the roster — its own confirmed seat is disclosed.
+    let view = a.read_roster(&w, owner.as_str(), sh).await.unwrap();
+    assert!(
+        view.seats
+            .iter()
+            .any(|seat_row| seat_row.email.as_str() == owner.as_str())
+    );
 }
 
 // ── idempotency + the cross-leg id space ────────────────────────────────────────────────────────

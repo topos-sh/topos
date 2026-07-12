@@ -3,7 +3,7 @@
 //!
 //! This lane exposes, over HTTP, the wrappers that otherwise have no route:
 //! [`PlaneState::read_current_session`](crate::PlaneState) and its read siblings, the review/roster/standup
-//! writes, and [`PlaneState::set_review_required`](crate::PlaneState). It mirrors the admin-token policy
+//! writes. It mirrors the admin-token policy
 //! route's auth shape ([`routes::policy`](super::policy) + the `with_admin_token` family on
 //! [`PlaneState`](crate::PlaneState)): a single configured bearer token gates the whole lane, and with NO
 //! token configured every route answers the uniform **404** — an unconfigured plane never exposes the lane.
@@ -433,30 +433,6 @@ pub(crate) async fn remove_member(
         RemoveMemberSummary::Denied { reason } => RemoveMemberResponse::Denied { reason },
     };
     Ok((StatusCode::OK, Json(resp)).into_response())
-}
-
-/// `PUT /internal/v1/workspaces/{ws}/policy/review-required` — the idempotent `review_required` policy set
-/// (the leak-free wrapper the operator route also drives). **204** on success, like the operator route.
-#[derive(serde::Deserialize)]
-struct ReviewRequiredRequest {
-    review_required: bool,
-}
-
-pub(crate) async fn set_review_required(
-    State(state): State<PlaneState>,
-    Path(ws): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, PlaneHttpError> {
-    // The acting principal is required for the lane's uniform shape (and its audit intent), even though the
-    // policy set is not itself roster-gated here — the operator/admin variant lives on `routes::policy`.
-    let _acting = acting_principal(&state, &headers)?;
-    let req: ReviewRequiredRequest = parse_body(&body)?;
-    state
-        .set_review_required(&ws, req.review_required)
-        .await
-        .map_err(internal_fault)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// The pointer-move family's all-outcome response (approve / reject / revert). Each op's summary maps only to

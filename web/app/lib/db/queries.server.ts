@@ -409,7 +409,57 @@ export async function insertProposalComment(
   const replay = await db
     .select({ id: proposalComment.id })
     .from(proposalComment)
-    .where(eq(proposalComment.id, input.id))
+    .where(
+      and(
+        eq(proposalComment.id, input.id),
+        eq(proposalComment.workspaceId, actor.workspaceId),
+        eq(proposalComment.skillId, input.skillId),
+        eq(proposalComment.versionId, input.versionId),
+      ),
+    )
     .limit(1);
   return replay.length > 0 ? "replayed" : "thread_full";
+}
+
+/** Whether a proposal row exists for this candidate — the comment lane's existence probe. */
+export async function proposalExists(
+  actor: MemberActor,
+  skillId: string,
+  versionId: string,
+): Promise<boolean> {
+  const rows = await getDb()
+    .select({ id: planeProposals.id })
+    .from(planeProposals)
+    .where(
+      and(
+        eq(planeProposals.workspaceId, actor.workspaceId),
+        eq(planeProposals.skillId, skillId),
+        eq(planeProposals.commitId, versionId),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** The outcome codes `topos_set_review_default` speaks. */
+export type ReviewDefaultOutcome = "set" | "member_required" | "owner_role_required" | "bad_value";
+
+/**
+ * The review-required DEFAULT is a database policy decision: ONE call to the guarded
+ * `topos_set_review_default`, which re-runs the owner gate itself — the web guard on the
+ * calling action is defense-in-depth, never the lock.
+ */
+export async function setReviewDefault(
+  actor: OwnerActor,
+  required: boolean,
+): Promise<ReviewDefaultOutcome> {
+  const result = await getPool().query<{ outcome: ReviewDefaultOutcome }>(
+    "select topos_set_review_default($1, $2, $3) as outcome",
+    [actor.workspaceId, actor.email, required ? 1 : 0],
+  );
+  const outcome = result.rows[0]?.outcome;
+  if (outcome === undefined) {
+    throw new Error("topos_set_review_default returned no outcome");
+  }
+  return outcome;
 }

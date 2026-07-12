@@ -25,7 +25,6 @@ export const ALLOWED_ROUTES = [
   "POST /internal/v1/device-sessions/{user_code}/approve",
   "POST /internal/v1/device-sessions/{user_code}/approve-standup",
   "POST /internal/v1/workspaces/{ws}/roster/remove",
-  "PUT /internal/v1/workspaces/{ws}/policy/review-required",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/approve",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/reject",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/reverts",
@@ -51,7 +50,7 @@ export function fillTemplate(template: string, params: Record<string, string>): 
 }
 
 export interface VaultRequest {
-  method: "GET" | "POST" | "PUT";
+  method: "GET" | "POST";
   template: string;
   params?: Record<string, string>;
   /** The session-verified acting principal — REQUIRED on the internal lane. */

@@ -167,17 +167,23 @@ async fn every_pre_gate_miss_is_the_same_notfound(pool: PgPool) {
             .await,
         Err(AuthorityError::NotFound)
     ));
-    // Self-host: uniformly denied even for a confirmed member.
-    assert!(matches!(
-        a.list_skills_session(&w, "member@acme.com", DeploymentMode::SelfHost)
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
-    assert!(matches!(
-        a.read_current_session(&w, "s_deploy", "member@acme.com", DeploymentMode::SelfHost)
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
+    // Self-host: a confirmed member is ANSWERED exactly like a hosted plane — the acting gate is the
+    // confirmed-roster-seat check, identical on both postures (the product app serves self-hosted
+    // deployments through this session lane), so the mode no longer gates these reads.
+    let sh = DeploymentMode::SelfHost;
+    assert_eq!(
+        a.list_skills_session(&w, "member@acme.com", sh)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        a.read_current_session(&w, "s_deploy", "member@acme.com", sh)
+            .await
+            .unwrap()
+            .is_some()
+    );
     // A malformed skill id is the SAME miss, post-gate (never a distinguishable 400).
     assert!(matches!(
         a.read_current_session(&w, "not a skill id!", "member@acme.com", CLOUD)
@@ -640,10 +646,11 @@ async fn a_member_device_reads_the_catalog(pool: PgPool) {
     assert_eq!(idx[0].open_proposals, 0);
 }
 
-/// THE key contrast: the device lane serves on self-host, where the session lane uniformly denies the
-/// SAME confirmed member — device auth is the self-host membership story.
+/// Both read lanes serve the SAME confirmed member on a self-host plane — device auth and a
+/// session-verified email are two authentications of the one membership gate, which is identical on both
+/// postures.
 #[sqlx::test]
-async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: PgPool) {
+async fn both_read_lanes_serve_a_confirmed_member_on_self_host(pool: PgPool) {
     let fx = Fixture::new(pool, "sd-selfhost").await;
     let a = &fx.authority;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
@@ -670,12 +677,15 @@ async fn the_device_lane_serves_where_the_session_lane_denies_self_host(pool: Pg
             .len(),
         1
     );
-    // The session lane, told the plane is self-host, denies the same confirmed member.
-    assert!(matches!(
+    // The session lane, told the plane is self-host, serves the SAME confirmed member identically — the
+    // acting gate is the confirmed seat, not the posture.
+    assert_eq!(
         a.list_skills_session(&w, "reader@acme.com", DeploymentMode::SelfHost)
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[sqlx::test]

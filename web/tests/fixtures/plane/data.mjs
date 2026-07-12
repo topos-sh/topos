@@ -196,6 +196,17 @@ export const VERIFY_CONTEXTS = {
     offered_skills: ["Deploy runbook"],
     intent: "enroll",
   },
+  // A LOGIN session: workspace-less by design (the device re-mints its credentials across every
+  // confirmed seat) — the page must render the sign-in consent, never a join framing.
+  LOGIN77: {
+    machine_name: "travel-laptop",
+    device_fingerprint: "a1b2c3d4e5f60718",
+    workspace_display_name: "",
+    verified_domain: null,
+    verified_domain_status: "unverified",
+    offered_skills: [],
+    intent: "login",
+  },
   // A STANDUP session: no workspace exists yet (the vault fills the required name with ""), the
   // page branches its copy on the intent.
   STANDUP42: {

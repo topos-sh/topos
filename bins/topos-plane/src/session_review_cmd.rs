@@ -4,8 +4,9 @@
 //! Deliberately LIB-ONLY (there is no OSS HTTP route for any of these): a downstream composition's
 //! authenticated admin routes call them with a session-verified acting email. Like
 //! [`roster_cmd`](crate::roster_cmd), every signature carries only plain/owned types, and each
-//! wrapper parses the plane's deployment mode STRICTLY (fail closed); the ops themselves uniformly
-//! deny a self-host plane. The write terminates in the authority's one serializable pointer-move
+//! wrapper parses the plane's deployment mode STRICTLY (fail closed) — though the mode no longer gates
+//! these ops: the acting gate is the confirmed-seat role check, the same on a self-host plane and a
+//! hosted one. The write terminates in the authority's one serializable pointer-move
 //! transaction — same approve predicate, same compare-and-set, same pointer advance, same
 //! four-eyes gate as the device-credential lane.
 //!
@@ -41,8 +42,8 @@ pub enum SessionReviewSummary {
         /// The static, typed reason (a plane→composition byte contract; never an oracle).
         reason: String,
     },
-    /// The uniform miss: a malformed id, an unproven caller, a self-host plane, or an unknown
-    /// candidate — none of which discloses anything.
+    /// The uniform miss: a malformed id, an unproven caller, or an unknown candidate — none of which
+    /// discloses anything.
     NotFound,
 }
 
@@ -72,7 +73,7 @@ pub struct SessionProposalDetail {
 pub enum SessionProposalDetailSummary {
     /// The proposal's stored facts.
     Detail(Box<SessionProposalDetail>),
-    /// The uniform miss (malformed ids, unproven caller, self-host, never-proposed candidate).
+    /// The uniform miss (malformed ids, unproven caller, never-proposed candidate).
     NotFound,
 }
 
@@ -92,7 +93,7 @@ pub enum SessionRevertSummary {
         /// The static, typed reason (a plane→composition byte contract; never an oracle).
         reason: String,
     },
-    /// The uniform miss: a malformed id, an unproven caller, or a self-host plane — disclosing nothing.
+    /// The uniform miss: a malformed id or an unproven caller — disclosing nothing.
     NotFound,
 }
 
@@ -120,8 +121,8 @@ fn classify(receipt: &SetCurrentReceipt, is_approve: bool) -> SessionReviewSumma
         }
         TerminalOutcome::Conflict => SessionReviewSummary::Conflict,
         TerminalOutcome::Denied => {
-            // The uniform acting-gate denial (which also covers self-host and an unparseable
-            // acting email) discloses nothing.
+            // The uniform acting-gate denial (which also covers an unparseable acting email)
+            // discloses nothing.
             if message.as_deref() == Some(SESSION_REVIEW_ACTING_DENIED) {
                 return SessionReviewSummary::NotFound;
             }
@@ -174,7 +175,7 @@ fn classify_revert(receipt: &SetCurrentReceipt) -> SessionRevertSummary {
         TerminalOutcome::Ok => SessionRevertSummary::Reverted,
         TerminalOutcome::Conflict => SessionRevertSummary::Conflict,
         TerminalOutcome::Denied => {
-            // The uniform acting-gate denial (non-member / self-host / unparseable email) discloses nothing.
+            // The uniform acting-gate denial (non-member / unparseable email) discloses nothing.
             if message.as_deref() == Some(SESSION_REVIEW_ACTING_DENIED) {
                 return SessionRevertSummary::NotFound;
             }

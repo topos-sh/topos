@@ -4,7 +4,7 @@ import { buttonClasses } from "@/components/ui";
 /** The settings route's typed reply for `intent=remove` (a landed removal revalidates the row away). */
 interface RemoveActionData {
   intent: "remove";
-  status: "removed" | "missing" | "last_owner" | "denied" | "error";
+  status: "removed" | "last_owner" | "denied" | "error";
 }
 
 /**
@@ -32,9 +32,6 @@ export function RemoveMemberForm({ email }: { email: string }) {
         Can&apos;t remove the last owner.
       </span>
     );
-  }
-  if (state?.status === "missing") {
-    return <span className="text-faint text-xs">not on the roster</span>;
   }
   return (
     <span className="inline-flex items-center gap-2">

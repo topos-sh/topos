@@ -10,6 +10,7 @@ export type ReviewStatus =
   | "accepted-live"
   | "superseded"
   | "rejected"
+  | "closed"
   | "unknown";
 
 // Zinc only — semantic green/amber/gray stay reserved for domain verification, so the one
@@ -20,6 +21,7 @@ const STYLES: Record<ReviewStatus, string> = {
   "accepted-live": "border-line-soft bg-ground text-dim",
   superseded: "border-line-soft bg-ground text-dim",
   rejected: "border-line-soft bg-ground text-dim",
+  closed: "border-line-soft bg-ground text-dim",
   unknown: "border-line-soft bg-ground text-dim",
 };
 
@@ -31,6 +33,8 @@ const COPY: Record<ReviewStatus, string> = {
   superseded:
     "Accepted earlier — current has since moved on. The diff below compares against today's current.",
   rejected: "Rejected — the resolution below says why.",
+  closed:
+    "Closed without a decision — superseded by a newer proposal, withdrawn, or retired with its skill.",
   unknown:
     "This proposal's status couldn't be confirmed. The change below is the immutable candidate version.",
 };

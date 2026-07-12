@@ -8,7 +8,8 @@
 //! the session gate is a confirmed **owner or reviewer** workspace seat (the first enforcement of the
 //! reviewer role), checked in-transaction; the composing caller's session verification is the
 //! authentication. Mirrors [`crate::session_roster`]'s trust shape (no signature; request_id-idempotent
-//! under a fresh domain-tagged identity; self-host uniformly denied) and [`crate::session_read`]'s
+//! under a fresh domain-tagged identity — the acting gate is the confirmed-seat role check, the same on
+//! a self-host plane and a hosted one) and [`crate::session_read`]'s
 //! gate-before-reach posture: a pool-level membership pre-gate runs BEFORE any proposal/digest/render
 //! work, so an unproven caller never reaches workspace data — the in-txn gate stays the authority.
 //!
@@ -125,9 +126,8 @@ fn revert_request_sha256(
     topos_core::digest::sha256(&buf)
 }
 
-/// A SYNTHESIZED session DENIED (never persisted): the pre-gate misses, the parse belts, and the
-/// posture denial all use it. Deterministic per input; only `created_at` re-stamps — an unproven
-/// caller is owed no byte-stable replay.
+/// A SYNTHESIZED session DENIED (never persisted): the pre-gate misses and the parse belts all use it.
+/// Deterministic per input; only `created_at` re-stamps — an unproven caller is owed no byte-stable replay.
 fn synth_denied(
     op: DeviceOp,
     skill: &SkillId,
@@ -160,9 +160,10 @@ fn code_details(code: &str, msg: &str) -> serde_json::Value {
     serde_json::json!({ "code": code, "message": msg })
 }
 
-/// The shared session preamble: the posture/parse belts + the POOL-LEVEL membership pre-gate (the
+/// The shared session preamble: the parse belts + the POOL-LEVEL membership pre-gate (the
 /// gate-before-reach fence — no proposal/digest/render work for an unproven caller; the in-txn role
-/// gate remains the authority). `Ok(Err(receipt))` is a synthesized refusal; `Ok(Ok(acting))` proceeds.
+/// gate remains the authority). The acting gate is the confirmed-seat role check, identical on a
+/// self-host plane and a hosted one. `Ok(Err(receipt))` is a synthesized refusal; `Ok(Ok(acting))` proceeds.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 async fn session_preamble(
     authority: &Authority,
@@ -173,20 +174,10 @@ async fn session_preamble(
     op: DeviceOp,
     request_id: &str,
     acting_email: &str,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-seat role check, the same on both postures.
+    _plane_mode: DeploymentMode,
     created_at: &str,
 ) -> Result<std::result::Result<Principal, SetCurrentReceipt>> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Ok(Err(synth_denied(
-            op,
-            skill,
-            candidate,
-            expected,
-            request_id,
-            created_at,
-            msg_details(SESSION_REVIEW_ACTING_DENIED),
-        )));
-    }
     if parse_op_id(request_id).is_none() {
         return Ok(Err(synth_denied(
             op,

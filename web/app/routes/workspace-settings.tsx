@@ -19,11 +19,13 @@ import {
   planeWorkspaceById,
   recordPolicyEvent,
   rosterOf,
+  setReviewDefault,
   workspacePolicyOf,
 } from "@/lib/db/queries.server";
-import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
+import { inviteMailDelivery, sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { vaultFetch } from "@/lib/plane/client.server";
-import type { RemoveMemberBody, RemoveMemberOutcome, ReviewRequiredBody } from "@/lib/plane/wire";
+import { followBase } from "@/lib/plane/follow-base.server";
+import type { RemoveMemberBody, RemoveMemberOutcome } from "@/lib/plane/wire";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Settings · ${params.ws ?? "Workspace"}` }];
@@ -38,6 +40,15 @@ const LAST_OWNER_REASON = "would remove the last owner";
 function plausibleEmail(email: string): boolean {
   return email.includes("@") && email.length >= 3 && !/\s/.test(email);
 }
+
+/**
+ * Printable ASCII, checked on the RAW input BEFORE lowercase-normalization — the same
+ * discipline as the actor mint: directory principals are ASCII-canonical, and a Unicode
+ * lookalike (U+212A KELVIN folds to `k`) must never silently seat an address the inviter
+ * didn't type; a genuinely non-ASCII address would seat a principal no session could ever
+ * become, a permanently dead row.
+ */
+const PRINTABLE_ASCII_EMAIL_RE = /^[\x20-\x7e]+$/;
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws;
@@ -59,7 +70,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lastEvent,
     roster,
     address: workspace?.name ?? ws,
-    origin: new URL(request.url).origin,
+    origin: followBase(request),
     // The directory holds the real value now (a bigint 0/1 flag) — the switch reflects it.
     reviewRequired: policy ? policy.reviewRequired === 1 : false,
   };
@@ -97,10 +108,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
 async function inviteIntent(request: Request, ws: string, formData: FormData) {
   const actor = await requireMember(request, ws);
   const raw = String(formData.get("emails") ?? "");
-  const emails = raw
-    .split(/[\s,]+/)
-    .map(normalizeEmail)
-    .filter((email) => email.length > 0);
+  const parts = raw.split(/[\s,]+/).filter((part) => part.length > 0);
+  if (!parts.every((part) => PRINTABLE_ASCII_EMAIL_RE.test(part))) {
+    return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
+  }
+  const emails = parts.map(normalizeEmail);
   if (emails.length === 0 || !emails.every(plausibleEmail)) {
     return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
   }
@@ -109,10 +121,12 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
   if (outcome === "invited") {
     // Best-effort mail: the seats stand whether or not delivery succeeds — a mail fault is logged,
     // never fatal, and the address block below already shares the same address by hand.
-    let emailSent = true;
+    // Honest by capability: the OSS default wires NO outbound delivery, so a successful
+    // invite must never claim a mail went out — owners share the address by hand instead.
+    let emailSent = inviteMailDelivery().canSend;
     try {
       const workspace = await planeWorkspaceById(actor, ws);
-      const address = `${new URL(request.url).origin}/${workspace?.name ?? ws}`;
+      const address = `${followBase(request)}/${workspace?.name ?? ws}`;
       const workspaceName = workspace?.displayName ?? ws;
       for (const email of emails) {
         await sendInviteEmail({
@@ -167,10 +181,6 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
   if (outcome.outcome === "removed") {
     return { intent: "remove" as const, status: "removed" as const };
   }
-  if (outcome.outcome === "not_found") {
-    // Removing an absent seat is idempotent — the honest "missing" state, refreshed by revalidation.
-    return { intent: "remove" as const, status: "missing" as const };
-  }
   // denied: distinguish the last-owner lockout (the promised honest state) from the acting gate.
   return {
     intent: "remove" as const,
@@ -179,26 +189,21 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
 }
 
 /**
- * The review-required gate — owner-only, SECURITY-CRITICAL: this web guard is the lock, and it
- * must never be weakened. Every attempt lands a `policy_event` row whatever the outcome, so the
- * panel's audit line stays honest; the loader revalidates and re-reads it after the action.
+ * The review-required gate — owner-only. The LOCK is the database's: `topos_set_review_default`
+ * re-runs the owner gate inside the function, so this web guard is defense-in-depth, never the
+ * only check. Every attempt lands a `policy_event` row whatever the outcome, so the panel's
+ * audit line stays honest; the loader revalidates and re-reads it after the action.
  */
 async function reviewRequiredIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
   const value = String(formData.get("review_required") ?? "") === "true";
-  const response = await vaultFetch({
-    method: "PUT",
-    template: "/internal/v1/workspaces/{ws}/policy/review-required",
-    params: { ws },
-    actingEmail: owner.email,
-    body: { review_required: value } satisfies ReviewRequiredBody,
-  });
-  const outcome: PolicyOutcome =
-    response.status === 204
-      ? "ok"
-      : response.status === 401 || response.status === 403 || response.status === 409
-        ? "denied"
-        : "error";
+  let outcome: PolicyOutcome;
+  try {
+    const set = await setReviewDefault(owner, value);
+    outcome = set === "set" ? "ok" : "denied";
+  } catch {
+    outcome = "error";
+  }
   await recordPolicyEvent(owner, value, outcome);
   return { intent: "set-review-required" as const, status: outcome };
 }

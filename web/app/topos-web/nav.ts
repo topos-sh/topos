@@ -1,7 +1,7 @@
 /**
  * The nav-slot registry — the second composition seam. The shell sidebar renders exactly the
- * entries the composition provides; a downstream superset build APPENDS entries (billing, org
- * administration, a staff section) without touching the shell. Entries are plain data: no
+ * entries the composition provides; a downstream superset build APPENDS its own entries and
+ * sections without touching the shell. Entries are plain data: no
  * component types cross this seam (icons are named, resolved by the shell's own icon map).
  */
 export interface NavContext {

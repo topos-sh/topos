@@ -116,4 +116,10 @@ describe("safeNextPath", () => {
     expect(safeNextPath("/%5Cevil")).toBe("/workspaces");
     expect(safeNextPath("/%2F%5Cevil.com")).toBe("/workspaces");
   });
+  it("rejects ASCII control characters (WHATWG URL parsing strips them before parsing)", () => {
+    expect(safeNextPath("/\t//evil.com")).toBe("/workspaces");
+    expect(safeNextPath("/\n//evil.com")).toBe("/workspaces");
+    expect(safeNextPath("/a\x00b")).toBe("/workspaces");
+    expect(safeNextPath("/a\x7fb")).toBe("/workspaces");
+  });
 });

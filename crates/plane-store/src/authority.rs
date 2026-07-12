@@ -789,7 +789,8 @@ impl Authority {
     // enforcement of the reviewer role) is the authorization. The write terminates in the SAME
     // serializable transaction as the device lane (one approve predicate, one CAS, one pointer
     // advance, one four-eyes gate); `plane_mode` is the plane's own posture threaded by the composer,
-    // never a request field; self-host is uniformly denied.
+    // never a request field — and no longer gates these ops: the acting gate is the confirmed-seat role
+    // check, the same on a self-host plane and a hosted one.
 
     /// **Approve an open proposal from a verified web session** — the browser's "Make current".
     /// `expected` is the generation the caller's rendered diff was computed against; a moved pointer
@@ -910,7 +911,7 @@ impl Authority {
     /// wrapper folds into its uniform miss.
     ///
     /// # Errors
-    /// [`AuthorityError::NotFound`] uniformly on every pre-gate miss (self-host / malformed email or
+    /// [`AuthorityError::NotFound`] uniformly on every pre-gate miss (malformed email or
     /// skill or version id / unknown workspace / non-member); [`AuthorityError::Internal`] on a store
     /// fault.
     pub async fn read_proposal_detail_session(
@@ -1268,8 +1269,8 @@ impl Authority {
     /// [`SessionInviteRole`].
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
-    /// threaded by the composing caller — never a request field. ALL session roster ops are uniformly
-    /// denied on a self-host plane (self-host joining stays the device lane).
+    /// threaded by the composing caller — never a request field, and no longer gating these ops: the
+    /// acting gate is the confirmed-OWNER seat check, the same on a self-host plane and a hosted one.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1308,7 +1309,8 @@ impl Authority {
     /// (gating nothing without a seat; re-adding the member re-enables the same devices).
     /// Removing a merely-invited seat un-invites it; removing an absent principal is an idempotent `Ok`.
     ///
-    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
+    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); the acting gate is the confirmed-OWNER seat
+    /// check, the same on a self-host plane and a hosted one (the mode no longer gates the op).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1339,8 +1341,8 @@ impl Authority {
     /// **Read the workspace roster for a verified session** — a pure privileged read (no receipt): every
     /// seat (email, role, invited/confirmed status, added-at) for any CONFIRMED member, plus the
     /// workspace ADDRESS (member-visible — it is a name, not a door; joining still gates on the
-    /// roster). Every miss — a self-host plane, an absent workspace, a non-member — is the single
-    /// indistinguishable [`AuthorityError::NotFound`].
+    /// roster). Every miss — an absent workspace, a non-member — is the single indistinguishable
+    /// [`AuthorityError::NotFound`]. The acting gate is the confirmed-seat check, identical on both postures.
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
@@ -1358,11 +1360,12 @@ impl Authority {
     // The read twin of the session-roster leg: a hosted composition's authenticated admin routes call
     // these with the session's VERIFIED email — the composing caller's session verification is the
     // authentication. `plane_mode` is the plane's own posture threaded by the composer, never a request
-    // field. Authorization is a CONFIRMED `workspace_member` row (any role — deliberately broader than
-    // the device lane's per-skill roster: catalog visibility IS workspace membership); self-host,
-    // malformed inputs, unknown workspaces, non-members, and invited-but-unconfirmed seats are ALL the
-    // single indistinguishable [`AuthorityError::NotFound`] (the shared `member_gate` preamble is the one
-    // session entry). Reads mint nothing durable — no receipts, no `workspace_events`.
+    // field, and no longer gates these ops (the acting gate is the confirmed seat, the same on a
+    // self-host plane and a hosted one). Authorization is a CONFIRMED `workspace_member` row (any role —
+    // deliberately broader than the device lane's per-skill roster: catalog visibility IS workspace
+    // membership); malformed inputs, unknown workspaces, non-members, and invited-but-unconfirmed seats
+    // are ALL the single indistinguishable [`AuthorityError::NotFound`] (the shared `member_gate` preamble
+    // is the one session entry). Reads mint nothing durable — no receipts, no `workspace_events`.
 
     /// The workspace catalog for a confirmed member: every skill holding a `current` row, with its
     /// pointer generation, epoch-ms update time, consent `bundle_digest`, and OPEN non-stale proposal
@@ -1602,8 +1605,9 @@ impl Authority {
             .await
     }
 
-    /// **Archive a skill from a verified OWNER session** (web-surface class; self-host denied like
-    /// every session op): renames the catalog entry (`<name>-archived-<date>`) FREEING the base
+    /// **Archive a skill from a verified OWNER session** (web-surface class; the acting gate is the
+    /// confirmed-seat check, the same on a self-host plane and a hosted one, like every session op):
+    /// renames the catalog entry (`<name>-archived-<date>`) FREEING the base
     /// name, removes it from every channel, closes open proposals with author notices, and drops it
     /// out of delivery. Unfollowed/detached copies are never touched.
     ///

@@ -405,7 +405,8 @@ function handleInternal(req, res, path, method) {
   if (method === "POST" && approve !== null) {
     return readBody(req, (body) => {
       calls.push({ route: "approve", method, path, key: approve[1], acting, body });
-      if (VERIFY_CONTEXTS[approve[1]]?.intent !== "enroll") {
+      const sessionIntent = VERIFY_CONTEXTS[approve[1]]?.intent;
+      if (sessionIntent !== "enroll" && sessionIntent !== "login") {
         return json(res, 200, { outcome: "not_found" });
       }
       return json(res, 200, { outcome: "confirmed" });
@@ -431,7 +432,6 @@ function handleInternal(req, res, path, method) {
       return json(res, 200, {
         outcome: "approved",
         workspace_id: CREATED_WS_ID,
-        address: CREATED_ADDRESS,
         display_name: name ?? "owner's workspace",
       });
     });
@@ -449,15 +449,6 @@ function handleInternal(req, res, path, method) {
         return json(res, 200, { outcome: "denied", reason: "bad_email" });
       }
       return json(res, 200, { outcome: "removed" });
-    });
-  }
-
-  // PUT /internal/v1/workspaces/{ws}/policy/review-required — the policy toggle.
-  const policy = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/policy\/review-required$/);
-  if (method === "PUT" && policy !== null) {
-    return readBody(req, (body) => {
-      calls.push({ route: "policy", method, path, ws: policy[1], acting, body });
-      return json(res, 200, { outcome: "ok", review_required: body.review_required === true });
     });
   }
 

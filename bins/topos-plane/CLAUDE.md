@@ -191,8 +191,9 @@
   ADDRESS the invitees join at, never a tokened link), `remove_member` (idempotent; the last-owner
   lockout denies typed), and `read_roster` (a `RosterSummary`: the seats + the workspace ADDRESS, or the
   uniform `NotFound`). The tokened standing-door machinery is GONE — links carry nothing, so `rotate_join_link`
-  is deleted (there is nothing to rotate). Same strict-mode threading as the standup wrappers; the authority
-  ops themselves uniformly deny a self-host plane.
+  is deleted (there is nothing to rotate). Same strict-mode threading as the standup wrappers; the acting
+  gate is the confirmed-owner seat check, the same on a self-host plane and a hosted one (the mode no
+  longer gates these ops — the product app serves self-hosted deployments through this session lane).
 - **The session-read wrappers** (`session_read_cmd.rs`) — the read twin of the roster wrappers, the
   same leak-free, LIB-ONLY surface for the web-session MEMBER-SCOPED reads (no OSS HTTP route):
   `PlaneState::list_skills_session` (the workspace catalog — per skill: the `current` version id,
@@ -201,9 +202,9 @@
   uniform `NotFound`, since the catalog only lists current-rowed skills), `read_version_session` +
   `list_proposals_session` (PRE-SERIALIZED wire JSON via the SAME mappers the token-scoped `/v1`
   routes use — parity by construction, a composing route relays the bytes verbatim), and
-  `read_object_session` (verified raw bytes). Same strict-mode threading; the authority ops uniformly
-  deny a self-host plane and gate on a CONFIRMED workspace member (any role — the SAME membership
-  gate the device lane runs).
+  `read_object_session` (verified raw bytes). Same strict-mode threading; the authority ops gate on a
+  CONFIRMED workspace member (any role — the SAME membership gate the device lane runs, identical on a
+  self-host plane and a hosted one).
 - **The session-review wrappers** (`session_review_cmd.rs`) — the write twin of the session-read
   wrappers, the same leak-free, LIB-ONLY surface for the PRIVILEGED web-session review ops (a downstream
   composition's authenticated admin routes call them with a session-verified acting email; there is NO
@@ -216,7 +217,7 @@
   (`Reverted` / `Conflict` / `Denied { reason }` / `NotFound`) — distinct from the review summary because a
   revert promotes (never approves/rejects) and its member-entitled refusals are the reviewer-role gate + the
   target refusals (a non-accepted / digest-less / no-current target), not the four-eyes/not-open family.
-  Classification posture: malformed/unknown ids, an unproven caller, self-host, and an unknown candidate all
+  Classification posture: malformed/unknown ids, an unproven caller, and an unknown candidate all
   fold to `NotFound` (disclosing nothing); the member-entitled protocol refusals (the reviewer-role gate,
   four-eyes, a resolved target, an empty reason, a reused request id, a non-accepted revert target) stay
   typed `Denied` so the composing surface can say why. Same strict-mode threading as the roster/read

@@ -31,7 +31,7 @@ import { fetchMemberships, membershipsQueryKey } from "@/lib/query/memberships";
  * shell route's loader already RESOLVED against the request's context (so no function crosses the
  * loader's serialization boundary, and null-href entries are already dropped), and whose `icon` is
  * a NAME resolved here through the icon map below. A downstream superset build appends its own
- * entries (billing, org admin) to this list; the shell renders whatever it's handed.
+ * its own entries to this list; the shell renders whatever it's handed.
  */
 export interface SidebarNavEntry {
   id: string;
@@ -54,18 +54,10 @@ const NAV_ICONS: Record<string, ElementType> = {
  * workspace list is a React Query the shell route's loader seeded into the cache (see providers.tsx),
  * so first paint has data (no loading flash); creating a workspace invalidates this same query and
  * the rail updates without a reload. `email`/`nav` are loader-derived, passed once as props — the
- * account menu renders the resolved nav registry, so a superset build's appended entries appear
- * there with no shell change. There is no staff section in this build.
+ * account menu renders the resolved nav registry, so a downstream build's appended entries
+ * appear there with no shell change.
  */
-export function AppSidebar({
-  email,
-  nav,
-}: {
-  email: string;
-  nav: readonly SidebarNavEntry[];
-  /** No staff section exists in this build — typing it `never` makes passing one a type error. */
-  isStaffSectionPresent?: never;
-}) {
+export function AppSidebar({ email, nav }: { email: string; nav: readonly SidebarNavEntry[] }) {
   const location = useLocation();
   const activeWorkspaceId = workspaceFromPath(location.pathname);
   const { data: memberships = [] } = useQuery({

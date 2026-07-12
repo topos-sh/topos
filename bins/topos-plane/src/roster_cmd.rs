@@ -6,8 +6,9 @@
 //! [`standup_cmd`](crate::standup_cmd), every signature carries only plain/owned types — ids are
 //! `&str`, outcomes are owned enums/structs, faults are stringified — so a composing plane never
 //! names a `plane-store` type. Each wrapper parses the plane's deployment mode STRICTLY (fail
-//! closed) and threads it into the authority op; the ops themselves uniformly deny a self-host
-//! plane (self-host membership stays the device invite chain).
+//! closed) and threads it into the authority op — though the mode no longer gates these ops: the
+//! acting gate is the confirmed-owner seat check, the same on a self-host plane and a hosted one
+//! (the product app serves self-hosted deployments through this session lane).
 //!
 //! An invitation is a ROSTER WRITE and nothing more: what comes back is the workspace ADDRESS
 //! (`<link_base>/<name>`), never a tokened link — links carry nothing, the roster is the lock. The
@@ -32,7 +33,7 @@ pub enum InviteMembersSummary {
         /// How many distinct addresses were seated.
         seated: usize,
     },
-    /// The request was denied (the uniform acting-gate denial, a malformed input, self-host).
+    /// The request was denied (the uniform acting-gate denial, or a malformed input).
     Denied {
         /// The static, typed reason (server-log fidelity; never an oracle).
         reason: String,
@@ -66,8 +67,7 @@ pub struct RosterSeatSummary {
 }
 
 /// The outcome of [`PlaneState::read_roster`]. `NotFound` is the UNIFORM miss (an absent workspace, a
-/// non-member or merely-invited acting email, a self-host plane) — the caller must render it
-/// indistinguishably.
+/// non-member or merely-invited acting email) — the caller must render it indistinguishably.
 #[derive(Debug, Clone)]
 pub enum RosterSummary {
     /// The roster, plus the workspace ADDRESS (member-visible — a name, not a door; joining still gates

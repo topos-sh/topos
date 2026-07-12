@@ -118,13 +118,8 @@ export interface RemoveMemberBody {
   email: string;
 }
 export interface RemoveMemberOutcome {
-  outcome: "removed" | "denied" | "not_found";
+  outcome: "removed" | "denied";
   reason?: string;
-}
-
-/** PUT  /internal/v1/workspaces/{ws}/policy/review-required — body */
-export interface ReviewRequiredBody {
-  review_required: boolean;
 }
 
 /** POST /internal/v1/workspaces/{ws}/skills/{skill}/proposals/{versionId}/approve|reject */

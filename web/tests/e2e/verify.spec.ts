@@ -53,6 +53,25 @@ test.describe("the verification page, signed in", () => {
     expect(approve.at(-1)?.body).toEqual({});
   });
 
+  test("a login session renders the sign-in consent, never a join framing", async ({ page }) => {
+    await page.goto("/verify/LOGIN77");
+    // The consent copy says the REAL operation: credentials re-mint across confirmed seats.
+    await expect(page.getByRole("heading", { name: "Sign this device in" })).toBeVisible();
+    await expect(page.getByText(/fresh credentials for every\s+workspace/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /Join/ })).toHaveCount(0);
+    await expect(page.getByText("travel-laptop")).toBeVisible();
+
+    await page.getByRole("button", { name: `Approve — sign in as ${MEMBER_EMAIL}` }).click();
+    await expect(page).toHaveURL(/\/verify\/LOGIN77\?outcome=approved/);
+    await expect(page.getByRole("heading", { name: "Approved" })).toBeVisible();
+
+    const approve = (await recordedCalls(page)).filter(
+      (c) => c.route === "approve" && c.key === "LOGIN77",
+    );
+    expect(approve.length).toBeGreaterThan(0);
+    expect(approve.at(-1)?.acting).toBe(MEMBER_EMAIL);
+  });
+
   test("a standup session prefils the name from the email; the default untouched is a complete standup", async ({
     page,
   }) => {

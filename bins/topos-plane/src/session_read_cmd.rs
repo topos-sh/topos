@@ -5,8 +5,9 @@
 //! Deliberately LIB-ONLY, like [`roster_cmd`](crate::roster_cmd) (there is no OSS HTTP route for any
 //! of these): a downstream composition's authenticated admin routes call them with a session-verified
 //! acting email. Every signature carries only plain/owned types; each wrapper parses the plane's
-//! deployment mode STRICTLY (fail closed) and threads it into the authority op, which uniformly
-//! denies a self-host plane.
+//! deployment mode STRICTLY (fail closed) and threads it into the authority op — though the mode no
+//! longer gates these ops: the acting gate is the confirmed workspace-member seat, the same on a
+//! self-host plane and a hosted one (the product app serves self-hosted deployments through this lane).
 //!
 //! **Wire parity by construction.** The current / version-metadata / proposals wrappers return
 //! PRE-SERIALIZED wire JSON bytes built by the SAME mappers (and, for `current`, the same stored
@@ -43,8 +44,7 @@ pub struct SkillIndexEntrySummary {
 pub enum SkillsIndexSummary {
     /// The workspace catalog (possibly empty — a member of a workspace with no published skill).
     Skills(Vec<SkillIndexEntrySummary>),
-    /// The single uniform miss (self-host / malformed input / unknown workspace / not a confirmed
-    /// member).
+    /// The single uniform miss (malformed input / unknown workspace / not a confirmed member).
     NotFound,
 }
 

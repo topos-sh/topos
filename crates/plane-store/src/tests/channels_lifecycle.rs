@@ -318,9 +318,10 @@ async fn same_day_archive_repeats_get_a_numeric_suffix(pool: PgPool) {
 }
 
 /// The archive refusals: a non-owner is `OwnerRoleRequired`, archiving an already-archived skill is
-/// `NotActive`, an unknown name is the uniform `NotFound`, and a self-host plane denies the whole
-/// session op (`NotFound`) — the typed reasons a confirmed member is entitled to, and the uniform
-/// misses that leak nothing.
+/// `NotActive`, an unknown name is the uniform `NotFound`, and a self-host plane ANSWERS the op exactly
+/// like a hosted one (the owner gate runs identically — a non-owner still gets `OwnerRoleRequired`, not a
+/// blanket posture denial) — the typed reasons a confirmed member is entitled to, and the uniform misses
+/// that leak nothing.
 #[sqlx::test]
 async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPool) {
     let fx = Fixture::new(pool, "chl-archive-refuse").await;
@@ -353,20 +354,16 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
             .await,
         Err(AuthorityError::NotFound)
     ));
-    // A self-host plane denies the whole session op uniformly.
-    assert!(matches!(
+    // A self-host plane ANSWERS the op exactly like a hosted one — the acting gate is the confirmed-seat
+    // check, identical on both postures (no blanket self-host denial). The OWNER role gate runs on
+    // self-host too: a confirmed non-owner still gets the typed OwnerRoleRequired (a non-mutating probe).
+    assert_eq!(
         fx.authority
-            .archive_skill_session(
-                &w,
-                ALICE,
-                "deploy",
-                DeploymentMode::SelfHost,
-                CREATED_AT,
-                NOW
-            )
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
+            .archive_skill_session(&w, BOB, "deploy", DeploymentMode::SelfHost, CREATED_AT, NOW)
+            .await
+            .unwrap(),
+        LifecycleOutcome::OwnerRoleRequired
+    );
     // Archiving twice: the second is NotActive.
     assert!(matches!(
         fx.authority

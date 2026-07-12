@@ -6,11 +6,11 @@
 //!
 //! **Deliberately BROADER than the device lane, by decision:** any CONFIRMED workspace member — any
 //! role, with or without per-skill `roster` rows — reads the workspace's full catalog and every skill's
-//! current/metadata/bytes/proposals. Catalog visibility IS workspace membership; per-skill `roster`
-//! stays the device lane's (read-token) gate. Cloud-only: a self-host plane denies uniformly (bearer +
-//! invite-chain remain the self-host story).
+//! current/metadata/bytes/proposals. Catalog visibility IS workspace membership. The acting gate is the
+//! confirmed workspace-member seat — the SAME check on a self-host plane and a hosted one; the product
+//! app serves self-hosted deployments through this session lane, so the mode no longer gates these ops.
 //!
-//! **NotFound uniformity.** Every pre-gate miss — self-host, malformed email, malformed skill id,
+//! **NotFound uniformity.** Every pre-gate miss — malformed email, malformed skill id,
 //! unknown workspace, non-member, invited-but-unconfirmed — is the single indistinguishable
 //! [`AuthorityError::NotFound`]: [`member_gate`] is the ONE session entry, so the uniformity cannot
 //! drift per-op. The only post-gate non-uniform outcomes are member-entitled: `read_current_session`'s
@@ -56,17 +56,16 @@ pub struct SkillIndexRow {
     pub open_proposals: u64,
 }
 
-/// The ONE session entry: self-host denial → canonical principal parse → confirmed-member probe. Every
-/// session op runs this first; each miss is the same indistinguishable [`AuthorityError::NotFound`].
+/// The ONE session entry: canonical principal parse → confirmed-member probe. Every session op runs this
+/// first; each miss is the same indistinguishable [`AuthorityError::NotFound`]. The acting gate is the
+/// confirmed-roster-seat check, identical on a self-host plane and a hosted one.
 async fn member_gate(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-seat check, the same on both postures.
+    _plane_mode: DeploymentMode,
 ) -> Result<Principal> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Err(AuthorityError::NotFound);
-    }
     let acting = Principal::parse(acting_email).map_err(|_| AuthorityError::NotFound)?;
     if !authority.db().confirmed_member(ws, &acting).await? {
         return Err(AuthorityError::NotFound);

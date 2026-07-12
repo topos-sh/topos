@@ -15,13 +15,17 @@ import { getDb } from "@/lib/db/index.server";
 function buildAuth() {
   const env = serverEnv();
   const providers = composition.auth;
-  // With NO delivery path configured (the OSS default), there is nothing that could ever verify
-  // an address out-of-band — possession of the password IS the identity claim on a self-hosted
+  // With NO out-of-band identity rung configured (the OSS default), there is nothing to verify
+  // an address against — possession of the password IS the identity claim on a self-hosted
   // instance (the roster still decides every admission; an uninvited sign-up holds no seat).
   // Stated honestly rather than left as a permanently-false flag that would brick the actor
   // mint: accounts born on the password rung are recorded verified-as-claimed. The moment a
-  // composition provides a magic-link delivery, that rung's real verification takes over.
-  const selfAssertedEmails = providers.emailAndPassword && !providers.magicLink;
+  // composition provides ANY real rung (magic link or a social provider), this hook stays dark
+  // and that rung's own verification decides — otherwise a password sign-up could pre-claim an
+  // address a social sign-in would later prove.
+  const hasSocial =
+    providers.socialProviders !== undefined && Object.keys(providers.socialProviders).length > 0;
+  const selfAssertedEmails = providers.emailAndPassword && !providers.magicLink && !hasSocial;
   return betterAuth({
     database: drizzleAdapter(getDb(), { provider: "pg" }),
     baseURL: env.BETTER_AUTH_URL,

@@ -12,7 +12,7 @@ import {
   ROSTER_WS,
   WS,
 } from "../fixtures/plane/data.mjs";
-import { BASE_URL, E2E_DATABASE_URL, PLANE_PORT } from "./env";
+import { BASE_URL, E2E_ADMIN_URL, E2E_DATABASE_URL, PLANE_PORT } from "./env";
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
@@ -200,8 +200,8 @@ test("a confirmed MEMBER cannot flip the review gate; a non-member workspace 404
   page,
 }) => {
   // The suite's default storage state: reviewer@example.com, a confirmed MEMBER (not owner) of
-  // ws-e2e. The settings page renders (requireMember), but the review-required toggle — whose ONLY
-  // lock is the web owner-guard's directory-seat read — must not.
+  // ws-e2e. The settings page renders (requireMember), but the review-required toggle must not
+  // (the web owner-guard hides it; the database's own owner gate backs the write either way).
   await gotoSettled(page, `/workspaces/${WS}/settings`);
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByRole("switch")).toHaveCount(0);
@@ -210,4 +210,29 @@ test("a confirmed MEMBER cannot flip the review gate; a non-member workspace 404
   await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+});
+
+test("the owner flips the review gate; the database row is the proof", async ({ page }) => {
+  await signIn(page, ROSTER_OWNER_EMAIL);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
+
+  const gate = page.getByRole("switch");
+  await expect(gate).toBeVisible();
+  const before = await gate.getAttribute("aria-checked");
+  await gate.click();
+  // The write is `topos_set_review_default` — owner-gated IN the database; the row flips and the
+  // switch re-renders from the revalidated loader read.
+  const expected = before === "true" ? "false" : "true";
+  await expect(gate).toHaveAttribute("aria-checked", expected);
+  const db = new Client({ connectionString: E2E_ADMIN_URL });
+  await db.connect();
+  try {
+    const { rows } = await db.query(
+      `select review_required from plane.workspace_policy where workspace_id = $1`,
+      [ROSTER_WS],
+    );
+    expect(String(rows[0]?.review_required)).toBe(expected === "true" ? "1" : "0");
+  } finally {
+    await db.end();
+  }
 });

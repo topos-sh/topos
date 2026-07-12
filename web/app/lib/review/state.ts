@@ -3,7 +3,7 @@ import type { GenerationLike } from "@/lib/diff/staleness";
 /**
  * The proposal page's ONE state derivation — pure, over the detail read + the live current
  * pointer (two reads the page already holds; nothing here fetches). The detail's `status` is
- * the STORED resolution; staleness stays a derived view, computed the same way the server's
+ * the STORED resolution ("open" | "accepted" | "rejected" | "closed"); staleness stays a derived view, computed the same way the server's
  * own listing predicate works (`open AND base == current`). Generations feed only the equality
  * comparison — nothing downstream renders an epoch or a seq.
  */
@@ -18,13 +18,16 @@ export type ProposalPageState =
   /** Accepted earlier — current has since moved on. */
   | "superseded"
   | "rejected"
+  /** Closed without a decision — superseded by a newer proposal, withdrawn upstream, or retired
+   * with its skill. A real terminal state, not an anchoring failure. */
+  | "closed"
   /** The detail or the pointer couldn't anchor a real state — stated plainly, never dressed up. */
   | "unknown";
 
 export interface ProposalDetailLike {
   /** The candidate version id (hex64). */
   version_id: string;
-  /** The stored status: "open" | "accepted" | "rejected" (anything else folds to unknown). */
+  /** The stored status: "open" | "accepted" | "rejected" | "closed" (anything else folds to unknown). */
   status: string;
   base_generation: GenerationLike;
 }
@@ -53,6 +56,9 @@ export function deriveProposalPageState(
   }
   if (detail.status === "rejected") {
     return "rejected";
+  }
+  if (detail.status === "closed") {
+    return "closed";
   }
   return "unknown";
 }

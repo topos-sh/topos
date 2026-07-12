@@ -31,6 +31,8 @@ const OP_PROPOSE: &str = "41000000-0000-4000-8000-000000000002";
 struct InternalCtx {
     dir: PathBuf,
     state: PlaneState,
+    /// The test's own handle on the database — direct asserts on the guarded SQL functions.
+    pool: PgPool,
     genesis_vid: [u8; 32],
     proposal_vid: [u8; 32],
 }
@@ -45,10 +47,15 @@ impl InternalCtx {
     fn app(&self) -> axum::Router {
         router(self.state.clone())
     }
+
+    fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
 async fn internal_setup(pool: PgPool, tag: &str, internal_token: Option<&str>) -> InternalCtx {
     let dir = unique_dir(tag);
+    let db_pool = pool.clone();
     let authority = Authority::from_pool(pool, &dir.join("git"), &dir.join("large"))
         .expect("open authority")
         .with_enrollment_config(EnrollmentConfig {
@@ -156,6 +163,7 @@ async fn internal_setup(pool: PgPool, tag: &str, internal_token: Option<&str>) -
     InternalCtx {
         dir,
         state,
+        pool: db_pool,
         genesis_vid,
         proposal_vid,
     }
@@ -257,13 +265,13 @@ async fn the_internal_lane_is_invisible_without_a_token(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // And a PUT (review-required) with a malformed body → still 404.
-    let policy = format!("/internal/v1/workspaces/{WS}/policy/review-required");
+    // And a roster-remove POST with a malformed body → still 404.
+    let remove = format!("/internal/v1/workspaces/{WS}/roster/remove");
     let (status, _h, _b) = send(
         ctx.app(),
         int_req(
-            "PUT",
-            &policy,
+            "POST",
+            &remove,
             Some("whatever"),
             Some(REVIEWER_EMAIL),
             b"not json".to_vec(),
@@ -518,21 +526,26 @@ async fn the_full_cloud_happy_path(pool: PgPool) {
         "last owner is locked in: {v:?}"
     );
 
-    // review-required PUT ⇒ 204, and the flip is OBSERVABLE via a fresh proposal-detail read (the accepted
-    // proposal's `review_required` field reflects the live policy).
-    let policy_uri = format!("/internal/v1/workspaces/{WS}/policy/review-required");
-    let (status, _h, _b) = send(
-        ctx.app(),
-        int_req(
-            "PUT",
-            &policy_uri,
-            Some(INTERNAL_TOKEN),
-            Some(OWNER_EMAIL),
-            json_body(serde_json::json!({ "review_required": true })),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // The review-required DEFAULT is a database policy decision now (`topos_set_review_default`,
+    // owner-gated in the function itself — no route on this lane): a member is refused, the owner
+    // sets it, and the flip is OBSERVABLE via a fresh proposal-detail read.
+    let denied: (String,) = sqlx::query_as("SELECT topos_set_review_default($1, $2, 1)")
+        .bind(WS)
+        .bind(REVIEWER_EMAIL)
+        .fetch_one(ctx.pool())
+        .await
+        .expect("the guarded setter answers");
+    assert_eq!(
+        denied.0, "owner_role_required",
+        "the role gate runs IN the function"
+    );
+    let set: (String,) = sqlx::query_as("SELECT topos_set_review_default($1, $2, 1)")
+        .bind(WS)
+        .bind(OWNER_EMAIL)
+        .fetch_one(ctx.pool())
+        .await
+        .expect("the guarded setter answers");
+    assert_eq!(set.0, "set");
     let (_s, _h, bytes) = send(
         ctx.app(),
         int_get(&detail_uri, Some(INTERNAL_TOKEN), Some(REVIEWER_EMAIL)),

@@ -19,8 +19,9 @@
 //! `request_id`-idempotent through the same `workspace_events` slot the device lane uses, with a
 //! FRESH domain-tagged request identity (the kernel governance preimage needs a signature frame no
 //! session op has), so a device op id and a session request id can never replay each other — a
-//! cross-leg id collision always fails closed as a key reuse. All ops (the read included) are
-//! uniformly denied on a self-host plane: self-host joining stays the device lane.
+//! cross-leg id collision always fails closed as a key reuse. The acting gate is the confirmed-owner
+//! seat check, identical on a self-host plane and a hosted one — the mode no longer gates these ops (the
+//! product app serves self-hosted deployments through this session lane).
 
 use crate::authority::Authority;
 use crate::enroll::{DeploymentMode, parse_op_id};
@@ -172,15 +173,11 @@ pub(crate) async fn invite_members_session(
     acting_email: &str,
     emails: &[String],
     role: SessionInviteRole,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-owner seat, the same on both postures.
+    _plane_mode: DeploymentMode,
     created_at: &str,
     now: i64,
 ) -> Result<SessionInviteOutcome> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Ok(SessionInviteOutcome::Denied(
-            "session roster ops are cloud-only",
-        ));
-    }
     if parse_op_id(request_id).is_none() {
         return Ok(SessionInviteOutcome::Denied(
             "request_id is not a canonical UUID",
@@ -242,15 +239,11 @@ pub(crate) async fn roster_remove_session(
     request_id: &str,
     acting_email: &str,
     target_email: &str,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-owner seat, the same on both postures.
+    _plane_mode: DeploymentMode,
     created_at: &str,
     now: i64,
 ) -> Result<GovernanceOutcome> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Ok(GovernanceOutcome::Denied(
-            "session roster ops are cloud-only",
-        ));
-    }
     if parse_op_id(request_id).is_none() {
         return Ok(GovernanceOutcome::Denied(
             "request_id is not a canonical UUID",
@@ -276,19 +269,17 @@ pub(crate) async fn roster_remove_session(
 }
 
 /// Read the workspace roster for a verified session (the orchestration half of
-/// [`Authority::read_roster`]). A pure read — no receipt, no idempotency slot. Every miss (a
-/// self-host plane, an absent workspace, an acting email that is not a confirmed member) is the
-/// single indistinguishable [`AuthorityError::NotFound`]; the workspace ADDRESS is disclosed to any
-/// confirmed member (it is a name, not a door).
+/// [`Authority::read_roster`]). A pure read — no receipt, no idempotency slot. Every miss (an absent
+/// workspace, an acting email that is not a confirmed member) is the single indistinguishable
+/// [`AuthorityError::NotFound`]; the workspace ADDRESS is disclosed to any confirmed member (it is a
+/// name, not a door). The acting gate is the confirmed-seat check, identical on both postures.
 pub(crate) async fn read_roster(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-seat check, the same on both postures.
+    _plane_mode: DeploymentMode,
 ) -> Result<RosterView> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Err(AuthorityError::NotFound);
-    }
     let acting = Principal::parse(acting_email).map_err(|_| AuthorityError::NotFound)?;
     let link_base = authority.enrollment()?.config.link_base().to_owned();
     authority

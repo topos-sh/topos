@@ -10,6 +10,7 @@ import {
 } from "react-router";
 import { buttonClasses } from "@/components/ui";
 import { ApproveEnrollCard } from "@/components/verify/ApproveEnrollCard";
+import { ApproveLoginCard } from "@/components/verify/ApproveLoginCard";
 import { ApproveStandupCard } from "@/components/verify/ApproveStandupCard";
 import { VerifyCard } from "@/components/verify/VerifyCard";
 import { actorFromSession } from "@/lib/auth/guards.server";
@@ -167,6 +168,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     // Signed out (or unverified): the full disclosure + the sign-in gate.
     return { state: "signed_out" as const, userCode, banner, context: result.data };
   }
+  if (result.data.intent === "login") {
+    return {
+      state: "login" as const,
+      userCode,
+      banner,
+      context: result.data,
+      sessionEmail: actor.email,
+    };
+  }
   if (result.data.intent === "standup") {
     const localpart = actor.email.split("@")[0] ?? actor.email;
     return {
@@ -260,6 +270,17 @@ function VerifyBody({ view }: { view: Awaited<ReturnType<typeof loader>> }) {
             context={view.context}
             sessionEmail={view.sessionEmail}
             defaultName={view.defaultName}
+          />
+        </div>
+      );
+    case "login":
+      return (
+        <div className="flex flex-col gap-6">
+          <Banner show={view.banner} />
+          <ApproveLoginCard
+            userCode={view.userCode}
+            context={view.context}
+            sessionEmail={view.sessionEmail}
           />
         </div>
       );

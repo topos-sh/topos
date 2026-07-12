@@ -2,8 +2,8 @@ import { sql } from "drizzle-orm";
 import { boolean, check, index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 /**
- * The web tier's OWN tables — cloud-only state (the policy audit trail; Better Auth owns its
- * own set in schema.auth.ts). Membership, workspace names, and the skill catalog live on the
+ * The web tier's OWN tables — app-side state (the policy audit trail + review comments;
+ * Better Auth owns its own set in schema.auth.ts). Membership, workspace names, and the skill catalog live on the
  * PLANE (`plane.workspace`, `plane.workspace_member`, `plane.current` — read via
  * schema.plane.ts); `workspace_id` here is a plain TEXT join key, never a foreign key: the web
  * tier holds no REFERENCES privilege on the authority tables and must never be able to veto an

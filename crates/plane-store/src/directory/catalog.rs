@@ -1,13 +1,14 @@
 //! The skill lifecycle — archive / unarchive / delete / purge (the orchestration half; the SQL +
 //! the custody un-rooting live in `db/directory/catalog.rs`).
 //!
-//! These are OWNER acts of the web-surface class (PRODUCT's exhaustive web list), exposed as
-//! PRIVILEGED lib-level session ops a hosted composition's authenticated pages call — the same
-//! posture as the session roster/review legs: uniformly denied on self-host (the OSS web app picks
-//! them up at the door cutover; the guarded SQL functions are the contract it will call), every
-//! pre-gate miss the single indistinguishable [`AuthorityError::NotFound`], and the OWNER gate
-//! answered inside the guarded function (a confirmed non-owner member gets the typed refusal — an
-//! authenticated member is entitled to the real reason). Naturally idempotent state machines — no
+//! These are OWNER acts of the web-surface class, exposed as PRIVILEGED lib-level session ops a hosted
+//! composition's authenticated pages call — the same posture as the session roster/review legs (the
+//! guarded SQL functions are the contract the web app calls): the acting gate is the confirmed-seat
+//! check, identical on a self-host plane and a hosted one (the mode no longer gates these ops — the
+//! product app serves self-hosted deployments through this session lane), every pre-gate miss the
+//! single indistinguishable [`AuthorityError::NotFound`], and the OWNER gate answered inside the guarded
+//! function (a confirmed non-owner member gets the typed refusal — an authenticated member is entitled
+//! to the real reason). Naturally idempotent state machines — no
 //! op-id receipt ceremony (re-archiving an archived skill answers `NotActive`, not a duplicate);
 //! the step-up/type-the-name confirm is the calling page's ceremony, not this layer's.
 
@@ -53,17 +54,16 @@ pub enum PurgeOutcome {
     OwnerRoleRequired,
 }
 
-/// The shared session front door: self-host denied, canonical principal, CONFIRMED membership —
-/// every miss the uniform `NotFound`. (The OWNER gate stays inside the guarded function.)
+/// The shared session front door: canonical principal, CONFIRMED membership — every miss the uniform
+/// `NotFound`. The acting gate is the confirmed-seat check, identical on a self-host plane and a hosted
+/// one. (The OWNER gate stays inside the guarded function.)
 async fn session_member(
     authority: &Authority,
     ws: &WorkspaceId,
     acting_email: &str,
-    plane_mode: DeploymentMode,
+    // `plane_mode` no longer gates this op — the acting gate is the confirmed-seat check, the same on both postures.
+    _plane_mode: DeploymentMode,
 ) -> Result<Principal> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Err(AuthorityError::NotFound);
-    }
     let acting = Principal::parse(acting_email).map_err(|_| AuthorityError::NotFound)?;
     if !authority.db().read_gate(ws, &acting).await? {
         return Err(AuthorityError::NotFound);

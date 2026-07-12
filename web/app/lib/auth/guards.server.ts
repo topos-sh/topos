@@ -71,6 +71,12 @@ export function safeNextPath(next: string | undefined): string {
   if (next.includes("\\") || next.includes("%")) {
     return "/workspaces";
   }
+  // WHATWG URL parsing STRIPS ASCII control characters before parsing, so "/\t//evil.com"
+  // would normalize off-origin in any consumer that resolves the value — reject them outright.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the control range IS the check.
+  if (/[\x00-\x1f\x7f]/.test(next)) {
+    return "/workspaces";
+  }
   return next;
 }
 
