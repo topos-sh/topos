@@ -55,10 +55,14 @@ export default defineConfig({
       // has no ready signal a headless runner can wait on), and the e2e exercises the same bundle
       // a deployment runs. Migrations apply lazily on the first request (the healthz probe).
       command: `bun run build && bun run start`,
-      url: `${BASE_URL}/healthz`,
+      // Probe by explicit IPv4 loopback — a runner's `localhost` may resolve to ::1 while the
+      // server binds only the IPv4 side; the browser's BASE_URL stays hostname-based.
+      url: `http://127.0.0.1:${APP_PORT}/healthz`,
       reuseExistingServer: !process.env.CI,
-      env: { ...appEnv(), PORT: String(APP_PORT) },
+      env: { ...appEnv(), PORT: String(APP_PORT), HOST: "0.0.0.0" },
       timeout: 180_000,
+      stdout: "pipe",
+      stderr: "pipe",
     },
   ],
 });
