@@ -227,10 +227,6 @@ impl ReviewVerdict {
             ReviewVerdict::Withdraw => ReviewDecision::Withdraw,
         }
     }
-    /// Whether this verdict is an approve (drives the WAL op kind + the resume-match check).
-    fn is_approve(&self) -> bool {
-        matches!(self, ReviewVerdict::Approve)
-    }
 }
 
 /// Resolve the proposal named `<skill>@<hash>` with `verdict`.
@@ -254,7 +250,6 @@ pub(crate) fn review(
             "`review --reject` needs a reason — pass `-m <message>`".into(),
         ));
     }
-    let approve = verdict.is_approve();
     // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
     // (a malformed target is a usage error however un-enrolled the machine is). Unlike the go-back /
     // revert / diff refs, this hash stays FULL-64 only: an open proposal's candidate id exists on the
@@ -285,8 +280,19 @@ pub(crate) fn review(
 
     let transport = connect(&instance.base_url);
 
+    // This command's WAL kind — the FULL 3-way verdict (approve / reject / withdraw), each a distinct
+    // op kind, so a crashed op of a DIFFERENT verdict can never replay this one's stored receipt.
+    let this_kind = match &verdict {
+        ReviewVerdict::Approve => OpKind::ReviewApprove,
+        ReviewVerdict::Reject { .. } => OpKind::ReviewReject,
+        ReviewVerdict::Withdraw => OpKind::ReviewWithdraw,
+    };
     // Resume a crashed prior review for this skill before minting a new op.
-    let kinds = [OpKind::ReviewApprove, OpKind::ReviewReject];
+    let kinds = [
+        OpKind::ReviewApprove,
+        OpKind::ReviewReject,
+        OpKind::ReviewWithdraw,
+    ];
     let rec = match op_wal::find_pending_for_skill(
         ctx.fs,
         &ctx.layout,
@@ -294,20 +300,21 @@ pub(crate) fn review(
         id.as_str(),
         &kinds,
     )? {
-        // Replay a crashed prior review ONLY if it matches THIS command (same proposal + same
-        // approve/reject verdict); a different intent must settle the in-flight op first.
+        // Replay a crashed prior review ONLY if it matches THIS command (same proposal + same exact
+        // verdict); a different verdict (approve vs reject vs withdraw) must settle the in-flight op
+        // first — reusing its op id under a new verdict would replay the OLD outcome and silently drop
+        // the new intent.
         Some(pending) => {
-            let pending_approve = matches!(pending.op, OpKind::ReviewApprove);
-            if pending.candidate_commit != proposal_hex || pending_approve != approve {
+            if pending.candidate_commit != proposal_hex || pending.op != this_kind {
+                let pending_verb = match pending.op {
+                    OpKind::ReviewApprove => "review --approve",
+                    OpKind::ReviewWithdraw => "review --withdraw",
+                    _ => "review --reject",
+                };
                 return Err(ClientError::PendingOp {
                     skill: skill_name.clone(),
                     detail: format!(
-                        "a {} of {skill_name}@{} is in flight — settle it (re-run that review), then retry",
-                        if pending_approve {
-                            "review --approve"
-                        } else {
-                            "review --reject"
-                        },
+                        "a {pending_verb} of {skill_name}@{} is in flight — settle it (re-run that review), then retry",
                         pending.candidate_commit
                     ),
                 });
@@ -327,11 +334,7 @@ pub(crate) fn review(
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
                 skill_id: id.to_string(),
-                op: if approve {
-                    OpKind::ReviewApprove
-                } else {
-                    OpKind::ReviewReject
-                },
+                op: this_kind,
                 candidate_commit: proposal_hex.clone(),
                 bundle_digest: to_hex(&bundle_digest),
                 expected_generation: expected,
@@ -344,9 +347,9 @@ pub(crate) fn review(
         }
     };
 
-    // The verdict + reason ride the current invocation into the POST (the durable `OpRecord` has no
-    // verdict-reason field — a `withdraw` stores as an `OpKind::ReviewReject` WAL, so a replay re-supplies
-    // both from this same argv).
+    // The verdict + reason ride the current invocation into the POST (the durable `OpRecord` records
+    // the verdict as its op KIND but not the reject reason, so a replay re-supplies the reason from
+    // this same argv — and a resume of a differing verdict was already refused above).
     let review_send = ReviewSend {
         decision: verdict.decision(),
         reason: match &verdict {

@@ -2,7 +2,7 @@
 //! reach) and the guarded row-op writes (follow / unfollow / protect), each authenticated by the ONE Bearer
 //! workspace credential: happy paths, a role refusal, and the uniform 404.
 
-use topos_types::requests::{WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillLog};
+use topos_types::requests::{WireChannelIndex, WireMe, WireProposalIndex, WireReach};
 
 use super::*;
 
@@ -26,23 +26,6 @@ async fn seed_owner_genesis(ctx: &EnrollCtx, op_id: &str) {
         .expect("seed genesis");
 }
 
-/// GET the skill log (by its bare id — `skill_log` resolves an id too) and return its catalog NAME (the
-/// mutable user-facing key the row ops address the skill by).
-async fn catalog_name(ctx: &EnrollCtx, cred: &str) -> String {
-    let (status, _, bytes) = send(
-        ctx.app(),
-        get(
-            &format!("/v1/workspaces/{WS}/skills/{SKILL}/log"),
-            &[("authorization", &format!("Bearer {cred}"))],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let log: WireSkillLog = serde_json::from_slice(&bytes).expect("a WireSkillLog");
-    assert_eq!(log.skill_id, SKILL);
-    assert!(!log.versions.is_empty(), "the genesis version is listed");
-    log.name
-}
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
 async fn the_describe_reads_serve_a_member(pool: PgPool) {
@@ -87,12 +70,10 @@ async fn the_describe_reads_serve_a_member(pool: PgPool) {
     assert_eq!(s, StatusCode::OK);
     let proposals: WireProposalIndex = serde_json::from_slice(&b).expect("a WireProposalIndex");
     assert!(proposals.proposals.is_empty());
-
     // reach — the publish audience (the author self-follows, so at least one person is entitled).
-    let name = catalog_name(&ctx, OWNER_CRED).await;
     let (s, _, b) = send(
         ctx.app(),
-        get(&format!("/v1/workspaces/{WS}/skills/{name}/reach"), &auth),
+        get(&format!("/v1/workspaces/{WS}/skills/{SKILL}/reach"), &auth),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -107,14 +88,13 @@ async fn the_describe_reads_serve_a_member(pool: PgPool) {
 async fn a_follow_then_unfollow_row_op_reports_its_status(pool: PgPool) {
     let ctx = enroll_setup(pool, "verbs-follow").await;
     seed_owner_genesis(&ctx, "c0000000-0000-4000-8000-000000000002").await;
-    let name = catalog_name(&ctx, OWNER_CRED).await;
 
-    // PUT follows/{name} → a 200 envelope carrying status "followed".
+    // PUT follows/{SKILL} → a 200 envelope carrying status "followed".
     let (s, _, b) = send(
         ctx.app(),
         req_json_auth(
             "PUT",
-            &format!("/v1/workspaces/{WS}/follows/{name}"),
+            &format!("/v1/workspaces/{WS}/follows/{SKILL}"),
             serde_json::json!({}),
             OWNER_CRED,
         ),
@@ -125,12 +105,12 @@ async fn a_follow_then_unfollow_row_op_reports_its_status(pool: PgPool) {
     assert!(env.ok, "follow ok: {env:?}");
     assert_eq!(env.data["status"], "followed");
 
-    // DELETE follows/{name} → status "unfollowed".
+    // DELETE follows/{SKILL} → status "unfollowed".
     let (s, _, b) = send(
         ctx.app(),
         req_json_auth(
             "DELETE",
-            &format!("/v1/workspaces/{WS}/follows/{name}"),
+            &format!("/v1/workspaces/{WS}/follows/{SKILL}"),
             serde_json::json!({}),
             OWNER_CRED,
         ),
@@ -144,7 +124,6 @@ async fn a_follow_then_unfollow_row_op_reports_its_status(pool: PgPool) {
 async fn a_member_tightening_protection_is_a_200_denied(pool: PgPool) {
     let ctx = enroll_setup(pool, "verbs-protect-role").await;
     seed_owner_genesis(&ctx, "c0000000-0000-4000-8000-000000000003").await;
-    let name = catalog_name(&ctx, OWNER_CRED).await;
     // A confirmed MEMBER device (tightening a skill to `reviewed` takes reviewer+).
     let ws = WorkspaceId::parse(WS).unwrap();
     let member = Principal::parse(MEMBER_PRINCIPAL).unwrap();
@@ -168,7 +147,7 @@ async fn a_member_tightening_protection_is_a_200_denied(pool: PgPool) {
         ctx.app(),
         req_json_auth(
             "PUT",
-            &format!("/v1/workspaces/{WS}/skills/{name}/protection"),
+            &format!("/v1/workspaces/{WS}/skills/{SKILL}/protection"),
             serde_json::json!({ "level": "reviewed" }),
             MEMBER_CRED,
         ),

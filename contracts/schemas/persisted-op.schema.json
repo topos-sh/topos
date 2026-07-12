@@ -133,6 +133,11 @@
           "description": "`review --reject` of a proposal.",
           "type": "string",
           "const": "review_reject"
+        },
+        {
+          "description": "`review --withdraw` — the author retracting their own proposal. A DISTINCT kind from\n`ReviewReject` so a crashed reject and a fresh withdraw (or vice versa) can never replay each\nother's stored receipt under a reused op id.",
+          "type": "string",
+          "const": "review_withdraw"
         }
       ]
     },

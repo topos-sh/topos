@@ -166,13 +166,13 @@ pub(crate) async fn channel_place(
     ws: &WorkspaceId,
     credential: &str,
     channel: &str,
-    skill_name: &str,
+    skill_id: &str,
     created_at: &str,
 ) -> Result<CurationOutcome> {
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .channel_place_txn(ws, channel, skill_name, &identity.principal, created_at)
+        .channel_place_txn(ws, channel, skill_id, &identity.principal, created_at)
         .await
 }
 
@@ -181,13 +181,13 @@ pub(crate) async fn channel_unplace(
     ws: &WorkspaceId,
     credential: &str,
     channel: &str,
-    skill_name: &str,
+    skill_id: &str,
     created_at: &str,
 ) -> Result<CurationOutcome> {
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .channel_unplace_txn(ws, channel, skill_name, &identity.principal, created_at)
+        .channel_unplace_txn(ws, channel, skill_id, &identity.principal, created_at)
         .await
 }
 
@@ -224,7 +224,7 @@ pub(crate) async fn follow_skill(
     authority: &Authority,
     ws: &WorkspaceId,
     credential: &str,
-    skill_name: &str,
+    skill_id: &str,
     created_at: &str,
 ) -> Result<SubscriptionOutcome> {
     let identity = device_member(authority, ws, credential).await?;
@@ -232,7 +232,7 @@ pub(crate) async fn follow_skill(
         .db()
         .follow_skill_txn(
             ws,
-            skill_name,
+            skill_id,
             &identity.principal,
             &identity.device_key_id,
             created_at,
@@ -244,14 +244,14 @@ pub(crate) async fn unfollow_skill(
     authority: &Authority,
     ws: &WorkspaceId,
     credential: &str,
-    skill_name: &str,
+    skill_id: &str,
     now: i64,
     created_at: &str,
 ) -> Result<SubscriptionOutcome> {
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .unfollow_skill_txn(ws, skill_name, &identity.principal, now, created_at)
+        .unfollow_skill_txn(ws, skill_id, &identity.principal, now, created_at)
         .await
 }
 
@@ -259,13 +259,13 @@ pub(crate) async fn exclude_device(
     authority: &Authority,
     ws: &WorkspaceId,
     credential: &str,
-    skill_name: &str,
+    skill_id: &str,
     created_at: &str,
 ) -> Result<SubscriptionOutcome> {
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .exclude_device_txn(ws, skill_name, &identity.device_key_id, created_at)
+        .exclude_device_txn(ws, skill_id, &identity.device_key_id, created_at)
         .await
 }
 

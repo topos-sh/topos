@@ -1227,6 +1227,11 @@ fn subscribe(
                 } => format!("{workspace_name}/{}/{name}", kind.segment()),
             });
         }
+        // `--manual` must ride the apply argv: without it the suggested next action installs in the
+        // default AUTO mode, so later updates auto-land despite the confirm-each consent the user chose.
+        if opts.manual {
+            base_argv.push("--manual".to_owned());
+        }
         let mut yes = base_argv.clone();
         yes.push("--yes".to_owned());
         let mut next_argvs = vec![yes];

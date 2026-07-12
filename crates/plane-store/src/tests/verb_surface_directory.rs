@@ -491,7 +491,7 @@ async fn channels_index_shows_everyone_and_a_joined_channel(pool: PgPool) {
     let bob = cred(&w, "dk_bob");
     // alice creates `ops` (placing deploy into it); bob joins.
     fx.authority
-        .channel_place(&w, &alice, "ops", "deploy", CREATED_AT)
+        .channel_place(&w, &alice, "ops", s.as_str(), CREATED_AT)
         .await
         .unwrap();
     fx.authority
@@ -775,7 +775,7 @@ async fn reach_counts_persons_and_devices_with_an_unfollow_subtracted(pool: PgPo
     // 3 persons (alice, bob, carol); devices = alice(1) + bob(1, the revoked excluded) + carol(2) = 4.
     let r = fx
         .authority
-        .reach(&w, &cred(&w, "dk_alice"), "deploy")
+        .reach(&w, &cred(&w, "dk_alice"), s.as_str())
         .await
         .unwrap();
     assert_eq!(r.persons, 3);
@@ -783,12 +783,12 @@ async fn reach_counts_persons_and_devices_with_an_unfollow_subtracted(pool: PgPo
 
     // alice unfollows ⇒ she (and her device) drop out of reach.
     fx.authority
-        .unfollow_skill(&w, &cred(&w, "dk_alice"), "deploy", NOW, CREATED_AT)
+        .unfollow_skill(&w, &cred(&w, "dk_alice"), s.as_str(), NOW, CREATED_AT)
         .await
         .unwrap();
     let r = fx
         .authority
-        .reach(&w, &cred(&w, "dk_alice"), "deploy")
+        .reach(&w, &cred(&w, "dk_alice"), s.as_str())
         .await
         .unwrap();
     assert_eq!(r.persons, 2, "alice unfollowed");
@@ -906,4 +906,77 @@ async fn delivery_carries_staleness_and_folds_the_proposal_count(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(d.staleness_window_ms, 3_600_000);
+}
+
+/// The device lane keys on the immutable skill ID, never the mutable catalog NAME: the client always
+/// resolved a resource address to its id, and a rename must never break a pending op. Passing the NAME
+/// where the id belongs is the same uniform miss any unknown token is. (A regression guard for the
+/// name!=id case the slug-clean suites cannot catch.)
+#[sqlx::test]
+async fn device_lane_ops_key_on_the_skill_id_not_the_catalog_name(pool: PgPool) {
+    use crate::channels::{ProtectKind, ProtectLevel};
+    let fx = Fixture::new(pool.clone(), "vsd-id-not-name").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner", "confirmed").await;
+    // Genesis a skill whose id (`s_deploy`) DIFFERS from its catalog name (`deploy`, folded from the
+    // display name) — the production shape the slug-clean suites deliberately avoid.
+    let s = skill("s_deploy");
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_alice",
+        "d1000000-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"v1")],
+        Some("Deploy"),
+        None,
+    )
+    .await;
+    let alice = cred(&w, "dk_alice");
+
+    // follow_skill by the ID works; by the NAME it is the uniform NotFound.
+    assert_eq!(
+        fx.authority.follow_skill(&w, &alice, "s_deploy", CREATED_AT).await.unwrap(),
+        crate::channels::SubscriptionOutcome::Followed,
+    );
+    assert!(matches!(
+        fx.authority.follow_skill(&w, &alice, "deploy", CREATED_AT).await,
+        Err(AuthorityError::NotFound),
+    ));
+
+    // channel_place likewise keys on the id.
+    assert!(matches!(
+        fx.authority
+            .channel_place(&w, &alice, "ops", "deploy", CREATED_AT)
+            .await,
+        Err(AuthorityError::NotFound),
+    ));
+    assert_eq!(
+        fx.authority
+            .channel_place(&w, &alice, "ops", "s_deploy", CREATED_AT)
+            .await
+            .unwrap(),
+        crate::channels::CurationOutcome::Created,
+    );
+
+    // protect (skill kind) and reach both take the id.
+    assert!(matches!(
+        fx.authority
+            .protect(&w, &alice, ProtectKind::Skill, "deploy", ProtectLevel::Protected, CREATED_AT)
+            .await,
+        Err(AuthorityError::NotFound),
+    ));
+    assert_eq!(
+        fx.authority
+            .protect(&w, &alice, ProtectKind::Skill, "s_deploy", ProtectLevel::Protected, CREATED_AT)
+            .await
+            .unwrap(),
+        crate::channels::ProtectOutcome::Set,
+    );
+    assert!(matches!(
+        fx.authority.reach(&w, &alice, "deploy").await,
+        Err(AuthorityError::NotFound),
+    ));
+    // The author self-follows at genesis, so the audience is at least one.
+    assert!(fx.authority.reach(&w, &alice, "s_deploy").await.unwrap().persons >= 1);
 }

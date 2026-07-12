@@ -325,7 +325,7 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
     let alice = cred(&w, "dk_alice");
     assert_eq!(
         fx.authority
-            .channel_place(&w, &alice, "ops", "beacon", CREATED_AT)
+            .channel_place(&w, &alice, "ops", sb.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::Created,
@@ -333,7 +333,7 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
     );
     assert_eq!(
         fx.authority
-            .channel_unplace(&w, &alice, "everyone", "beacon", CREATED_AT)
+            .channel_unplace(&w, &alice, "everyone", sb.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::Removed
@@ -362,7 +362,7 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
     // Reference counting: re-place B in `everyone` too. Leaving ops now leaves it delivered (everyone
     // still references it).
     fx.authority
-        .channel_place(&w, &alice, "everyone", "beacon", CREATED_AT)
+        .channel_place(&w, &alice, "everyone", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
     assert_eq!(
@@ -381,7 +381,7 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
     );
     // And with everyone ALSO unplaced, leaving really drops it.
     fx.authority
-        .channel_unplace(&w, &alice, "everyone", "beacon", CREATED_AT)
+        .channel_unplace(&w, &alice, "everyone", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
     assert!(
@@ -413,15 +413,15 @@ async fn two_channels_deliver_one_row_with_sorted_via(pool: PgPool) {
     let alice = cred(&w, "dk_alice");
     // B in ops + eng; everyone dropped so ONLY the two named channels deliver it.
     fx.authority
-        .channel_place(&w, &alice, "ops", "beacon", CREATED_AT)
+        .channel_place(&w, &alice, "ops", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
     fx.authority
-        .channel_place(&w, &alice, "eng", "beacon", CREATED_AT)
+        .channel_place(&w, &alice, "eng", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
     fx.authority
-        .channel_unplace(&w, &alice, "everyone", "beacon", CREATED_AT)
+        .channel_unplace(&w, &alice, "everyone", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
     let bob = cred(&w, "dk_bob");
@@ -472,14 +472,14 @@ async fn a_direct_follow_survives_dropping_from_every_channel(pool: PgPool) {
     let bob = cred(&w, "dk_bob");
     assert_eq!(
         fx.authority
-            .follow_skill(&w, &bob, "beacon", CREATED_AT)
+            .follow_skill(&w, &bob, sb.as_str(), CREATED_AT)
             .await
             .unwrap(),
         SubscriptionOutcome::Followed
     );
     // Drop B from every channel it sits in.
     fx.authority
-        .channel_unplace(&w, &cred(&w, "dk_alice"), "everyone", "beacon", CREATED_AT)
+        .channel_unplace(&w, &cred(&w, "dk_alice"), "everyone", sb.as_str(), CREATED_AT)
         .await
         .unwrap();
 
@@ -532,7 +532,7 @@ async fn unfollow_masks_everything_and_follow_reattaches(pool: PgPool) {
     // Unfollow → withheld everywhere, listed detached, the fleet row frozen.
     assert_eq!(
         fx.authority
-            .unfollow_skill(&w, &bob, "deploy", NOW, CREATED_AT)
+            .unfollow_skill(&w, &bob, s.as_str(), NOW, CREATED_AT)
             .await
             .unwrap(),
         SubscriptionOutcome::Unfollowed
@@ -552,7 +552,7 @@ async fn unfollow_masks_everything_and_follow_reattaches(pool: PgPool) {
     // Follow re-attaches: delivered again, detached empty, the row live.
     assert_eq!(
         fx.authority
-            .follow_skill(&w, &bob, "deploy", CREATED_AT)
+            .follow_skill(&w, &bob, s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         SubscriptionOutcome::Followed
@@ -619,7 +619,7 @@ async fn a_device_exclusion_is_device_scoped_and_follow_lifts_it(pool: PgPool) {
     // Exclude from bob1 only.
     assert_eq!(
         fx.authority
-            .exclude_device(&w, &bob1, "deploy", CREATED_AT)
+            .exclude_device(&w, &bob1, s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         SubscriptionOutcome::Excluded
@@ -642,7 +642,7 @@ async fn a_device_exclusion_is_device_scoped_and_follow_lifts_it(pool: PgPool) {
 
     // follow on the excluded device lifts the exclusion.
     fx.authority
-        .follow_skill(&w, &bob1, "deploy", CREATED_AT)
+        .follow_skill(&w, &bob1, s.as_str(), CREATED_AT)
         .await
         .unwrap();
     let d1 = fx.authority.delivery(&w, &bob1).await.unwrap();
@@ -685,7 +685,7 @@ async fn a_current_less_skill_is_never_delivered(pool: PgPool) {
                 &w,
                 &cred(&w, "dk_alice"),
                 "everyone",
-                "draftonly",
+                s.as_str(),
                 CREATED_AT
             )
             .await
@@ -724,7 +724,7 @@ async fn an_archived_skill_leaves_delivery_and_an_unfollowed_archived_stays_deta
     let bob = cred(&w, "dk_bob");
     // bob unfollows it FIRST (a person-level detach), then the owner archives it.
     fx.authority
-        .unfollow_skill(&w, &bob, "deploy", NOW, CREATED_AT)
+        .unfollow_skill(&w, &bob, s.as_str(), NOW, CREATED_AT)
         .await
         .unwrap();
     assert!(
@@ -964,14 +964,14 @@ async fn a_curated_channel_gates_curation_and_loosening_by_role(pool: PgPool) {
     // A plain member's placement is refused; a reviewer's lands.
     assert_eq!(
         fx.authority
-            .channel_place(&w, &cred(&w, "dk_mem"), "ops", "deploy", CREATED_AT)
+            .channel_place(&w, &cred(&w, "dk_mem"), "ops", s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::CuratedRoleRequired
     );
     assert_eq!(
         fx.authority
-            .channel_place(&w, &rev, "ops", "deploy", CREATED_AT)
+            .channel_place(&w, &rev, "ops", s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::Placed
@@ -1029,7 +1029,7 @@ async fn create_on_first_use_and_a_bad_name_is_typed(pool: PgPool) {
     let mem = cred(&w, "dk_mem");
     assert_eq!(
         fx.authority
-            .channel_place(&w, &mem, "new-ch", "deploy", CREATED_AT)
+            .channel_place(&w, &mem, "new-ch", s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::Created,
@@ -1037,7 +1037,7 @@ async fn create_on_first_use_and_a_bad_name_is_typed(pool: PgPool) {
     );
     assert_eq!(
         fx.authority
-            .channel_place(&w, &mem, "Bad_Name", "deploy", CREATED_AT)
+            .channel_place(&w, &mem, "Bad_Name", s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         CurationOutcome::BadName,
@@ -1100,7 +1100,7 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
         .await
         .unwrap();
     fx.authority
-        .unfollow_skill(&w, &bob, "beacon", NOW, CREATED_AT)
+        .unfollow_skill(&w, &bob, sb.as_str(), NOW, CREATED_AT)
         .await
         .unwrap();
     assert_eq!(
@@ -1256,7 +1256,7 @@ async fn channel_operations_emit_audit_rows_attributed_to_the_actor(pool: PgPool
     let bob = cred(&w, "dk_bob");
     // create + place (alice), join + leave (bob), then a removal (alice).
     fx.authority
-        .channel_place(&w, &alice, "ops", "deploy", CREATED_AT)
+        .channel_place(&w, &alice, "ops", s.as_str(), CREATED_AT)
         .await
         .unwrap();
     fx.authority
@@ -1268,7 +1268,7 @@ async fn channel_operations_emit_audit_rows_attributed_to_the_actor(pool: PgPool
         .await
         .unwrap();
     fx.authority
-        .channel_unplace(&w, &alice, "ops", "deploy", CREATED_AT)
+        .channel_unplace(&w, &alice, "ops", s.as_str(), CREATED_AT)
         .await
         .unwrap();
 

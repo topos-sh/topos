@@ -25,12 +25,12 @@ impl Db {
         &self,
         ws: &WorkspaceId,
         channel: &str,
-        skill_name: &str,
+        skill_id: &str,
         actor: &Principal,
         created_at: &str,
     ) -> Result<CurationOutcome> {
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
+            let skill_id = resolve_device_skill(&mut tx, ws, skill_id).await?;
             let code = call_policy(
                 &mut tx,
                 PolicyCall::Place {
@@ -51,12 +51,12 @@ impl Db {
         &self,
         ws: &WorkspaceId,
         channel: &str,
-        skill_name: &str,
+        skill_id: &str,
         actor: &Principal,
         created_at: &str,
     ) -> Result<CurationOutcome> {
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
+            let skill_id = resolve_device_skill(&mut tx, ws, skill_id).await?;
             let code = call_policy(
                 &mut tx,
                 PolicyCall::Unplace {
@@ -135,13 +135,13 @@ impl Db {
     pub(crate) async fn follow_skill_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         principal: &Principal,
         device_key_id: &str,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
+            let skill_id = resolve_device_skill(&mut tx, ws, skill_id).await?;
             let code = call_policy(
                 &mut tx,
                 PolicyCall::Follow {
@@ -166,13 +166,13 @@ impl Db {
     pub(crate) async fn unfollow_skill_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         principal: &Principal,
         now: i64,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
+            let skill_id = resolve_device_skill(&mut tx, ws, skill_id).await?;
             let code = call_policy(
                 &mut tx,
                 PolicyCall::Unfollow {
@@ -196,12 +196,12 @@ impl Db {
     pub(crate) async fn exclude_device_txn(
         &self,
         ws: &WorkspaceId,
-        skill_name: &str,
+        skill_id: &str,
         device_key_id: &str,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
         run_serializable!(self, tx, {
-            let skill_id = resolve_skill_name(&mut tx, ws, skill_name).await?;
+            let skill_id = resolve_device_skill(&mut tx, ws, skill_id).await?;
             let code = call_policy(
                 &mut tx,
                 PolicyCall::Exclude {
@@ -234,7 +234,7 @@ impl Db {
         run_serializable!(self, tx, {
             let code = match kind {
                 ProtectKind::Skill => {
-                    let skill_id = resolve_skill_name(&mut tx, ws, target_name).await?;
+                    let skill_id = resolve_device_skill(&mut tx, ws, target_name).await?;
                     call_policy(
                         &mut tx,
                         PolicyCall::ProtectSkill {
@@ -347,9 +347,10 @@ impl Db {
     }
 }
 
-/// Resolve a user-facing skill NAME to its immutable skill id through the catalog — the one
-/// name→id resolution every channel-era op runs (id-keyed references are what make rename-on-archive
-/// safe). An unknown name is the uniform miss.
+/// Resolve a user-facing skill NAME to its immutable skill id through the catalog — the SESSION
+/// lifecycle ops (archive / unarchive / delete / purge) run this, because a web user selects a skill
+/// by its name. An unknown name is the uniform miss. (The DEVICE lane keys on the id instead — see
+/// [`resolve_device_skill`].)
 pub(super) async fn resolve_skill_name(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
@@ -360,6 +361,29 @@ pub(super) async fn resolve_skill_name(
         r#"SELECT skill_id AS "skill_id!" FROM catalog WHERE workspace_id = $1 AND name = $2"#,
         ws_s,
         name,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    row.map(|r| r.skill_id).ok_or(AuthorityError::NotFound)
+}
+
+/// Validate a DEVICE-lane skill id against the catalog and return it. Subscriptions and channel
+/// references are id-keyed (the immutable custody key — a rename never breaks a pending op), and the
+/// client always holds the id it resolved a resource address to, so the device-lane routes carry the
+/// id, not the mutable name. An unknown id is the same uniform miss an unknown name is. (The
+/// guarded functions re-check existence too; this keeps the miss uniform and BEFORE the policy call,
+/// mirroring [`resolve_skill_name`].)
+pub(super) async fn resolve_device_skill(
+    tx: &mut Transaction<'_, Postgres>,
+    ws: &WorkspaceId,
+    skill_id: &str,
+) -> Result<String> {
+    let ws_s = ws.as_str();
+    let row = sqlx::query!(
+        r#"SELECT skill_id AS "skill_id!" FROM catalog WHERE workspace_id = $1 AND skill_id = $2"#,
+        ws_s,
+        skill_id,
     )
     .fetch_optional(&mut **tx)
     .await

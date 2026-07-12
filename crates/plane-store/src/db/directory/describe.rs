@@ -243,12 +243,14 @@ impl Db {
     /// A skill's audience: the confirmed members entitled to it (via the ONE person-entitlement SRF)
     /// and their non-revoked devices. The name resolves at any status; an unknown name is the miss.
     /// Two counts over `topos_person_entitled` (which already gates on a confirmed seat).
-    pub(crate) async fn reach(&self, ws: &WorkspaceId, skill_name: &str) -> Result<Reach> {
+    pub(crate) async fn reach(&self, ws: &WorkspaceId, skill_id: &str) -> Result<Reach> {
         let ws_s = ws.as_str();
+        // The device lane keys on the immutable id (the client resolved the resource address to it) —
+        // validate it against the catalog (any status) and count from it. An unknown id is the miss.
         let skill_id = sqlx::query_scalar!(
-            r#"SELECT skill_id AS "skill_id!" FROM catalog WHERE workspace_id = $1 AND name = $2"#,
+            r#"SELECT skill_id AS "skill_id!" FROM catalog WHERE workspace_id = $1 AND skill_id = $2"#,
             ws_s,
-            skill_name,
+            skill_id,
         )
         .fetch_optional(self.pool())
         .await

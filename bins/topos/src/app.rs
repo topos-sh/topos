@@ -391,7 +391,9 @@ pub fn run() -> ExitCode {
                     to.as_deref(),
                     workspace.as_deref(),
                 );
-                // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`).
+                // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`
+                // / `-m` — dropping the message would change the version's commit identity from what the
+                // describe computed, so an agent that runs this next action ships the wrong version).
                 let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
                 if propose {
                     yes_argv.push("--propose".to_owned());
@@ -399,6 +401,10 @@ pub fn run() -> ExitCode {
                 if let Some(ch) = &to {
                     yes_argv.push("--to".to_owned());
                     yes_argv.push(ch.clone());
+                }
+                if let Some(m) = &message {
+                    yes_argv.push("-m".to_owned());
+                    yes_argv.push(m.clone());
                 }
                 yes_argv.push("--yes".to_owned());
                 return finish_publish_describe(json, cmd_name, described, yes_argv, &diag);
@@ -1701,11 +1707,13 @@ fn build_pull_scope(
         }
         return Ok(ops::PullScope::One {
             name: name.to_owned(),
+                workspace: None,
             mode: ops::TargetMode::GoBack(vref),
         });
     }
     Ok(ops::PullScope::One {
         name: arg,
+                workspace: None,
         mode: if onto_current {
             ops::TargetMode::OntoCurrent
         } else {
@@ -1745,6 +1753,7 @@ pub(crate) fn pull_with_name_fallback(
                 ctx,
                 ops::PullScope::One {
                     name: arg.expect("guard checked Some"),
+                workspace: None,
                     mode: ops::TargetMode::AcceptPending,
                 },
             )
@@ -1920,12 +1929,12 @@ mod tests {
         let full = format!("docs@{}", "ab".repeat(32));
         assert!(matches!(
             build_pull_scope(Some(full), false).unwrap(),
-            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Full(_)) } if name == "docs"
+            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Full(_)), .. } if name == "docs"
         ));
         // A pasted 12-char short form is a go-back too — no more silent NO_SUCH_SKILL degradation.
         assert!(matches!(
             build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), false).unwrap(),
-            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Prefix(p)) }
+            PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Prefix(p)), .. }
                 if name == "docs" && p == "ab12cd34ef56"
         ));
         // A hex-ish suffix SHORTER than the prefix floor stays part of the name (a name may contain `@`),
@@ -1933,7 +1942,7 @@ mod tests {
         for name in ["docs@ab12", "team@cli"] {
             assert!(matches!(
                 build_pull_scope(Some(name.to_owned()), false).unwrap(),
-                PullScope::One { name: n, mode: TargetMode::AcceptPending } if n == name
+                PullScope::One { name: n, mode: TargetMode::AcceptPending, .. } if n == name
             ));
         }
         // The escape never combines with a go-back ref.

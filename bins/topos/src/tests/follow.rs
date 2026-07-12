@@ -1019,6 +1019,7 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
         &ctx,
         ops::PullScope::One {
             name: "deploy".to_owned(),
+                workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )

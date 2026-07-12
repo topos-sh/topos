@@ -675,12 +675,7 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
     // A follow of the archived name is SkillNotActive.
     assert_eq!(
         fx.authority
-            .follow_skill(
-                &w,
-                &cred(&w, "dk_bob"),
-                "deploy-archived-2026-06-28",
-                CREATED_AT
-            )
+            .follow_skill(&w, &cred(&w, "dk_bob"), s.as_str(), CREATED_AT)
             .await
             .unwrap(),
         SubscriptionOutcome::SkillNotActive

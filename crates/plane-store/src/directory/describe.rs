@@ -273,10 +273,10 @@ pub(crate) async fn reach(
     authority: &Authority,
     ws: &WorkspaceId,
     credential: &str,
-    skill_name: &str,
+    skill_id: &str,
 ) -> Result<Reach> {
     device_member(authority, ws, credential).await?;
-    authority.db().reach(ws, skill_name).await
+    authority.db().reach(ws, skill_id).await
 }
 
 /// Ack a batch of the caller's own notices by id (the read-state write; idempotent — only the

@@ -49,8 +49,15 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 pub(crate) enum PullScope {
     /// The bare session-start sweep — every followed skill.
     AllFollowed,
-    /// One skill, by name, in a targeted mode.
-    One { name: String, mode: TargetMode },
+    /// One skill, by name, in a targeted mode. `workspace` pins the resolution to a specific
+    /// workspace when a qualified path (`<ws>/skills/<name>`) selected one — so a name shared across
+    /// workspaces resolves to exactly the one the user addressed, never a different one or an
+    /// over-strict ambiguity refusal.
+    One {
+        name: String,
+        workspace: Option<String>,
+        mode: TargetMode,
+    },
 }
 
 /// How a targeted single-skill pull behaves.
@@ -187,8 +194,13 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                 warnings,
             ))
         }
-        PullScope::One { name, mode } => {
-            let (skill_id, _lock) = super::resolve_skill(ctx, &name)?;
+        PullScope::One {
+            name,
+            workspace,
+            mode,
+        } => {
+            let (skill_id, _lock) =
+                super::resolve_skill_in_workspace(ctx, &name, workspace.as_deref())?;
             // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
@@ -608,32 +620,36 @@ pub(crate) fn update_selective(
     let resolutions = resolve::resolve_all(&universe, &specs, KindScope::SUBSCRIBABLE)?;
 
     // Partition into skill names (targeted) and channel names (delivery-filtered).
-    let mut skill_targets: Vec<String> = Vec::new();
-    let mut channel_targets: Vec<String> = Vec::new();
+    let mut skill_targets: Vec<(String, String)> = Vec::new();
+    let mut channel_targets: Vec<(String, String)> = Vec::new();
     for r in resolutions {
         match r {
             Resolution::Resource {
                 kind: ResourceKind::Skill,
                 name,
+                workspace_id,
                 ..
-            } => skill_targets.push(name),
+            } => skill_targets.push((name, workspace_id)),
             Resolution::Resource {
                 kind: ResourceKind::Channel,
                 name,
+                workspace_id,
                 ..
-            } => channel_targets.push(name),
+            } => channel_targets.push((name, workspace_id)),
             // SUBSCRIBABLE excludes workspaces, so a workspace resolution cannot occur here.
             Resolution::Workspace { .. } => {}
         }
     }
 
     let mut acc = PullAccumulator::default();
-    // Skill targets → the targeted per-skill engine (accept a pending update / resume a hold).
-    for name in &skill_targets {
+    // Skill targets → the targeted per-skill engine (accept a pending update / resume a hold),
+    // pinned to the workspace the qualified path selected.
+    for (name, ws) in &skill_targets {
         acc.merge(pull(
             ctx,
             PullScope::One {
                 name: name.clone(),
+                workspace: Some(ws.clone()),
                 mode: TargetMode::AcceptPending,
             },
         )?);
@@ -643,28 +659,31 @@ pub(crate) fn update_selective(
         let delivery = delivery.ok_or_else(|| {
             ClientError::Enrollment("not enrolled; nothing to update from a channel".into())
         })?;
-        acc.merge(pull_channel_filtered(
-            ctx,
-            delivery,
-            &channel_targets,
-            only_workspace,
-        )?);
+        let _ = only_workspace;
+        acc.merge(pull_channel_filtered(ctx, delivery, &channel_targets)?);
     }
     Ok(acc.into_outcome())
 }
 
-/// A channel-scoped update: sync every DELIVERED skill whose `via` channels include one of `channels`
-/// — installing a new arrival, landing a pending update for a known one — over the live delivery. It is a
-/// PARTIAL, targeted operation (like `pull <skill>`): it never withdraws, freezes, reports, acks notices,
-/// or writes the freshness cache — those belong to the full bare reconcile. A whole-workspace access loss
-/// still surfaces as a warning + the structured `access_gone` signal.
+/// A channel-scoped update: sync every DELIVERED skill whose `via` channels include one of the
+/// requested `(channel_name, workspace_id)` pairs — installing a new arrival, landing a pending update
+/// for a known one — over the live delivery. The pair is SCOPED: a channel name shared across two
+/// workspaces syncs only the one the qualified path selected, never both. It is a PARTIAL, targeted
+/// operation (like `pull <skill>`): it never withdraws, freezes, reports, acks notices, or writes the
+/// freshness cache — those belong to the full bare reconcile. A whole-workspace access loss still
+/// surfaces as a warning + the structured `access_gone` signal.
 fn pull_channel_filtered(
     ctx: &Ctx<'_>,
     delivery: &dyn DeliverySource,
-    channels: &[String],
-    only_workspace: Option<&str>,
+    channels: &[(String, String)],
 ) -> Result<PullOutcome, ClientError> {
-    let want: HashSet<&str> = channels.iter().map(String::as_str).collect();
+    // (workspace_id, channel_name) — matched as a PAIR, so a same-named channel in another workspace
+    // is never swept in.
+    let want: HashSet<(&str, &str)> = channels
+        .iter()
+        .map(|(name, ws)| (ws.as_str(), name.as_str()))
+        .collect();
+    let wanted_ws: HashSet<&str> = channels.iter().map(|(_, ws)| ws.as_str()).collect();
     let followed = ctx.follow.followed();
     let mut skills = Vec::new();
     let mut warnings = Vec::new();
@@ -673,7 +692,7 @@ fn pull_channel_filtered(
     let mut unreachable = Vec::new();
 
     for ws in delivery.workspaces() {
-        if only_workspace.is_some_and(|only| only != ws) {
+        if !wanted_ws.contains(ws.as_str()) {
             continue;
         }
         let snapshot = match delivery.fetch_delivery(&ws) {
@@ -699,7 +718,11 @@ fn pull_channel_filtered(
         proposals_awaiting = proposals_awaiting
             .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
         for ds in &snapshot.skills {
-            if !ds.via_channels.iter().any(|c| want.contains(c.as_str())) {
+            if !ds
+                .via_channels
+                .iter()
+                .any(|c| want.contains(&(ws.as_str(), c.as_str())))
+            {
                 continue;
             }
             // Teach the read transport this skill's credential before its first byte fetch (a new

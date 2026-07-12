@@ -46,7 +46,7 @@ pub(crate) const REVERT_MESSAGE: &str = "topos: revert";
 /// current invocation supplies them on both the fresh send and a WAL replay (a resume is the same argv
 /// re-run), so a replayed reject re-carries its reason. `None` for publish / revert callers.
 pub(crate) struct ReviewSend {
-    /// The wire verdict — `approve`, `reject`, or `withdraw` (a `withdraw` stores as an `OpKind::ReviewReject`
+    /// The wire verdict — `approve`, `reject`, or `withdraw` (a `withdraw` stores as `OpKind::ReviewWithdraw`
     /// WAL, so the durable op alone cannot recover it).
     pub decision: ReviewDecision,
     /// The reject/withdraw reason (REQUIRED by the plane on `reject`; `None` otherwise).
@@ -286,18 +286,18 @@ fn send_op(
                 message: REVERT_MESSAGE.to_owned(),
             })
         }
-        OpKind::ReviewApprove | OpKind::ReviewReject => {
+        OpKind::ReviewApprove | OpKind::ReviewReject | OpKind::ReviewWithdraw => {
             // The verdict + reason ride the CURRENT invocation (`review` passes them; a WAL replay is the
-            // same argv re-run, so it re-supplies them). Fall back to the op-derived decision with no reason
-            // when absent — a `withdraw` stores as an `OpKind::ReviewReject` WAL, so the durable op alone
-            // cannot tell reject from withdraw; the current invocation's `ReviewSend` is authoritative.
+            // same argv re-run, so it re-supplies them). Fall back to the op-derived decision with no
+            // reason when absent — the durable op kind now records the full verdict (approve / reject /
+            // withdraw), so a replay re-derives the right decision even without the current `ReviewSend`.
             let (decision, reason) = match review {
                 Some(rs) => (rs.decision, rs.reason.clone()),
                 None => (
-                    if matches!(rec.op, OpKind::ReviewApprove) {
-                        ReviewDecision::Approve
-                    } else {
-                        ReviewDecision::Reject
+                    match rec.op {
+                        OpKind::ReviewApprove => ReviewDecision::Approve,
+                        OpKind::ReviewWithdraw => ReviewDecision::Withdraw,
+                        _ => ReviewDecision::Reject,
                     },
                     None,
                 ),

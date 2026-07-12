@@ -132,7 +132,7 @@ async fn a_per_skill_reviewed_pin_beats_an_open_workspace_default(pool: PgPool) 
                 &w,
                 &cred(&w, "dk_rev"),
                 ProtectKind::Skill,
-                "deploy",
+                s.as_str(),
                 ProtectLevel::Protected,
                 CREATED_AT
             )
@@ -203,7 +203,7 @@ async fn protect_skill_role_matrix_tighten_reviewer_loosen_owner(pool: PgPool) {
                 &w,
                 &cred(&w, cred_dk),
                 ProtectKind::Skill,
-                "deploy",
+                s.as_str(),
                 level,
                 CREATED_AT,
             )
@@ -266,7 +266,7 @@ async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_
             &w,
             &cred(&w, "dk_owner"),
             ProtectKind::Skill,
-            "deploy",
+            s.as_str(),
             ProtectLevel::Protected,
             CREATED_AT,
         )
@@ -293,7 +293,7 @@ async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_
             &w,
             &cred(&w, "dk_owner"),
             ProtectKind::Skill,
-            "deploy",
+            s.as_str(),
             ProtectLevel::Open,
             CREATED_AT,
         )

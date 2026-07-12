@@ -394,8 +394,7 @@ impl PullHarness {
             Scope::AllFollowed => ops::PullScope::AllFollowed,
             Scope::Accept { name } => ops::PullScope::One {
                 name,
-                mode: ops::TargetMode::AcceptPending,
-            },
+                mode: ops::TargetMode::AcceptPending, .. },
             Scope::GoBack {
                 name,
                 version_id_hex,
@@ -404,8 +403,7 @@ impl PullHarness {
                     .unwrap_or_else(|e| panic!("test_support: bad go-back version id: {e}"));
                 ops::PullScope::One {
                     name,
-                    mode: ops::TargetMode::GoBack(ops::VersionRef::Full(hash)),
-                }
+                    mode: ops::TargetMode::GoBack(ops::VersionRef::Full(hash)), .. }
             }
         };
         ops::pull(&ctx, internal)
@@ -1652,8 +1650,7 @@ impl FollowHarness {
             Scope::AllFollowed => ops::PullScope::AllFollowed,
             Scope::Accept { name } => ops::PullScope::One {
                 name,
-                mode: ops::TargetMode::AcceptPending,
-            },
+                mode: ops::TargetMode::AcceptPending, .. },
             Scope::GoBack {
                 name,
                 version_id_hex,
@@ -1661,8 +1658,7 @@ impl FollowHarness {
                 name,
                 mode: ops::TargetMode::GoBack(ops::VersionRef::Full(
                     ops::parse_hex32(&version_id_hex).expect("go-back id is 32-byte hex"),
-                )),
-            },
+                )), .. },
         };
         // Production's `Command::Pull` arm loads (or mints) the device id — a draft snapshot authors under it.
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
@@ -2753,6 +2749,7 @@ impl ReconcileHarness {
             &ctx,
             ops::PullScope::One {
                 name: name.to_owned(),
+                workspace: None,
                 mode: ops::TargetMode::AcceptPending,
             },
         )

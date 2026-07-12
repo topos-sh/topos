@@ -1447,10 +1447,10 @@ impl Authority {
         ws: &WorkspaceId,
         credential: &str,
         channel: &str,
-        skill_name: &str,
+        skill_id: &str,
         created_at: &str,
     ) -> Result<CurationOutcome> {
-        crate::channels::channel_place(self, ws, credential, channel, skill_name, created_at).await
+        crate::channels::channel_place(self, ws, credential, channel, skill_id, created_at).await
     }
 
     /// **Curation: remove a skill reference from a channel** — symmetric gate with
@@ -1463,10 +1463,10 @@ impl Authority {
         ws: &WorkspaceId,
         credential: &str,
         channel: &str,
-        skill_name: &str,
+        skill_id: &str,
         created_at: &str,
     ) -> Result<CurationOutcome> {
-        crate::channels::channel_unplace(self, ws, credential, channel, skill_name, created_at)
+        crate::channels::channel_unplace(self, ws, credential, channel, skill_id, created_at)
             .await
     }
 
@@ -1514,10 +1514,10 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         credential: &str,
-        skill_name: &str,
+        skill_id: &str,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
-        crate::channels::follow_skill(self, ws, credential, skill_name, created_at).await
+        crate::channels::follow_skill(self, ws, credential, skill_id, created_at).await
     }
 
     /// **Unfollow a skill** (person-scoped): the standing negative mask — delivery ends on ALL the
@@ -1530,11 +1530,11 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         credential: &str,
-        skill_name: &str,
+        skill_id: &str,
         now: i64,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
-        crate::channels::unfollow_skill(self, ws, credential, skill_name, now, created_at).await
+        crate::channels::unfollow_skill(self, ws, credential, skill_id, now, created_at).await
     }
 
     /// **Exclude a followed skill from THIS device** ("not on this device" — the `remove` verb's
@@ -1546,10 +1546,10 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         credential: &str,
-        skill_name: &str,
+        skill_id: &str,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
-        crate::channels::exclude_device(self, ws, credential, skill_name, created_at).await
+        crate::channels::exclude_device(self, ws, credential, skill_id, created_at).await
     }
 
     /// **The `protect` setter** — per-bundle protection (`reviewed`) or per-channel mode
@@ -2075,9 +2075,9 @@ impl Authority {
         &self,
         ws: &WorkspaceId,
         credential: &str,
-        skill_name: &str,
+        skill_id: &str,
     ) -> Result<crate::describe::Reach> {
-        crate::describe::reach(self, ws, credential, skill_name).await
+        crate::describe::reach(self, ws, credential, skill_id).await
     }
 
     /// **Ack notices** — mark the caller's own notices read by id (the delivery feed carries them

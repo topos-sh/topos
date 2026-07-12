@@ -229,6 +229,10 @@ pub enum OpKind {
     ReviewApprove,
     /// `review --reject` of a proposal.
     ReviewReject,
+    /// `review --withdraw` — the author retracting their own proposal. A DISTINCT kind from
+    /// `ReviewReject` so a crashed reject and a fresh withdraw (or vice versa) can never replay each
+    /// other's stored receipt under a reused op id.
+    ReviewWithdraw,
 }
 
 /// `ops/<op_id>.json` — the durable request identity, persisted (`0600`) BEFORE the first network send so

@@ -460,6 +460,7 @@ fn confirm_each_offers_then_explicit_pull_accepts() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -553,6 +554,7 @@ fn go_back_then_resume() {
         &ctx,
         ops::PullScope::One {
             name: name.clone(),
+            workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
@@ -591,6 +593,7 @@ fn go_back_then_resume() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -696,6 +699,7 @@ fn go_back_resolves_a_unique_short_prefix_and_refuses_a_no_match() {
         &ctx,
         ops::PullScope::One {
             name: name.clone(),
+            workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Prefix(to_hex(&genesis)[..12].into())),
         },
     )
@@ -714,6 +718,7 @@ fn go_back_resolves_a_unique_short_prefix_and_refuses_a_no_match() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Prefix("ffffffffffff".into())),
         },
     )
@@ -792,6 +797,7 @@ fn mis_scoped_pointer_is_a_wire_error() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -871,6 +877,7 @@ fn confirm_each_accept_reoffers_a_version_that_moved() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -921,6 +928,7 @@ fn go_back_snapshots_an_unsaved_draft_before_overwriting() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
@@ -967,6 +975,7 @@ fn malformed_plane_response_is_a_wire_error() {
         &ctx,
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -1128,6 +1137,7 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -1159,6 +1169,7 @@ fn escape_commits_mine_on_current_and_is_publishable() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::OntoCurrent,
         },
     )
@@ -1236,6 +1247,7 @@ fn conflict_blocks_and_persists_until_escaped() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::OntoCurrent,
         },
     )
@@ -1469,6 +1481,7 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::OntoCurrent,
         },
     )
@@ -1513,6 +1526,7 @@ fn escape_of_edited_conflict_commits_the_resolution() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::OntoCurrent,
         },
     )
@@ -1565,6 +1579,7 @@ fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
         &rig.ctx(&p2, &foll),
         ops::PullScope::One {
             name: "pr-describe".into(),
+            workspace: None,
             mode: ops::TargetMode::AcceptPending,
         },
     )
@@ -1753,6 +1768,7 @@ fn go_back_is_plane_independent_and_spends_no_network_call() {
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             name,
+            workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Full(genesis)),
         },
     )
