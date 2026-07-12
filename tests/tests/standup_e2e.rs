@@ -240,7 +240,10 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     assert!(!client.wal_exists(), "the WAL is consumed at promote");
     // A standup-born workspace has its ADDRESS name minted (a slug), and the receipt address roots on it.
     let minted_name = workspace_name(&plane, ws);
-    assert!(!minted_name.is_empty(), "the standup minted an address name");
+    assert!(
+        !minted_name.is_empty(),
+        "the standup minted an address name"
+    );
     assert!(
         receipt_address.ends_with(&format!("/{minted_name}")),
         "the receipt address roots on the minted name: {receipt_address} vs {minted_name}"
@@ -445,7 +448,10 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     let owner = FollowHarness::new("standup-door2-owner");
     common::begin_address_enroll(&plane, &owner, &owner_address, OWNER_EMAIL);
     let describe = owner.resume_describe().expect("owner resume enrolls");
-    assert!(describe.enrolled_now, "the confirmed owner's redeem is admitted");
+    assert!(
+        describe.enrolled_now,
+        "the confirmed owner's redeem is admitted"
+    );
     assert_eq!(describe.workspace_id, ws);
     assert!(owner.instance_written());
     assert_eq!(owner.user_principal().as_deref(), Some(OWNER_EMAIL));
@@ -481,7 +487,9 @@ fn e2e_door2_web_create_enrolls_the_owner_and_distributes_to_an_invited_member()
     // confirmed → the `--yes` apply lands the `everyone` genesis byte-exact (a batch-accepted first receive).
     let member = FollowHarness::new("standup-door2-member");
     common::begin_address_enroll(&plane, &member, &member_address, MEMBER_EMAIL);
-    let applied = member.resume_apply().expect("member resume enrolls + applies");
+    let applied = member
+        .resume_apply()
+        .expect("member resume enrolls + applies");
     assert!(applied.enrolled_now);
     assert_eq!(
         member_row(&plane, &ws, MEMBER_EMAIL),
@@ -853,8 +861,13 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
         .expect("the owner's invite");
     let member = FollowHarness::new("standup-claim-member");
     common::begin_address_enroll(&plane, &member, &member_address, "anyone@else.test");
-    let applied = member.resume_apply().expect("member resume enrolls + applies");
-    assert!(applied.enrolled_now, "the invited identity joins on self-host");
+    let applied = member
+        .resume_apply()
+        .expect("member resume enrolls + applies");
+    assert!(
+        applied.enrolled_now,
+        "the invited identity joins on self-host"
+    );
     assert_eq!(
         member_row(&plane, WS, "anyone@else.test"),
         ("member".to_owned(), "confirmed".to_owned()),

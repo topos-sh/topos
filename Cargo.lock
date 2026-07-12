@@ -5344,12 +5344,14 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "flate2",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2",
  "tar",
+ "topos",
  "topos-plane",
  "topos-types",
  "utoipa",

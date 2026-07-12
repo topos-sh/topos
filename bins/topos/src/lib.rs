@@ -51,3 +51,4 @@ pub mod test_support;
 mod tests;
 
 pub use app::run;
+pub use cli::cli_command;

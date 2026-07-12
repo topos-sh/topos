@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireProposalIndex",
+  "description": "`GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message\nfirst. The caller splits inbox (others') from outbox (own) by `proposer`. Member-scoped.",
+  "type": "object",
+  "properties": {
+    "proposals": {
+      "description": "The open proposals (possibly empty).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireProposalEntry"
+      }
+    }
+  },
+  "required": [
+    "proposals"
+  ],
+  "$defs": {
+    "WireProposalEntry": {
+      "description": "One open proposal in the workspace's review inbox.",
+      "type": "object",
+      "properties": {
+        "base_version_id": {
+          "description": "The base version the proposal was built on (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "description": "When the proposal was opened (the server-stamped string).",
+          "type": "string"
+        },
+        "message": {
+          "description": "The author's message (the proposed version's commit message) — what a reviewer reads FIRST.",
+          "type": "string"
+        },
+        "proposer": {
+          "description": "The author's principal.",
+          "type": "string"
+        },
+        "skill_id": {
+          "description": "The skill the proposal targets.",
+          "type": "string"
+        },
+        "skill_name": {
+          "description": "The skill's catalog name.",
+          "type": "string"
+        },
+        "stale": {
+          "description": "Whether `current` has moved since the proposal's base (a stale proposal needs a re-propose).",
+          "type": "boolean"
+        },
+        "version_id": {
+          "description": "The proposed version's commit id (64-char lowercase hex) — the review target handle.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "skill_id",
+        "skill_name",
+        "version_id",
+        "base_version_id",
+        "proposer",
+        "message",
+        "created_at",
+        "stale"
+      ]
+    }
+  }
+}

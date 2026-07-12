@@ -45,6 +45,12 @@
         "$ref": "#/$defs/WireDeliverySkill"
       }
     },
+    "staleness_window_ms": {
+      "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
     "workspace_id": {
       "description": "The workspace this delivery is scoped to (echoed from the path).",
       "type": "string"
@@ -56,7 +62,8 @@
     "skills",
     "detached",
     "notices",
-    "proposals_awaiting"
+    "proposals_awaiting",
+    "staleness_window_ms"
   ],
   "$defs": {
     "Generation": {

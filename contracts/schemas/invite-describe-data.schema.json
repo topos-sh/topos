@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InviteDescribeData",
+  "description": "`invite <email>...` (bare, no `--yes`) — the describe: who gets seated, the channel pre-placements,\nand the mail-or-paste note. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "address": {
+      "type": "string"
+    },
+    "channels": {
+      "description": "The channels each invitee would be pre-placed into.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invite_policy": {
+      "type": "string"
+    },
+    "seat": {
+      "description": "The emails that would be seated (canonical form).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "address",
+    "invite_policy",
+    "seat"
+  ]
+}

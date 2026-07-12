@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoginData",
+  "description": "`POST /v1/login` success `data` — the proven identity + one entry per confirmed seat.",
+  "type": "object",
+  "properties": {
+    "memberships": {
+      "description": "One entry per workspace where the principal holds a confirmed seat (possibly empty).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LoginMembership"
+      }
+    },
+    "principal": {
+      "description": "The proven principal (canonical form).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "principal",
+    "memberships"
+  ],
+  "$defs": {
+    "LoginMembership": {
+      "description": "One workspace a login re-minted (or could not re-mint) a credential for.",
+      "type": "object",
+      "properties": {
+        "blocked": {
+          "description": "Why no credential was minted (e.g. this device is revoked in that workspace); absent on success.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credential": {
+          "description": "The freshly minted plaintext workspace credential — absent when the mint was refused (see\n`blocked`). Returned ONCE; the server stores only its hash.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_key_id": {
+          "description": "The device's non-secret key id in this workspace (server-derived).",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "The workspace's display name.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS name.",
+          "type": "string"
+        },
+        "role": {
+          "description": "The person's role on the seat (`owner` / `reviewer` / `member`).",
+          "type": "string"
+        },
+        "workspace_id": {
+          "description": "The workspace id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "display_name",
+        "role",
+        "device_key_id"
+      ]
+    }
+  }
+}

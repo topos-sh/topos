@@ -326,7 +326,9 @@ fn enroll_follower(
     assert!(matches!(confirm, ConfirmOutcome::Confirmed));
     // Resume WITH `--yes`: poll → redeem → promote (arming the REAL adapter's currency trigger) then apply —
     // the reconcile batch-accepts `everyone`'s genesis first-receive in this same invocation.
-    let applied = follower.resume_apply().expect("the resume enrolls + applies");
+    let applied = follower
+        .resume_apply()
+        .expect("the resume enrolls + applies");
     assert!(applied.enrolled_now, "THIS invocation enrolled the device");
     assert_eq!(
         applied.installed.len(),

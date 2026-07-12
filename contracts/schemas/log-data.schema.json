@@ -4,6 +4,13 @@
   "description": "`log` — local action events (and, with `--team`, partial plane records). The individual event\nfields are **not pinned by the spec**, so events stay open JSON. **INFERRED.**",
   "type": "object",
   "properties": {
+    "archived_successor": {
+      "description": "When the skill was resolved by a FREED base name (it has since been archived under a new name),\nthe archived-successor hint: \"`<base>` is archived as `<archived>`\". **INFERRED** (additive).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "events": {
       "description": "Local action-event envelopes from `log.jsonl` (field set intentionally open).",
       "type": "array",

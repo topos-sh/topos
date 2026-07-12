@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PublishDescribeData",
+  "description": "`publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the\nshare line, and the undo path. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "bundle_digest": {
+      "description": "The byte-exact digest of the draft being published.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gate": {
+      "description": "The gate outcome: an OPEN bundle lands directly; a REVIEWED one becomes a proposal.",
+      "$ref": "#/$defs/PublishGate"
+    },
+    "is_revert": {
+      "description": "Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).",
+      "type": "boolean"
+    },
+    "origin_note": {
+      "description": "The origin-demotion disclosure for an imported skill (publishing makes the team copy the source\nof truth).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "placements": {
+      "description": "The channels the reference lands in (`--to`, or `everyone` for a brand-new skill).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reach": {
+      "description": "The audience the change reaches (people entitled to the skill), when the plane discloses it.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "share_line": {
+      "description": "The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skill": {
+      "type": "string"
+    },
+    "skill_id": {
+      "type": "string"
+    },
+    "undo": {
+      "description": "The undo path — the version `revert --to` restores to get back here.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_display_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "skill",
+    "skill_id",
+    "workspace_id",
+    "bundle_digest",
+    "placements",
+    "gate",
+    "is_revert"
+  ],
+  "$defs": {
+    "PublishGate": {
+      "description": "The gate a `publish` describe predicts. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "The bundle is open — publishing moves `current` directly.",
+          "type": "string",
+          "const": "lands"
+        },
+        {
+          "description": "The bundle is reviewed — publishing opens a proposal instead of moving `current`.",
+          "type": "string",
+          "const": "proposal"
+        }
+      ]
+    }
+  }
+}

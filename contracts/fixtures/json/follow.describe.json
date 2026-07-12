@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "command": "follow",
+  "ok": true,
+  "data": {
+    "deployment_mode": "cloud",
+    "enrolled": true,
+    "plane_base_url": "https://api.topos.sh",
+    "skills": [
+      {
+        "name": "deploy",
+        "offer": {
+          "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "skill_id": "s_deploy"
+      }
+    ],
+    "verified_domain": "acme.com",
+    "verified_domain_status": "verified",
+    "workspace_display_name": "Acme",
+    "workspace_id": "w_acme"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY",
+      "argv": [
+        "topos",
+        "follow",
+        "acme",
+        "--yes"
+      ]
+    }
+  ]
+}

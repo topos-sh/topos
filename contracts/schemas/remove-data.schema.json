@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RemoveData",
+  "description": "`remove` — take skills off THIS device. A followed skill becomes a per-device exclusion (other\ndevices keep receiving it); an untracked local copy (or a never-published tracked one) is deleted\npermanently. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "applied": {
+      "description": "`true` on the `--yes` apply, `false` on the describe (nothing changed yet).",
+      "type": "boolean"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RemoveItem"
+      }
+    }
+  },
+  "required": [
+    "items",
+    "applied"
+  ],
+  "$defs": {
+    "RemoveItem": {
+      "description": "One skill in a [`RemoveData`]. **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "agent_dirs": {
+          "description": "The agent directories cleaned (or, on the describe, that would be cleaned).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bytes_kept": {
+          "description": "Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a\nfrozen copy; an untracked-local delete removes the only copy there is).",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "How the removal behaves for this skill.",
+          "$ref": "#/$defs/RemoveKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "description": "The workspace the exclusion is recorded in (a followed skill); absent for a local copy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "bytes_kept"
+      ]
+    },
+    "RemoveKind": {
+      "description": "How `remove` treats one skill. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).",
+          "type": "string",
+          "const": "followed-exclusion"
+        },
+        {
+          "description": "An untracked local copy in an agent dir → permanent delete (no other copy exists).",
+          "type": "string",
+          "const": "untracked-local"
+        },
+        {
+          "description": "A tracked, never-published local skill → permanent delete (the sidecar entry drops too).",
+          "type": "string",
+          "const": "tracked-local-permanent"
+        }
+      ]
+    }
+  }
+}

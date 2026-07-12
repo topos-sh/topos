@@ -49,11 +49,12 @@
       ]
     },
     "ReviewDecision": {
-      "description": "A review verdict. **INFERRED.**",
+      "description": "A review verdict — `approve` promotes, `reject` carries a reason back, `withdraw` is the author\nretracting their own open proposal. **INFERRED.**",
       "type": "string",
       "enum": [
         "approve",
-        "reject"
+        "reject",
+        "withdraw"
       ]
     }
   }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProtectionSetRequest",
+  "description": "`PUT /v1/workspaces/{ws}/skills/{skill}/protection` and\n`PUT /v1/workspaces/{ws}/channels/{ch}/protection` body — the safety knob. Levels are per kind:\n`reviewed`/`open` for a skill bundle, `curated`/`open` for a channel. Tightening takes reviewer+;\nloosening back to `open` takes an owner.",
+  "type": "object",
+  "properties": {
+    "level": {
+      "description": "The target level (`open`, `reviewed` for skills, `curated` for channels).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "level"
+  ]
+}

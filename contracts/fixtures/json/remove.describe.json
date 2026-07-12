@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "command": "remove",
+  "ok": true,
+  "data": {
+    "applied": false,
+    "items": [
+      {
+        "agent_dirs": [
+          "~/.claude/skills/deploy"
+        ],
+        "bytes_kept": true,
+        "kind": "followed-exclusion",
+        "name": "deploy",
+        "workspace_id": "w_acme"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY",
+      "argv": [
+        "topos",
+        "remove",
+        "deploy",
+        "--yes"
+      ]
+    }
+  ]
+}

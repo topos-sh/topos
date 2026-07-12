@@ -10,6 +10,8 @@ cargo xtask gen-schema             # (re)generate contracts/schemas/*.schema.jso
 cargo xtask gen-schema --check     # the contract drift gate — a stale / missing / orphan artifact fails
 cargo xtask gen-fixtures           # (re)generate the golden --json fixtures under contracts/fixtures/
 cargo xtask gen-fixtures --check   # the fixture drift gate (same stale/missing/orphan discipline)
+cargo xtask gen-cli-ref            # (re)generate docs/cli.md from the real clap tree (topos::cli_command())
+cargo xtask gen-cli-ref --check    # the CLI-reference drift gate (byte-compare, like the other drift gates)
 cargo xtask check-arch             # the architectural-layering + lint-opt-in + toolchain-pin gate
 cargo xtask ci                     # ALL the non-DB gates, in CI's order, failing fast
 cargo xtask conformance            # the store matrices (not yet implemented — prints so and exits 0)
@@ -26,6 +28,12 @@ cargo xtask conformance            # the store matrices (not yet implemented —
 - **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes (so they cannot
   drift from the contract) and writes them under `contracts/fixtures/json/`; `--check` is the drift gate
   with the same stale/missing/orphan discipline.
+- **`gen-cli-ref [--check]`** — renders the CLI reference `docs/cli.md` from the REAL clap tree
+  (`topos::cli_command()`, so the reference can never drift from what the binary parses): the consent-contract
+  preamble, the global flags, then every verb grouped by scope (self / team / maintenance) with its usage line,
+  about text, and args/flags table; hidden subcommands are omitted with a short "renamed verbs" note.
+  `--check` is a byte-compare drift gate like the others. (xtask takes a path dependency on `topos` for this —
+  default features only, so the test-only `test-fixtures` surface stays off; `check-arch` holds the line.)
 - **`check-arch`** — the dependency-graph trust claims as a gate, via `cargo tree`:
   - the client (`topos`) carries no `plane-store` / `sqlx` / `libsqlite3-sys` / `tokio` / `reqwest` /
     `hyper` edge (it is a thin sync tool, never an authority), and none of the contract-generation
@@ -48,7 +56,8 @@ cargo xtask conformance            # the store matrices (not yet implemented —
 - **`ci`** — the contributor's pre-push loop: runs the full NON-DB gate sequence in the same order as the
   CI `gate` job, failing fast with a per-gate banner — `cargo fmt --all --check`, `cargo clippy --workspace
   --all-targets --locked -- -D warnings`, `cargo doc --workspace --no-deps --locked` (with
-  `RUSTDOCFLAGS="-D warnings"`), `gen-schema --check`, `gen-fixtures --check`, `check-arch`. Not covered
+  `RUSTDOCFLAGS="-D warnings"`), `gen-schema --check`, `gen-fixtures --check`, `gen-cli-ref --check`,
+  `check-arch`. Not covered
   (they need a database or an extra tool): `cargo test --workspace` (Postgres via `DATABASE_URL`),
   `cargo deny check`, and CI's sqlx offline-metadata drift job.
 - **`conformance`** — a stub for the store conformance matrices; prints "not yet implemented".

@@ -31,13 +31,6 @@
         }
       ]
     },
-    "invite_link": {
-      "description": "A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the\npublisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer\nmove is the real outcome; the link is a convenience (the `invite` verb mints one independently).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "pending": {
       "description": "Present when this publish is WAITING on the workspace-standup sign-in (the un-enrolled first publish\non a hosted plane): a human opens `verification_uri_complete` and approves; the agent then re-runs\nthe SAME publish command (the `ENROLL_RESUME` next-action carries the argv).",
       "anyOf": [
@@ -47,6 +40,13 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "share_line": {
+      "description": "The paste-able share line for the shipped skill (`<workspace address>/skills/<name>`) — present\nwhen the plane disclosed the workspace address. The pointer move is the real outcome; the line is\nwhat a human pastes in chat.",
+      "type": [
+        "string",
+        "null"
       ]
     },
     "skill_id": {
@@ -166,6 +166,13 @@
       "description": "The standup disclosure a workspace-creating publish carries: which workspace was stood up and who owns\nit. **INFERRED.**",
       "type": "object",
       "properties": {
+        "address": {
+          "description": "The stood-up workspace's ADDRESS (the share link — printed once at genesis, pasted anywhere).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "owner_principal": {
           "description": "The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack\ntripwire: a principal you don't recognize means someone else approved (and owns) this workspace.",
           "type": [

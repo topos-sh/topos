@@ -14,6 +14,9 @@ The source of truth for the wire boundary, GENERATED from the Rust types and com
   annotated routes + the `topos-types` wire DTOs). It rides the SAME `gen-schema` run and the same
   `--check` drift discipline (stale / missing / orphan all fail), so one gate covers both contracts. The
   feature-gated OIDC routes are default-off and therefore deliberately absent from the committed document.
+- **The CLI reference `docs/cli.md`** (a SIBLING generated + committed artifact, outside `contracts/`) is
+  rendered from the real clap tree by `cargo xtask gen-cli-ref` and byte-gated by `gen-cli-ref --check` —
+  the same generated-and-reviewed discipline, applied to the client's command surface.
 - **Not yet here (honestly):** per-harness **placement** fixtures. The Claude Code adapter itself is built
   (`crates/topos-harness`); its placement + hook behavior is pinned by that crate's tests and the
   real-adapter e2e (`tests/tests/hero_claude.rs`), but no committed placement-fixture format exists yet.

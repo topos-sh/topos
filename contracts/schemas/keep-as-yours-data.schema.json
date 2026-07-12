@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KeepAsYoursData",
+  "description": "The `keep it as yours` describe — an `add <name>` that re-forks a RETAINED withdrawn/detached copy\ninto a NEW local skill with no upstream. Bare `add <name>` returns this preview; `--yes` re-adopts the\nbytes and returns an ordinary [`AddData`]. **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "has_draft": {
+      "description": "Whether a local draft rides along into the fork (a snapshotted or on-disk edit ahead of the base).",
+      "type": "boolean"
+    },
+    "name": {
+      "description": "The skill name to re-fork.",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Why the local copy is retained (and no longer delivering here).",
+      "$ref": "#/$defs/KeepReason"
+    },
+    "workspace_id": {
+      "description": "The workspace the retained copy was followed in (its former upstream), if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "name",
+    "reason",
+    "has_draft"
+  ],
+  "$defs": {
+    "KeepReason": {
+      "description": "Why a `keep-as-yours` copy is retained but no longer live. **INFERRED** (additive value set).",
+      "oneOf": [
+        {
+          "description": "Upstream withdrew the skill (archived, or its last delivering channel dropped it) — the agent dirs\nwere cleaned; the sidecar kept the bytes + any draft.",
+          "type": "string",
+          "const": "withdrawn-upstream"
+        },
+        {
+          "description": "The person unfollowed the skill (a detach) — its bytes are frozen in place here.",
+          "type": "string",
+          "const": "detached"
+        },
+        {
+          "description": "`topos remove` excluded the skill on this device — the agent dirs were cleaned, the sidecar kept.",
+          "type": "string",
+          "const": "removed-here"
+        }
+      ]
+    }
+  }
+}

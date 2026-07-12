@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NoticeAckRequest",
+  "description": "`POST /v1/workspaces/{ws}/notices/ack` body — acknowledge notices by id (person-scoped read-state;\nthe silent hook fetches without acking, an interactive narration acks what it narrated).",
+  "type": "object",
+  "properties": {
+    "ids": {
+      "description": "The notice ids to mark read (only the caller's own unacked rows move; unknown ids are ignored).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "ids"
+  ]
+}

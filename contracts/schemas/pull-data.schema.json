@@ -1,9 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PullData",
-  "description": "`pull` result — per-skill currency state plus the reviewer-queue count. **PINNED.**",
+  "description": "`pull` result — per-skill currency state plus the reviewer-queue count. **PINNED** (the original\nfields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent\non a targeted pull and from an older producer).",
   "type": "object",
   "properties": {
+    "notices": {
+      "description": "The unacked, person-scoped notices the delivery answered (verdicts first) — narrated by an\ninteractive `update`, which then acks exactly these ids; the quiet hook fetches without\nacking. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireNotice"
+      }
+    },
     "proposals_awaiting": {
       "description": "Open proposals on your followed skills (v0 is single-approver — any rostered member may review, so\nthe count is all open-non-stale proposals across what you follow, not a reviewer-assignment queue).",
       "type": "integer",
@@ -14,6 +21,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/PullSkill"
+      }
+    },
+    "sync": {
+      "description": "Per-workspace delivery/report freshness after the sweep — the staleness clock the hook\nwarning and `auth status` read. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WorkspaceSyncReport"
       }
     }
   },
@@ -305,6 +319,114 @@
         "observed",
         "applied",
         "action"
+      ]
+    },
+    "WireNotice": {
+      "description": "One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without\na schema break (today's values include `\"verdict\"` and `\"proposal_closed\"`); every other field is\npresent only when the notice names it. The silent currency hook fetches these without acking; an\ninteractive surface acks by id.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "description": "The actor whose action raised the notice, when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "When the notice was created (the server-stamped RFC-3339 string).",
+          "type": "string"
+        },
+        "id": {
+          "description": "The notice id (the ack handle).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The notice kind — an OPEN vocabulary (e.g. `\"verdict\"`, `\"proposal_closed\"`); a client ignores a\nkind it does not recognize.",
+          "type": "string"
+        },
+        "message": {
+          "description": "A rendered human message, when the notice carries one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "The outcome (e.g. a verdict's `approve` / `reject`), when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "The human reason (a review's rationale), when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_id": {
+          "description": "The skill the notice concerns, when it names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_name": {
+          "description": "The skill's current catalog name (joined for narration), when the notice names a skill.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_id": {
+          "description": "The version the notice concerns (64-char lowercase hex), when it names one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "created_at"
+      ]
+    },
+    "WorkspaceSyncReport": {
+      "description": "One workspace's sync freshness in a [`PullData`]. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "last_delivery_at": {
+          "description": "When the last successful delivery answered (epoch millis; absent if never).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "last_report_at": {
+          "description": "When the last successful applied-state report landed (epoch millis; absent if never).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "staleness_window_ms": {
+          "description": "The workspace's staleness window (ms).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "staleness_window_ms"
       ]
     }
   }

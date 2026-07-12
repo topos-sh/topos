@@ -198,14 +198,22 @@ fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
     common::begin_address_enroll(&plane, &client, &address, FOLLOWER);
     let applied = client.resume_apply().expect("the resume enrolls + applies");
     assert!(applied.enrolled_now, "THIS invocation enrolled the device");
-    assert_eq!(applied.installed.len(), 1, "the everyone genesis landed: {:?}", applied.installed);
+    assert_eq!(
+        applied.installed.len(),
+        1,
+        "the everyone genesis landed: {:?}",
+        applied.installed
+    );
     assert_eq!(applied.installed[0].skill_id, SKILL);
     assert_eq!(
         client.placement_files(SKILL),
         expected_placement(&genesis_files()),
         "v1 lands byte-exact"
     );
-    assert_eq!(client.sync_state(SKILL).applied, Generation { epoch: 1, seq: 1 });
+    assert_eq!(
+        client.sync_state(SKILL).applied,
+        Generation { epoch: 1, seq: 1 }
+    );
 
     // The pre-rotation credential hash (the rotation witness — captured while the follower is a member).
     let hash_before = credential_hash(&plane, FOLLOWER);

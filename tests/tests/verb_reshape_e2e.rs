@@ -159,7 +159,10 @@ fn row_exists(plane: &Plane, sql: &str, binds: &[&str]) -> bool {
         for b in binds {
             q = q.bind(*b);
         }
-        q.fetch_optional(&plane.pool).await.expect("witness query").is_some()
+        q.fetch_optional(&plane.pool)
+            .await
+            .expect("witness query")
+            .is_some()
     })
 }
 
@@ -229,14 +232,26 @@ fn s02_follow_a_channel_qualified_address_joins_and_lands_the_set() {
     let applied = client.resume_apply().expect("resume enrolls + applies");
     assert!(applied.enrolled_now);
     assert!(
-        applied.subscribed.contains(&("channel".to_owned(), "ops".to_owned())),
+        applied
+            .subscribed
+            .contains(&("channel".to_owned(), "ops".to_owned())),
         "the apply joined #ops: {:?}",
         applied.subscribed
     );
     // The reconcile landed the WHOLE entitled set: the channel's skill AND the everyone genesis.
-    let installed: Vec<&str> = applied.installed.iter().map(|i| i.skill_id.as_str()).collect();
-    assert!(installed.contains(&OPS_SKILL), "the channel set landed: {installed:?}");
-    assert!(installed.contains(&SKILL), "everyone still delivers: {installed:?}");
+    let installed: Vec<&str> = applied
+        .installed
+        .iter()
+        .map(|i| i.skill_id.as_str())
+        .collect();
+    assert!(
+        installed.contains(&OPS_SKILL),
+        "the channel set landed: {installed:?}"
+    );
+    assert!(
+        installed.contains(&SKILL),
+        "everyone still delivers: {installed:?}"
+    );
     assert_eq!(
         client.placement_files(OPS_SKILL),
         expected(&[("SKILL.md", false, b"# ops\nOps runbook.\n")]),
@@ -271,11 +286,18 @@ fn s03_unfollow_is_person_scoped_and_freezes_bytes_everywhere() {
     // already-confirmed seat).
     let device_a = join_and_land(&plane, "vr-s03-a", ALICE);
     let device_b = join_and_land(&plane, "vr-s03-b", ALICE);
-    assert_eq!(device_b.placement_files(SKILL), expected_placement(&genesis_files()));
+    assert_eq!(
+        device_b.placement_files(SKILL),
+        expected_placement(&genesis_files())
+    );
 
     // Device A unfollows — a PERSON-scoped detach (the describe's all-devices disclosure is the law).
     let applied = device_a.unfollow_apply(SKILL).expect("unfollow --yes");
-    assert_eq!(applied["bytes_kept"], serde_json::json!(true), "an unfollow never touches a byte");
+    assert_eq!(
+        applied["bytes_kept"],
+        serde_json::json!(true),
+        "an unfollow never touches a byte"
+    );
     assert!(
         applied["items"][0]["stops"]
             .as_array()
@@ -300,7 +322,11 @@ fn s03_unfollow_is_person_scoped_and_freezes_bytes_everywhere() {
         .iter()
         .find(|r| r.skill == SKILL)
         .expect("the detached skill is narrated, never silently dropped");
-    assert_eq!(row.action, PullAction::Detached, "person-scoped: B detaches too");
+    assert_eq!(
+        row.action,
+        PullAction::Detached,
+        "person-scoped: B detaches too"
+    );
     assert_eq!(
         device_b.placement_files(SKILL),
         expected_placement(&genesis_files()),
@@ -366,7 +392,9 @@ fn s04_remove_excludes_one_device_and_follow_restores_it() {
     // BYTES on A in the same invocation (remove reset the sync state to the never-received
     // baseline, so the re-delivery is a fresh first-receive — not an "already current" no-op over
     // an empty dir).
-    let _applied = device_a.follow_apply_skills(&[SKILL]).expect("follow --skill --yes");
+    let _applied = device_a
+        .follow_apply_skills(&[SKILL])
+        .expect("follow --skill --yes");
     assert!(
         !row_exists(
             &plane,
@@ -382,7 +410,11 @@ fn s04_remove_excludes_one_device_and_follow_restores_it() {
         "follow at A restores the bytes"
     );
     let (data, _) = device_a.reconcile(false);
-    let row = data.skills.iter().find(|r| r.skill == SKILL).expect("delivered again");
+    let row = data
+        .skills
+        .iter()
+        .find(|r| r.skill == SKILL)
+        .expect("delivered again");
     assert!(
         !matches!(row.action, PullAction::Excluded | PullAction::Detached),
         "the skill is back in A's delivered set (not excluded/frozen): {:?}",
@@ -431,7 +463,11 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
     author.edit_placement(
         SKILL,
         &[
-            ("SKILL.md", false, b"# deploy\nDeploy the service, sharper.\n"),
+            (
+                "SKILL.md",
+                false,
+                b"# deploy\nDeploy the service, sharper.\n",
+            ),
             ("run.sh", true, b"#!/bin/sh\necho deploying\n"),
         ],
     );
@@ -442,16 +478,30 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
     let PublishResult::Proposed(p1) = published else {
         panic!("a member publish on a reviewed bundle downgrades to a proposal, got {published:?}");
     };
-    let hash1 = p1.proposal.split_once('@').expect("skill@hash").1.to_owned();
+    let hash1 = p1
+        .proposal
+        .split_once('@')
+        .expect("skill@hash")
+        .1
+        .to_owned();
 
     // The reviewer's bare `review` leads with the author's message.
     let inbox = reviewer.review_inbox().expect("the review inbox");
-    assert_eq!(inbox.inbox.len(), 1, "one proposal awaits: {:?}", inbox.inbox);
+    assert_eq!(
+        inbox.inbox.len(),
+        1,
+        "one proposal awaits: {:?}",
+        inbox.inbox
+    );
     assert_eq!(inbox.inbox[0].message, "sharper deploy", "message-first");
     assert_eq!(inbox.inbox[0].proposer, ALICE);
     // The AUTHOR's bare `review` files the same proposal under the OUTBOX (their own).
     let author_view = author.review_inbox().expect("the author's review view");
-    assert_eq!(author_view.outbox.len(), 1, "the author sees their own proposal as outbox");
+    assert_eq!(
+        author_view.outbox.len(),
+        1,
+        "the author sees their own proposal as outbox"
+    );
 
     // The base MOVES (the owner ships a non-overlapping v2), so the approve is a stale CONFLICT.
     plane.rt.block_on(async {
@@ -500,22 +550,45 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
         "the stale approve is refused at the read surface: {err}"
     );
     // …and the reviewer's inbox now DISCLOSES the staleness (the typed flag a re-propose clears).
-    let inbox = reviewer.review_inbox().expect("the inbox after the base moved");
-    assert!(inbox.inbox[0].stale, "the stale flag is raised: {:?}", inbox.inbox);
+    let inbox = reviewer
+        .review_inbox()
+        .expect("the inbox after the base moved");
+    assert!(
+        inbox.inbox[0].stale,
+        "the stale flag is raised: {:?}",
+        inbox.inbox
+    );
 
     // The author's next update MERGES the draft onto the moved base (non-overlapping ⇒ clean), and
     // the RE-PROPOSE supersedes the stale proposal — closed with resolved_reason 'superseded'.
     let (data, _) = author.reconcile(false);
-    let row = data.skills.iter().find(|r| r.skill == SKILL).expect("the skill row");
-    assert_eq!(row.action, PullAction::Merged, "the draft merges cleanly onto the moved base");
+    let row = data
+        .skills
+        .iter()
+        .find(|r| r.skill == SKILL)
+        .expect("the skill row");
+    assert_eq!(
+        row.action,
+        PullAction::Merged,
+        "the draft merges cleanly onto the moved base"
+    );
     let d2 = author.draft_digest(SKILL);
     let PublishResult::Proposed(p2) = author
-        .publish_message(&plane.base_url, &format!("{SKILL}@{d2}"), "sharper deploy, rebased")
+        .publish_message(
+            &plane.base_url,
+            &format!("{SKILL}@{d2}"),
+            "sharper deploy, rebased",
+        )
         .expect("the re-propose runs")
     else {
         panic!("the re-propose downgrades to a proposal again");
     };
-    let hash2 = p2.proposal.split_once('@').expect("skill@hash").1.to_owned();
+    let hash2 = p2
+        .proposal
+        .split_once('@')
+        .expect("skill@hash")
+        .1
+        .to_owned();
     assert_ne!(hash1, hash2, "a fresh candidate");
     assert!(
         row_exists(
@@ -532,7 +605,10 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
     let approved = reviewer
         .review_approve(&format!("{SKILL}@{hash2}"))
         .expect("the fresh proposal approves");
-    assert!(approved.current_generation.is_some(), "the approve moved current");
+    assert!(
+        approved.current_generation.is_some(),
+        "the approve moved current"
+    );
     let (data, _) = author.reconcile(true);
     let verdict = data
         .notices
@@ -559,7 +635,11 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
     author.edit_placement(
         SKILL,
         &[
-            ("SKILL.md", false, b"# deploy\nDeploy the service, sharper still.\n"),
+            (
+                "SKILL.md",
+                false,
+                b"# deploy\nDeploy the service, sharper still.\n",
+            ),
             ("run.sh", true, b"#!/bin/sh\necho deploying\n"),
             ("OWNER.md", false, b"# owner notes\n"),
         ],
@@ -571,7 +651,12 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
     else {
         panic!("the third publish downgrades to a proposal");
     };
-    let hash3 = p3.proposal.split_once('@').expect("skill@hash").1.to_owned();
+    let hash3 = p3
+        .proposal
+        .split_once('@')
+        .expect("skill@hash")
+        .1
+        .to_owned();
     reviewer
         .review_reject(&format!("{SKILL}@{hash3}"), "needs a rollback plan")
         .expect("the reject (with the required -m reason) runs");
@@ -614,7 +699,11 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
     owner.follow_locally(LOG_SKILL, WS);
     let d1 = owner.draft_digest(LOG_SKILL);
     let PublishResult::Published(v1) = owner
-        .publish_message(&plane.base_url, &format!("{LOG_SKILL}@{d1}"), "add deploy script")
+        .publish_message(
+            &plane.base_url,
+            &format!("{LOG_SKILL}@{d1}"),
+            "add deploy script",
+        )
         .expect("the genesis publish")
     else {
         panic!("an owner genesis publishes direct");
@@ -623,7 +712,11 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
     owner.edit_placement(LOG_SKILL, &[("SKILL.md", false, b"# log\nv2 faster\n")]);
     let d2 = owner.draft_digest(LOG_SKILL);
     let PublishResult::Published(_v2) = owner
-        .publish_message(&plane.base_url, &format!("{LOG_SKILL}@{d2}"), "faster deploy")
+        .publish_message(
+            &plane.base_url,
+            &format!("{LOG_SKILL}@{d2}"),
+            "faster deploy",
+        )
         .expect("the v2 publish")
     else {
         panic!("the owner's v2 publishes direct");
@@ -636,12 +729,21 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
         .iter()
         .filter_map(|v| v.message.as_deref())
         .collect();
-    assert!(messages.contains(&"add deploy script"), "v1's -m shows: {messages:?}");
-    assert!(messages.contains(&"faster deploy"), "v2's -m shows: {messages:?}");
+    assert!(
+        messages.contains(&"add deploy script"),
+        "v1's -m shows: {messages:?}"
+    );
+    assert!(
+        messages.contains(&"faster deploy"),
+        "v2's -m shows: {messages:?}"
+    );
 
     // A purge leaves the tombstone (who, when) — the hash stays in history, the bytes go.
     let v1_commit = CommitId(
-        hex::decode(&v1_hex).expect("hex").try_into().expect("32 bytes"),
+        hex::decode(&v1_hex)
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes"),
     );
     let purged = plane
         .rt
@@ -655,8 +757,13 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
             wall_ms(),
         ))
         .expect("the purge op runs");
-    assert!(matches!(purged, PurgeOutcome::Purged), "v1 purges: {purged:?}");
-    let log = owner.skill_log_wire(WS, LOG_SKILL).expect("the post-purge log");
+    assert!(
+        matches!(purged, PurgeOutcome::Purged),
+        "v1 purges: {purged:?}"
+    );
+    let log = owner
+        .skill_log_wire(WS, LOG_SKILL)
+        .expect("the post-purge log");
     let tombstone = log
         .versions
         .iter()
@@ -676,7 +783,9 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
         refused.contains("not served here"),
         "the revert is refused at the read surface: {refused}"
     );
-    let log = owner.skill_log_wire(WS, LOG_SKILL).expect("the post-refusal log");
+    let log = owner
+        .skill_log_wire(WS, LOG_SKILL)
+        .expect("the post-refusal log");
     let current: Vec<&str> = log
         .versions
         .iter()
@@ -703,13 +812,18 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
     let LifecycleOutcome::Archived { archived_name } = archived else {
         panic!("expected Archived, got {archived:?}");
     };
-    let log = owner.skill_log_wire(WS, LOG_SKILL).expect("the post-archive log");
+    let log = owner
+        .skill_log_wire(WS, LOG_SKILL)
+        .expect("the post-archive log");
     assert_eq!(
         log.base_name.as_deref(),
         Some(LOG_SKILL),
         "the freed base name is recorded (the archived-successor hint's source)"
     );
-    assert_eq!(log.name, archived_name, "the log answers under the archived name");
+    assert_eq!(
+        log.name, archived_name,
+        "the log answers under the archived name"
+    );
     assert_eq!(log.status, "archived");
 }
 
@@ -763,8 +877,15 @@ fn s07_multi_flag_follow_resolves_all_or_applies_none() {
     );
 
     // The positive control: the same batch with both names real applies BOTH.
-    let applied = client.follow_apply_skills(&[ALPHA, BETA]).expect("the clean batch applies");
-    assert_eq!(applied.subscribed.len(), 2, "both direct follows: {:?}", applied.subscribed);
+    let applied = client
+        .follow_apply_skills(&[ALPHA, BETA])
+        .expect("the clean batch applies");
+    assert_eq!(
+        applied.subscribed.len(),
+        2,
+        "both direct follows: {:?}",
+        applied.subscribed
+    );
     assert_eq!(
         row_count(
             &plane,
@@ -796,7 +917,11 @@ fn s08_the_protocol_card_is_identical_on_every_path() {
     let bodies: Vec<String> = paths.iter().map(|p| http_get_body(p, "*/*")).collect();
     assert_eq!(bodies[0], bodies[1], "the card echoes no path");
     assert_eq!(bodies[1], bodies[2], "noise answers the same card");
-    assert!(bodies[0].contains("topos follow"), "the agent hand-off line: {}", bodies[0]);
+    assert!(
+        bodies[0].contains("topos follow"),
+        "the agent hand-off line: {}",
+        bodies[0]
+    );
 
     // The machine bootstrap: the JSON face carries the API base a client re-roots onto.
     let card: WireProtocolCard =
@@ -872,13 +997,24 @@ fn s10_protect_tighten_reviewer_loosen_owner_audience_in_describe() {
 
     // The bare describe: tighten-to-reviewed, nothing applied, the AUDIENCE disclosed (the reach —
     // the owner + the reviewer are the entitled persons here).
-    let describe = reviewer.protect(SKILL, None, false).expect("the protect describe");
+    let describe = reviewer
+        .protect(SKILL, None, false)
+        .expect("the protect describe");
     assert!(!describe.applied, "a bare protect changes nothing");
-    assert_eq!(describe.level, "reviewed", "bare = tighten to the skill default");
-    assert_eq!(describe.audience, Some(2), "the describe carries the reach: {describe:?}");
+    assert_eq!(
+        describe.level, "reviewed",
+        "bare = tighten to the skill default"
+    );
+    assert_eq!(
+        describe.audience,
+        Some(2),
+        "the describe carries the reach: {describe:?}"
+    );
 
     // Tighten as a reviewer WORKS (tighten is reviewer-gated).
-    let applied = reviewer.protect(SKILL, None, true).expect("the reviewer tightens");
+    let applied = reviewer
+        .protect(SKILL, None, true)
+        .expect("the reviewer tightens");
     assert!(applied.applied);
     assert!(
         row_exists(
@@ -894,7 +1030,10 @@ fn s10_protect_tighten_reviewer_loosen_owner_audience_in_describe() {
     let refused = reviewer
         .protect(SKILL, Some("open"), true)
         .expect_err("loosening is the owner's act");
-    assert!(refused.to_lowercase().contains("owner"), "the refusal names the owner: {refused}");
+    assert!(
+        refused.to_lowercase().contains("owner"),
+        "the refusal names the owner: {refused}"
+    );
     assert!(
         row_exists(
             &plane,
@@ -923,9 +1062,14 @@ fn s11_one_login_session_mints_credentials_for_two_workspaces() {
             .await
             .expect("seed the second workspace");
         for ws in [WorkspaceId::parse(WS).unwrap(), ws_b] {
-            a.seed_workspace_member(&ws, &Principal::parse(ALICE).unwrap(), "member", "confirmed")
-                .await
-                .expect("seat alice confirmed");
+            a.seed_workspace_member(
+                &ws,
+                &Principal::parse(ALICE).unwrap(),
+                "member",
+                "confirmed",
+            )
+            .await
+            .expect("seat alice confirmed");
         }
         common::Seeded {
             genesis: Some(g),
@@ -936,7 +1080,9 @@ fn s11_one_login_session_mints_credentials_for_two_workspaces() {
     // ONE login session: begin (device flow, intent login) → the identity leg ONCE → resume redeems
     // at POST /v1/login, minting one credential per confirmed seat.
     let client = FollowHarness::new("vr-s11");
-    let begin = client.auth_login(Some(&plane.base_url)).expect("login call 1");
+    let begin = client
+        .auth_login(Some(&plane.base_url))
+        .expect("login call 1");
     let user_code = begin["pending"]["user_code"]
         .as_str()
         .expect("the pending user code")
@@ -949,13 +1095,21 @@ fn s11_one_login_session_mints_credentials_for_two_workspaces() {
                 .confirm_external_identity(&user_code, ALICE, NOW),
         )
         .expect("the one identity leg");
-    let done = client.auth_login(Some(&plane.base_url)).expect("login resume");
+    let done = client
+        .auth_login(Some(&plane.base_url))
+        .expect("login resume");
     let memberships = done["done"]["memberships"]
         .as_array()
         .expect("the memberships array");
-    assert_eq!(memberships.len(), 2, "one browser round, two workspaces: {memberships:?}");
+    assert_eq!(
+        memberships.len(),
+        2,
+        "one browser round, two workspaces: {memberships:?}"
+    );
     assert!(
-        memberships.iter().all(|m| m["minted"] == serde_json::json!(true)),
+        memberships
+            .iter()
+            .all(|m| m["minted"] == serde_json::json!(true)),
         "a credential minted per confirmed seat: {memberships:?}"
     );
     assert_eq!(done["done"]["principal"], serde_json::json!(ALICE));
@@ -967,7 +1121,10 @@ fn s11_one_login_session_mints_credentials_for_two_workspaces() {
     client
         .approve(&plane.base_url, &[target])
         .expect("the first-receive accept");
-    assert_eq!(client.placement_files(SKILL), expected_placement(&genesis_files()));
+    assert_eq!(
+        client.placement_files(SKILL),
+        expected_placement(&genesis_files())
+    );
 
     let status = client.auth_status().expect("auth status (signed in)");
     assert_eq!(status["signed_in"], serde_json::json!(true));
@@ -1049,7 +1206,9 @@ fn s12_hook_posture_freeze_line_and_staleness_warning() {
     let client_b = join_and_land(&plane_b, "vr-s12b", ALICE);
     client_b.backdate_sync_status(WS, wall_ms() - 3_600_000, 60_000);
     drop(plane_b); // the listener dies with the runtime — the next dial is connection-refused
-    let lines = client_b.quiet_update().expect("an unreachable plane is hook-soft (exit 0)");
+    let lines = client_b
+        .quiet_update()
+        .expect("an unreachable plane is hook-soft (exit 0)");
     assert!(
         lines
             .iter()
@@ -1074,7 +1233,9 @@ fn http_get_body(url: &str, accept: &str) -> String {
     )
     .expect("send the request");
     let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read the response");
+    stream
+        .read_to_string(&mut response)
+        .expect("read the response");
     response
         .split_once("\r\n\r\n")
         .map(|(_, b)| b.to_owned())

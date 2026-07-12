@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireSkillLog",
+  "description": "`GET /v1/workspaces/{ws}/skills/{skill}/log` response — the skill's version history (purge\ntombstones included) and its proposal events. An ARCHIVED skill stays addressable here; asking by a\nfreed base name answers the archived successor as a hint. Member-scoped.",
+  "type": "object",
+  "properties": {
+    "base_name": {
+      "description": "The pre-archive name, when archived (what the skill was called before the rename freed it).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The skill's current catalog name (the archived spelling once archived).",
+      "type": "string"
+    },
+    "proposals": {
+      "description": "The proposal events, newest first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireLogProposal"
+      }
+    },
+    "skill_id": {
+      "description": "The skill id.",
+      "type": "string"
+    },
+    "status": {
+      "description": "The skill's lifecycle status (`active` / `archived` / `deleted`).",
+      "type": "string"
+    },
+    "versions": {
+      "description": "The versions, newest first where orderable (the ancestry walk stops at reclaimed history;\ntombstoned leftovers follow unordered).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireLogVersion"
+      }
+    }
+  },
+  "required": [
+    "skill_id",
+    "name",
+    "status",
+    "versions",
+    "proposals"
+  ],
+  "$defs": {
+    "WireLogProposal": {
+      "description": "One proposal event in a skill's history (open, and every resolution).",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "description": "When the proposal was opened (server-stamped string).",
+          "type": "string"
+        },
+        "proposer": {
+          "description": "The author's principal.",
+          "type": "string"
+        },
+        "resolved_at": {
+          "description": "When it was resolved (server-stamped string), when resolved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved_by": {
+          "description": "Who resolved it, when resolved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved_reason": {
+          "description": "The resolution reason (a reject's rationale; a closure's cause), when recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "The proposal's status (`open` / `accepted` / `rejected` / `closed`).",
+          "type": "string"
+        },
+        "version_id": {
+          "description": "The proposed version's commit id (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version_id",
+        "proposer",
+        "status",
+        "created_at"
+      ]
+    },
+    "WireLogVersion": {
+      "description": "One version in a skill's history. A PURGED version stays listed — who purged it and when — with its\nbytes gone (author/message may be absent once the underlying objects are reclaimed).",
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "The version author, when the commit object is still readable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current": {
+          "description": "Whether this version is the skill's `current`.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "The version message, when the commit object is still readable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purged_at": {
+          "description": "When the version's bytes were purged (epoch milliseconds) — the tombstone half.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "purged_by": {
+          "description": "Who purged the version's bytes — the tombstone half.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_id": {
+          "description": "The version's commit id (64-char lowercase hex).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version_id",
+        "current"
+      ]
+    }
+  }
+}

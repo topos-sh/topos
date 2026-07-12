@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChannelData",
+  "description": "`channel add|remove <channel> <skill>...` — place / remove skill references in a channel. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "`add` or `remove`.",
+      "$ref": "#/$defs/ChannelAction"
+    },
+    "applied": {
+      "description": "`true` on the `--yes` apply, `false` on the describe.",
+      "type": "boolean"
+    },
+    "channel": {
+      "type": "string"
+    },
+    "creates": {
+      "description": "`true` when this `add` would CREATE the channel (it does not exist yet).",
+      "type": "boolean"
+    },
+    "items": {
+      "description": "The per-skill placement/removal outcomes.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChannelItem"
+      }
+    },
+    "mode": {
+      "description": "The channel's mode (`open` / `curated`) — the gate a placement passes.",
+      "type": "string"
+    },
+    "workspace_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "channel",
+    "workspace_id",
+    "action",
+    "mode",
+    "creates",
+    "items",
+    "applied"
+  ],
+  "$defs": {
+    "ChannelAction": {
+      "description": "`add` vs `remove` for a [`ChannelData`]. **INFERRED value set.**",
+      "type": "string",
+      "enum": [
+        "add",
+        "remove"
+      ]
+    },
+    "ChannelItem": {
+      "description": "One skill's placement/removal in a [`ChannelData`]. **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "The refusal detail when `failed` (e.g. a curated-channel role refusal).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "`pending` (describe), `placed` / `removed` (applied ok), or `failed` (a mid-flight refusal after\nan earlier one landed — reported honestly, per skill).",
+          "$ref": "#/$defs/ChannelItemOutcome"
+        },
+        "skill": {
+          "type": "string"
+        },
+        "skill_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill",
+        "skill_id",
+        "outcome"
+      ]
+    },
+    "ChannelItemOutcome": {
+      "description": "One skill's channel-op outcome. **INFERRED value set.**",
+      "type": "string",
+      "enum": [
+        "pending",
+        "placed",
+        "removed",
+        "failed"
+      ]
+    }
+  }
+}

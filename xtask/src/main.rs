@@ -4,9 +4,11 @@
 //! `cargo xtask gen-schema --check`  → the CI drift gate (stale / missing / orphan schemas all fail).
 //! `cargo xtask gen-fixtures`        → (re)generate the golden `--json` fixtures under `contracts/fixtures/`.
 //! `cargo xtask gen-fixtures --check`→ the fixture drift gate.
+//! `cargo xtask gen-cli-ref`         → (re)generate the CLI reference `docs/cli.md` from the real clap tree.
+//! `cargo xtask gen-cli-ref --check` → the CLI-reference drift gate.
 //! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in + toolchain-pin gate.
 //! `cargo xtask ci`                  → the full non-DB gate sequence, in CI's order (fmt, clippy, doc,
-//!                                     both drift gates, check-arch) — the contributor's pre-push loop.
+//!                                     the drift gates, check-arch) — the contributor's pre-push loop.
 //! `cargo xtask conformance`         → the store matrices (not yet implemented).
 //! `cargo xtask dist …`              → offline release packaging (deterministic tarball + SHA256SUMS) — see `dist.rs`.
 //!
@@ -60,6 +62,61 @@ fn schemas() -> Vec<(&'static str, String)> {
                 topos_types::requests::WireAppliedReport
             )),
         ),
+        // The adopted member-lane wire bodies: the constant protocol card (the unmatched-path machine
+        // face), the login-redeem answer, and the member-scoped describe reads + row-op request bodies the
+        // two-phase verbs run over.
+        (
+            "wire-protocol-card",
+            emit(schemars::schema_for!(
+                topos_types::requests::WireProtocolCard
+            )),
+        ),
+        (
+            "wire-me",
+            emit(schemars::schema_for!(topos_types::requests::WireMe)),
+        ),
+        (
+            "wire-channel-index",
+            emit(schemars::schema_for!(
+                topos_types::requests::WireChannelIndex
+            )),
+        ),
+        (
+            "wire-proposal-index",
+            emit(schemars::schema_for!(
+                topos_types::requests::WireProposalIndex
+            )),
+        ),
+        (
+            "wire-skill-log",
+            emit(schemars::schema_for!(topos_types::requests::WireSkillLog)),
+        ),
+        (
+            "wire-reach",
+            emit(schemars::schema_for!(topos_types::requests::WireReach)),
+        ),
+        (
+            "login-data",
+            emit(schemars::schema_for!(topos_types::requests::LoginData)),
+        ),
+        (
+            "login-redeem-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::LoginRedeemRequest
+            )),
+        ),
+        (
+            "notice-ack-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::NoticeAckRequest
+            )),
+        ),
+        (
+            "protection-set-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::ProtectionSetRequest
+            )),
+        ),
         // Per-verb `--json` `data` payloads — one schema each.
         (
             "pull-data",
@@ -108,6 +165,54 @@ fn schemas() -> Vec<(&'static str, String)> {
         (
             "invitation-data",
             emit(schemars::schema_for!(topos_types::requests::InvitationData)),
+        ),
+        // The adopted verb describe/apply `data` payloads (the two-phase surface: a bare mutating verb
+        // returns the describe, `--yes` returns it applied).
+        (
+            "remove-data",
+            emit(schemars::schema_for!(topos_types::results::RemoveData)),
+        ),
+        (
+            "channel-data",
+            emit(schemars::schema_for!(topos_types::results::ChannelData)),
+        ),
+        (
+            "protect-data",
+            emit(schemars::schema_for!(topos_types::results::ProtectData)),
+        ),
+        (
+            "review-index-data",
+            emit(schemars::schema_for!(topos_types::results::ReviewIndexData)),
+        ),
+        (
+            "review-describe-data",
+            emit(schemars::schema_for!(
+                topos_types::results::ReviewDescribeData
+            )),
+        ),
+        (
+            "invite-read-data",
+            emit(schemars::schema_for!(topos_types::results::InviteReadData)),
+        ),
+        (
+            "invite-describe-data",
+            emit(schemars::schema_for!(
+                topos_types::results::InviteDescribeData
+            )),
+        ),
+        (
+            "reset-data",
+            emit(schemars::schema_for!(topos_types::results::ResetData)),
+        ),
+        (
+            "publish-describe-data",
+            emit(schemars::schema_for!(
+                topos_types::results::PublishDescribeData
+            )),
+        ),
+        (
+            "keep-as-yours-data",
+            emit(schemars::schema_for!(topos_types::results::KeepAsYoursData)),
         ),
         // On-disk persisted client documents.
         (
@@ -265,13 +370,16 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
-    use topos_types::bootstrap::DeploymentMode;
+    use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ConflictPathReport, DiffData, DiffSource, FollowData, ListData, LogData,
-        MergeReport, PublishData, PublishPending, PublishPendingStatus, PullAction, PullData,
-        PullSkill, SkillEntry, UnfollowData,
+        AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, ConflictPathReport,
+        DiffData, DiffSource, FollowData, FollowOffer, InviteReadData, ListData, LogData,
+        MergeReport, Offer, ProtectData, PublishData, PublishDescribeData, PublishGate,
+        PublishPending, PublishPendingStatus, PullAction, PullData, PullSkill, RemoveData,
+        RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, UnfollowData,
+        WorkspaceSyncReport,
     };
     use topos_types::{
         ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
@@ -447,6 +555,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 bundle_digest: fx_digest.to_owned(),
                 draft: false,
                 pending_proposals: vec![],
+                // A purely-local, never-followed `add` carries no provenance columns — the pinned shape
+                // stays byte-identical to what the real CLI emits here (all three omit when `None`).
+                source: None,
+                status: None,
+                cause: None,
             }],
             ..Default::default()
         })
@@ -498,6 +611,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }),
             ],
             team: None,
+            // A local skill resolved by its own name — no freed-base-name archived-successor hint (omits).
+            archived_successor: None,
         })
         .expect("LogData serializes"),
         warnings: vec![],
@@ -701,6 +816,292 @@ fn fixtures() -> Vec<(&'static str, String)> {
         proposals_awaiting: 1,
     };
 
+    // =============================================================================================
+    // The ADOPTED verb surface — the two-phase describe/apply envelopes (a bare mutating verb returns
+    // the describe with `applied: false`; `--yes` returns it applied) + the reshaped reads.
+    // =============================================================================================
+
+    // `follow <workspace>` (bare) — the DESCRIBE after the enrollment settled: who you are, the
+    // workspace's posture, and the ONE first-receive offer awaiting a `--yes` (nothing landed yet).
+    let follow_describe = JsonEnvelope {
+        schema_version: 1,
+        command: "follow".to_owned(),
+        ok: true,
+        data: serde_json::to_value(FollowData {
+            workspace_id: "w_acme".to_owned(),
+            enrolled: true,
+            skills: vec![FollowOffer {
+                skill_id: "s_deploy".to_owned(),
+                name: "deploy".to_owned(),
+                offer: Offer {
+                    version_id: "a".repeat(64),
+                    bundle_digest: "b".repeat(64),
+                },
+            }],
+            deployment_mode: Some(DeploymentMode::Cloud),
+            workspace_display_name: Some("Acme".to_owned()),
+            verified_domain: Some("acme.com".to_owned()),
+            verified_domain_status: Some(VerifiedDomainStatus::Verified),
+            plane_base_url: Some("https://api.topos.sh".to_owned()),
+            pending: None,
+            currency: None,
+        })
+        .expect("FollowData serializes"),
+        warnings: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("APPLY".to_owned()),
+            argv: argv(&["topos", "follow", "acme", "--yes"]),
+        }],
+        receipt: None,
+        error: None,
+    };
+
+    // `remove <skill>` (bare) — the DESCRIBE: a followed skill becomes a per-device exclusion (bytes
+    // kept, the agent dirs would be cleaned). `applied: false` — nothing has changed.
+    let remove_describe = JsonEnvelope {
+        schema_version: 1,
+        command: "remove".to_owned(),
+        ok: true,
+        data: serde_json::to_value(RemoveData {
+            items: vec![RemoveItem {
+                name: "deploy".to_owned(),
+                kind: RemoveKind::FollowedExclusion,
+                workspace_id: Some("w_acme".to_owned()),
+                agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
+                bytes_kept: true,
+            }],
+            applied: false,
+        })
+        .expect("RemoveData serializes"),
+        warnings: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("APPLY".to_owned()),
+            argv: argv(&["topos", "remove", "deploy", "--yes"]),
+        }],
+        receipt: None,
+        error: None,
+    };
+
+    // `remove <skill> --yes` — the APPLY of the same exclusion (`applied: true`; the agent dirs are
+    // cleaned, every sidecar byte kept).
+    let remove_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "remove".to_owned(),
+        ok: true,
+        data: serde_json::to_value(RemoveData {
+            items: vec![RemoveItem {
+                name: "deploy".to_owned(),
+                kind: RemoveKind::FollowedExclusion,
+                workspace_id: Some("w_acme".to_owned()),
+                agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
+                bytes_kept: true,
+            }],
+            applied: true,
+        })
+        .expect("RemoveData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `channel add eng deploy --yes` — a placement APPLIED: the skill reference lands in the `open`
+    // channel `eng`.
+    let channel_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "channel".to_owned(),
+        ok: true,
+        data: serde_json::to_value(ChannelData {
+            channel: "eng".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            action: ChannelAction::Add,
+            mode: "open".to_owned(),
+            creates: false,
+            items: vec![ChannelItem {
+                skill: "deploy".to_owned(),
+                skill_id: "s_deploy".to_owned(),
+                outcome: ChannelItemOutcome::Placed,
+                detail: None,
+            }],
+            applied: true,
+        })
+        .expect("ChannelData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `protect <skill>` (bare) — the DESCRIBE of TIGHTENING a skill to `reviewed`, carrying the audience
+    // (people reached). `applied: false`, `loosening: false` (tightening takes reviewer+).
+    let protect_describe = JsonEnvelope {
+        schema_version: 1,
+        command: "protect".to_owned(),
+        ok: true,
+        data: serde_json::to_value(ProtectData {
+            target: "deploy".to_owned(),
+            kind: "skill".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            level: "reviewed".to_owned(),
+            loosening: false,
+            audience: Some(12),
+            note: None,
+            applied: false,
+        })
+        .expect("ProtectData serializes"),
+        warnings: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("APPLY".to_owned()),
+            argv: argv(&["topos", "protect", "deploy", "--yes"]),
+        }],
+        receipt: None,
+        error: None,
+    };
+
+    // `review` (bare) — the review INBOX/OUTBOX across enrolled workspaces, author-message first.
+    let review_inbox = JsonEnvelope {
+        schema_version: 1,
+        command: "review".to_owned(),
+        ok: true,
+        data: serde_json::to_value(ReviewIndexData {
+            inbox: vec![ReviewIndexEntry {
+                workspace_id: "w_acme".to_owned(),
+                workspace_name: "acme".to_owned(),
+                skill: "deploy".to_owned(),
+                proposal: format!("deploy@{}", "c".repeat(64)),
+                proposer: "alice@acme.com".to_owned(),
+                message: "Tighten the rollback note.".to_owned(),
+                base_version_id: "a".repeat(64),
+                created_at: "2026-06-25T00:00:00Z".to_owned(),
+                stale: false,
+            }],
+            outbox: vec![],
+        })
+        .expect("ReviewIndexData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy
+    // (`changed: false` — nothing was sent).
+    let invite_read = JsonEnvelope {
+        schema_version: 1,
+        command: "invite".to_owned(),
+        ok: true,
+        data: serde_json::to_value(InviteReadData {
+            address: "https://topos.sh/acme".to_owned(),
+            invite_policy: "members".to_owned(),
+            changed: false,
+        })
+        .expect("InviteReadData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `publish <skill>` (bare, enrolled) — the DESCRIBE: where it lands, the gate outcome (an `open`
+    // bundle lands directly), the audience, the share line, and the undo path. Nothing shipped yet.
+    let publish_describe = JsonEnvelope {
+        schema_version: 1,
+        command: "publish".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PublishDescribeData {
+            skill: "deploy".to_owned(),
+            skill_id: "s_deploy".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            workspace_display_name: Some("Acme".to_owned()),
+            bundle_digest: "b".repeat(64),
+            placements: vec!["everyone".to_owned()],
+            gate: PublishGate::Lands,
+            is_revert: false,
+            reach: Some(12),
+            share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
+            undo: Some("a".repeat(64)),
+            origin_note: None,
+        })
+        .expect("PublishDescribeData serializes"),
+        warnings: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("APPLY".to_owned()),
+            argv: argv(&["topos", "publish", "deploy", "--yes"]),
+        }],
+        receipt: None,
+        error: None,
+    };
+
+    // `publish <skill>` when the draft equals `current` — the NEGATIVE `NO_CHANGES` refusal (a permanent
+    // failure: there is nothing to ship, so no retry helps).
+    let publish_no_changes = JsonEnvelope {
+        schema_version: 1,
+        command: "publish".to_owned(),
+        ok: false,
+        data: serde_json::json!({}),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: Some(WireError {
+            code: "NO_CHANGES".to_owned(),
+            outcome: TerminalOutcome::PermanentFailure,
+            retryable: false,
+            affected: Affected {
+                skill: Some("deploy".to_owned()),
+                ..Default::default()
+            },
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({}),
+            next_actions: vec![],
+        }),
+    };
+
+    // A bare `update` sweep whose workspace has gone STALE — the additive `sync` freshness rows + the
+    // person-scoped notices feed the hook's staleness warning + narration read. `command: "update"`
+    // (the reshaped verb; `pull` is its hidden alias).
+    let update_stale = JsonEnvelope {
+        schema_version: 1,
+        command: "update".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PullData {
+            skills: vec![PullSkill {
+                skill: "deploy".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
+                observed: Generation { epoch: 1, seq: 12 },
+                applied: Generation { epoch: 1, seq: 12 },
+                action: PullAction::UpToDate,
+                offer: None,
+                conflict: None,
+                merge: None,
+            }],
+            proposals_awaiting: 1,
+            notices: vec![WireNotice {
+                id: "ntc_09".to_owned(),
+                kind: "verdict".to_owned(),
+                skill_id: Some("s_deploy".to_owned()),
+                skill_name: Some("deploy".to_owned()),
+                version_id: Some("c".repeat(64)),
+                actor: Some("reviewer@acme.com".to_owned()),
+                outcome: Some("approve".to_owned()),
+                reason: Some("Ship it.".to_owned()),
+                message: None,
+                created_at: "2026-06-25T00:00:00Z".to_owned(),
+            }],
+            sync: vec![WorkspaceSyncReport {
+                workspace_id: "w_acme".to_owned(),
+                last_delivery_at: Some(1_699_000_000_000),
+                last_report_at: Some(1_699_000_000_000),
+                staleness_window_ms: 604_800_000,
+            }],
+        })
+        .expect("PullData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
@@ -714,7 +1115,17 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.conflict", emit_json(&publish_conflict)),
         ("json/publish.pending", emit_json(&publish_pending)),
         ("json/follow.claim.ok", emit_json(&follow_claim_ok)),
+        ("json/follow.describe", emit_json(&follow_describe)),
         ("json/delivery.ok", emit_json(&delivery_ok)),
+        ("json/remove.describe", emit_json(&remove_describe)),
+        ("json/remove.ok", emit_json(&remove_ok)),
+        ("json/channel.ok", emit_json(&channel_ok)),
+        ("json/protect.describe", emit_json(&protect_describe)),
+        ("json/review.inbox", emit_json(&review_inbox)),
+        ("json/invite.read", emit_json(&invite_read)),
+        ("json/publish.describe", emit_json(&publish_describe)),
+        ("json/publish.no-changes", emit_json(&publish_no_changes)),
+        ("json/update.stale", emit_json(&update_stale)),
     ]
 }
 
@@ -791,6 +1202,275 @@ fn json_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+// =================================================================================================
+// gen-cli-ref — the CLI reference (`docs/cli.md`), rendered from the REAL `clap` tree (`topos::
+// cli_command()`) so it can never drift from what the binary parses. Same byte-compare `--check` drift
+// discipline as the schema/fixture gates.
+// =================================================================================================
+
+/// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
+/// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
+const SELF_SCOPED: [&str; 8] = [
+    "follow", "unfollow", "update", "add", "remove", "list", "diff", "log",
+];
+const TEAM_SCOPED: [&str; 6] = [
+    "publish", "review", "revert", "channel", "protect", "invite",
+];
+const MAINTENANCE: [&str; 2] = ["self-update", "auth"];
+
+fn docs_dir() -> PathBuf {
+    workspace_root().join("docs")
+}
+
+/// One markdown table cell: collapse internal whitespace to single spaces and escape the `|` that would
+/// otherwise split the row.
+fn cell(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
+}
+
+/// Does the arg carry a value (an option or a positional), vs a bare boolean flag?
+fn takes_value(arg: &clap::Arg) -> bool {
+    matches!(
+        arg.get_action(),
+        clap::ArgAction::Set | clap::ArgAction::Append
+    )
+}
+
+/// Is the arg repeatable / multi-valued (a `Vec` field)?
+fn is_multiple(arg: &clap::Arg) -> bool {
+    matches!(arg.get_action(), clap::ArgAction::Append)
+}
+
+/// The first declared value name for an arg (its `<NAME>` placeholder), falling back to the id in caps.
+fn value_name(arg: &clap::Arg) -> String {
+    arg.get_value_names()
+        .and_then(|names| names.first().map(|n| n.as_str().to_owned()))
+        .unwrap_or_else(|| arg.get_id().as_str().to_uppercase())
+}
+
+/// The usage token for a positional arg: `<NAME>` (required) / `[NAME]` (optional), plus `...` when
+/// repeatable.
+fn positional_token(arg: &clap::Arg) -> String {
+    let name = value_name(arg);
+    let inner = if arg.is_required_set() {
+        format!("<{name}>")
+    } else {
+        format!("[{name}]")
+    };
+    if is_multiple(arg) {
+        format!("{inner}...")
+    } else {
+        inner
+    }
+}
+
+/// The auto-generated `--help` / `--version` args clap injects — identified by their ACTION, so a real
+/// user field literally named `version` (e.g. `self-update --version <TAG>`) is NEVER mistaken for one.
+fn is_auto_help(arg: &clap::Arg) -> bool {
+    matches!(
+        arg.get_action(),
+        clap::ArgAction::Help
+            | clap::ArgAction::HelpShort
+            | clap::ArgAction::HelpLong
+            | clap::ArgAction::Version
+    )
+}
+
+/// True for the auto-generated help/version pair + the two global flags surfaced once under "Global
+/// options" — the args each per-verb table omits.
+fn is_boilerplate(arg: &clap::Arg) -> bool {
+    is_auto_help(arg) || matches!(arg.get_id().as_str(), "json" | "workspace")
+}
+
+/// The comma-joined spellings of an option (`-m, --message`); empty for a bare positional.
+fn option_spellings(arg: &clap::Arg) -> String {
+    let mut spellings = Vec::new();
+    if let Some(short) = arg.get_short() {
+        spellings.push(format!("-{short}"));
+    }
+    if let Some(long) = arg.get_long() {
+        spellings.push(format!("--{long}"));
+    }
+    spellings.join(", ")
+}
+
+/// Render one command (recursing into any subcommands) into `out` at the given heading level.
+fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usize) {
+    let hashes = "#".repeat(level);
+    out.push_str(&format!("\n{hashes} `{path}`\n\n"));
+
+    // The usage line.
+    let mut usage = vec![path.to_owned()];
+    let has_flags = cmd
+        .get_arguments()
+        .any(|a| !a.is_positional() && !a.is_hide_set() && !is_boilerplate(a));
+    if has_flags {
+        usage.push("[OPTIONS]".to_owned());
+    }
+    if cmd.has_subcommands() {
+        usage.push("<COMMAND>".to_owned());
+    }
+    for arg in cmd.get_arguments() {
+        if arg.is_positional() && !arg.is_hide_set() && !is_boilerplate(arg) {
+            usage.push(positional_token(arg));
+        }
+    }
+    out.push_str(&format!("```\n{}\n```\n\n", usage.join(" ")));
+
+    // The about text — the long form when present (the full description), collapsed to one paragraph.
+    if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
+        out.push_str(&format!("{}\n\n", cell(&about.to_string())));
+    }
+
+    // The args/flags table (visible, non-boilerplate args only).
+    let rows: Vec<&clap::Arg> = cmd
+        .get_arguments()
+        .filter(|a| !a.is_hide_set() && !is_boilerplate(a))
+        .collect();
+    if !rows.is_empty() {
+        out.push_str("| Argument / flag | Value | Default | Description |\n");
+        out.push_str("|---|---|---|---|\n");
+        for arg in rows {
+            let name = if arg.is_positional() {
+                positional_token(arg)
+            } else {
+                option_spellings(arg)
+            };
+            let value = if takes_value(arg) && !arg.is_positional() {
+                format!("`<{}>`", value_name(arg))
+            } else {
+                String::new()
+            };
+            let default = arg
+                .get_default_values()
+                .iter()
+                .map(|v| v.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+            out.push_str(&format!(
+                "| `{}` | {} | {} | {} |\n",
+                cell(&name),
+                value,
+                cell(&default),
+                cell(&help),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Recurse into visible subcommands (e.g. `auth login|logout|status`).
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        render_command(out, &format!("{path} {}", sub.get_name()), sub, level + 1);
+    }
+}
+
+/// Render the full CLI reference markdown from the real clap command tree.
+fn cli_ref_md() -> String {
+    let root = topos::cli_command();
+    let mut out = String::new();
+    out.push_str("# `topos` command reference\n\n");
+    out.push_str(
+        "> GENERATED from the `clap` command tree by `cargo xtask gen-cli-ref` — do not hand-edit. \
+         Change the CLI, re-run the command, and commit the result; the `--check` variant is the drift \
+         gate.\n\n",
+    );
+    out.push_str(
+        "`topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a \
+         bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in \
+         one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works \
+         on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is \
+         one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the \
+         envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a \
+         usage error (an unknown flag or a missing argument). The session-start currency hook runs \
+         `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a \
+         network blip so a session never fails to start.\n\n",
+    );
+
+    // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
+    let globals: Vec<&clap::Arg> = root
+        .get_arguments()
+        .filter(|a| !a.is_hide_set() && !is_auto_help(a))
+        .collect();
+    if !globals.is_empty() {
+        out.push_str("## Global options\n\nThese work before or after any verb.\n\n");
+        out.push_str("| Flag | Value | Description |\n|---|---|---|\n");
+        for arg in globals {
+            let value = if takes_value(arg) {
+                format!("`<{}>`", value_name(arg))
+            } else {
+                String::new()
+            };
+            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+            out.push_str(&format!(
+                "| `{}` | {} | {} |\n",
+                cell(&option_spellings(arg)),
+                value,
+                cell(&help),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // The verbs, grouped by scope (the known verb lists, not clap metadata).
+    for (title, names) in [
+        ("Self-scoped verbs", SELF_SCOPED.as_slice()),
+        ("Team-scoped verbs", TEAM_SCOPED.as_slice()),
+        ("Maintenance", MAINTENANCE.as_slice()),
+    ] {
+        out.push_str(&format!("## {title}\n"));
+        for name in names {
+            let cmd = root
+                .get_subcommands()
+                .find(|c| c.get_name() == *name)
+                .unwrap_or_else(|| panic!("the cli tree is missing the `{name}` verb"));
+            render_command(&mut out, &format!("topos {name}"), cmd, 3);
+        }
+    }
+
+    // The hidden / renamed verbs note (the reference omits hidden subcommands themselves).
+    out.push_str(
+        "\n## Renamed verbs\n\n\
+         - `topos pull` is a hidden alias of `topos update` (armed session-start hooks in the field \
+         still invoke `pull`); the `--json` envelope always reads `update`.\n\
+         - `topos upgrade` is intentionally ambiguous and refuses with a disambiguation: `topos \
+         update` refreshes followed skills, while `topos self-update` replaces the `topos` binary.\n",
+    );
+
+    out
+}
+
+/// Generate (or `--check`) `docs/cli.md`, mirroring the schema/fixture drift discipline (a stale or
+/// missing file fails). Rendered from the real clap tree, so the reference tracks the binary exactly.
+fn gen_cli_ref(check: bool) -> Result<()> {
+    let dir = docs_dir();
+    let path = dir.join("cli.md");
+    let content = cli_ref_md();
+    if check {
+        match fs::read_to_string(&path) {
+            Ok(existing) if existing == content => println!("cli reference up to date"),
+            Ok(_) => bail!(
+                "cli-reference drift: docs/cli.md is stale — run `cargo xtask gen-cli-ref` and commit"
+            ),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
+                "cli-reference drift: docs/cli.md is missing — run `cargo xtask gen-cli-ref` and commit"
+            ),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    } else {
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+    Ok(())
 }
 
 /// The resolved set of crate names in a package's NORMAL (non-dev, non-build) dependency tree.
@@ -1321,6 +2001,10 @@ fn ci() -> Result<()> {
             "contract drift gate (fixtures)",
             Box::new(|| gen_fixtures(true)),
         ),
+        (
+            "cli-reference drift gate (docs/cli.md)",
+            Box::new(|| gen_cli_ref(true)),
+        ),
         ("architectural layering", Box::new(check_arch)),
     ];
     let total = gates.len();
@@ -1342,13 +2026,14 @@ fn main() -> Result<()> {
     match cmd {
         "gen-schema" => gen_schema(check)?,
         "gen-fixtures" => gen_fixtures(check)?,
+        "gen-cli-ref" => gen_cli_ref(check)?,
         "check-arch" => check_arch()?,
         "ci" => ci()?,
         "conformance" => println!("conformance: not yet implemented"),
         "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | check-arch | ci | conformance | dist …>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | check-arch | ci | conformance | dist …>"
             );
             std::process::exit(2);
         }

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "command": "review",
+  "ok": true,
+  "data": {
+    "inbox": [
+      {
+        "base_version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "created_at": "2026-06-25T00:00:00Z",
+        "message": "Tighten the rollback note.",
+        "proposal": "deploy@cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "proposer": "alice@acme.com",
+        "skill": "deploy",
+        "stale": false,
+        "workspace_id": "w_acme",
+        "workspace_name": "acme"
+      }
+    ],
+    "outbox": []
+  },
+  "warnings": [],
+  "next_actions": []
+}

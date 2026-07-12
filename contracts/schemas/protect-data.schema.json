@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProtectData",
+  "description": "`protect <target> [<level>]` — set a skill's or channel's protection level. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "applied": {
+      "description": "`true` on the `--yes` apply, `false` on the describe.",
+      "type": "boolean"
+    },
+    "audience": {
+      "description": "The audience this protection governs: the reach (people) for a skill, the member count for a\nchannel.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "kind": {
+      "description": "`skill` or `channel`.",
+      "type": "string"
+    },
+    "level": {
+      "description": "The level being set (`reviewed` / `curated` / `open`).",
+      "type": "string"
+    },
+    "loosening": {
+      "description": "`true` when the level LOOSENS protection (`open`) — the owner-gated direction.",
+      "type": "boolean"
+    },
+    "note": {
+      "description": "A standing note the describe carries (e.g. \"pending proposals survive a loosening\").",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target": {
+      "type": "string"
+    },
+    "workspace_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "target",
+    "kind",
+    "workspace_id",
+    "level",
+    "loosening",
+    "applied"
+  ]
+}

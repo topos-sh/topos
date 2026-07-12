@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewIndexData",
+  "description": "`review` (bare) — the review inbox/outbox across every enrolled workspace, author-message first.\n**INFERRED.**",
+  "type": "object",
+  "properties": {
+    "inbox": {
+      "description": "Proposals others opened that you can review (inbox).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReviewIndexEntry"
+      }
+    },
+    "outbox": {
+      "description": "Your own open proposals (outbox).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReviewIndexEntry"
+      }
+    }
+  },
+  "required": [
+    "inbox",
+    "outbox"
+  ],
+  "$defs": {
+    "ReviewIndexEntry": {
+      "description": "One proposal in the review inbox/outbox. **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "base_version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "message": {
+          "description": "The author's message — rendered FIRST.",
+          "type": "string"
+        },
+        "proposal": {
+          "description": "The review target handle, `<skill>@<version_id>`.",
+          "type": "string"
+        },
+        "proposer": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
+        },
+        "stale": {
+          "description": "Whether `current` has moved past the proposal's base (a stale proposal needs a re-propose).",
+          "type": "boolean"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "workspace_name": {
+          "description": "The workspace's address name (the inbox groups by it).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "workspace_name",
+        "skill",
+        "proposal",
+        "proposer",
+        "message",
+        "base_version_id",
+        "created_at",
+        "stale"
+      ]
+    }
+  }
+}

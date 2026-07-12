@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "command": "channel",
+  "ok": true,
+  "data": {
+    "action": "add",
+    "applied": true,
+    "channel": "eng",
+    "creates": false,
+    "items": [
+      {
+        "outcome": "placed",
+        "skill": "deploy",
+        "skill_id": "s_deploy"
+      }
+    ],
+    "mode": "open",
+    "workspace_id": "w_acme"
+  },
+  "warnings": [],
+  "next_actions": []
+}

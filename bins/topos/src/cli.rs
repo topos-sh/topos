@@ -10,6 +10,14 @@
 
 use clap::{Parser, Subcommand};
 
+/// The full `clap` command tree, built from the derived `Cli`. The ONE source of truth for both argv
+/// parsing and the generated command reference (`cargo xtask gen-cli-ref` renders `docs/cli.md` from
+/// this), so the reference can never drift from what the binary actually accepts.
+#[must_use]
+pub fn cli_command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
 /// `topos` — share agent behaviors across a team. The agent drives it non-interactively with `--json`.
 #[derive(Debug, Parser)]
 #[command(name = "topos", version, about = "Share agent behaviors across a team")]

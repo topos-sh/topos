@@ -54,6 +54,31 @@
     "untracked"
   ],
   "$defs": {
+    "DetachCause": {
+      "description": "Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).",
+      "oneOf": [
+        {
+          "description": "The person unfollowed the skill (delivery stopped on every device).",
+          "type": "string",
+          "const": "unfollowed"
+        },
+        {
+          "description": "`topos remove` excluded the skill on THIS device (other devices still receive it).",
+          "type": "string",
+          "const": "excluded-here"
+        },
+        {
+          "description": "Upstream withdrew the skill (archived, or its last delivering channel dropped it).",
+          "type": "string",
+          "const": "removed-upstream"
+        },
+        {
+          "description": "No stored workspace credential — signed out of the workspace this skill lives in.",
+          "type": "string",
+          "const": "signed-out"
+        }
+      ]
+    },
     "RemoteFollowState": {
       "description": "The local follow-state annotation on a `--remote` catalog entry.",
       "oneOf": [
@@ -132,6 +157,17 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "cause": {
+          "description": "Why a `detached` row is no longer live: `unfollowed` / `excluded-here` / `removed-upstream` /\n`signed-out`. Absent when the row is live. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DetachCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "draft": {
           "description": "Local edits ahead of the version this entry is on.",
           "type": "boolean"
@@ -145,6 +181,24 @@
         },
         "skill": {
           "type": "string"
+        },
+        "source": {
+          "description": "Where the bytes come from: the followed workspace's address name, an imported skill's origin\nhost, or `local` for a purely local `add`. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "The currency posture of the local copy: `current` / `behind` / `draft` / `detached`.\n**INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkillStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "version_id": {
           "description": "The approvable `@` token (the commit SHA-256).",
@@ -164,6 +218,31 @@
         "version_id",
         "bundle_digest",
         "draft"
+      ]
+    },
+    "SkillStatus": {
+      "description": "A tracked skill's currency posture in [`SkillEntry`]. **INFERRED** (additive value set).",
+      "oneOf": [
+        {
+          "description": "On the followed `current` (or a local skill at its own head), no local edits.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "The followed workspace serves a newer `current` than this copy holds — `update` to advance.",
+          "type": "string",
+          "const": "behind"
+        },
+        {
+          "description": "Local edits ahead of the version this copy is on.",
+          "type": "string",
+          "const": "draft"
+        },
+        {
+          "description": "No longer live here (see [`SkillEntry::cause`]) — the bytes are a frozen copy.",
+          "type": "string",
+          "const": "detached"
+        }
       ]
     },
     "UntrackedEntry": {

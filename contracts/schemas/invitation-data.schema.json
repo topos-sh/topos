@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InvitationData",
+  "description": "`POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace\nADDRESS (the whole invitation besides the roster rows themselves).",
+  "type": "object",
+  "properties": {
+    "address": {
+      "description": "The workspace address (the share link — it carries nothing; the roster is the lock).",
+      "type": "string"
+    },
+    "invited": {
+      "description": "The emails now seated as invited members (canonical form).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mailed": {
+      "description": "Whether invitation mail was sent server-side (`true` only when the server can send mail).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "address",
+    "invited",
+    "mailed"
+  ]
+}

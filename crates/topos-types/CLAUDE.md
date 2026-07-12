@@ -8,12 +8,19 @@ the workspace-standup flow; **reshaped by the workspace-credential clean break**
 pre-1.0, no compatibility window): the write + governance bodies DROPPED `device_key_id` (the acting
 device rides the `Authorization: Bearer` workspace credential, never a body field), `RedeemResponse`
 dropped the per-skill `read_creds` (and `RedeemedSkillCred` with it) for the ONE plaintext
-`credential`; earlier standup-era additions stay: `DeviceAuthorizeRequest`'s optional `invite_token` +
-the closed `SessionIntent` (`enroll`/`standup`), `DeviceAuthorizeResponse`'s optional
-`verification_uri_complete` + the standup `plane` block, `DeviceTokenResponse`'s optional granted
-`workspace {workspace_id, display_name}`, `RedeemResponse`'s optional seated `principal`,
-`VerificationContextResponse`'s optional `intent` — + the **governance**
-invite/roster/revoke bodies), the unauthenticated invite-**bootstrap** payload ([`bootstrap`]: the
+`credential`; the enrollment surface then went **token-less** with the adopted verbs:
+`DeviceAuthorizeRequest` dropped `invite_token` for an optional `workspace` ADDRESS (an unknown name is
+never disclosed), and the closed `SessionIntent` is now `enroll`/`standup`/`login`; the `/i/`-link invite
+DTOs (`InviteRequest`/`InviteSkill`/`InviteData`) were DELETED — joining is `follow <address>`, and inviting
+is a roster write (`InvitationRequest`/`InvitationData`). Earlier standup-era additions stay:
+`DeviceAuthorizeResponse`'s optional `verification_uri_complete` + the standup `plane` block,
+`DeviceTokenResponse`'s optional granted `workspace {workspace_id, display_name, address}`,
+`RedeemResponse`'s optional seated `principal`, `VerificationContextResponse`'s optional `intent`; plus the
+**governance** roster/revoke bodies and the **adopted member-lane surface**: `POST /v1/login`
+(`LoginRedeemRequest` → `LoginData`/`LoginMembership`), the constant `WireProtocolCard`, the member-scoped
+describe reads (`WireMe`, `WireChannelIndex`, `WireProposalIndex`, `WireSkillLog`, `WireReach`), the row-op
+bodies (`ProtectionSetRequest`, `NoticeAckRequest`), and `WireDelivery`'s new `staleness_window_ms`), the
+unauthenticated **bootstrap** payload ([`bootstrap`]: the
 pre-enrollment read — workspace + the plane API base to dial; no trust root, no bytes, no role), and the on-disk
 client documents ([`persisted`]: sync / lock / map / op / conflict — the last records an unresolved author
 merge: the publish-block fact + the recovery journal). These are **deserialization shapes** — the app libs
@@ -25,8 +32,11 @@ kernel never holds an invalid deserialized state). The wire request/response DTO
 its OpenAPI) enable it; every other consumer, above all the client, compiles pure-serde DTOs (check-arch
 asserts the `topos` tree resolves neither `schemars` nor `utoipa`).
 
-Per-verb `data` shapes: `pull`/`list`/`diff` are spec-PINNED; the other nine are marked **INFERRED**
-(additive-only, will tighten as each verb is built). `WireError.code` is an **open** string vocabulary by
+Per-verb `data` shapes: `pull`/`list`/`diff` are spec-PINNED; the rest are marked **INFERRED**
+(additive-only, tightening as each verb is built) — including the adopted two-phase describe/apply payloads
+(`RemoveData`, `ChannelData`, `ProtectData`, `ReviewIndexData`/`ReviewDescribeData`,
+`InviteReadData`/`InviteDescribeData`, `ResetData`, `PublishDescribeData`, `KeepAsYoursData`), each carrying
+an `applied` flag (a bare describe is `false`, `--yes` is `true`). `WireError.code` is an **open** string vocabulary by
 design — the spec deliberately does not freeze a closed code set. `PublishData` widened for the
 workspace-standup client: `version_id`/`current_generation` became `Option` (unknowable while a publish is
 PENDING the standup sign-in) and it gained the optional `pending` (`PublishPending`, status

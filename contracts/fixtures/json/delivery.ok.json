@@ -60,5 +60,6 @@
       "created_at": "2026-06-25T00:00:00Z"
     }
   ],
-  "proposals_awaiting": 1
+  "proposals_awaiting": 1,
+  "staleness_window_ms": 604800000
 }

@@ -96,7 +96,11 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
     // Seat the invitee through the REAL invitation op (the member-lane roster write) — no `/i/` link;
     // the address IS the join target, the roster is the lock. The redeem flips invited → confirmed.
     let invited = common::invite_member(authority, &ws, OWNER_CRED, &[INVITEE], &[], AT).await;
-    assert_eq!(invited, vec![INVITEE.to_owned()], "the invite seats the member");
+    assert_eq!(
+        invited,
+        vec![INVITEE.to_owned()],
+        "the invite seats the member"
+    );
 
     common::Seeded {
         genesis: Some(genesis),
@@ -123,14 +127,20 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
         "the JSON card discloses the API base (the machine bootstrap)"
     );
     let markdown = http_get(&address, "*/*");
-    assert!(markdown.contains("text/plain"), "the markdown face: {markdown}");
+    assert!(
+        markdown.contains("text/plain"),
+        "the markdown face: {markdown}"
+    );
     assert!(markdown.contains("A Topos resource address"));
     assert!(markdown.contains("releases/latest/download/install.sh"));
 
     // Call 1 — `topos follow <address>`: fetch the card, re-root, mint the device keypair, device-authorize.
     // The identity leg is completed in-process (the authority's external-confirm op — the flow is headless).
     common::begin_address_enroll(&plane, &client, &address, INVITEE);
-    assert!(client.wal_exists(), "the pending WAL is written (0600 resume journal)");
+    assert!(
+        client.wal_exists(),
+        "the pending WAL is written (0600 resume journal)"
+    );
     assert_eq!(
         client.device_key_mode(),
         Some(0o600),
@@ -140,14 +150,25 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     // Call 2 — re-invoke `topos follow <address>`: poll (granted) → redeem OVER THE WIRE → promote →
     // continue into the two-phase DESCRIBE (the enrollment landed; the subscription still awaits `--yes`).
     let describe = client.resume_describe().expect("the resume describes");
-    assert!(client.instance_written(), "instance.json committed at promote");
-    assert!(!client.wal_exists(), "the WAL is consumed once promotion completes");
+    assert!(
+        client.instance_written(),
+        "instance.json committed at promote"
+    );
+    assert!(
+        !client.wal_exists(),
+        "the WAL is consumed once promotion completes"
+    );
     assert!(describe.enrolled_now, "THIS invocation enrolled the device");
     assert_eq!(describe.workspace_id, WS);
     assert_eq!(describe.workspace_name, WS_NAME);
     assert_eq!(describe.role, "member", "the confirmed seat is a member");
     // The describe lists exactly the `everyone`-delivered genesis, with its consent digest + `via`.
-    assert_eq!(describe.installs.len(), 1, "one install: {:?}", describe.installs);
+    assert_eq!(
+        describe.installs.len(),
+        1,
+        "one install: {:?}",
+        describe.installs
+    );
     let install = &describe.installs[0];
     assert_eq!(install.skill_id, SKILL);
     assert_eq!(
@@ -155,25 +176,56 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
         Some(hex::encode(plane.genesis().0).as_str()),
         "the install pins the genesis version"
     );
-    assert!(install.bundle_digest.is_some(), "the consent digest is disclosed");
+    assert!(
+        install.bundle_digest.is_some(),
+        "the consent digest is disclosed"
+    );
     assert_eq!(install.via_channels, vec!["everyone".to_owned()]);
-    assert!(!install.via_direct, "it arrives via the everyone channel, not a direct follow");
-    assert!(!describe.all_devices_note.is_empty(), "the person-scoped disclosure");
-    assert!(!describe.reporting_note.is_empty(), "the fleet-reporting disclosure");
+    assert!(
+        !install.via_direct,
+        "it arrives via the everyone channel, not a direct follow"
+    );
+    assert!(
+        !describe.all_devices_note.is_empty(),
+        "the person-scoped disclosure"
+    );
+    assert!(
+        !describe.reporting_note.is_empty(),
+        "the fleet-reporting disclosure"
+    );
 
     // Call 3 — `topos follow <address> --yes`: apply. The reconcile lands `everyone`'s set this invocation.
     let applied = client.follow_apply(&address).expect("the --yes apply");
     assert!(!applied.enrolled_now, "already enrolled by call 2");
-    assert_eq!(applied.installed.len(), 1, "the genesis landed: {:?}", applied.installed);
+    assert_eq!(
+        applied.installed.len(),
+        1,
+        "the genesis landed: {:?}",
+        applied.installed
+    );
     assert_eq!(applied.installed[0].skill_id, SKILL);
-    assert!(applied.warnings.is_empty(), "a clean apply: {:?}", applied.warnings);
+    assert!(
+        applied.warnings.is_empty(),
+        "a clean apply: {:?}",
+        applied.warnings
+    );
 
     // The placement holds the EXACT genesis bytes — path/mode/content byte-for-byte, incl. the exec bit.
     let got = client.placement_files(SKILL);
-    assert_eq!(got, expected_placement(&genesis_files()), "the genesis is placed byte-exact");
-    let run_sh = got.iter().find(|(p, _, _)| p == "run.sh").expect("run.sh present");
+    assert_eq!(
+        got,
+        expected_placement(&genesis_files()),
+        "the genesis is placed byte-exact"
+    );
+    let run_sh = got
+        .iter()
+        .find(|(p, _, _)| p == "run.sh")
+        .expect("run.sh present");
     assert_eq!(run_sh.1 & 0o111, 0o111, "run.sh keeps its executable bit");
-    let skill_md = got.iter().find(|(p, _, _)| p == "SKILL.md").expect("SKILL.md present");
+    let skill_md = got
+        .iter()
+        .find(|(p, _, _)| p == "SKILL.md")
+        .expect("SKILL.md present");
     assert_eq!(skill_md.1 & 0o111, 0, "SKILL.md is not executable");
 }
 
@@ -199,7 +251,10 @@ fn e2e_off_roster_identity_gets_the_uniform_denial() {
         vec!["REQUEST_ACCESS".to_owned()],
         "the denied redeem carries the REQUEST_ACCESS next-action"
     );
-    assert!(!client.enrolled(), "no enrollment state lands for a denied redeem");
+    assert!(
+        !client.enrolled(),
+        "no enrollment state lands for a denied redeem"
+    );
     assert!(!client.instance_written(), "nothing was promoted");
 }
 
@@ -229,12 +284,18 @@ fn e2e_a_web_base_address_re_roots_and_lands_the_genesis() {
     let describe = client.resume_describe().expect("the resume describes");
     assert!(describe.enrolled_now);
     assert_eq!(describe.workspace_id, WS);
-    assert!(client.instance_written(), "instance.json committed under the API base");
+    assert!(
+        client.instance_written(),
+        "instance.json committed under the API base"
+    );
 
     // (3) The `--yes` apply rides the API base and lands the genesis byte-exact.
     let applied = client.follow_apply(&web_address).expect("the --yes apply");
     assert_eq!(applied.installed[0].skill_id, SKILL);
-    assert_eq!(client.placement_files(SKILL), expected_placement(&genesis_files()));
+    assert_eq!(
+        client.placement_files(SKILL),
+        expected_placement(&genesis_files())
+    );
 }
 
 // ── raw HTTP helpers (the e2e crate carries no client library) ──────────────────────────────────────────
@@ -253,7 +314,9 @@ fn http_get(url: &str, accept: &str) -> String {
     )
     .expect("send the request");
     let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read the response");
+    stream
+        .read_to_string(&mut response)
+        .expect("read the response");
     response
 }
 

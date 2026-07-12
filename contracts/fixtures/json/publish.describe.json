@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "command": "publish",
+  "ok": true,
+  "data": {
+    "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "gate": "lands",
+    "is_revert": false,
+    "placements": [
+      "everyone"
+    ],
+    "reach": 12,
+    "share_line": "https://topos.sh/acme/skills/deploy",
+    "skill": "deploy",
+    "skill_id": "s_deploy",
+    "undo": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workspace_display_name": "Acme",
+    "workspace_id": "w_acme"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY",
+      "argv": [
+        "topos",
+        "publish",
+        "deploy",
+        "--yes"
+      ]
+    }
+  ]
+}

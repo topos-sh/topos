@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "command": "protect",
+  "ok": true,
+  "data": {
+    "applied": false,
+    "audience": 12,
+    "kind": "skill",
+    "level": "reviewed",
+    "loosening": false,
+    "target": "deploy",
+    "workspace_id": "w_acme"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY",
+      "argv": [
+        "topos",
+        "protect",
+        "deploy",
+        "--yes"
+      ]
+    }
+  ]
+}

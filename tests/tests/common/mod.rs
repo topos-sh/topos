@@ -25,9 +25,9 @@ use plane_store::{
     Authority, CommitId, ConfirmOutcome, DeploymentMode, EnrollmentConfig, FileMode, InviteOutcome,
     OpId, Principal, SkillId, UploadedFile, WorkspaceId,
 };
-use topos::test_support::FollowHarness;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
+use topos::test_support::FollowHarness;
 use topos_plane::{PlaneState, router};
 use topos_types::{Generation, TerminalOutcome};
 

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewDescribeData",
+  "description": "`review <target>` (bare, no verdict) — the target describe: who, what, base, staleness, and the\ndiff against current. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "base_version_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "diff": {
+      "description": "The unified diff of the proposal against current (`current..<proposal>`).",
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "proposal": {
+      "description": "The review target handle, `<skill>@<version_id>`.",
+      "type": "string"
+    },
+    "proposer": {
+      "type": "string"
+    },
+    "skill": {
+      "type": "string"
+    },
+    "stale": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "proposal",
+    "skill",
+    "proposer",
+    "message",
+    "base_version_id",
+    "stale",
+    "diff"
+  ]
+}

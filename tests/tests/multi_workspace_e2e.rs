@@ -267,7 +267,6 @@ fn follow_and_place(plane: &Plane, client: &FollowHarness, ws_id: &str) {
     );
 }
 
-
 // ── the keystone: one client, two workspaces, every verb scoped right ────────────────────────────────
 
 #[test]

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoginRedeemRequest",
+  "description": "`POST /v1/login` body — redeem a LOGIN grant: prove the device key the grant is bound to and\nreceive one workspace credential per confirmed seat. The grant is the bearer credential; the\ndevice public key is a binding check (nothing signs).",
+  "type": "object",
+  "properties": {
+    "device_public_key": {
+      "description": "The device's raw 32-byte public key, base64url-unpadded — must equal the grant's bound key.",
+      "type": "string"
+    },
+    "grant": {
+      "description": "The opaque grant from the login device flow (the bearer credential for this one exchange).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "grant",
+    "device_public_key"
+  ]
+}

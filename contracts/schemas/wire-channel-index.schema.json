@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireChannelIndex",
+  "description": "`GET /v1/workspaces/{ws}/channels` response — the workspace's channels with the caller's own\nmembership marked. Member-scoped.",
+  "type": "object",
+  "properties": {
+    "channels": {
+      "description": "The channels (the structural `everyone` always present).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WireChannelEntry"
+      }
+    }
+  },
+  "required": [
+    "channels"
+  ],
+  "$defs": {
+    "WireChannelEntry": {
+      "description": "One channel in the workspace's channel index.",
+      "type": "object",
+      "properties": {
+        "builtin": {
+          "description": "Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left).",
+          "type": "boolean"
+        },
+        "member": {
+          "description": "Whether the CALLER is a member (always `true` on `everyone`).",
+          "type": "boolean"
+        },
+        "member_count": {
+          "description": "How many people the channel reaches (confirmed roster size for `everyone`).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mode": {
+          "description": "The channel's mode (`open` or `curated`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The channel's name.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "The skills the channel references.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WireChannelSkill"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "mode",
+        "builtin",
+        "member",
+        "member_count",
+        "skills"
+      ]
+    },
+    "WireChannelSkill": {
+      "description": "One skill reference inside a channel entry.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The skill's catalog name.",
+          "type": "string"
+        },
+        "skill_id": {
+          "description": "The referenced skill id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_id",
+        "name"
+      ]
+    }
+  }
+}

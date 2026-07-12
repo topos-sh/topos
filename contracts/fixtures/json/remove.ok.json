@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "command": "remove",
+  "ok": true,
+  "data": {
+    "applied": true,
+    "items": [
+      {
+        "agent_dirs": [
+          "~/.claude/skills/deploy"
+        ],
+        "bytes_kept": true,
+        "kind": "followed-exclusion",
+        "name": "deploy",
+        "workspace_id": "w_acme"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": []
+}

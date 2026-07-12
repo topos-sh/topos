@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireProtocolCard",
+  "description": "The MACHINE face of the constant protocol card — what an `Accept: application/json` GET of any\nresource address returns, identical for every path (no content, no existence signal): just enough\nfor a client to re-root onto the API and run `follow`.",
+  "type": "object",
+  "properties": {
+    "api_base_url": {
+      "description": "The API base URL the client re-roots onto (the origin serving `/v1`).",
+      "type": "string"
+    },
+    "card": {
+      "description": "The constant discriminant a client dispatches on (`\"topos-protocol-card\"`).",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Always `1` for this contract version (the schema pins it `const`).",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "card",
+    "api_base_url"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResetData",
+  "description": "`update --reset <skill>` — discard a local draft back to the followed `current` (or an imported\nskill's last-fetched origin snapshot). The describe LEADS with what is lost. **INFERRED.**",
+  "type": "object",
+  "properties": {
+    "applied": {
+      "description": "`true` on the `--yes` apply, `false` on the describe.",
+      "type": "boolean"
+    },
+    "drop_diff": {
+      "description": "The unified diff of the draft that would be (describe) / was (apply) discarded.",
+      "type": "string"
+    },
+    "skill": {
+      "type": "string"
+    },
+    "to_version": {
+      "description": "The version the reset lands on (the followed current / the origin snapshot).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "workspace_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "skill",
+    "to_version",
+    "drop_diff",
+    "applied"
+  ]
+}

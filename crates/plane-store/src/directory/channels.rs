@@ -103,7 +103,7 @@ impl ProtectLevel {
     }
 }
 
-/// One channel of the workspace, as [`channels_index`] returns it: identity + mode + whether the
+/// One channel of the workspace, as `channels_index` returns it: identity + mode + whether the
 /// caller belongs, the member count, and the skill references it holds (both name-sorted).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelIndexEntry {

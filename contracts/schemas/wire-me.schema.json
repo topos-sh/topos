@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireMe",
+  "description": "`GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,\nwho added you, and the workspace's address block. Member-scoped (the uniform not-found otherwise).",
+  "type": "object",
+  "properties": {
+    "address": {
+      "description": "The workspace's full address (the share link — server-built on the public link base).",
+      "type": "string"
+    },
+    "display_name": {
+      "description": "The workspace's display name.",
+      "type": "string"
+    },
+    "invite_policy": {
+      "description": "The workspace's invite policy (`members` or `owners`).",
+      "type": "string"
+    },
+    "invited_by": {
+      "description": "Who invited this principal (absent for a genesis owner).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The workspace's ADDRESS name.",
+      "type": "string"
+    },
+    "principal": {
+      "description": "The caller's principal (canonical form).",
+      "type": "string"
+    },
+    "role": {
+      "description": "The caller's role (`owner` / `reviewer` / `member`).",
+      "type": "string"
+    },
+    "workspace_id": {
+      "description": "The workspace id.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "name",
+    "display_name",
+    "address",
+    "principal",
+    "role",
+    "invite_policy"
+  ]
+}

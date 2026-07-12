@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "command": "publish",
+  "ok": false,
+  "data": {},
+  "warnings": [],
+  "next_actions": [],
+  "error": {
+    "code": "NO_CHANGES",
+    "outcome": "PERMANENT_FAILURE",
+    "retryable": false,
+    "affected": {
+      "skill": "deploy"
+    },
+    "context": {},
+    "next_actions": []
+  }
+}

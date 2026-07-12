@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "invite",
+  "ok": true,
+  "data": {
+    "address": "https://topos.sh/acme",
+    "changed": false,
+    "invite_policy": "members"
+  },
+  "warnings": [],
+  "next_actions": []
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "command": "update",
+  "ok": true,
+  "data": {
+    "notices": [
+      {
+        "actor": "reviewer@acme.com",
+        "created_at": "2026-06-25T00:00:00Z",
+        "id": "ntc_09",
+        "kind": "verdict",
+        "outcome": "approve",
+        "reason": "Ship it.",
+        "skill_id": "s_deploy",
+        "skill_name": "deploy",
+        "version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "proposals_awaiting": 1,
+    "skills": [
+      {
+        "action": "up_to_date",
+        "applied": {
+          "epoch": 1,
+          "seq": 12
+        },
+        "observed": {
+          "epoch": 1,
+          "seq": 12
+        },
+        "skill": "deploy",
+        "workspace_id": "w_acme"
+      }
+    ],
+    "sync": [
+      {
+        "last_delivery_at": 1699000000000,
+        "last_report_at": 1699000000000,
+        "staleness_window_ms": 604800000,
+        "workspace_id": "w_acme"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": []
+}
