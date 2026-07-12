@@ -1,4 +1,4 @@
-//! The verb-reshape TAIL seams closed in this leg, over fakes (no HTTP):
+//! The adopted-verb-surface TAIL seams closed in this leg, over fakes (no HTTP):
 //! - **keep-as-yours** — `add <name>` on a RETAINED withdrawn/detached copy re-forks it into a NEW
 //!   local skill (bytes rendered from the sidecar store, the old ghost follow entry retired);
 //! - **`update` selectors + multi-target** — the `--channel`/`--skill`/multi-name resolution is

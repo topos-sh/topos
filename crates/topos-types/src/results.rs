@@ -723,7 +723,7 @@ pub enum ReviewDecision {
 }
 
 // =================================================================================================
-// INFERRED — the verb-reshape describe/apply payloads (`remove` / `channel` / `protect` / the review
+// INFERRED — the adopted describe/apply payloads (`remove` / `channel` / `protect` / the review
 // inbox+describe / `invite`'s read+describe / `update --reset` / `publish`'s describe). Each rides the
 // two-phase envelope: a bare mutating verb returns the payload under `data.describe` (nothing changed),
 // `--yes` returns it as `data` with `applied: true`. Additive-only.

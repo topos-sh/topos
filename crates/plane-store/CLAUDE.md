@@ -544,7 +544,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   full-request identity; NULL on the device lane, whose identity is the resolved device key id) + a
   reserved `step_up_attestation` column + the `(workspace_id, op_id)` index, and adds
   `proposals.resolved_reason` + `resolved_at` (both lanes REQUIRE the reason now — the device lane
-  caught up in the verb reshape).
+  caught up in the verb-surface reshape).
   The receipt replay probe is now **lane-blind** per `(workspace, op_id)`: cross-lane id reuse fails
   closed in BOTH directions (a device op id and a session request id never replay each other), while each
   lane's own slot still replays byte-identically on a full `(method, actor, request_sha256)` match — the
