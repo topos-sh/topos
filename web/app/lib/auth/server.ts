@@ -30,6 +30,10 @@ function buildAuth() {
     database: drizzleAdapter(getDb(), { provider: "pg" }),
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
+    // Better Auth's built-in limiter arms by NODE_ENV, which a served test build sets to
+    // production — key it on the app's OWN env so the credential endpoints stay limited in
+    // production and the suites' rapid sign-ins don't trip it.
+    rateLimit: { enabled: env.APP_ENV === "production" },
     ...(providers.emailAndPassword ? { emailAndPassword: { enabled: true } } : {}),
     ...(selfAssertedEmails
       ? {

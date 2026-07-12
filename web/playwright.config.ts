@@ -51,10 +51,13 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
-      command: `bun run dev -- --port ${APP_PORT}`,
+      // The PRODUCTION build, served — deterministic startup (the dev server's on-demand compile
+      // has no ready signal a headless runner can wait on), and the e2e exercises the same bundle
+      // a deployment runs. Migrations apply lazily on the first request (the healthz probe).
+      command: `bun run build && bun run start`,
       url: `${BASE_URL}/healthz`,
       reuseExistingServer: !process.env.CI,
-      env: appEnv(),
+      env: { ...appEnv(), PORT: String(APP_PORT) },
       timeout: 180_000,
     },
   ],
