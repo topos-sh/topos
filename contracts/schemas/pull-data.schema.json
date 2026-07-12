@@ -235,6 +235,11 @@
           "description": "The PERSON detached the skill (an unfollow, or a channel leave that lapsed it) on some\ndevice: this copy froze in place — bytes untouched, delivery ended.",
           "type": "string",
           "const": "detached"
+        },
+        {
+          "description": "THIS DEVICE excludes the skill (\"not on this device\"): the agent dirs are clear here, the\nperson keeps receiving it everywhere else, and following it here lifts the exclusion.",
+          "type": "string",
+          "const": "excluded"
         }
       ]
     },

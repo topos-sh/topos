@@ -267,8 +267,11 @@ pub(crate) fn pull_reconcile(
             }
         }
 
-        // The undelivered remainder: who acted decides the on-disk consequence.
+        // The undelivered remainder: WHO ACTED decides the on-disk consequence. Three actors, three
+        // outcomes — and absence alone cannot tell them apart, which is why the plane names two of
+        // them explicitly and upstream is the remainder.
         let detached: HashSet<&str> = snapshot.detached.iter().map(String::as_str).collect();
+        let excluded: HashSet<&str> = snapshot.excluded.iter().map(String::as_str).collect();
         for (skill_id, follow) in followed.iter().filter(|(id, f)| {
             f.workspace_id == ws && f.following && !delivered_ids.contains(id.as_str())
         }) {
@@ -281,8 +284,22 @@ pub(crate) fn pull_reconcile(
                 }
             };
             let row = if detached.contains(skill_id.as_str()) {
+                // The PERSON detached it (unfollow / a channel leave that lapsed it): freeze in
+                // place on every device — bytes untouched, `follow` re-attaches.
                 freeze_detached(ctx, &sid)
+            } else if excluded.contains(skill_id.as_str()) {
+                // THIS DEVICE excludes it ("not on this device"). The `remove` verb already cleared
+                // the agent dirs here; the person keeps receiving it elsewhere. Report the true
+                // cause and touch nothing — mistaking this for an upstream withdrawal would narrate
+                // a lie (and re-run a clean that already happened).
+                Ok(undelivered_row(
+                    &sid,
+                    read_sync(ctx, &sid)?.as_ref(),
+                    PullAction::Excluded,
+                ))
             } else {
+                // UPSTREAM withdrew it (archived, or its last delivering channel dropped it):
+                // managed distribution cleans what it managed.
                 withdraw_upstream(ctx, &sid)
             };
             match row {

@@ -447,6 +447,13 @@ pub struct WireDelivery {
     /// The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
     /// NOT currently re-entitled — every device freezes these in place, never cleaning them.
     pub detached: Vec<String>,
+    /// The skill ids THIS DEVICE excludes ("not on this device") — the third actor in the who-acts
+    /// split, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy
+    /// leaves this device; the person keeps receiving it on every other device; `follow` here lifts it.
+    /// Sent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere
+    /// (the web, a second tool) for an upstream withdrawal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
     /// The unacked, person-scoped notices (verdicts, proposal closures, …).
     pub notices: Vec<WireNotice>,
     /// The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).
@@ -1238,6 +1245,7 @@ mod tests {
                 },
             }],
             detached: vec!["s_old".to_owned()],
+            excluded: Vec::new(),
             notices: vec![WireNotice {
                 id: "ntc_1".to_owned(),
                 kind: "verdict".to_owned(),

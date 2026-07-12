@@ -3410,6 +3410,13 @@
             },
             "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them."
           },
+          "excluded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The skill ids THIS DEVICE excludes (\"not on this device\") — the third actor in the who-acts\nsplit, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy\nleaves this device; the person keeps receiving it on every other device; `follow` here lifts it.\nSent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere\n(the web, a second tool) for an upstream withdrawal."
+          },
           "notices": {
             "type": "array",
             "items": {

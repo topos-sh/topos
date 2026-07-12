@@ -678,6 +678,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             },
         ],
         detached: vec!["s_legacy".to_owned()],
+        excluded: vec!["s_laptop_only".to_owned()],
         notices: vec![WireNotice {
             id: "ntc_01".to_owned(),
             kind: "verdict".to_owned(),

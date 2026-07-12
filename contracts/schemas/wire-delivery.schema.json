@@ -11,6 +11,13 @@
         "type": "string"
       }
     },
+    "excluded": {
+      "description": "The skill ids THIS DEVICE excludes (\"not on this device\") — the third actor in the who-acts\nsplit, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy\nleaves this device; the person keeps receiving it on every other device; `follow` here lifts it.\nSent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere\n(the web, a second tool) for an upstream withdrawal.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "notices": {
       "description": "The unacked, person-scoped notices (verdicts, proposal closures, …).",
       "type": "array",

@@ -605,6 +605,7 @@ async fn member_read_scope(
 mod canonical_migration;
 mod channels_delivery;
 mod channels_lifecycle;
+mod channels_migration;
 mod channels_protect;
 mod contribute;
 mod display_name;

@@ -175,6 +175,9 @@ pub(crate) struct DeliverySnapshot {
     pub skills: Vec<DeliverySkill>,
     /// Skill ids the person detached (unfollowed / lapsed): bytes stay in place, frozen.
     pub detached: Vec<String>,
+    /// Skill ids THIS DEVICE excludes ("not on this device") — the third actor: the copy leaves this
+    /// device (the `remove` verb already cleared it), the person keeps receiving it elsewhere.
+    pub excluded: Vec<String>,
     /// OPEN proposals across the delivered set (the `proposals_awaiting` gauge).
     pub proposals_awaiting: u64,
 }

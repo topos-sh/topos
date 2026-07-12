@@ -902,6 +902,12 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             String::from("detached (you unfollowed) — frozen in place; `topos follow` re-attaches"),
             Vec::new(),
         ),
+        PullAction::Excluded => (
+            String::from(
+                "not on this device (you removed it here) — your other devices still receive it",
+            ),
+            Vec::new(),
+        ),
         PullAction::Diverged => {
             let v = s
                 .conflict

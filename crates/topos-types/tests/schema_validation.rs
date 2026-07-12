@@ -84,6 +84,7 @@ fn good_delivery() -> WireDelivery {
             },
         }],
         detached: vec![],
+        excluded: Vec::new(),
         notices: vec![WireNotice {
             id: "n_1".into(),
             kind: "verdict".into(),

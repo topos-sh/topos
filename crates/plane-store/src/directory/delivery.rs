@@ -69,6 +69,9 @@ pub struct Delivery {
     /// Skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that
     /// are NOT currently re-entitled — every device freezes these in place.
     pub detached: Vec<String>,
+    /// Skill ids THIS DEVICE excludes ("not on this device") — the third actor: the copy leaves this
+    /// device, the person keeps receiving it everywhere else, and `follow` here lifts it.
+    pub excluded: Vec<String>,
     pub notices: Vec<DeliveryNotice>,
     /// OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge; the
     /// inbox detail is a separate surface).
@@ -107,6 +110,10 @@ pub(crate) async fn delivery(
     let detached = authority
         .db()
         .detached_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
+        .await?;
+    let excluded = authority
+        .db()
+        .device_exclusions(&mut tx, ws, &identity.device_key_id)
         .await?;
     let notice_rows = authority
         .db()
@@ -180,6 +187,7 @@ pub(crate) async fn delivery(
     Ok(Delivery {
         skills,
         detached,
+        excluded,
         notices,
         proposals_awaiting,
     })

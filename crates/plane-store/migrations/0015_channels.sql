@@ -696,6 +696,11 @@ RETURNS TEXT LANGUAGE plpgsql AS $$
 DECLARE
     v_before TEXT[];
 BEGIN
+    -- The membership gate, IN the function (defense in depth): the callers gate too, but the database
+    -- answer must be authoritative for EVERY caller — the web tier calls these same functions
+    -- directly at the door cutover, and an ungated one would let a caller bug write durable mask
+    -- rows for a principal with no seat, silently killing a member's delivery.
+    IF topos_member_role(p_ws, p_principal) IS NULL THEN RETURN 'member_required'; END IF;
     IF NOT EXISTS (SELECT 1 FROM catalog WHERE workspace_id = p_ws AND skill_id = p_skill) THEN
         RETURN 'unknown_skill';
     END IF;
@@ -719,6 +724,16 @@ $$;
 CREATE FUNCTION topos_exclude_device(p_ws TEXT, p_device TEXT, p_skill TEXT, p_created_at TEXT)
 RETURNS TEXT LANGUAGE plpgsql AS $$
 BEGIN
+    -- The device must be a REGISTERED, non-revoked device of a CONFIRMED member (the same predicate
+    -- every lane gates on) — the exclusion is that device's own row, and no caller may mint one for
+    -- a device (or a person) that does not hold a seat.
+    IF NOT EXISTS (
+        SELECT 1 FROM device_registry dr
+        WHERE dr.workspace_id = p_ws AND dr.device_key_id = p_device AND dr.revoked = 0
+          AND topos_member_role(p_ws, dr.principal) IS NOT NULL
+    ) THEN
+        RETURN 'member_required';
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM catalog WHERE workspace_id = p_ws AND skill_id = p_skill) THEN
         RETURN 'unknown_skill';
     END IF;

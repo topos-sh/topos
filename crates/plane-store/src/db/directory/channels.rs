@@ -186,7 +186,7 @@ impl Db {
             .await?;
             Ok(match code.as_str() {
                 "unfollowed" => SubscriptionOutcome::Unfollowed,
-                "unknown_skill" => return Err(AuthorityError::NotFound),
+                "unknown_skill" | "member_required" => return Err(AuthorityError::NotFound),
                 other => return Err(unexpected("topos_unfollow_skill", other)),
             })
         })
@@ -214,7 +214,7 @@ impl Db {
             .await?;
             Ok(match code.as_str() {
                 "excluded" => SubscriptionOutcome::Excluded,
-                "unknown_skill" => return Err(AuthorityError::NotFound),
+                "unknown_skill" | "member_required" => return Err(AuthorityError::NotFound),
                 other => return Err(unexpected("topos_exclude_device", other)),
             })
         })

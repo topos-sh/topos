@@ -223,6 +223,7 @@ pub(crate) fn delivery_to_wire(d: Delivery, ws: &str) -> WireDelivery {
             })
             .collect(),
         detached: d.detached,
+        excluded: d.excluded,
         notices: d
             .notices
             .into_iter()

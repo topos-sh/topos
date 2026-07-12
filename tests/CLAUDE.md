@@ -68,11 +68,10 @@ directory is for what only a cross-crate loopback run can prove.
   fleet (`device_skill_state` + `last_report_at`); an archive withdraws the follower, frees the name, and
   auto-closes the open proposal with an author notice; a fresh follower installs v2 over a PURGED v1
   ancestor (the backfill shallow-stops); and a removed member gets `ACCESS_GONE` with every placement
-  INTACT (never a clean), resuming when re-added. **Honest ceiling:** a brand-new arrival needs TWO sweeps
-  today — the transport's per-skill credential map is built from the *pre*-reconcile `follows.json`, so the
-  sweep that first discovers a skill has no credential for its disclosure fetch and warns instead of
-  offering; the follow entry + baseline still land, so the next sweep offers cleanly. `install_then_offer`
-  pins exactly that, and its doc comment names the defect.
+  INTACT (never a clean), resuming when re-added. A brand-new arrival installs on ONE sweep: the reconcile
+  binds each delivered skill to its workspace credential before any fetch (the per-skill credential map is
+  derived from `follows.json`, which cannot yet name a skill this device has never held), and
+  `install_then_offer` pins the clean, warning-free first sweep.
 - **`tests/multi_workspace_e2e.rs`** — one install, one plane, TWO workspaces: a single `follow` twice into
   the same sidecar, both memberships retained, every verb scoped to the right workspace (an authoring
   `publish` moves only its skill's OWN workspace; `invite --workspace` mints into the named one), and

@@ -155,6 +155,34 @@ impl Db {
         Ok(rows.into_iter().map(|r| r.skill_id).collect())
     }
 
+    /// The skills THIS DEVICE excludes ("not on this device"): the third actor in the who-acts
+    /// split. Without it the client sees only "delivered nowhere, not person-detached" and reads an
+    /// exclusion written anywhere else (the web, a second tool) as an UPSTREAM withdrawal — the
+    /// on-disk effect happens to be right (the copy leaves this device either way), but the CAUSE it
+    /// narrates, and the state `list` reports, would be a lie. Catalog-scoped, so a stale exclusion
+    /// for a deleted skill never surfaces.
+    pub(crate) async fn device_exclusions(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        device_key_id: &str,
+    ) -> Result<Vec<String>> {
+        let ws_s = ws.as_str();
+        let rows = sqlx::query!(
+            r#"SELECT dx.skill_id AS "skill_id!"
+               FROM device_exclusions dx
+               JOIN catalog cat ON cat.workspace_id = dx.workspace_id AND cat.skill_id = dx.skill_id
+               WHERE dx.workspace_id = $1 AND dx.device_key_id = $2 AND cat.status = 'active'
+               ORDER BY dx.skill_id"#,
+            ws_s,
+            device_key_id,
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(rows.into_iter().map(|r| r.skill_id).collect())
+    }
+
     /// This person's unacked notices, oldest first (the hook fetches without acking; the ack write
     /// is a later surface).
     pub(crate) async fn unacked_notices(

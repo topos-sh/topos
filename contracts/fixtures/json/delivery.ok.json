@@ -44,6 +44,9 @@
   "detached": [
     "s_legacy"
   ],
+  "excluded": [
+    "s_laptop_only"
+  ],
   "notices": [
     {
       "id": "ntc_01",

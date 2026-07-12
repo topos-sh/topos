@@ -81,6 +81,9 @@ pub enum PullAction {
     /// The PERSON detached the skill (an unfollow, or a channel leave that lapsed it) on some
     /// device: this copy froze in place — bytes untouched, delivery ended.
     Detached,
+    /// THIS DEVICE excludes the skill ("not on this device"): the agent dirs are clear here, the
+    /// person keeps receiving it everywhere else, and following it here lifts the exclusion.
+    Excluded,
 }
 
 /// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the

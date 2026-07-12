@@ -305,6 +305,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         Ok(crate::plane::DeliverySnapshot {
             skills,
             detached: wire.detached,
+            excluded: wire.excluded,
             proposals_awaiting: wire.proposals_awaiting,
         })
     }

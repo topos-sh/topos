@@ -48,7 +48,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
 
 **Directory** (`directory/` + `db/directory/`) — access/identity/policy:
 - `catalog.rs` / `db/directory/catalog.rs` — the skill LIFECYCLE session ops (archive / unarchive /
-  delete / purge): owner-gated in the guarded SQL functions, self-host denied like every session op;
+  delete / purge): owner-gated in the guarded SQL functions, self-host denied like the roster/review/read
+  session legs (the channel join/leave session twins deliberately do NOT deny — they are the same guarded
+  functions the device lane calls, and self-host runs the whole loop);
   the db twin runs the row policy + the CUSTODY halves (delete un-roots every commit's edges + drops
   `current`; purge un-roots one version's) in ONE transaction, so the shipped GC keep-set reclaims
   exactly what dropped out.
@@ -56,8 +58,10 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   (place/unplace, create-on-first-use), self-serve channel join/leave, person-scoped
   follow/unfollow, the device exclusion, the `protect` setter (+ session twins for join/leave).
   Every policy decision is a guarded `topos_*` SQL function call (0015) — the ONE implementation
-  Rust calls today and the web tier calls at the door cutover; the db twin only resolves the
-  user-facing NAMES to ids and maps outcome codes. Naturally idempotent row ops (no receipts);
+  Rust calls today and the web tier calls at the door cutover; each function re-runs the membership gate
+  itself, so the database answer is authoritative for every caller, not just this one. The db twin
+  resolves SKILL names to ids in Rust (`resolve_skill_name`) and leaves CHANNEL names to the functions,
+  then maps outcome codes — an asymmetry the web tier will want folded into the functions. Naturally idempotent row ops (no receipts);
   the channel audit is TRIGGER-emitted, so no write path can skip it.
 - `delivery.rs` / `db/directory/delivery.rs` — the delivery read ("what should THIS device have":
   the ONE entitlement SRF + via attribution + the person's detached set + the unacked notices feed
