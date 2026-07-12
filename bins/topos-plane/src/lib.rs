@@ -36,6 +36,7 @@
 //! The enrollment connectors are the enrollment port's, not this layer's; they land behind their own seams.
 
 mod enroll;
+mod lifecycle_cmd;
 mod maintenance;
 mod rate_limit;
 mod restore_cmd;
@@ -55,6 +56,10 @@ pub mod openapi;
 mod tests;
 
 pub use enroll::mailer::SmtpConfig;
+pub use lifecycle_cmd::{
+    ArchiveSkillSummary, DeleteSkillSummary, PurgeVersionSummary, RenameSkillSummary,
+    UnarchiveSkillSummary,
+};
 pub use maintenance::{MaintenancePass, run_maintenance_pass, spawn_maintenance};
 pub use openapi::openapi;
 pub use rate_limit::Limits;

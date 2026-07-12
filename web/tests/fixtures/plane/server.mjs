@@ -77,6 +77,7 @@ let replays = new Map();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[0-9a-f]{64}$/;
+const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 const A_LONG_TIME_AGO = "2026-07-01T00:00:00Z";
 
 /** The acting identity the app derives from the session and sends verbatim on the internal lane.
@@ -596,6 +597,86 @@ function handleInternal(req, res, path, method) {
       // catalog never tracks the vault's moves anyway), and a stable history keeps the mounted
       // control's success state assertable rather than racing an unmount against revalidation.
       return answer({ outcome: "reverted" });
+    });
+  }
+
+  // ── Skill LIFECYCLE ceremonies (archive/unarchive/delete/purge/rename) ───────────────────────
+  // Owner-gating lives in the WEB guard (the DB roster); the fixture models the confirmed-MEMBER
+  // posture (a non-member acting is the uniform 200 {outcome:"not_found"}) plus the deterministic
+  // per-op denial triggers the crib names. `{skill}` is the immutable skill_id (== name for seeded
+  // skills). Every call is recorded BEFORE it is answered, keyed by route/ws/skill/acting/body.
+  const lifecycleMember = (ws) => {
+    const scope = scopes[ws];
+    return scope?.members.includes(acting) ? scope : undefined;
+  };
+
+  const archive = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/skills\/([^/]+)\/archive$/);
+  if (method === "POST" && archive !== null) {
+    const [, ws, skill] = archive;
+    return readBody(req, (body) => {
+      calls.push({ route: "archive", method, path, ws, skill, acting, body });
+      if (lifecycleMember(ws) === undefined) return json(res, 200, { outcome: "not_found" });
+      // Archive renames to `<name>-archived-<date>`, freeing the base name.
+      return json(res, 200, { outcome: "archived", archived_name: `${skill}-archived-2026-07-12` });
+    });
+  }
+
+  const unarchive = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/skills\/([^/]+)\/unarchive$/);
+  if (method === "POST" && unarchive !== null) {
+    const [, ws, skill] = unarchive;
+    return readBody(req, (body) => {
+      calls.push({ route: "unarchive", method, path, ws, skill, acting, body });
+      if (lifecycleMember(ws) === undefined) return json(res, 200, { outcome: "not_found" });
+      // A skill id tagged `-name-taken` models the base name having been reused since archiving.
+      if (skill.endsWith("-name-taken")) {
+        return json(res, 200, { outcome: "denied", reason: "name_taken" });
+      }
+      return json(res, 200, { outcome: "unarchived", name: skill });
+    });
+  }
+
+  const del = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/skills\/([^/]+)\/delete$/);
+  if (method === "POST" && del !== null) {
+    const [, ws, skill] = del;
+    return readBody(req, (body) => {
+      calls.push({ route: "delete", method, path, ws, skill, acting, body });
+      if (lifecycleMember(ws) === undefined) return json(res, 200, { outcome: "not_found" });
+      return json(res, 200, { outcome: "deleted" });
+    });
+  }
+
+  const purge = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/skills\/([^/]+)\/purge$/);
+  if (method === "POST" && purge !== null) {
+    const [, ws, skill] = purge;
+    return readBody(req, (body) => {
+      calls.push({ route: "purge", method, path, ws, skill, acting, body });
+      const scope = lifecycleMember(ws);
+      if (scope === undefined) return json(res, 200, { outcome: "not_found" });
+      const s = scope.skills?.[skill];
+      // Purging the CURRENT version is refused; any other readable version drops its bytes.
+      if (s !== undefined && body.version_id === s.currentId) {
+        return json(res, 200, { outcome: "denied", reason: "is_current" });
+      }
+      return json(res, 200, { outcome: "purged" });
+    });
+  }
+
+  const rename = path.match(/^\/internal\/v1\/workspaces\/([^/]+)\/skills\/([^/]+)\/rename$/);
+  if (method === "POST" && rename !== null) {
+    const [, ws, skill] = rename;
+    return readBody(req, (body) => {
+      calls.push({ route: "rename", method, path, ws, skill, acting, body });
+      const scope = lifecycleMember(ws);
+      if (scope === undefined) return json(res, 200, { outcome: "not_found" });
+      const name = String(body.new_name ?? "");
+      if (!SKILL_NAME_RE.test(name) || name.length > 64 || name.includes("-archived-")) {
+        return json(res, 200, { outcome: "denied", reason: "bad_name" });
+      }
+      // A rename to a name a live skill already holds is refused.
+      if (scope.skills?.[name] !== undefined) {
+        return json(res, 200, { outcome: "denied", reason: "name_taken" });
+      }
+      return json(res, 200, { outcome: "renamed", name });
     });
   }
 

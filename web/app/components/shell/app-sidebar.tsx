@@ -1,5 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronsUpDown, Layers, LogOut, Plus, Settings, UserRound } from "lucide-react";
+import {
+  ChevronsUpDown,
+  Hash,
+  Laptop,
+  Layers,
+  LogOut,
+  MonitorSmartphone,
+  Plus,
+  Settings,
+  UserRound,
+  Users,
+} from "lucide-react";
 import type { ElementType } from "react";
 import { Link, useLocation } from "react-router";
 import {
@@ -47,6 +58,10 @@ export interface SidebarNavEntry {
 const NAV_ICONS: Record<string, ElementType> = {
   layers: Layers,
   settings: Settings,
+  hash: Hash,
+  users: Users,
+  monitor: MonitorSmartphone,
+  laptop: Laptop,
 };
 
 /**

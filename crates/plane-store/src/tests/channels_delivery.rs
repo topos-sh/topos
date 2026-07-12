@@ -736,7 +736,14 @@ async fn an_archived_skill_leaves_delivery_and_an_unfollowed_archived_stays_deta
     assert!(
         matches!(
             fx.authority
-                .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+                .archive_skill_session(
+                    &w,
+                    ALICE,
+                    "s_deploy",
+                    DeploymentMode::Cloud,
+                    CREATED_AT,
+                    NOW
+                )
                 .await
                 .unwrap(),
             crate::LifecycleOutcome::Archived { .. }

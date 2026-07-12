@@ -10,25 +10,25 @@ import {
   ROSTER_OWNER_EMAIL,
   ROSTER_REMOVABLE_EMAIL,
   ROSTER_WS,
-  WS,
 } from "../fixtures/plane/data.mjs";
-import { BASE_URL, E2E_ADMIN_URL, E2E_DATABASE_URL, PLANE_PORT } from "./env";
+import { BASE_URL, E2E_DATABASE_URL, E2E_PASSWORD, PLANE_PORT } from "./env";
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
- * The members panel over the NEW roster wiring. Two writes, two backends: INVITE is a guarded
- * DATABASE write (`topos_invite` seats an invited member row directly — the proof is the row
- * landing + the address-bearing invite mail record), and REMOVE is an internal-lane VAULT write
- * (the instant-revoke op — the proof is the recorded wire call). The share surface is the workspace
- * ADDRESS: `topos follow <origin>/<address>` (links carry nothing; the roster is the lock — the
- * tokened door + its rotation are gone). Every invitee starts a member; there is no role picker,
- * and inviting is member-level (the database re-runs the invite-policy gate). Only REMOVE and the
- * review-gate toggle are owner-gated in the UI.
+ * The members page (/workspaces/:ws/members) over the roster wiring. The settings page now only
+ * LINKS here; every membership act lives on this page. Three write backends:
+ *  - INVITE is a guarded DATABASE write (`topos_invite` seats an invited member row directly).
+ *  - REMOVE is an internal-lane VAULT write (the instant-revoke op), NOW behind a step-up.
+ *  - ROLE CHANGE + LEAVE are guarded DATABASE writes (`topos_set_member_role` / `topos_leave_workspace`),
+ *    also behind a step-up.
+ * The share surface is the workspace ADDRESS: `topos follow <origin>/<address>` (links carry
+ * nothing; the roster is the lock). Every invitee starts a member; roles are raised here.
  *
- * Identities ride the PLANE SEED: w_roster's owner holds a confirmed OWNER seat, its plain member a
- * confirmed MEMBER seat; w_notowner seats the same owner email as a confirmed MEMBER. HARNESS
- * DISCIPLINE: the DB invite mutates topos_e2e (re-seeded each run); the vault remove records a wire
- * call but never touches the seeded rows.
+ * Identities ride the PLANE SEED: w_roster's owner holds a confirmed OWNER seat, its plain members
+ * confirmed MEMBER seats; w_notowner seats the same owner email as a confirmed MEMBER. HARNESS
+ * DISCIPLINE: the DB invite/role/leave writes mutate topos_e2e (re-seeded each run); the vault remove
+ * records a wire call but never touches the seeded rows. The MUTATING tests (role change; leave) run
+ * LAST and target seats nothing after them depends on.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -85,7 +85,7 @@ async function recordedRosterRemoves(
 }
 
 async function invite(page: Page, email: string): Promise<void> {
-  // No role picker: every invitee starts a member (roles are raised later, on the web).
+  // No role picker: every invitee starts a member (roles are raised here later, on the web).
   await page.getByLabel("Invite by email").fill(email);
   await page.getByRole("button", { name: "Invite", exact: true }).click();
 }
@@ -94,20 +94,15 @@ test("invite seats an invited MEMBER in the database; the panel shows the seat +
   page,
 }) => {
   await signIn(page, ROSTER_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
 
   // The pre-invite roster: the owner's confirmed seat with its role chip, and the workspace-address
   // paste block — `topos follow <origin>/<address>` + a copy affordance.
   const ownerRow = page.getByRole("listitem").filter({ hasText: ROSTER_OWNER_EMAIL });
   await expect(ownerRow.getByText("owner", { exact: true })).toBeVisible();
   await expect(ownerRow.getByText("confirmed")).toBeVisible();
-  // The settings page shows the address block plus its inline copy affordance — assert the first.
   await expect(page.getByText(FOLLOW_LINE).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /copy/i }).first()).toBeVisible();
-
-  // The owner-gated review toggle renders for the confirmed OWNER seat — the positive control for
-  // the member-denial assertion in the last test (the guard, not the fixture, decides).
-  await expect(page.getByRole("switch")).toBeVisible();
 
   // Invite a member: the DB row lands (member / invited) and the panel confirms it.
   await invite(page, INVITED_A);
@@ -125,27 +120,28 @@ test("invite seats an invited MEMBER in the database; the panel shows the seat +
 
 test("the invite mail rode the dev transport carrying the workspace ADDRESS", async () => {
   // Never a real send: APP_ENV=test appends {to,address,...} to .invite-emails.jsonl — the notice
-  // carries the ADDRESS (a plain slug), never a tokened link.
-  // The address is the FULL `<origin>/<name>` form — the same string the follow command pastes.
+  // carries the ADDRESS (the full `<origin>/<name>` form), never a tokened link.
   const mailA = await inviteMailFor(INVITED_A);
   expect(mailA.address).toBe(`${BASE_URL}/${ROSTER_ADDRESS}`);
   const mailB = await inviteMailFor(INVITED_B);
   expect(mailB.address).toBe(`${BASE_URL}/${ROSTER_ADDRESS}`);
 });
 
-test("remove posts the instant-revoke to the vault; the sole owner is never removable", async ({
+test("remove is a step-up-gated instant revoke posted to the vault; the sole owner is never removable", async ({
   page,
 }) => {
   await signIn(page, ROSTER_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
 
   const row = page.getByRole("listitem").filter({ hasText: ROSTER_REMOVABLE_EMAIL });
-  await expect(row).toBeVisible();
+  // Expand the confirm panel, re-enter the acting owner's password, then confirm the removal.
   await row.getByRole("button", { name: "Remove" }).click();
+  await row.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await row.getByRole("button", { name: "Remove", exact: true }).click();
 
-  // The proof is the recorded internal-lane call: the acting owner, a UUID request_id, and the
-  // target email. (Harness discipline: the vault mock never edits the seeded rows, so the panel —
-  // a DB read — does not reflect the removal mid-suite.)
+  // The proof is the recorded internal-lane call: the acting owner, a UUID request_id, the target
+  // email. (Harness discipline: the vault mock never edits the seeded rows, so the panel — a DB read
+  // — does not reflect the removal mid-suite.)
   await expect.poll(async () => (await recordedRosterRemoves(page)).length).toBeGreaterThan(0);
   const remove = (await recordedRosterRemoves(page)).at(-1);
   expect(remove?.acting).toBe(ROSTER_OWNER_EMAIL);
@@ -153,9 +149,10 @@ test("remove posts the instant-revoke to the vault; the sole owner is never remo
   expect(remove?.body.email).toBe(ROSTER_REMOVABLE_EMAIL);
   expect(String(remove?.body.request_id)).toMatch(UUID);
 
-  // The sole owner's seat never offers Remove — the vault would refuse to orphan it.
+  // The sole owner's seat carries no controls at all — the vault would refuse to orphan it.
   const ownerRow = page.getByRole("listitem").filter({ hasText: ROSTER_OWNER_EMAIL });
   await expect(ownerRow.getByRole("button", { name: "Remove" })).toHaveCount(0);
+  await expect(ownerRow.getByRole("button", { name: "Change role" })).toHaveCount(0);
   await expect(ownerRow.getByText("workspace owner")).toBeVisible();
 });
 
@@ -165,74 +162,98 @@ test("the workspace page shows the join address block for a member", async ({ pa
   // Adding a device is `follow <origin>/<address>` — the SAME address hand-off, with the paste-block
   // treatment.
   await expect(page.getByText("Add my device")).toBeVisible();
-  // The settings page shows the address block plus its inline copy affordance — assert the first.
   await expect(page.getByText(FOLLOW_LINE).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /copy/i }).first()).toBeVisible();
 });
 
-test("a non-owner member reads seats but gets no remove or review-gate controls", async ({
+test("a non-owner member reads seats but gets no owner controls (and can still leave)", async ({
   page,
 }) => {
-  // Admission rides the confirmed MEMBER seat; any confirmed member reads the roster (and may
-  // attempt a member-level invite), but only the owner gets remove controls and the review toggle.
+  // Admission rides the confirmed MEMBER seat; any confirmed member reads the roster (and may attempt
+  // a member-level invite), but only the owner gets remove/role controls.
   await signIn(page, ROSTER_MEMBER_EMAIL);
-  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
   await expect(
     page.getByRole("listitem").filter({ hasText: ROSTER_OWNER_EMAIL }).first(),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Change role", exact: true })).toHaveCount(0);
+  // The self-serve leave ceremony is theirs, though.
+  await expect(page.getByRole("button", { name: "Leave this workspace" })).toBeVisible();
 });
 
-test("a member of a workspace they do not own sees settings without owner controls", async ({
+test("a non-member gets the uniform 404 on the members page", async ({ page }) => {
+  // The suite's default storage state (reviewer@example.com) holds NO seat in w_roster: the members
+  // surface never renders — the house miss, never a 403 that would confirm the workspace exists.
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
+});
+
+test("a member of a workspace they do not own sees the members page without owner controls", async ({
   page,
 }) => {
   // w_notowner: the guard admits this email through its confirmed MEMBER seat, but with no owner
   // controls — the honest state, never a crash.
   await signIn(page, ROSTER_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${NOT_OWNER_WS}/settings`);
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await gotoSettled(page, `/workspaces/${NOT_OWNER_WS}/members`);
+  // The page-header h1 (level 1) — distinct from the section's "Members" sub-heading (h2).
+  await expect(page.getByRole("heading", { name: "Members", level: 1 })).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Change role", exact: true })).toHaveCount(0);
 });
 
-test("a confirmed MEMBER cannot flip the review gate; a non-member workspace 404s", async ({
+test("role change: a wrong password refuses, the right password promotes; the chip + DB reflect it", async ({
   page,
 }) => {
-  // The suite's default storage state: reviewer@example.com, a confirmed MEMBER (not owner) of
-  // ws-e2e. The settings page renders (requireMember), but the review-required toggle must not
-  // (the web owner-guard hides it; the database's own owner gate backs the write either way).
-  await gotoSettled(page, `/workspaces/${WS}/settings`);
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  await signIn(page, ROSTER_OWNER_EMAIL);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
 
-  // No seat in w_roster: the uniform 404 — the settings surface never renders.
-  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
-  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+  const row = page.getByRole("listitem").filter({ hasText: ROSTER_MEMBER_EMAIL });
+  await row.getByRole("button", { name: "Change role" }).click();
+  await row.getByRole("combobox").selectOption("reviewer");
+
+  // A wrong password: the step-up refuses inline and NOTHING changes.
+  await row.getByLabel("Confirm with your password").fill("not-the-password");
+  await row.getByRole("button", { name: "Save role" }).click();
+  await expect(row.getByRole("alert")).toContainText("Password check failed");
+  expect(await seatOf(ROSTER_MEMBER_EMAIL)).toEqual({ role: "member", status: "confirmed" });
+
+  // The right password promotes. Wait for the panel to close (the select gone) BEFORE reading the
+  // chip, so "reviewer" resolves to the role chip alone — never the still-open select's option.
+  await row.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await row.getByRole("button", { name: "Save role" }).click();
+  await expect(row.getByRole("combobox")).toHaveCount(0);
+  await expect(row.getByText("reviewer", { exact: true })).toBeVisible();
+  expect(await seatOf(ROSTER_MEMBER_EMAIL)).toEqual({ role: "reviewer", status: "confirmed" });
 });
 
-test("the owner flips the review gate; the database row is the proof", async ({ page }) => {
+test("leave is refused for the sole owner — transfer ownership first", async ({ page }) => {
   await signIn(page, ROSTER_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${ROSTER_WS}/settings`);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
 
-  const gate = page.getByRole("switch");
-  await expect(gate).toBeVisible();
-  const before = await gate.getAttribute("aria-checked");
-  await gate.click();
-  // The write is `topos_set_review_default` — owner-gated IN the database; the row flips and the
-  // switch re-renders from the revalidated loader read.
-  const expected = before === "true" ? "false" : "true";
-  await expect(gate).toHaveAttribute("aria-checked", expected);
-  const db = new Client({ connectionString: E2E_ADMIN_URL });
-  await db.connect();
-  try {
-    const { rows } = await db.query(
-      `select review_required from plane.workspace_policy where workspace_id = $1`,
-      [ROSTER_WS],
-    );
-    expect(String(rows[0]?.review_required)).toBe(expected === "true" ? "1" : "0");
-  } finally {
-    await db.end();
-  }
+  await page.getByRole("button", { name: "Leave this workspace" }).click();
+  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Leave workspace" }).click();
+
+  // The honest refusal: a sole owner can't orphan the workspace. No redirect — the seat stands.
+  await expect(page.getByText(/the workspace must always have an owner/i)).toBeVisible();
+  expect(await seatOf(ROSTER_OWNER_EMAIL)).toEqual({ role: "owner", status: "confirmed" });
+});
+
+test("leave: a member leaves; the workspace drops off their rail", async ({ page }) => {
+  // A confirmed member leaves through the step-up ceremony; the seat is deleted and the workspace
+  // disappears from the index. Runs LAST — carol's seat is nothing later depends on.
+  await signIn(page, ROSTER_REMOVABLE_EMAIL);
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
+
+  await page.getByRole("button", { name: "Leave this workspace" }).click();
+  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Leave workspace" }).click();
+
+  // The action redirects to the index (the fetcher follows it), and the workspace row is gone.
+  await page.waitForURL("**/workspaces");
+  await expect(page.getByRole("main").locator(`a[href="/workspaces/${ROSTER_WS}"]`)).toHaveCount(0);
+  // The seat is really gone from the directory roster.
+  expect(await seatOf(ROSTER_REMOVABLE_EMAIL)).toBeUndefined();
 });

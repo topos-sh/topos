@@ -1,15 +1,26 @@
-import { Link, type MetaFunction } from "react-router";
+import { Link, type MetaFunction, useLoaderData } from "react-router";
 import { CommandBlock } from "@/components/command-block";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { TerminalDemo } from "@/components/landing/terminal-demo";
+import { hasAnyWorkspace } from "@/lib/db/resolve.server";
 
 /**
  * The public landing page ("Klein"): warm-gray print ground, near-black ink, links in ink,
  * International Klein Blue as placed objects (nav button, routing chips, check-chips) plus the
  * agent-conversation section's markers and result lines. The dark terminal glass carries a
- * single phosphor from the blue ramp. Static: no session, no data reads — the signed-in product
- * lives under /workspaces.
+ * single phosphor from the blue ramp. No session: the signed-in product lives under /workspaces.
+ * The one actor-less read is the first-run probe below.
  */
+
+/**
+ * The single sessionless probe: does this plane hold ANY workspace yet? A fresh self-hosted
+ * deployment ("virgin plane") leads with a claim block — the first person to sign in stands the
+ * first workspace up and owns it. Once any workspace exists, the ordinary marketing page renders
+ * unchanged. This discloses one boolean about the deployment, never a row.
+ */
+export async function loader() {
+  return { virgin: !(await hasAnyWorkspace()) };
+}
 
 export const meta: MetaFunction = () => [
   // Absolute title: this one page already carries the brand, so it skips the `· Topos` suffix.
@@ -83,7 +94,42 @@ function CheckChip() {
   );
 }
 
+/**
+ * The empty-plane claim band: shown ONLY when no workspace exists anywhere yet. The first
+ * visitor to sign in stands the first workspace up and owns it — the ordinary create flow IS the
+ * claim, so the CTA is just sign-in. Honest about the ownership: whoever creates it owns it.
+ */
+function ClaimBlock() {
+  return (
+    <section className="border-line-soft border-b bg-panel">
+      <div className={`${WRAP} py-8`}>
+        <div className="rounded-lg border border-line-soft bg-panel2 px-6 py-6 shadow-card">
+          <p className="font-display text-[10px] text-accent uppercase tracking-[0.14em]">
+            Set up this plane
+          </p>
+          <h2 className="mt-3 max-w-[40ch] font-display font-semibold text-[clamp(18px,2.2vw,23px)] text-ink leading-[1.4] tracking-[-0.02em]">
+            This plane has no workspace yet.
+          </h2>
+          <p className="mt-3 max-w-[60ch] text-dim">
+            The first person to sign in sets it up. Create the first workspace and you become its
+            owner — everyone else joins the address you share.
+          </p>
+          <div className="mt-5">
+            <Link
+              to="/login"
+              className="inline-block rounded-md bg-accent px-4 py-2.5 font-mono text-[13px] text-on-accent transition-colors hover:bg-accent-deep focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 active:scale-[0.98]"
+            >
+              Sign in to set it up
+            </Link>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function LandingPage() {
+  const { virgin } = useLoaderData<typeof loader>();
   return (
     <div className="min-h-dvh text-[15px] leading-[1.6]">
       <nav className="border-line-soft border-b">
@@ -116,6 +162,8 @@ export default function LandingPage() {
           </div>
         </div>
       </nav>
+
+      {virgin && <ClaimBlock />}
 
       <header className="pt-11 pb-8 lg:pt-[58px] lg:pb-9">
         <div

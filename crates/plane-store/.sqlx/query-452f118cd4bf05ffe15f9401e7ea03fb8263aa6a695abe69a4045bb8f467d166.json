@@ -1,23 +1,26 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT skill_id AS \"skill_id!\" FROM catalog WHERE workspace_id = $1 AND name = $2",
+  "query": "SELECT topos_rename_skill($1, $2, $3, $4, $5) AS \"outcome!\"",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "skill_id!",
+        "name": "outcome!",
         "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
         "Text",
+        "Text",
+        "Text",
+        "Text",
         "Text"
       ]
     },
     "nullable": [
-      false
+      null
     ]
   },
-  "hash": "f3f1d626cd8dae5f9b80052b5d0a1f6f2d588f878db8c55bedd4a62e91ee258e"
+  "hash": "452f118cd4bf05ffe15f9401e7ea03fb8263aa6a695abe69a4045bb8f467d166"
 }

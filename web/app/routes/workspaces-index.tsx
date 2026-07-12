@@ -4,6 +4,7 @@ import { NoWorkspaces } from "@/components/empty-states";
 import { buttonClasses, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import { actorFromSession, requireSession } from "@/lib/auth/guards.server";
 import { planeMembershipsFor, type WorkspaceMembership } from "@/lib/db/queries.server";
+import { hasAnyWorkspace } from "@/lib/db/resolve.server";
 
 export function meta() {
   return [{ title: "Workspaces · Topos" }];
@@ -20,13 +21,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const actor = actorFromSession(await requireSession(request));
   // An unverified session sees the empty state — membership is keyed on verified email only.
   const memberships = actor ? await planeMembershipsFor(actor) : [];
-  return { memberships };
+  // Only when the person holds NOTHING do we probe the plane's virginity: a plane with no
+  // workspace at all offers the "set up this plane" claim (you become its owner); otherwise the
+  // ordinary create-your-first-workspace welcome. The create flow itself IS the claim — no new op.
+  const virgin = memberships.length === 0 ? !(await hasAnyWorkspace()) : false;
+  return { memberships, virgin };
 }
 
 export default function WorkspacesIndex() {
-  const { memberships } = useLoaderData<typeof loader>();
+  const { memberships, virgin } = useLoaderData<typeof loader>();
   if (memberships.length === 0) {
-    return <NoWorkspaces />;
+    return virgin ? <ClaimPlane /> : <NoWorkspaces />;
   }
   const channels = memberships.filter((m) => m.navigable);
   const invited = memberships.filter((m) => !m.navigable);
@@ -71,6 +76,33 @@ export default function WorkspacesIndex() {
           </ul>
         </section>
       )}
+    </div>
+  );
+}
+
+/**
+ * The empty-plane claim: no workspace exists ANYWHERE yet, and this signed-in person can stand
+ * the first one up (and own it). The existing create flow is the claim — the CTA is the same
+ * /workspaces/new, framed for the first-run moment.
+ */
+function ClaimPlane() {
+  return (
+    <div className="mx-auto max-w-xl py-10 sm:py-16">
+      <p className="font-display text-[10px] text-faint uppercase tracking-[0.12em]">
+        Welcome to Topos
+      </p>
+      <h1 className="mt-3 font-display font-semibold text-ink text-xl tracking-[-0.02em]">
+        Set up this plane
+      </h1>
+      <p className="mt-3 text-dim text-sm leading-relaxed">
+        No workspace exists here yet. Create its first workspace and you become the owner — then
+        share its address and your team joins from there.
+      </p>
+      <div className="mt-6">
+        <Link to="/workspaces/new" className={`${buttonClasses("primary")} min-h-11`}>
+          Create its first workspace
+        </Link>
+      </div>
     </div>
   );
 }

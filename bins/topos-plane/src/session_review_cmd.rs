@@ -406,6 +406,14 @@ fn parse_review_ids(
 ) -> Option<(WorkspaceId, SkillId, plane_store::CommitId)> {
     let ws = WorkspaceId::parse(workspace_id).ok()?;
     let skill = SkillId::parse(skill_id).ok()?;
+    let commit = parse_version_hex(version_id_hex)?;
+    Some((ws, skill, commit))
+}
+
+/// Parse a version id as exactly 64 lowercase-hex chars; `None` on any other shape. Shared by every
+/// session wrapper that names a version (review/revert here, the lifecycle purge in
+/// [`lifecycle_cmd`](crate::lifecycle_cmd)).
+pub(crate) fn parse_version_hex(version_id_hex: &str) -> Option<plane_store::CommitId> {
     if version_id_hex.len() != 64
         || !version_id_hex
             .bytes()
@@ -419,7 +427,7 @@ fn parse_review_ids(
         let lo = hex_val(version_id_hex.as_bytes()[2 * i + 1]);
         *slot = (hi << 4) | lo;
     }
-    Some((ws, skill, plane_store::CommitId(bytes)))
+    Some(plane_store::CommitId(bytes))
 }
 
 fn hex_val(b: u8) -> u8 {

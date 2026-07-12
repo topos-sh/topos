@@ -314,6 +314,40 @@ export const R_REVERT_STALE_GOOD = "c6".repeat(32);
 export const REVERT_GENERATION = { epoch: 4, seq: 2 };
 export const REVERT_STALE_GENERATION = { epoch: 1, seq: 8 };
 
+// ---------------------------------------------------------------------------------------------
+// The LIFECYCLE workspace: its OWN workspace + its OWN confirmed OWNER identity, because the
+// lifecycle ceremonies (archive / unarchive / delete / purge / rename) are owner-gated in the web
+// guard. The directory rows (workspace, owner seat, an ACTIVE 2-version skill, a pre-archived
+// skill) are seeded by lifecycle.spec.ts directly (not auth.setup.ts) against E2E_ADMIN_URL; the
+// vault scope below serves the internal-lane reads (history walk) + records the write ceremonies.
+// ---------------------------------------------------------------------------------------------
+export const LIFECYCLE_WS = "w_lifecycle";
+export const LIFECYCLE_ADDRESS = "lifecycle-ws";
+// TWO confirmed owners: the step-up password belt is per-PROCESS + per-user, so the spec spreads
+// its ceremonies across two owner identities to stay under the burst within one run.
+export const LIFECYCLE_OWNER_EMAIL = "owner-lifecycle@example.com";
+export const LIFECYCLE_OWNER2_EMAIL = "owner2-lifecycle@example.com";
+
+/** The ACTIVE skill: a 2-version linear history (current → good) so the History tab shows a
+ *  purgeable non-current row, and the settings page can rename/archive it. */
+export const LIFECYCLE_SKILL = "shipping-runbook";
+export const L_CUR = "ba".repeat(32);
+export const L_GOOD = "bc".repeat(32);
+export const LIFECYCLE_GENERATION = { epoch: 5, seq: 3 };
+
+/** A pre-ARCHIVED skill: the /archive page lists it, and the delete ceremony types its name. */
+export const LIFECYCLE_ARCHIVED_SKILL_ID = "retired-runbook";
+export const LIFECYCLE_ARCHIVED_BASE = "retired-runbook";
+export const LIFECYCLE_ARCHIVED_NAME = "retired-runbook-archived-2026-07-12";
+export const LIFECYCLE_ARCHIVED_AT_MS = Date.parse("2026-07-10T12:00:00Z");
+
+/** A fresh name the rename-success case targets (must NOT collide with any seeded skill name). */
+export const LIFECYCLE_RENAME_TO = "delivery-runbook";
+
+/** The rename REDIRECT (hint) fixture: an old name on ws-e2e that resolves to SKILL via a
+ *  catalog_name_hints row lifecycle.spec.ts seeds. GET …/skills/<old> lands on <SKILL>. */
+export const HINT_OLD_NAME = "old-deploy-runbook";
+
 const REVIEW_UPDATED_AT_MS = Date.parse("2026-07-05T09:00:00Z");
 
 /** One review skill's MUTABLE fixture state: a 2-version story (current → candidate, the same
@@ -785,6 +819,20 @@ export function initialScopes() {
           proposer: REVIEWER_EMAIL,
           reviewRequired: true,
           message: "The reviewer's own proposal under review-required",
+        }),
+      },
+    },
+    [LIFECYCLE_WS]: {
+      members: [LIFECYCLE_OWNER_EMAIL, LIFECYCLE_OWNER2_EMAIL],
+      reviewers: [LIFECYCLE_OWNER_EMAIL, LIFECYCLE_OWNER2_EMAIL],
+      skills: {
+        // The active skill's 2-version linear history — the history walk shows L_CUR (head) plus
+        // the purgeable L_GOOD; the purge fixture answers `is_current` for L_CUR, `purged` for
+        // any other readable version.
+        [LIFECYCLE_SKILL]: revertSkillState({
+          currentId: L_CUR,
+          goodId: L_GOOD,
+          generation: LIFECYCLE_GENERATION,
         }),
       },
     },

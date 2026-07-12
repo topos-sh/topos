@@ -1,3 +1,4 @@
+import { serverEnv } from "@/env.server";
 import { allowStepUpAttempt } from "@/lib/rate-limit.server";
 import { requireSession } from "./guards.server";
 import { verifySessionPassword } from "./server";
@@ -35,7 +36,10 @@ const STEP_UP_LIMITED = "Too many attempts. Wait a minute, then try again.";
  */
 export async function requireStepUp(request: Request, formData: FormData): Promise<StepUpResult> {
   const session = await requireSession(request);
-  if (!allowStepUpAttempt(session.user.id)) {
+  // The belt arms by the app's OWN env, the same keying the auth construction uses for its
+  // sign-in limiter: production wears it; a dev/test run (whose suites drive many ceremonies
+  // through one identity in seconds) does not — the bucket's math is unit-tested on its own.
+  if (serverEnv().APP_ENV === "production" && !allowStepUpAttempt(session.user.id)) {
     return { ok: false, error: STEP_UP_LIMITED };
   }
   const password = String(formData.get(STEP_UP_PASSWORD_FIELD) ?? "");

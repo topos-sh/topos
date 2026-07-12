@@ -1,10 +1,30 @@
 # `web/` — the product web app (TypeScript / React Router 8 on bun)
 
 The signed-in surface for Topos: a workspace dashboard, the skill browser, the rendered review UI
-(unified diff + Approve/Reject + comments), the verification page, and the create/join flows. It
-renders state read from the vault over HTTP and its own Postgres schema. It holds **no signing key,
-computes no digest, and initiates no device-signed write** — publishing stays on the enrolled device;
-this app is surfaces.
+(unified diff + Approve/Reject + comments), the verification page, the create/join flows, and the
+ADMIN surfaces — the roster page in full (invite / role change / remove / self-serve leave), the
+skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), channel
+existence-admin + history, the workspace policy page (review default · invite policy · staleness
+window), the fleet page (staleness + the named blind spots: detached copies, removed-upstream
+rows, stale devices), the "your devices" self-service list, and the first-run claim. It renders
+state read from the vault over HTTP and its own Postgres schema. It holds **no signing key,
+computes no digest, and initiates no device-signed write** — publishing stays on the enrolled
+device; this app is surfaces.
+
+**Step-up.** Every admin ceremony re-authenticates immediately before the act: the person
+re-enters their password inside the ceremony form (`app/lib/auth/step-up.server.ts`, verified with
+better-auth's own hasher; its own rate belt, armed by `APP_ENV` like the sign-in limiter), and the
+destructive ceremonies (delete a skill, purge a version, delete a channel) additionally require
+typing the resource's exact name. Deliberately STATELESS — no sudo window. Every attempt lands an
+`admin_event` audit row, refused step-ups included.
+
+**Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
+`/{workspace}/skills/{name}` are the shareable addresses, plus a root catch-all: a non-browser
+fetcher gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault card's negotiation
+mirrored; served whole from route middleware, byte-identical on every path, `api_base_url` = the
+follow base); an anonymous browser gets one constant teaser page; a signed-in member is resolved
+through their own confirmed seats into the workspace surface; everyone else gets the house 404.
+No face is an existence oracle.
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the

@@ -868,7 +868,7 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
 
         // The owner archives it.
         assert!(matches!(
-            a.archive_skill_session(&ws(), OWNER, "deploy", DeploymentMode::Cloud, AT, NOW)
+            a.archive_skill_session(&ws(), OWNER, "s_deploy", DeploymentMode::Cloud, AT, NOW)
                 .await
                 .unwrap(),
             plane_store::LifecycleOutcome::Archived { .. }
@@ -995,7 +995,7 @@ fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
         .unwrap();
         // Purge the v1 ancestor (its bytes drop out of history; v2 stays current).
         assert_eq!(
-            a.purge_version_session(&ws(), OWNER, "deploy", v1, DeploymentMode::Cloud, AT, NOW)
+            a.purge_version_session(&ws(), OWNER, "s_deploy", v1, DeploymentMode::Cloud, AT, NOW)
                 .await
                 .unwrap(),
             plane_store::PurgeOutcome::Purged

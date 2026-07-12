@@ -626,3 +626,334 @@ async fn unknown_target_and_non_member_answer_the_same_shape(pool: PgPool) {
     assert_eq!(outcome(&b3)["outcome"].as_str(), Some("not_found"));
     assert_eq!(outcome(&b4)["outcome"].as_str(), Some("not_found"));
 }
+
+// ══ 5. the skill-lifecycle ceremonies (archive / unarchive / delete / purge / rename) ═══════════════════
+
+/// One lifecycle POST (the ceremonies are id-keyed: `{skill}` carries the immutable skill id).
+fn lifecycle_uri(skill_id: &str, act: &str) -> String {
+    format!("/internal/v1/workspaces/{WS}/skills/{skill_id}/{act}")
+}
+
+/// The skill's catalog `(status, name)` row (raw `sqlx` against the test's own pool handle).
+async fn catalog_row(pool: &PgPool, skill_id: &str) -> Option<(String, String)> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT status, name FROM catalog WHERE workspace_id = $1 AND skill_id = $2",
+    )
+    .bind(WS)
+    .bind(skill_id)
+    .fetch_optional(pool)
+    .await
+    .expect("the catalog probe answers")
+}
+
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn the_lifecycle_ceremonies_land_and_refuse_typed(pool: PgPool) {
+    let ctx = internal_setup(pool, "internal-lifecycle", Some(INTERNAL_TOKEN)).await;
+    let g_hex = hex::encode(ctx.genesis_vid);
+    let p_hex = hex::encode(ctx.proposal_vid);
+
+    // Approve the seed proposal (reviewer) so the pointer sits at (1,2) = the proposal's version —
+    // giving purge a non-current target (the genesis) and a current one (the candidate).
+    let approve_uri =
+        format!("/internal/v1/workspaces/{WS}/skills/{SKILL}/proposals/{p_hex}/approve");
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &approve_uri,
+            Some(INTERNAL_TOKEN),
+            Some(REVIEWER_EMAIL),
+            json_body(serde_json::json!({
+                "request_id": "42000000-0000-4000-8000-0000000000a1",
+                "expected_epoch": 1, "expected_seq": 1,
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(outcome(&bytes)["outcome"].as_str(), Some("approved"));
+
+    // ── purge ───────────────────────────────────────────────────────────────────────────────────────
+    // A malformed version id is a malformed BODY (400) — parsed AFTER the guard, never an oracle.
+    let (status, _h, _b) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "purge"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "version_id": "not-hex" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Purging the CURRENT version refuses typed (`is_current` — the SQL outcome code verbatim).
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "purge"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "version_id": p_hex })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("denied"));
+    assert_eq!(v["reason"].as_str(), Some("is_current"));
+
+    // Purging the non-current genesis lands.
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "purge"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "version_id": g_hex })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(outcome(&bytes)["outcome"].as_str(), Some("purged"));
+
+    // ── rename ──────────────────────────────────────────────────────────────────────────────────────
+    // A plain member is refused typed; the owner renames; the OLD name keeps resolving as a hint.
+    let (_s, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "rename"),
+            Some(INTERNAL_TOKEN),
+            Some(MEMBER_EMAIL),
+            json_body(serde_json::json!({ "new_name": "ship" })),
+        ),
+    )
+    .await;
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("denied"));
+    assert_eq!(v["reason"].as_str(), Some("owner_role_required"));
+
+    let old_name = catalog_row(ctx.pool(), SKILL).await.expect("cataloged").1;
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "rename"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "new_name": "ship" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("renamed"));
+    assert_eq!(v["name"].as_str(), Some("ship"));
+    assert_eq!(
+        catalog_row(ctx.pool(), SKILL).await,
+        Some(("active".to_owned(), "ship".to_owned()))
+    );
+    let (hint_id, hint_name, via): (String, String, String) =
+        sqlx::query_as("SELECT skill_id, name, via FROM topos_resolve_skill($1, $2)")
+            .bind(WS)
+            .bind(&old_name)
+            .fetch_one(ctx.pool())
+            .await
+            .expect("the old name still resolves");
+    assert_eq!(
+        (hint_id.as_str(), hint_name.as_str(), via.as_str()),
+        (SKILL, "ship", "hint"),
+        "the old name resolves as a hint carrying the live spelling"
+    );
+
+    // A name another identity holds refuses typed (`name_taken`).
+    ctx.state
+        .authority()
+        .seed_catalog(
+            &WorkspaceId::parse(WS).unwrap(),
+            &SkillId::parse("s_docs").unwrap(),
+            "docs",
+        )
+        .await
+        .unwrap();
+    let (_s, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "rename"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "new_name": "docs" })),
+        ),
+    )
+    .await;
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("denied"));
+    assert_eq!(v["reason"].as_str(), Some("name_taken"));
+
+    // ── delete is archive-first ─────────────────────────────────────────────────────────────────────
+    let (_s, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "delete"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("denied"));
+    assert_eq!(v["reason"].as_str(), Some("not_archived"));
+
+    // ── archive → unarchive → archive → delete ──────────────────────────────────────────────────────
+    // A non-owner archive is the typed role refusal.
+    let (_s, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "archive"),
+            Some(INTERNAL_TOKEN),
+            Some(MEMBER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("denied"));
+    assert_eq!(v["reason"].as_str(), Some("owner_role_required"));
+
+    // The owner archives: the body carries the archived spelling and the catalog row moved to it.
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "archive"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("archived"));
+    let archived_name = v["archived_name"]
+        .as_str()
+        .expect("archived_name")
+        .to_owned();
+    assert!(
+        archived_name.starts_with("ship-archived-"),
+        "the archived spelling carries the freed base name: {archived_name}"
+    );
+    assert_eq!(
+        catalog_row(ctx.pool(), SKILL).await,
+        Some(("archived".to_owned(), archived_name))
+    );
+
+    // Unarchive renames back.
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "unarchive"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = outcome(&bytes);
+    assert_eq!(v["outcome"].as_str(), Some("unarchived"));
+    assert_eq!(v["name"].as_str(), Some("ship"));
+    assert_eq!(
+        catalog_row(ctx.pool(), SKILL).await,
+        Some(("active".to_owned(), "ship".to_owned()))
+    );
+
+    // Archive again, then delete (archive-first satisfied): the catalog row is the tombstone.
+    let (_s, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "archive"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(outcome(&bytes)["outcome"].as_str(), Some("archived"));
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri(SKILL, "delete"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(outcome(&bytes)["outcome"].as_str(), Some("deleted"));
+    assert_eq!(
+        catalog_row(ctx.pool(), SKILL).await.map(|(s, _)| s),
+        Some("deleted".to_owned())
+    );
+}
+
+/// The ceremonies' miss uniformity: a stranger acting on a real skill, an owner acting on an unknown
+/// skill id, and an owner acting in an unknown workspace all answer the SAME 200 `not_found` body —
+/// the composing page renders the uniform miss itself, and nothing distinguishes the causes.
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn lifecycle_misses_are_the_one_uniform_not_found(pool: PgPool) {
+    let ctx = internal_setup(pool, "internal-lc-miss", Some(INTERNAL_TOKEN)).await;
+    let cases: [(String, &str); 3] = [
+        (lifecycle_uri(SKILL, "archive"), STRANGER_EMAIL),
+        (lifecycle_uri("s_nope", "archive"), OWNER_EMAIL),
+        (
+            format!("/internal/v1/workspaces/w_nope/skills/{SKILL}/archive"),
+            OWNER_EMAIL,
+        ),
+    ];
+    for (uri, acting) in cases {
+        let (status, _h, bytes) = send(
+            ctx.app(),
+            int_req(
+                "POST",
+                &uri,
+                Some(INTERNAL_TOKEN),
+                Some(acting),
+                json_body(serde_json::json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(
+            outcome(&bytes)["outcome"].as_str(),
+            Some("not_found"),
+            "{uri} as {acting}"
+        );
+    }
+    // The rename twin of the unknown-id miss (the body parses, the target does not resolve).
+    let (status, _h, bytes) = send(
+        ctx.app(),
+        int_req(
+            "POST",
+            &lifecycle_uri("s_nope", "rename"),
+            Some(INTERNAL_TOKEN),
+            Some(OWNER_EMAIL),
+            json_body(serde_json::json!({ "new_name": "ship" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(outcome(&bytes)["outcome"].as_str(), Some("not_found"));
+}

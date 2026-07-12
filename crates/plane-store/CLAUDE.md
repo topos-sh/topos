@@ -48,12 +48,14 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
 
 **Directory** (`directory/` + `db/directory/`) — access/identity/policy:
 - `catalog.rs` / `db/directory/catalog.rs` — the skill LIFECYCLE session ops (archive / unarchive /
-  delete / purge): owner-gated in the guarded SQL functions, answered on both postures like the
+  delete / purge / rename): owner-gated in the guarded SQL functions, answered on both postures like the
   roster/review/read session legs — the acting gate is the confirmed-seat check, identical on a self-host
   plane and a hosted one (the product app serves self-hosted deployments through this session lane; the
   channel join/leave twins call the same guarded functions the device lane calls, and self-host runs the
-  whole loop);
-  the db twin runs the row policy + the CUSTODY halves (delete un-roots every commit's edges + drops
+  whole loop). Every op keys on the IMMUTABLE skill id — the composing surface resolves the mutable
+  catalog name to the id in its own loader, so a concurrent rename is a harmless miss, never a
+  wrong-target act; rename records the old name as a resolving hint.
+  The db twin runs the row policy + the CUSTODY halves (delete un-roots every commit's edges + drops
   `current`; purge un-roots one version's) in ONE transaction, so the shipped GC keep-set reclaims
   exactly what dropped out.
 - `channels.rs` / `db/directory/channels.rs` — the device-lane channel-era ops: curation
@@ -61,9 +63,11 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   follow/unfollow, the device exclusion, the `protect` setter (+ session twins for join/leave).
   Every policy decision is a guarded `topos_*` SQL function call (0015) — the ONE implementation
   Rust calls today and the web tier calls at the door cutover; each function re-runs the membership gate
-  itself, so the database answer is authoritative for every caller, not just this one. The db twin
-  resolves SKILL names to ids in Rust (`resolve_skill_name`) and leaves CHANNEL names to the functions,
-  then maps outcome codes — an asymmetry the web tier will want folded into the functions. Naturally idempotent row ops (no receipts);
+  itself, so the database answer is authoritative for every caller, not just this one. The db twins
+  carry the IMMUTABLE skill id (validated against the catalog before the policy call) and leave CHANNEL
+  names to the functions, then map outcome codes — skill name→id resolution lives in SQL too
+  (`topos_resolve_skill`: live catalog first, rename hints second — an old renamed name keeps
+  resolving), so every tier resolves identically. Naturally idempotent row ops (no receipts);
   the channel audit is TRIGGER-emitted, so no write path can skip it.
 - `delivery.rs` / `db/directory/delivery.rs` — the delivery read ("what should THIS device have":
   the ONE entitlement SRF + via attribution + the person's detached set + the unacked notices feed
@@ -612,13 +616,23 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   reference-counted via the union); `follow`/join re-attach. Curation is member-level on `open` channels,
   reviewer+ on `curated`; `protect` tightens at reviewer+ and loosens only at owner, per kind. The
   LIFECYCLE session ops (owner; answered on a self-host plane exactly like a hosted one, the acting gate
-  the confirmed-seat check): archive renames
+  the confirmed-seat check; every op KEYED on the immutable skill id — the composing surface resolves
+  the mutable name in its own loader, so a concurrent rename is a harmless miss): archive renames
   (`<name>-archived-<date>`, counter on repeats) FREEING the base name (id-keyed references make a reused
   name a new identity), unplaces everywhere, auto-closes open proposals with author NOTICES; unarchive
-  renames back or refuses typed (`NameTaken`); delete (archive-first) tombstones the catalog row and
+  renames back or refuses typed (`NameTaken`); RENAME (0018) moves only the catalog name — the old name
+  stays a resolving redirect through `catalog_name_hints` until a live identity claims it, and
+  `topos_resolve_skill` (live catalog first, hints second) plus the `topos_mint_catalog_name` birth-name
+  fold put name derivation + resolution in SQL, ONE implementation for every tier (the Rust folds are
+  deleted); delete (archive-first) tombstones the catalog row and
   un-roots all content for the shipped GC; purge un-roots ONE version's bytes (refused while `current`;
   the hash stays as a who/when tombstone; only blobs unreachable from live versions drop — no
-  object-denylist, content-addressed bytes may legitimately reappear). Verdict + closure notices are
+  object-denylist, content-addressed bytes may legitimately reappear). Migration 0018 also lands the
+  web-admin roster/channel/device acts as guarded functions (`topos_set_member_role` with the sole-owner
+  lockout, `topos_leave_workspace` running the lapse-detach reconcile BEFORE the seat delete,
+  `topos_channel_rename`/`topos_channel_delete` — builtin-refusing, the delete cascading references +
+  memberships with NO person-detach records — and the owner-or-self `topos_revoke_device`), called by
+  the web tier directly. Verdict + closure notices are
   person-scoped rows written IN the deciding transaction. Driven by `src/tests/channels_*.rs` + the
   adapted `set_current`/`contribute`/`session_*` suites.
 

@@ -148,8 +148,12 @@
   policy is later work).
 - **The internal session lane** (`routes/internal.rs`, `internal_session_routes()`): the `/internal/v1/*`
   HTTP front for the lib-only session wrappers (the member-scoped reads `session_read_cmd`, the
-  review/revert `session_review_cmd`, `remove_member`, `set_review_required`, and the standup
-  `create_workspace`/`approve_session`/`approve_standup`) — for a downstream session-authenticated composing
+  review/revert `session_review_cmd`, `remove_member`, `set_review_required`, the standup
+  `create_workspace`/`approve_session`/`approve_standup`, and the skill-lifecycle ceremonies
+  `lifecycle_cmd` — archive/unarchive/delete/version-purge/rename as five POST routes keyed on the
+  IMMUTABLE skill id, never the mutable catalog name (the composing surface resolves name→id in its own
+  loader, so a concurrent rename is a harmless miss); their 200 all-outcome bodies carry the guarded
+  functions' DENIED reason codes verbatim) — for a downstream session-authenticated composing
   surface that has already proven who is acting. It mirrors the policy route's auth shape: ONE **internal
   bearer token** (`--internal-token` / `TOPOS_PLANE_INTERNAL_TOKEN`, sha256-only via
   `PlaneState::with_internal_token`) gates the whole lane — with NO token configured every route answers the

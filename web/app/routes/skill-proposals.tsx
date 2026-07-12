@@ -1,10 +1,11 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { redirect, useLoaderData } from "react-router";
 import { ProposalsSection, type ProposalsSectionData } from "@/components/skill/proposals-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
+import { resolveSkillName } from "@/lib/db/resolve.server";
 import { sessionProposals } from "@/lib/plane/reads.server";
 
 export function meta({ params }: { params: { skill?: string } }) {
@@ -29,6 +30,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const actor = await requireMember(request, ws);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
+    // A rename left an old name behind: follow the resolving hint to the live name; else 404.
+    const resolved = await resolveSkillName(actor, skill);
+    if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
+      throw redirect(`/workspaces/${ws}/skills/${resolved.name}/proposals`);
+    }
     notFound();
   }
 

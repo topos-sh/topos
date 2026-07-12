@@ -437,7 +437,7 @@ async fn a_purged_version_is_never_a_revert_target_on_either_lane(pool: PgPool) 
         .await
         .unwrap();
 
-    // Genesis (v1) named "Deploy" (the catalog name the purge resolves), then v2 on top.
+    // Genesis (v1) named "Deploy" (the purge keys on the immutable skill id), then v2 on top.
     let (staged, device) = prepare(
         &fx,
         &key,
@@ -482,7 +482,7 @@ async fn a_purged_version_is_never_a_revert_target_on_either_lane(pool: PgPool) 
             .purge_version_session(
                 &w,
                 "alice@acme.com",
-                "deploy",
+                "s_deploy",
                 v1,
                 DeploymentMode::Cloud,
                 CREATED_AT,
@@ -576,7 +576,7 @@ async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
         .await
         .unwrap();
 
-    // Genesis v1 (current) named "Deploy"; a proposal V rides on it (not current — purgeable).
+    // Genesis v1 (current) named "Deploy" (ops key on the id); a proposal V rides on it (not current — purgeable).
     let (staged, device) = prepare(
         &fx,
         &key,
@@ -622,7 +622,7 @@ async fn re_introducing_a_purged_version_clears_its_tombstone(pool: PgPool) {
             .purge_version_session(
                 &w,
                 "alice@acme.com",
-                "deploy",
+                "s_deploy",
                 vcommit,
                 DeploymentMode::Cloud,
                 CREATED_AT,

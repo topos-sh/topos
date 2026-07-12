@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { redirect, useLoaderData } from "react-router";
 import { VersionFiles } from "@/components/browse/version-files";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
@@ -7,6 +7,7 @@ import { Card } from "@/components/ui";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
+import { resolveSkillName } from "@/lib/db/resolve.server";
 
 export function meta({ params }: { params: { skill?: string } }) {
   return [{ title: `${params.skill ?? "skill"} · Topos` }];
@@ -32,6 +33,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const actor = await requireMember(request, ws);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
+    // A rename left an old name behind: follow the resolving hint to the live name; else 404.
+    const resolved = await resolveSkillName(actor, skill);
+    if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
+      throw redirect(`/workspaces/${ws}/skills/${resolved.name}`);
+    }
     notFound();
   }
 

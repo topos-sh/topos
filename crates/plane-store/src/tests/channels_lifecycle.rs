@@ -213,7 +213,14 @@ async fn owner_archive_renames_frees_the_name_closes_proposals_and_notifies(pool
 
     let out = fx
         .authority
-        .archive_skill_session(&w, ALICE, "s_deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(
+            &w,
+            ALICE,
+            "s_deploy",
+            DeploymentMode::Cloud,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap();
     let LifecycleOutcome::Archived { archived_name } = out else {
@@ -342,15 +349,15 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
     // A confirmed non-owner member gets the typed role refusal.
     assert_eq!(
         fx.authority
-            .archive_skill_session(&w, BOB, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+            .archive_skill_session(&w, BOB, "s_deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
             .await
             .unwrap(),
         LifecycleOutcome::OwnerRoleRequired
     );
-    // An unknown skill name is the uniform NotFound.
+    // An unknown skill id is the uniform NotFound.
     assert!(matches!(
         fx.authority
-            .archive_skill_session(&w, ALICE, "nope", DeploymentMode::Cloud, CREATED_AT, NOW)
+            .archive_skill_session(&w, ALICE, "s_nope", DeploymentMode::Cloud, CREATED_AT, NOW)
             .await,
         Err(AuthorityError::NotFound)
     ));
@@ -359,15 +366,29 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
     // self-host too: a confirmed non-owner still gets the typed OwnerRoleRequired (a non-mutating probe).
     assert_eq!(
         fx.authority
-            .archive_skill_session(&w, BOB, "deploy", DeploymentMode::SelfHost, CREATED_AT, NOW)
+            .archive_skill_session(
+                &w,
+                BOB,
+                "s_deploy",
+                DeploymentMode::SelfHost,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         LifecycleOutcome::OwnerRoleRequired
     );
-    // Archiving twice: the second is NotActive.
+    // Archiving twice: the second is NotActive (the id names the same identity across the rename).
     assert!(matches!(
         fx.authority
-            .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+            .archive_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         LifecycleOutcome::Archived { .. }
@@ -377,7 +398,7 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
             .archive_skill_session(
                 &w,
                 ALICE,
-                "deploy-archived-2026-06-28",
+                "s_deploy",
                 DeploymentMode::Cloud,
                 CREATED_AT,
                 NOW
@@ -414,17 +435,19 @@ async fn unarchive_restores_the_name_and_the_author_self_follow_survives(pool: P
     assert!(find(&deliver(&fx, &w, "dk_bob").await, "s_deploy").is_some());
 
     fx.authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(
+            &w,
+            ALICE,
+            "s_deploy",
+            DeploymentMode::Cloud,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap();
     let out = fx
         .authority
-        .unarchive_skill_session(
-            &w,
-            ALICE,
-            "deploy-archived-2026-06-28",
-            DeploymentMode::Cloud,
-        )
+        .unarchive_skill_session(&w, ALICE, "s_deploy", DeploymentMode::Cloud)
         .await
         .unwrap();
     assert_eq!(
@@ -469,7 +492,7 @@ async fn unarchive_refuses_when_the_base_name_was_reused(pool: PgPool) {
     )
     .await;
     fx.authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(&w, ALICE, "s_old", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     // A fresh identity claims "deploy".
@@ -486,12 +509,7 @@ async fn unarchive_refuses_when_the_base_name_was_reused(pool: PgPool) {
     // Unarchiving the OLD skill now collides on the base name.
     assert_eq!(
         fx.authority
-            .unarchive_skill_session(
-                &w,
-                ALICE,
-                "deploy-archived-2026-06-28",
-                DeploymentMode::Cloud
-            )
+            .unarchive_skill_session(&w, ALICE, "s_old", DeploymentMode::Cloud)
             .await
             .unwrap(),
         LifecycleOutcome::NameTaken
@@ -532,25 +550,26 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
     // Delete of an ACTIVE skill is refused (archive-first).
     assert_eq!(
         fx.authority
-            .delete_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, NOW)
+            .delete_skill_session(&w, ALICE, "s_deploy", DeploymentMode::Cloud, NOW)
             .await
             .unwrap(),
         LifecycleOutcome::NotArchived
     );
     // Archive, then delete.
     fx.authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(
+            &w,
+            ALICE,
+            "s_deploy",
+            DeploymentMode::Cloud,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap();
     assert_eq!(
         fx.authority
-            .delete_skill_session(
-                &w,
-                ALICE,
-                "deploy-archived-2026-06-28",
-                DeploymentMode::Cloud,
-                NOW
-            )
+            .delete_skill_session(&w, ALICE, "s_deploy", DeploymentMode::Cloud, NOW)
             .await
             .unwrap(),
         LifecycleOutcome::Deleted
@@ -637,7 +656,14 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
         .unwrap()
         .unwrap();
     fx.authority
-        .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
+        .archive_skill_session(
+            &w,
+            ALICE,
+            "s_deploy",
+            DeploymentMode::Cloud,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap();
 
@@ -750,7 +776,7 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
             .purge_version_session(
                 &w,
                 ALICE,
-                "deploy",
+                "s_deploy",
                 v2_commit,
                 DeploymentMode::Cloud,
                 CREATED_AT,
@@ -766,7 +792,7 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
             .purge_version_session(
                 &w,
                 ALICE,
-                "deploy",
+                "s_deploy",
                 v1_commit,
                 DeploymentMode::Cloud,
                 CREATED_AT,
@@ -836,7 +862,7 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
             .purge_version_session(
                 &w,
                 ALICE,
-                "deploy",
+                "s_deploy",
                 v1_commit,
                 DeploymentMode::Cloud,
                 CREATED_AT,
@@ -988,4 +1014,573 @@ async fn a_member_revert_on_a_reviewed_bundle_downgrades_but_a_reviewer_lands(po
             > b_current.seq,
         "the pointer advanced"
     );
+}
+
+// ── rename ────────────────────────────────────────────────────────────────────────────────────────
+
+/// The owner rename: the identity (and every id-keyed reference) is untouched — only the catalog
+/// name moves — and the OLD name keeps resolving as a hint (`topos_resolve_skill` answers the live
+/// spelling with `via = 'hint'`) until a new identity claims it. The refusals are the typed reasons a
+/// confirmed member is entitled to: a non-owner `OwnerRoleRequired`, a rule-breaking name `BadName`,
+/// a name another identity holds `NameTaken`, an archived skill `NotActive`; an unknown id is the
+/// uniform `NotFound`.
+#[sqlx::test]
+async fn rename_moves_the_name_leaves_a_resolving_hint_and_refuses_typed(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-rename").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
+    // A second identity holding "docs" (the NameTaken witness).
+    gpub(
+        &fx,
+        &w,
+        &skill("s_docs"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000002",
+        vec![file("f", b"docs")],
+        "Docs",
+    )
+    .await;
+
+    // A confirmed non-owner member gets the typed role refusal; an unknown id the uniform miss.
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                BOB,
+                "s_deploy",
+                "ship",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::OwnerRoleRequired
+    );
+    assert!(matches!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_nope",
+                "ship",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+    // The name rules hold: charset/length and the reserved archive-rename pattern.
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                "Bad Name!",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::BadName
+    );
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                "ship-archived-2026",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::BadName
+    );
+    // Two identities cannot share one name.
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                "docs",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::NameTaken
+    );
+
+    // The happy path: renamed, and the OLD name resolves as a hint to the live identity.
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                "ship",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::Renamed {
+            name: "ship".to_owned()
+        }
+    );
+    assert_eq!(
+        catalog(&pool, "w_acme", "s_deploy").await,
+        Some(("active".to_owned(), "ship".to_owned()))
+    );
+    let hint = resolve(&pool, "w_acme", "deploy").await;
+    assert_eq!(
+        hint,
+        Some((
+            "s_deploy".to_owned(),
+            "ship".to_owned(),
+            "active".to_owned(),
+            "hint".to_owned()
+        )),
+        "the old name keeps resolving, flagged as a hint carrying the live spelling"
+    );
+    // The live name resolves via the catalog arm, and a fresh identity claiming the freed old name
+    // SHADOWS the hint (one name, one meaning at a time).
+    assert_eq!(
+        resolve(&pool, "w_acme", "ship").await.map(|r| r.3),
+        Some("name".to_owned())
+    );
+    gpub(
+        &fx,
+        &w,
+        &skill("s_fresh"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000003",
+        vec![file("f", b"fresh")],
+        "Deploy",
+    )
+    .await;
+    assert_eq!(
+        resolve(&pool, "w_acme", "deploy").await,
+        Some((
+            "s_fresh".to_owned(),
+            "deploy".to_owned(),
+            "active".to_owned(),
+            "name".to_owned()
+        )),
+        "a live identity shadows the hint"
+    );
+
+    // An archived skill refuses the rename typed.
+    fx.authority
+        .archive_skill_session(
+            &w,
+            ALICE,
+            "s_deploy",
+            DeploymentMode::Cloud,
+            CREATED_AT,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.authority
+            .rename_skill_session(
+                &w,
+                ALICE,
+                "s_deploy",
+                "boat",
+                DeploymentMode::Cloud,
+                CREATED_AT
+            )
+            .await
+            .unwrap(),
+        crate::RenameOutcome::NotActive
+    );
+}
+
+/// One `topos_resolve_skill` row as `(skill_id, name, status, via)` (raw `sqlx`, off the committed
+/// `.sqlx` drift surface).
+async fn resolve(pool: &PgPool, w: &str, name: &str) -> Option<(String, String, String, String)> {
+    use sqlx::Row as _;
+    sqlx::query("SELECT skill_id, name, status, via FROM topos_resolve_skill($1, $2)")
+        .bind(w)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .map(|r| {
+            (
+                r.get::<String, _>("skill_id"),
+                r.get::<String, _>("name"),
+                r.get::<String, _>("status"),
+                r.get::<String, _>("via"),
+            )
+        })
+}
+
+// ── the web-admin roster/channel/device acts (guarded functions, called as the web tier calls them) ──
+
+/// One guarded-function call answering a TEXT outcome, with string binds (raw `sqlx`, exactly the
+/// call shape the web tier uses).
+async fn fn_outcome(pool: &PgPool, sql: &str, binds: &[&str]) -> String {
+    let mut q = sqlx::query_scalar::<_, String>(sql);
+    for b in binds {
+        q = q.bind(*b);
+    }
+    q.fetch_one(pool).await.unwrap()
+}
+
+/// `topos_set_member_role`: an owner act on any seat, with the last-owner lockout — demoting the
+/// sole confirmed owner refuses (`sole_owner`) until a second confirmed owner exists.
+#[sqlx::test]
+async fn set_member_role_is_owner_gated_and_the_sole_owner_cannot_be_demoted(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-role").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    let sql = "SELECT topos_set_member_role($1, $2, $3, $4)";
+
+    // The gates: a stranger is member_required, a plain member owner_role_required, a bad role and
+    // an unknown target typed.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", "eve@else.com", BOB, "reviewer"]).await,
+        "member_required"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", BOB, ALICE, "member"]).await,
+        "owner_role_required"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, BOB, "admin"]).await,
+        "bad_role"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, "ghost@acme.com", "member"]).await,
+        "unknown_member"
+    );
+
+    // The owner raises bob to reviewer; the row moves.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, BOB, "reviewer"]).await,
+        "set"
+    );
+    let role: String = sqlx::query_scalar::<_, String>(
+        "SELECT role FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
+    )
+    .bind("w_acme")
+    .bind(BOB)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(role, "reviewer");
+
+    // Demoting the SOLE confirmed owner refuses; after a second owner exists it lands.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, ALICE, "member"]).await,
+        "sole_owner"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, BOB, "owner"]).await,
+        "set"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, ALICE, "member"]).await,
+        "set"
+    );
+}
+
+/// `topos_leave_workspace`: the self-serve seat delete. The lapse-detach reconcile runs BEFORE the
+/// seat delete — the person's detachment records land (proving the entitled set was still readable
+/// when they were written; after the delete the membership-gated union reads empty) — and a sole
+/// confirmed owner cannot leave.
+#[sqlx::test]
+async fn leave_writes_the_detach_records_before_the_seat_delete_and_locks_the_sole_owner(
+    pool: PgPool,
+) {
+    let fx = Fixture::new(pool.clone(), "chl-leave").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
+    // bob receives it via `everyone` before leaving.
+    assert!(find(&deliver(&fx, &w, "dk_bob").await, "s_deploy").is_some());
+
+    // A stranger is the typed member_required; the sole confirmed owner cannot leave.
+    let eve: String = sqlx::query_scalar("SELECT topos_leave_workspace($1, $2, $3, $4)")
+        .bind("w_acme")
+        .bind("eve@else.com")
+        .bind(NOW)
+        .bind(CREATED_AT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(eve, "member_required");
+    let alice: String = sqlx::query_scalar("SELECT topos_leave_workspace($1, $2, $3, $4)")
+        .bind("w_acme")
+        .bind(ALICE)
+        .bind(NOW)
+        .bind(CREATED_AT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(alice, "sole_owner");
+
+    // bob leaves: the seat is gone AND the person-scoped detachment record exists — written by the
+    // reconcile that ran BEFORE the delete (the union is membership-gated, so a post-delete
+    // reconcile would have had nothing to record).
+    let left: String = sqlx::query_scalar("SELECT topos_leave_workspace($1, $2, $3, $4)")
+        .bind("w_acme")
+        .bind(BOB)
+        .bind(NOW)
+        .bind(CREATED_AT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, "left");
+    let seated: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
+    )
+    .bind("w_acme")
+    .bind(BOB)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert!(seated.is_none(), "the seat is deleted");
+    let detached: Option<String> = sqlx::query_scalar(
+        "SELECT cause FROM skill_detachments \
+         WHERE workspace_id = $1 AND principal = $2 AND skill_id = 's_deploy'",
+    )
+    .bind("w_acme")
+    .bind(BOB)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detached.as_deref(),
+        Some("membership_removed"),
+        "the detach record landed before the seat delete"
+    );
+}
+
+/// `topos_channel_rename` / `topos_channel_delete`: owner existence-acts. `everyone` refuses typed
+/// (`builtin`) on both; a rename moves only the display key (the channel_id survives); a delete
+/// cascades the references and memberships itself and writes NO person-detach records (a deletion is
+/// an upstream withdrawal, never the person's own act).
+#[sqlx::test]
+async fn channel_rename_and_delete_are_owner_acts_that_spare_everyone_and_detach_nobody(
+    pool: PgPool,
+) {
+    let fx = Fixture::new(pool.clone(), "chl-chadmin").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
+    // A channel with a reference and a member: place creates `tools`, bob joins + follows via it.
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_channel_place($1, $2, $3, $4, $5)",
+            &["w_acme", "tools", "s_deploy", ALICE, CREATED_AT],
+        )
+        .await,
+        "created"
+    );
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_channel_join($1, $2, $3, $4)",
+            &["w_acme", "tools", BOB, CREATED_AT],
+        )
+        .await,
+        "joined"
+    );
+
+    // The gates: builtin refusals for `everyone`, the owner gate, name rules, unknown channel.
+    let rename = "SELECT topos_channel_rename($1, $2, $3, $4, $5)";
+    let delete = "SELECT topos_channel_delete($1, $2, $3, $4)";
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            rename,
+            &["w_acme", "everyone", "all", ALICE, CREATED_AT]
+        )
+        .await,
+        "builtin"
+    );
+    assert_eq!(
+        fn_outcome(&pool, delete, &["w_acme", "everyone", ALICE, CREATED_AT]).await,
+        "builtin"
+    );
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            rename,
+            &["w_acme", "tools", "toolbox", BOB, CREATED_AT]
+        )
+        .await,
+        "owner_role_required"
+    );
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            rename,
+            &["w_acme", "tools", "Bad Name!", ALICE, CREATED_AT]
+        )
+        .await,
+        "bad_name"
+    );
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            rename,
+            &["w_acme", "tools", "everyone", ALICE, CREATED_AT]
+        )
+        .await,
+        "name_taken"
+    );
+    assert_eq!(
+        fn_outcome(&pool, rename, &["w_acme", "nope", "x", ALICE, CREATED_AT]).await,
+        "unknown_channel"
+    );
+
+    // Rename: only the display key moves — the channel_id, references, and memberships survive.
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            rename,
+            &["w_acme", "tools", "toolbox", ALICE, CREATED_AT]
+        )
+        .await,
+        "renamed"
+    );
+    let (cid, refs, members): (String, i64, i64) = {
+        use sqlx::Row as _;
+        let r = sqlx::query(
+            "SELECT ch.channel_id,
+                    (SELECT COUNT(*)::int8 FROM channel_skills cs
+                     WHERE cs.workspace_id = ch.workspace_id AND cs.channel_id = ch.channel_id),
+                    (SELECT COUNT(*)::int8 FROM channel_members cm
+                     WHERE cm.workspace_id = ch.workspace_id AND cm.channel_id = ch.channel_id)
+             FROM channels ch WHERE ch.workspace_id = $1 AND ch.name = 'toolbox'",
+        )
+        .bind("w_acme")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (r.get(0), r.get(1), r.get(2))
+    };
+    assert_eq!(cid, "tools", "the immutable channel_id never moves");
+    assert_eq!((refs, members), (1, 1), "references + memberships survive");
+
+    // Delete: the channel, its references, and its memberships are gone — and NOBODY gets a
+    // person-detach record (the skill still delivers via `everyone`; a channel deletion is an
+    // upstream act).
+    assert_eq!(
+        fn_outcome(&pool, delete, &["w_acme", "toolbox", ALICE, CREATED_AT]).await,
+        "deleted"
+    );
+    for probe in [
+        "SELECT COUNT(*)::int8 FROM channels WHERE workspace_id = $1 AND channel_id = 'tools'",
+        "SELECT COUNT(*)::int8 FROM channel_skills WHERE workspace_id = $1 AND channel_id = 'tools'",
+        "SELECT COUNT(*)::int8 FROM channel_members WHERE workspace_id = $1 AND channel_id = 'tools'",
+    ] {
+        let n: i64 = sqlx::query_scalar(probe)
+            .bind("w_acme")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "cascaded: {probe}");
+    }
+    let detachments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::int8 FROM skill_detachments WHERE workspace_id = $1")
+            .bind("w_acme")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(detachments, 0, "an upstream delete detaches nobody");
+    assert!(
+        find(&deliver(&fx, &w, "dk_bob").await, "s_deploy").is_some(),
+        "the skill keeps flowing via everyone"
+    );
+}
+
+/// `topos_revoke_device`: the session-side revoke — the device's own principal signs it out, an
+/// owner revokes anyone's, another member is refused typed, and a re-revoke is idempotent.
+#[sqlx::test]
+async fn revoke_device_allows_self_and_owner_and_refuses_another_member(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-revoke").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    seat(&fx, &w, "dk_carol", 13, "carol@acme.com", "member").await;
+    let sql = "SELECT topos_revoke_device($1, $2, $3)";
+
+    // The gates: a stranger, an unknown device, and another plain member all refuse typed.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", "eve@else.com", "dk_bob"]).await,
+        "member_required"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, "dk_ghost"]).await,
+        "unknown_device"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", "carol@acme.com", "dk_bob"]).await,
+        "owner_or_self_required"
+    );
+
+    // Self sign-out and the owner's revoke both land; re-revoking answers the same.
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", BOB, "dk_bob"]).await,
+        "revoked"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", ALICE, "dk_carol"]).await,
+        "revoked"
+    );
+    assert_eq!(
+        fn_outcome(&pool, sql, &["w_acme", BOB, "dk_bob"]).await,
+        "revoked"
+    );
+    let revoked: Vec<String> = sqlx::query_scalar(
+        "SELECT device_key_id FROM device_registry \
+         WHERE workspace_id = $1 AND revoked = 1 ORDER BY device_key_id",
+    )
+    .bind("w_acme")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(revoked, vec!["dk_bob".to_owned(), "dk_carol".to_owned()]);
 }

@@ -1,17 +1,28 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, useLoaderData } from "react-router";
+import { data, redirect, useLoaderData } from "react-router";
 import {
   HistorySection,
   type HistorySectionData,
   type HistoryStepView,
 } from "@/components/skill/history-section";
+import { type PurgeActionData, PurgeSection } from "@/components/skill/purge-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { notFound, requireMember, requireReviewer } from "@/lib/auth/guards.server";
+import {
+  notFound,
+  requireMember,
+  requireReviewer,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
+import { requireStepUp, requireTypedName } from "@/lib/auth/step-up.server";
+import { recordAdminEvent } from "@/lib/db/audit.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
+import { resolveSkillName } from "@/lib/db/resolve.server";
 import { vaultFetch } from "@/lib/plane/client.server";
 import { REVERT_DENIED_REASONS } from "@/lib/plane/errors";
 import { walkHistory } from "@/lib/plane/history.server";
+import { purgeVersion } from "@/lib/plane/lifecycle.server";
+import { purgeDeniedCopy } from "@/lib/plane/lifecycle-copy";
 import { sessionVersionMeta } from "@/lib/plane/reads.server";
 import type { RevertOutcome } from "@/lib/plane/wire";
 import { allowRevertWrite } from "@/lib/rate-limit.server";
@@ -66,6 +77,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const actor = await requireMember(request, ws);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
+    // A rename left an old name behind: follow the resolving hint to the live name's History tab
+    // (preserving the paging cursor); anything else is the house 404.
+    const resolved = await resolveSkillName(actor, skill);
+    if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
+      throw redirect(
+        `/workspaces/${ws}/skills/${resolved.name}/history${new URL(request.url).search}`,
+      );
+    }
     notFound();
   }
 
@@ -115,29 +134,40 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     displayName: row.displayName,
     openProposals: row.openProposals,
     history,
+    // The purge affordance is a workspace-OWNER act (the vault's in-transaction owner gate is the
+    // authority — this is the matching web lock); a plain member/reviewer never sees the section.
+    canPurge: actor.role === "owner",
   };
 }
 
 /**
- * The team-revert decision — roll a skill's `current` back to a known-good version. The per-row
- * RevertControl on a non-head history row posts here (the same route it renders under). The guard
- * (`requireReviewer`, a confirmed owner|reviewer seat) runs FIRST and the vault's in-transaction
- * gate re-checks the seat — the web never decides, it relays a decision the vault authorizes.
- * Revert is a FORWARD move (it restores already-consented bytes on top of `current`; nothing is
- * deleted, and a team can roll forward again). The form binds what the reviewer saw: a loader-minted
- * UUID `request_id` (a retried form replays the same idempotent outcome) plus the bound `(epoch,
- * seq)` the page rendered against, so a moved pointer refuses `conflict` and the reloaded page mints
- * fresh values. React Router revalidates the loader after this action — no explicit invalidation.
+ * The History tab's writes, dispatched on the hidden `intent`: REVERT (owner|reviewer roll-back to
+ * a known-good version — a forward, already-consented move) and PURGE (an owner-only ceremony that
+ * drops one past version's bytes, gated by step-up + typing the skill name). Each branch RE-GUARDS
+ * itself and the vault's in-transaction gate re-checks — the web never decides, it relays a decision
+ * the vault authorizes. React Router revalidates the loader after either — no explicit invalidation.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const ws = params.ws as string;
   const skill = params.skill as string;
-  const actor = await requireReviewer(request, ws);
-
   const form = await request.formData();
-  if (String(form.get("intent") ?? "") !== "revert") {
-    return data<RevertActionData>({ status: "error" }, { status: 400 });
+  const intent = String(form.get("intent") ?? "");
+  if (intent === "revert") {
+    return revertAction(request, ws, skill, form);
   }
+  if (intent === "purge") {
+    return purgeAction(request, ws, skill, form);
+  }
+  return data<RevertActionData>({ status: "error" }, { status: 400 });
+}
+
+/**
+ * The team-revert decision — the per-row RevertControl posts here. Guard (owner|reviewer) FIRST,
+ * then the vault's in-transaction gate re-checks; the web relays. The belt runs after the guard (a
+ * stranger burns no token) and before the vault call, keyed by the guard-minted actor's email.
+ */
+async function revertAction(request: Request, ws: string, skill: string, form: FormData) {
+  const actor = await requireReviewer(request, ws);
 
   // The belt runs after the guard (a stranger burns no token) and before the vault call, keyed by
   // the guard-minted actor's email. A refusal is the honest error state — nothing was sent.
@@ -218,8 +248,94 @@ export async function action({ request, params }: ActionFunctionArgs) {
   return data<RevertActionData>({ status: "error" });
 }
 
+/**
+ * The per-version PURGE ceremony — OWNER-only (requireWorkspaceOwner), step-up + type-the-skill-name
+ * gated. It drops ONE past version's bytes server-side; the hash stays as a tombstone. The vault
+ * refuses the CURRENT version (`is_current`) — the UI also hides the control on the head row — and a
+ * second purge answers `already_purged`. One admin_event lands whatever the outcome (a refused
+ * step-up included). The vault keys on the immutable skill id, never the catalog name.
+ */
+async function purgeAction(request: Request, ws: string, skill: string, form: FormData) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const versionId = String(form.get("version_id") ?? "")
+    .trim()
+    .toLowerCase();
+  const short = versionId.slice(0, 12);
+
+  const stepUp = await requireStepUp(request, form);
+  if (!stepUp.ok) {
+    await recordAdminEvent(owner, {
+      kind: "purge",
+      subject: skill,
+      detail: short,
+      outcome: "denied",
+    });
+    return data<PurgeActionData>({
+      intent: "purge",
+      status: "denied",
+      versionId,
+      message: stepUp.error,
+    });
+  }
+  const row = await skillIndexRow(owner, skill);
+  if (row === undefined) {
+    return data<PurgeActionData>({ intent: "purge", status: "error", versionId });
+  }
+  // The typed second factor: the skill's CURRENT catalog name, re-read from the server (never a
+  // form-supplied expected value).
+  const typed = requireTypedName(form, row.name);
+  if (!typed.ok) {
+    await recordAdminEvent(owner, {
+      kind: "purge",
+      subject: row.name,
+      detail: short,
+      outcome: "denied",
+    });
+    return data<PurgeActionData>({
+      intent: "purge",
+      status: "denied",
+      versionId,
+      message: typed.error,
+    });
+  }
+  if (!HEX64.test(versionId)) {
+    return data<PurgeActionData>({ intent: "purge", status: "error", versionId });
+  }
+  const outcome = await purgeVersion(owner.email, ws, row.skillId, versionId);
+  if (outcome === null) {
+    await recordAdminEvent(owner, {
+      kind: "purge",
+      subject: row.name,
+      detail: short,
+      outcome: "error",
+    });
+    return data<PurgeActionData>({ intent: "purge", status: "error", versionId });
+  }
+  if (outcome.outcome === "purged") {
+    await recordAdminEvent(owner, {
+      kind: "purge",
+      subject: row.name,
+      detail: short,
+      outcome: "ok",
+    });
+    return data<PurgeActionData>({ intent: "purge", status: "purged", versionId });
+  }
+  await recordAdminEvent(owner, {
+    kind: "purge",
+    subject: row.name,
+    detail: short,
+    outcome: "denied",
+  });
+  return data<PurgeActionData>({
+    intent: "purge",
+    status: "denied",
+    versionId,
+    message: purgeDeniedCopy(outcome.reason),
+  });
+}
+
 export default function SkillHistoryPage() {
-  const { ws, skill, currentShort, displayName, openProposals, history } =
+  const { ws, skill, currentShort, displayName, openProposals, history, canPurge } =
     useLoaderData<typeof loader>();
   return (
     <div className="space-y-6">
@@ -230,6 +346,7 @@ export default function SkillHistoryPage() {
         openProposals={openProposals}
       />
       <HistorySection ws={ws} skill={skill} data={history} />
+      <PurgeSection skill={skill} data={history} canPurge={canPurge} />
     </div>
   );
 }

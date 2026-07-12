@@ -147,6 +147,62 @@ export interface RevertOutcome {
   reason?: string;
 }
 
+/**
+ * The skill LIFECYCLE ceremonies — five internal-lane writes, every one keyed on the immutable
+ * `skill_id` (the page resolves the catalog name in its own loader first; keying the wire on the
+ * id makes a concurrent rename a harmless miss, never a wrong-target act). Each answers
+ * 200-for-all-outcomes: the decision rides the body's `outcome` discriminant. `denied.reason`
+ * is the guarded SQL function's own outcome code, relayed verbatim; `not_found` is the uniform
+ * miss the whole lane answers for a non-member acting principal.
+ */
+
+/** POST /internal/v1/workspaces/{ws}/skills/{skill}/archive — body {} */
+export interface ArchiveOutcome {
+  outcome: "archived" | "denied" | "not_found";
+  /** On `archived`: the new archived catalog name (`<base>-archived-<date>`) — the base name freed. */
+  archived_name?: string;
+  reason?: string;
+}
+
+/** POST /internal/v1/workspaces/{ws}/skills/{skill}/unarchive — body {} */
+export interface UnarchiveOutcome {
+  outcome: "unarchived" | "denied" | "not_found";
+  /** On `unarchived`: the live catalog name restored. */
+  name?: string;
+  /** denied reasons: name_taken | not_archived | owner_role_required. */
+  reason?: string;
+}
+
+/** POST /internal/v1/workspaces/{ws}/skills/{skill}/delete — body {} */
+export interface DeleteOutcome {
+  outcome: "deleted" | "denied" | "not_found";
+  /** denied reasons: not_archived | owner_role_required. */
+  reason?: string;
+}
+
+/** POST /internal/v1/workspaces/{ws}/skills/{skill}/purge — body {version_id} */
+export interface PurgeBody {
+  /** The version to purge (lowercase hex64) — its bytes drop, the hash stays as a tombstone. */
+  version_id: string;
+}
+export interface PurgeOutcome {
+  outcome: "purged" | "denied" | "not_found";
+  /** denied reasons: is_current | already_purged | owner_role_required. */
+  reason?: string;
+}
+
+/** POST /internal/v1/workspaces/{ws}/skills/{skill}/rename — body {new_name} */
+export interface RenameBody {
+  new_name: string;
+}
+export interface RenameOutcome {
+  outcome: "renamed" | "denied" | "not_found";
+  /** On `renamed`: the live catalog name (the new name). */
+  name?: string;
+  /** denied reasons: bad_name | name_taken | not_active | owner_role_required. */
+  reason?: string;
+}
+
 /** GET /v1/enroll/verify/{userCode} — the PUBLIC verification-context read (device approval). */
 export interface VerificationContext {
   intent?: "enroll" | "standup" | "login";

@@ -1,8 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import { data, Link, redirect, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
 import { InviteMemberForm } from "@/components/members/invite-member-form";
+import { LeaveWorkspaceForm } from "@/components/members/leave-workspace-form";
 import { RemoveMemberForm } from "@/components/members/remove-member-form";
+import { RoleForm } from "@/components/members/role-form";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import {
   normalizeEmail,
@@ -10,6 +12,14 @@ import {
   requireMember,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
+import { requireStepUp } from "@/lib/auth/step-up.server";
+import { recordAdminEvent } from "@/lib/db/audit.server";
+import {
+  type LeaveWorkspaceOutcome,
+  leaveWorkspace,
+  type SetMemberRoleOutcome,
+  setMemberRole,
+} from "@/lib/db/queries.roster.server";
 import {
   inviteMembers,
   type PlaneMemberRow,
@@ -65,7 +75,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 /**
  * ONE action, dispatched on the hidden `intent`. Each branch RE-GUARDS itself (a loader gate
  * never extends to an action), and each re-guards at its own grade: inviting is a member op the
- * DATABASE gates per invite-policy; removing is owner-only.
+ * DATABASE gates per invite-policy; removing and role changes are owner-only; leaving is the
+ * signed-in member's own act. Role change, remove, and leave are STEP-UP ceremonies (a fresh
+ * password re-entry, verified immediately before the act); invite stays ungated (member-level,
+ * non-destructive).
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const ws = params.ws;
@@ -79,6 +92,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "remove") {
     return removeIntent(request, ws, formData);
+  }
+  if (intent === "set-role") {
+    return setRoleIntent(request, ws, formData);
+  }
+  if (intent === "leave") {
+    return leaveIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -135,16 +154,32 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
   return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
 }
 
-/** Removing a seat is owner-only; the web guard is the matching lock behind the vault's own gate. */
+/**
+ * Removing a seat is owner-only and a STEP-UP ceremony: guard → validate the target → requireStepUp
+ * → the instant-revoke vault call → record the admin event (whatever the outcome — a refused
+ * step-up is a fact the trail must show). The web guard is the matching lock behind the vault's own
+ * gate.
+ */
 async function removeIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
   const requestId = String(formData.get("request_id") ?? "").trim();
-  if (!UUID_RE.test(requestId)) {
-    return { intent: "remove" as const, status: "error" as const };
-  }
   // The directory's principal identity is case-EXACT and the form binds a VERBATIM seat email —
   // trim only, so a mixed-case seat is matched, not silently no-op-removed.
   const email = String(formData.get("email") ?? "").trim();
+  if (!UUID_RE.test(requestId) || email.length === 0) {
+    await recordAdminEvent(owner, { kind: "member_removed", subject: email, outcome: "error" });
+    return { intent: "remove" as const, status: "error" as const };
+  }
+  const stepUp = await requireStepUp(request, formData);
+  if (!stepUp.ok) {
+    await recordAdminEvent(owner, {
+      kind: "member_removed",
+      subject: email,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return { intent: "remove" as const, status: "step_up" as const, error: stepUp.error };
+  }
   const response = await vaultFetch({
     method: "POST",
     template: "/internal/v1/workspaces/{ws}/roster/remove",
@@ -153,22 +188,142 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
     body: { request_id: requestId, email } satisfies RemoveMemberBody,
   });
   if (!response.ok) {
+    await recordAdminEvent(owner, { kind: "member_removed", subject: email, outcome: "error" });
     return { intent: "remove" as const, status: "error" as const };
   }
   let outcome: RemoveMemberOutcome;
   try {
     outcome = (await response.json()) as RemoveMemberOutcome;
   } catch {
+    await recordAdminEvent(owner, { kind: "member_removed", subject: email, outcome: "error" });
     return { intent: "remove" as const, status: "error" as const };
   }
   if (outcome.outcome === "removed") {
+    await recordAdminEvent(owner, { kind: "member_removed", subject: email, outcome: "ok" });
     return { intent: "remove" as const, status: "removed" as const };
   }
   // denied: distinguish the last-owner lockout (the promised honest state) from the acting gate.
+  await recordAdminEvent(owner, {
+    kind: "member_removed",
+    subject: email,
+    detail: outcome.reason,
+    outcome: "denied",
+  });
   return {
     intent: "remove" as const,
     status: outcome.reason === LAST_OWNER_REASON ? ("last_owner" as const) : ("denied" as const),
   };
+}
+
+/**
+ * Changing a seat's role is owner-only and a STEP-UP ceremony: guard → validate the role →
+ * requireStepUp → the guarded `topos_set_member_role` call → record the admin event. The database
+ * re-runs the owner gate and refuses demoting the sole owner (`sole_owner`); its outcome codes ride
+ * back to the honest inline copy. A lapsed acting gate (a race between guard and call) is the house
+ * miss, never a claim.
+ */
+async function setRoleIntent(request: Request, ws: string, formData: FormData) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const email = String(formData.get("email") ?? "").trim();
+  const role = String(formData.get("role") ?? "");
+  if (role !== "owner" && role !== "reviewer" && role !== "member") {
+    await recordAdminEvent(owner, {
+      kind: "role_change",
+      subject: email,
+      detail: role,
+      outcome: "error",
+    });
+    return { intent: "set-role" as const, status: "error" as const };
+  }
+  const stepUp = await requireStepUp(request, formData);
+  if (!stepUp.ok) {
+    await recordAdminEvent(owner, {
+      kind: "role_change",
+      subject: email,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return { intent: "set-role" as const, status: "step_up" as const, error: stepUp.error };
+  }
+  let outcome: SetMemberRoleOutcome;
+  try {
+    outcome = await setMemberRole(owner, email, role);
+  } catch {
+    await recordAdminEvent(owner, {
+      kind: "role_change",
+      subject: email,
+      detail: role,
+      outcome: "error",
+    });
+    return { intent: "set-role" as const, status: "error" as const };
+  }
+  if (outcome === "set") {
+    await recordAdminEvent(owner, {
+      kind: "role_change",
+      subject: email,
+      detail: role,
+      outcome: "ok",
+    });
+    return { intent: "set-role" as const, status: "ok" as const };
+  }
+  if (outcome === "sole_owner") {
+    await recordAdminEvent(owner, {
+      kind: "role_change",
+      subject: email,
+      detail: role,
+      outcome: "denied",
+    });
+    return { intent: "set-role" as const, status: "sole_owner" as const };
+  }
+  if (outcome === "member_required" || outcome === "owner_role_required") {
+    // The acting owner seat lapsed between guard and call — the house miss, never a claim.
+    notFound();
+  }
+  // bad_role (guarded above) or unknown_member (a vanished target) — an honest error.
+  await recordAdminEvent(owner, {
+    kind: "role_change",
+    subject: email,
+    detail: role,
+    outcome: "error",
+  });
+  return { intent: "set-role" as const, status: "error" as const };
+}
+
+/**
+ * The signed-in member leaving their OWN seat — a STEP-UP ceremony gated only by membership (any
+ * confirmed member may leave themselves): guard → requireStepUp → the guarded `topos_leave_workspace`
+ * call → record the admin event. On success the seat is gone and the person is sent to the
+ * workspaces index (the workspace drops off their rail). The sole owner is refused honestly.
+ */
+async function leaveIntent(request: Request, ws: string, formData: FormData) {
+  const actor = await requireMember(request, ws);
+  const stepUp = await requireStepUp(request, formData);
+  if (!stepUp.ok) {
+    await recordAdminEvent(actor, {
+      kind: "leave",
+      subject: actor.email,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return { intent: "leave" as const, status: "step_up" as const, error: stepUp.error };
+  }
+  let outcome: LeaveWorkspaceOutcome;
+  try {
+    outcome = await leaveWorkspace(actor);
+  } catch {
+    await recordAdminEvent(actor, { kind: "leave", subject: actor.email, outcome: "error" });
+    return { intent: "leave" as const, status: "error" as const };
+  }
+  if (outcome === "left") {
+    await recordAdminEvent(actor, { kind: "leave", subject: actor.email, outcome: "ok" });
+    throw redirect("/workspaces");
+  }
+  if (outcome === "sole_owner") {
+    await recordAdminEvent(actor, { kind: "leave", subject: actor.email, outcome: "denied" });
+    return { intent: "leave" as const, status: "sole_owner" as const };
+  }
+  // member_required — the seat is already gone (a race); the person is not a member. Send them home.
+  throw redirect("/workspaces");
 }
 
 export default function WorkspaceMembers() {
@@ -197,14 +352,17 @@ export default function WorkspaceMembers() {
           <AddressBlock address={address} origin={origin} />
         </Card>
       </section>
+      <LeaveWorkspaceForm />
     </div>
   );
 }
 
 /**
  * The roster panel: the directory's own seats. Every member may attempt an invite (the database
- * gates it per invite-policy); removal controls render only for a confirmed OWNER, and never for
- * the workspace's last owner (the honest lockout the vault also enforces).
+ * gates it per invite-policy); role and removal controls render only for a confirmed OWNER. The
+ * SOLE owner's own seat carries neither (nothing safe to do — you can't remove or demote the last
+ * owner; the honest lockout the database also enforces). Ownership transfers by promoting another
+ * seat to owner first.
  */
 function MembersSection({ roster, isOwner }: { roster: PlaneMemberRow[]; isOwner: boolean }) {
   const ownerCount = roster.filter((s) => s.role === "owner").length;
@@ -221,24 +379,28 @@ function MembersSection({ roster, isOwner }: { roster: PlaneMemberRow[]; isOwner
       </div>
       <Card className="overflow-hidden">
         <ul>
-          {roster.map((seat) => (
-            <li
-              key={seat.principal}
-              className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0"
-            >
-              <span className="text-ink text-sm">{seat.principal}</span>
-              <Chip tone={seat.role === "owner" ? "accent" : "neutral"}>{seat.role}</Chip>
-              <span className="text-faint text-xs">{seat.status}</span>
-              <span className="ml-auto">
+          {roster.map((seat) => {
+            const soleOwner = seat.role === "owner" && ownerCount <= 1;
+            return (
+              <li
+                key={seat.principal}
+                className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-2 border-line-soft border-b px-4 py-3 last:border-b-0"
+              >
+                <span className="text-ink text-sm">{seat.principal}</span>
+                <Chip tone={seat.role === "owner" ? "accent" : "neutral"}>{seat.role}</Chip>
+                <span className="text-faint text-xs">{seat.status}</span>
                 {isOwner &&
-                  (seat.role === "owner" && ownerCount <= 1 ? (
-                    <span className="text-faint text-xs">workspace owner</span>
+                  (soleOwner ? (
+                    <span className="ml-auto text-faint text-xs">workspace owner</span>
                   ) : (
-                    <RemoveMemberForm email={seat.principal} />
+                    <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                      <RoleForm email={seat.principal} role={seat.role} />
+                      <RemoveMemberForm email={seat.principal} />
+                    </span>
                   ))}
-              </span>
-            </li>
-          ))}
+              </li>
+            );
+          })}
           {roster.length === 0 && <li className="px-4 py-3 text-faint text-sm">No seats yet.</li>}
         </ul>
       </Card>

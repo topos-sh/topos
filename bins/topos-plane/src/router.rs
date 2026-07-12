@@ -224,6 +224,29 @@ fn internal_session_routes() -> Router<PlaneState> {
             "/internal/v1/workspaces/{ws}/skills/{skill}/reverts",
             post(routes::internal::revert),
         )
+        // The skill-lifecycle ceremonies (owner acts) — keyed on the IMMUTABLE skill id, never the
+        // mutable catalog name (the composing surface resolves name→id in its own loader, so a
+        // concurrent rename is a harmless miss).
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/archive",
+            post(routes::internal::archive_skill),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/unarchive",
+            post(routes::internal::unarchive_skill),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/delete",
+            post(routes::internal::delete_skill),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/purge",
+            post(routes::internal::purge_version),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/skills/{skill}/rename",
+            post(routes::internal::rename_skill),
+        )
 }
 
 /// Request-level tracing, wired into [`router`] so every composition gets it (no new dependency): ONE

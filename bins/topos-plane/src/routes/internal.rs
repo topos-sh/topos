@@ -27,6 +27,10 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use plane_store::AuthorityError;
 
+use crate::lifecycle_cmd::{
+    ArchiveSkillSummary, DeleteSkillSummary, PurgeVersionSummary, RenameSkillSummary,
+    UnarchiveSkillSummary,
+};
 use crate::roster_cmd::RemoveMemberSummary;
 use crate::session_read_cmd::{
     SessionCurrentSummary, SessionObjectSummary, SessionProposalsSummary, SessionVersionSummary,
@@ -521,6 +525,154 @@ pub(crate) async fn reject_proposal(
         .await
         .map_err(internal_fault)?;
     Ok((StatusCode::OK, Json(review_response(summary))).into_response())
+}
+
+// ── the skill-lifecycle ceremonies (owner acts; every route keys on the IMMUTABLE skill id, never the
+// mutable catalog name — the composing surface resolves name→id in its own loader, so a concurrent
+// rename is a harmless miss, never a wrong-target act) ─────────────────────────────────────────────────
+
+/// The lifecycle family's DENIED/NOT_FOUND arms, shared by the five ceremony routes; each success arm
+/// is route-specific. `reason` is the guarded function's outcome code VERBATIM (`owner_role_required`,
+/// `not_active`, `not_archived`, `name_taken`, `bad_name`, `is_current`, `already_purged`).
+#[derive(serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum LifecycleResponse {
+    Archived { archived_name: String },
+    Unarchived { name: String },
+    Deleted,
+    Purged,
+    Renamed { name: String },
+    Denied { reason: String },
+    NotFound,
+}
+
+/// `POST /internal/v1/workspaces/{ws}/skills/{skill}/archive` — retire the skill for the whole team
+/// (rename + free the base name, unplace everywhere, close open proposals with author notices).
+pub(crate) async fn archive_skill(
+    State(state): State<PlaneState>,
+    Path((ws, skill_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, PlaneHttpError> {
+    let acting = acting_principal(&state, &headers)?;
+    let resp = match state
+        .archive_skill_session(&ws, &acting, &skill_id)
+        .await
+        .map_err(internal_fault)?
+    {
+        ArchiveSkillSummary::Archived { archived_name } => {
+            LifecycleResponse::Archived { archived_name }
+        }
+        ArchiveSkillSummary::Denied { reason } => LifecycleResponse::Denied { reason },
+        ArchiveSkillSummary::NotFound => LifecycleResponse::NotFound,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+/// `POST /internal/v1/workspaces/{ws}/skills/{skill}/unarchive` — rename back to the base name
+/// (refused `name_taken` when a new identity claimed it).
+pub(crate) async fn unarchive_skill(
+    State(state): State<PlaneState>,
+    Path((ws, skill_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, PlaneHttpError> {
+    let acting = acting_principal(&state, &headers)?;
+    let resp = match state
+        .unarchive_skill_session(&ws, &acting, &skill_id)
+        .await
+        .map_err(internal_fault)?
+    {
+        UnarchiveSkillSummary::Unarchived { name } => LifecycleResponse::Unarchived { name },
+        UnarchiveSkillSummary::Denied { reason } => LifecycleResponse::Denied { reason },
+        UnarchiveSkillSummary::NotFound => LifecycleResponse::NotFound,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+/// `POST /internal/v1/workspaces/{ws}/skills/{skill}/delete` — tombstone an ARCHIVED skill
+/// (archive-first; deletion cannot recall device copies).
+pub(crate) async fn delete_skill(
+    State(state): State<PlaneState>,
+    Path((ws, skill_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, PlaneHttpError> {
+    let acting = acting_principal(&state, &headers)?;
+    let resp = match state
+        .delete_skill_session(&ws, &acting, &skill_id)
+        .await
+        .map_err(internal_fault)?
+    {
+        DeleteSkillSummary::Deleted => LifecycleResponse::Deleted,
+        DeleteSkillSummary::Denied { reason } => LifecycleResponse::Denied { reason },
+        DeleteSkillSummary::NotFound => LifecycleResponse::NotFound,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+/// `POST /internal/v1/workspaces/{ws}/skills/{skill}/purge` — un-root ONE version's bytes (refused
+/// `is_current` on the live pointer). The body names the version; it is parsed AFTER the guard, and a
+/// version id that is not 64 lowercase-hex chars is a malformed BODY (400), not an unknown object.
+#[derive(serde::Deserialize)]
+struct PurgeVersionRequest {
+    version_id: String,
+}
+
+pub(crate) async fn purge_version(
+    State(state): State<PlaneState>,
+    Path((ws, skill_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, PlaneHttpError> {
+    let acting = acting_principal(&state, &headers)?;
+    let req: PurgeVersionRequest = parse_body(&body)?;
+    if req.version_id.len() != 64
+        || !req
+            .version_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(PlaneHttpError::BadBody(
+            "version_id must be 64 lowercase hex characters".to_owned(),
+        ));
+    }
+    let resp = match state
+        .purge_version_session(&ws, &acting, &skill_id, &req.version_id)
+        .await
+        .map_err(internal_fault)?
+    {
+        PurgeVersionSummary::Purged => LifecycleResponse::Purged,
+        PurgeVersionSummary::Denied { reason } => LifecycleResponse::Denied { reason },
+        PurgeVersionSummary::NotFound => LifecycleResponse::NotFound,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+/// `POST /internal/v1/workspaces/{ws}/skills/{skill}/rename` — move the user-facing catalog name;
+/// the identity and every id-keyed reference survive, and the old name keeps resolving as a redirect.
+/// A rule-breaking name is the guarded function's `bad_name` DENIED (a member-entitled answer), never
+/// a transport 400.
+#[derive(serde::Deserialize)]
+struct RenameSkillRequest {
+    new_name: String,
+}
+
+pub(crate) async fn rename_skill(
+    State(state): State<PlaneState>,
+    Path((ws, skill_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, PlaneHttpError> {
+    let acting = acting_principal(&state, &headers)?;
+    let req: RenameSkillRequest = parse_body(&body)?;
+    let resp = match state
+        .rename_skill_session(&ws, &acting, &skill_id, &req.new_name)
+        .await
+        .map_err(internal_fault)?
+    {
+        RenameSkillSummary::Renamed { name } => LifecycleResponse::Renamed { name },
+        RenameSkillSummary::Denied { reason } => LifecycleResponse::Denied { reason },
+        RenameSkillSummary::NotFound => LifecycleResponse::NotFound,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
 }
 
 /// `POST /internal/v1/workspaces/{ws}/skills/{skill}/reverts` — the web one-click roll-back to a good version.

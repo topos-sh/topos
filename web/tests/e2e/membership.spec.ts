@@ -55,6 +55,11 @@ test("an invited-only seat is index-visible with the join framing but never admi
 
   await gotoSettled(page, `/workspaces/${ROSTER_WS}`);
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+
+  // The members surface answers the same way — an invite is index visibility, never admission.
+  await gotoSettled(page, `/workspaces/${ROSTER_WS}/members`);
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
 });
 
 test("a signed-in non-member gets 404 on the workspace and no index row — the uniform miss", async ({
@@ -75,8 +80,12 @@ test("a signed-in non-member gets 404 on the workspace and no index row — the 
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "E2E Workspace" })).toHaveCount(0);
 
-  // The nested surfaces answer the same way (settings included).
+  // The nested surfaces answer the same way (settings + members included).
   await gotoSettled(page, `/workspaces/${WS}/settings`);
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+
+  await gotoSettled(page, `/workspaces/${WS}/members`);
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
 });

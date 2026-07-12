@@ -7,9 +7,10 @@ const DENIED_COPY =
   "the server refused the change — a configuration issue on the server, not your permissions";
 
 /**
- * The review-required gate. The directory now holds the real value (`reviewRequired`), so the
- * switch reflects it directly; the `policy_event` audit trail (this tier's own record of who set
- * it from here, and whether the write landed) shows below as an honest history line.
+ * The review-required gate. An owner sees the step-up switch; a non-owner member sees the current
+ * value read-only with role-honest copy (the switch is owner-only, and the database's own owner
+ * gate backs the write either way). The `policy_event` audit trail — this tier's record of who set
+ * it from here and whether the write landed — shows below as an honest history line.
  */
 export function ReviewRequiredPanel({
   lastEvent,
@@ -18,7 +19,7 @@ export function ReviewRequiredPanel({
 }: {
   lastEvent: PolicyEventRow | undefined;
   isOwner: boolean;
-  /** The directory's real review-required value — what the switch shows. */
+  /** The directory's real review-required value — what the switch (or the read-only line) shows. */
   reviewRequired: boolean;
 }) {
   return (
@@ -31,7 +32,15 @@ export function ReviewRequiredPanel({
           When review is required, a direct publish is refused and every change goes through a
           proposal a reviewer approves.
         </p>
-        {isOwner && <ReviewGateSwitch checked={reviewRequired} />}
+        {isOwner ? (
+          <ReviewGateSwitch checked={reviewRequired} />
+        ) : (
+          <p className="text-ink text-sm">
+            Review is currently{" "}
+            <span className="font-medium">{reviewRequired ? "required" : "not required"}</span>.
+            Only an owner can change this.
+          </p>
+        )}
         <div className="space-y-1">
           <p className="text-sm text-dim">
             {lastEvent === undefined
