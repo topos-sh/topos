@@ -2,7 +2,8 @@
 # acme-rehearsal.sh — prove the plane's built-in ACME TLS serve path (the default-off `acme` feature)
 # against a REAL local ACME test server (pebble), end to end. Asserts, in order, failing loudly on each:
 #
-#   1. plain HTTP still serves beside the TLS listener (GET /v1/current/<unknown> → 404);
+#   1. plain HTTP still serves beside the TLS listener (a credentialed read with an unknown
+#      workspace credential → the uniform 404, proving a database roundtrip);
 #   2. a real tls-alpn-01 issuance: the plane orders from pebble, answers the challenge inside its own
 #      TLS acceptor on :8443, and then serves the API over TLS that curl VERIFIES against pebble's
 #      issuing root (fetched live from the management API — pebble mints a fresh CA per boot);
@@ -47,12 +48,14 @@ echo "== building + starting the rehearsal stack (project $PROJECT) =="
 compose up -d --build
 
 # ---------- 1. plain HTTP still serves beside the TLS listener --------------------------
-# Same probe as compose-smoke: an unknown read token 404ing proves up + migrated + querying Postgres.
-PROBE_HTTP="http://localhost:8787/v1/current/rt_unknown"
-echo "== [1/3] probing plain HTTP ($PROBE_HTTP must 404) =="
+# Same probe as compose-smoke: the device-lane catalog read resolves the presented workspace credential
+# in Postgres, so an unknown one 404ing (not the constant card an anonymous GET gets) proves up +
+# migrated + querying Postgres.
+PROBE_HTTP="http://localhost:8787/v1/workspaces/ws-rehearsal-unknown/skills"
+echo "== [1/3] probing plain HTTP ($PROBE_HTTP with an unknown credential must 404) =="
 code=""
 for _ in $(seq 1 60); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$PROBE_HTTP" || true)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer rehearsal-unknown' "$PROBE_HTTP" || true)"
   [ "$code" = "404" ] && break
   sleep 1
 done
@@ -60,7 +63,7 @@ if [ "$code" != "404" ]; then
   compose logs --no-color plane | tail -40
   fail "expected 404 from $PROBE_HTTP, got '$code'"
 fi
-pass "plain HTTP serves beside the TLS listener (404 on an unknown read token)"
+pass "plain HTTP serves beside the TLS listener (404 on an unknown workspace credential)"
 
 # ---------- 2. issuance + VERIFIED TLS serve ---------------------------------------------
 # The ISSUING root: pebble mints a fresh CA every boot and serves it on the management API; that
@@ -76,9 +79,9 @@ for _ in $(seq 1 30); do
 done
 [ -n "$ok" ] || fail "could not fetch pebble's issuing root from https://localhost:15000/roots/0"
 
-PROBE_TLS="https://plane.rehearsal.test:8443/v1/current/rt_unknown"
+PROBE_TLS="https://plane.rehearsal.test:8443/v1/workspaces/ws-rehearsal-unknown/skills"
 tls_probe() {
-  curl -s -o /dev/null -w '%{http_code}' \
+  curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer rehearsal-unknown' \
     --resolve plane.rehearsal.test:8443:127.0.0.1 --cacert "$ROOT" "$PROBE_TLS" || true
 }
 fingerprint() {

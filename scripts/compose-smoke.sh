@@ -17,19 +17,20 @@ trap cleanup EXIT
 echo "== building + starting the stack (project $PROJECT) =="
 compose up -d --build
 
-# `GET /v1/current/<token>` resolves the read token in Postgres, so an unknown one returning 404 (not a 500
-# or a connection error) proves the plane is up, migrated, and querying the database.
-PROBE="http://localhost:8787/v1/current/rt_smoke_definitely_unknown"
-echo "== probing a database-backed read ($PROBE must 404) =="
+# The device-lane catalog read resolves the presented workspace credential in Postgres before answering,
+# so an unknown credential returning the uniform 404 (not a 500, not a connection error — and not the
+# constant protocol card an anonymous GET gets) proves the plane is up, migrated, and querying the database.
+PROBE="http://localhost:8787/v1/workspaces/ws-smoke-unknown/skills"
+echo "== probing a database-backed read ($PROBE with an unknown credential must 404) =="
 code=""
 for _ in $(seq 1 60); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$PROBE" || true)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer smoke-definitely-unknown' "$PROBE" || true)"
   [ "$code" = "404" ] && break
   sleep 1
 done
 
 if [ "$code" = "404" ]; then
-  echo "PASS: an unknown read token 404'd — the plane is up, migrated, and querying Postgres."
+  echo "PASS: an unknown workspace credential 404'd — the plane is up, migrated, and querying Postgres."
   # The 404 proves first boot completed, so the enrollment secret exists — now assert the stated custody
   # posture (0600, owned by the unprivileged uid) instead of trusting the docs. GNU-stat syntax: fine
   # on the debian-slim runtime; revisit if the base image ever changes family.
