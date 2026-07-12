@@ -1,65 +1,51 @@
-//! `invite` — an OWNER mints an `/i/<token>` invite link by POSTing the governance Invite op.
+//! `invite [EMAIL]... [--channel <N>]...` — seat emails as invited members of the workspace.
+//!
+//! An invitation is a ROSTER WRITE: `POST /v1/workspaces/{ws}/invitations` under the workspace Bearer
+//! credential seats each email as an `invited` member (recording who invited whom) and optionally
+//! pre-places each invitee into channels. There is no invite link and no role — every CLI invitee starts
+//! as a member (roles are raised later, on the web); joining is `follow <address>` plus proof of the
+//! invited email. Member-level unless the workspace's invite policy restricts inviting to owners.
 //!
 //! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
-//! sidecar `follow` wrote, and the acting device rides the transport's workspace **Bearer credential**; the
-//! plane resolves the non-revoked registry row for that credential → its principal → the role matrix (a
-//! non-owner is DENIED). Nothing is signed — the trust level is git/GitHub-level. The role rides the wire
-//! body; emails are folded to the kernel's canonical (ASCII-lowercase) principal form so the roster rows
-//! carry one identity per human; the skill **ids** (never names) are what the invite pre-offers.
+//! sidecar `follow` wrote; the acting device rides the transport's workspace **Bearer credential** (the
+//! plane resolves the non-revoked registry row → principal → the invite-policy gate). Nothing is signed —
+//! the trust level is git/GitHub-level. Emails are folded to the kernel's canonical (ASCII-lowercase)
+//! principal form so the roster rows carry one identity per human.
+//!
+//! Bare `invite` (no emails) is the no-mutation read (address + policy) — a MARKED SEAM until the two-phase
+//! describe leg lands.
 
-use topos_types::requests::{InviteRequest, InviteSkill, WorkspaceRole};
-use topos_types::results::InviteData;
+use topos_types::requests::{InvitationData, InvitationRequest};
 
 use crate::ctx::Ctx;
 use crate::enroll;
 use crate::error::ClientError;
+use crate::ops::not_yet;
 use crate::plane::GovernanceSource;
 
-/// Builds the owner's governance-write transport for a plane base URL — known only after reading
-/// `instance.json`, so it can't be pre-built in the composition root (mirrors `follow`'s enroll connector).
-/// Production wires `UreqDeviceClient`; the tests wire a fake (no HTTP).
+/// Builds the governance-write transport for a plane base URL — known only after reading `instance.json`,
+/// so it can't be pre-built in the composition root (mirrors `follow`'s enroll connector). Production wires
+/// `UreqDeviceClient`; the tests wire a fake (no HTTP).
 pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
 
-/// Validate every `--skills` token at the argv boundary with the client id rules (`crate::id` — the same
-/// lowercase path-safe charset every other id boundary enforces, and the rule the plane's own parse
-/// applies). Failing here names the bad token BEFORE anything is signed or sent; a token carrying
-/// non-printable or non-ASCII bytes is described, never echoed.
-fn validate_skill_tokens(skills: &[String]) -> Result<(), ClientError> {
-    for token in skills {
-        if crate::id::is_valid_id(token) {
-            continue;
-        }
-        let shown = if token.is_empty() {
-            "an empty token".to_owned()
-        } else if token.chars().all(|c| c.is_ascii_graphic()) {
-            format!("`{token}`")
-        } else {
-            "a token containing non-printable or non-ASCII characters".to_owned()
-        };
-        return Err(ClientError::InvalidArgument(format!(
-            "--skills takes skill ids (lowercase, [a-z0-9_-], at most 128 bytes); {shown} is not one"
-        )));
-    }
-    Ok(())
-}
-
-/// Mint an `/i/<token>` invite: POST the governance Invite op under the workspace Bearer credential.
+/// Seat `emails` as invited members of the workspace, optionally pre-placing them into `channels`.
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] for a malformed `--skills` token (refused at the argv boundary);
-/// [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the workspace can't be inferred (no
-/// `identity/user.json`); a transport failure otherwise (a role-DENIED surfaces as
-/// [`ClientError::Plane`] — "not authorized").
+/// [`ClientError::InvalidArgument`] (via [`not_yet`]) for a bare `invite` with no emails (the read-only
+/// describe is a marked seam); [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the
+/// workspace can't be inferred (no `identity/user.json`); a transport failure otherwise (a policy-DENIED
+/// surfaces as [`ClientError::Plane`] — "not authorized").
 pub(crate) fn invite(
     ctx: &Ctx<'_>,
     connect: &GovernanceConnect<'_>,
     emails: Vec<String>,
-    role: Option<WorkspaceRole>,
-    skills: Vec<String>,
+    channels: Vec<String>,
     workspace: Option<&str>,
-) -> Result<InviteData, ClientError> {
-    // The argv boundary: refuse a malformed skill id before contacting anything.
-    validate_skill_tokens(&skills)?;
+) -> Result<InvitationData, ClientError> {
+    // Bare `invite` (no emails) is the no-mutation read (the workspace address + invite policy). SEAM.
+    if emails.is_empty() {
+        return Err(not_yet("invite (the address/policy read)"));
+    }
     // Fold the emails to the kernel's canonical (ASCII-lowercase) principal form ONCE, before they reach
     // the wire body — the plane folds at its parse boundary, so the roster rows carry one identity per human
     // regardless of how the address was typed.
@@ -71,7 +57,7 @@ pub(crate) fn invite(
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
-    // Pick the workspace (the governance frame's scope) from the enrolled `user.json` memberships:
+    // Pick the workspace (the invitation's scope) from the enrolled `user.json` memberships:
     // `--workspace <id>` when the install has joined several, else the sole one. `instance.json` carries
     // the plane but no workspace, so a present-instance-but-no-user state is a partial enrollment we guide
     // the user to complete rather than guess at.
@@ -86,32 +72,12 @@ pub(crate) fn invite(
         .workspace_id
         .clone();
 
-    // The client-minted idempotency key: the canonical hyphenated UUID rides the wire (the plane's
-    // `parse_op_id` parses it back to the SAME 16 bytes, so a lost-ack retry replays the deterministic
-    // link + receipt).
-    let op_id = uuid::Uuid::from_bytes(ctx.ids.new_op_id())
-        .as_hyphenated()
-        .to_string();
-
-    // POST the op under the workspace Bearer credential (the transport looks it up by `workspace_id`; the
-    // plane resolves the credential's registry row → principal → role matrix to authorize the invite). The
-    // role rides the body as a `WorkspaceRole` (omitted ⇒ the plane defaults it to member). The link never
-    // carries a role — it is a property of the seeded roster row. `name: None` — only the skill id pre-offers.
-    let body = InviteRequest {
-        workspace_id,
-        op_id,
-        emails,
-        role,
-        skills: skills
-            .into_iter()
-            .map(|skill_id| InviteSkill {
-                skill_id,
-                name: None,
-            })
-            .collect(),
-    };
+    // POST the invitation under the workspace Bearer credential (the transport looks it up by
+    // `workspace_id`; the plane resolves the credential's registry row → principal → the invite-policy
+    // gate). The workspace id rides the URL path; the body carries only the emails + channel pre-placements.
+    let body = InvitationRequest { emails, channels };
     let transport = connect(&instance.base_url);
-    transport.create_invite(body)
+    transport.invite(&workspace_id, body)
 }
 
 #[cfg(test)]
@@ -123,8 +89,7 @@ mod tests {
 
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
-    use topos_types::requests::{InviteRequest, WorkspaceRole};
-    use topos_types::results::InviteData;
+    use topos_types::requests::{InvitationData, InvitationRequest};
     use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
     use super::{GovernanceConnect, invite};
@@ -204,16 +169,18 @@ mod tests {
 
     // ---- the fake governance transport: captures the request, returns a canned outcome ----
 
-    /// One captured POST: the wire body (the acting device rides the transport's Bearer credential — never
-    /// a body field; nothing is signed).
-    type CapturedInvite = InviteRequest;
-    type Captured = Rc<RefCell<Option<CapturedInvite>>>;
+    /// One captured POST: the target workspace id + the wire body (the acting device rides the transport's
+    /// Bearer credential — never a body field; nothing is signed).
+    type Captured = Rc<RefCell<Option<(String, InvitationRequest)>>>;
     /// A `run_invite` outcome: the op result + whatever reached the transport (`None` if it never did).
-    type InviteRun = (Result<InviteData, ClientError>, Option<CapturedInvite>);
+    type InviteRun = (
+        Result<InvitationData, ClientError>,
+        Option<(String, InvitationRequest)>,
+    );
 
     #[derive(Clone)]
     enum Resp {
-        Ok(InviteData),
+        Ok(InvitationData),
         /// An already-mapped DENIED outcome (the real envelope mapping is unit-tested in `plane_http`).
         Denied(String),
     }
@@ -224,8 +191,12 @@ mod tests {
         resp: Resp,
     }
     impl GovernanceSource for FakeGov {
-        fn create_invite(&self, body: InviteRequest) -> Result<InviteData, ClientError> {
-            *self.captured.borrow_mut() = Some(body);
+        fn invite(
+            &self,
+            workspace_id: &str,
+            body: InvitationRequest,
+        ) -> Result<InvitationData, ClientError> {
+            *self.captured.borrow_mut() = Some((workspace_id.to_owned(), body));
             match &self.resp {
                 Resp::Ok(data) => Ok(data.clone()),
                 Resp::Denied(code) => Err(ClientError::Plane(format!("invite refused ({code})"))),
@@ -302,14 +273,16 @@ mod tests {
         }
     }
 
-    /// Run the `invite` op over the fake transport, returning the op result + the captured wire body.
-    fn run_invite(
-        rig: &Rig,
-        resp: Resp,
-        emails: &[&str],
-        role: Option<WorkspaceRole>,
-        skills: &[&str],
-    ) -> InviteRun {
+    fn ok_data() -> InvitationData {
+        InvitationData {
+            address: format!("{BASE_URL}/acme"),
+            invited: vec!["alice@acme.com".to_owned()],
+            mailed: false,
+        }
+    }
+
+    /// Run the `invite` op over the fake transport, returning the op result + the captured (ws, wire body).
+    fn run_invite(rig: &Rig, resp: Resp, emails: &[&str], channels: &[&str]) -> InviteRun {
         let captured: Captured = Rc::new(RefCell::new(None));
         let fake = FakeGov {
             captured: captured.clone(),
@@ -324,8 +297,7 @@ mod tests {
             &ctx,
             &*connect,
             emails.iter().map(|s| (*s).to_owned()).collect(),
-            role,
-            skills.iter().map(|s| (*s).to_owned()).collect(),
+            channels.iter().map(|s| (*s).to_owned()).collect(),
             None,
         );
         let cap = captured.borrow().clone();
@@ -336,53 +308,33 @@ mod tests {
 
     #[test]
     fn posts_the_expected_wire_body_under_the_workspace_credential() {
-        // The op POSTs a body naming the enrolled workspace, the chosen role, the canonical hyphenated
-        // op_id, and the skill ids. The acting device rides the transport's Bearer credential (the plane
-        // resolves its registry row → principal → role matrix), never a body field. Nothing is signed.
+        // The op POSTs a body naming the folded emails + channel pre-placements, to the enrolled workspace
+        // id (the URL path segment). The acting device rides the transport's Bearer credential (the plane
+        // resolves its registry row → principal → the invite-policy gate), never a body field.
         let rig = Rig::new("wire-body");
         rig.seed_enrolled();
         let (out, cap) = run_invite(
             &rig,
-            Resp::Ok(InviteData {
-                invite_link: format!("{BASE_URL}/i/tok_abc"),
-                roster_added: vec!["alice@acme.com".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
-            }),
+            Resp::Ok(ok_data()),
             &["alice@acme.com"],
-            Some(WorkspaceRole::Reviewer),
-            &["s_review", "s_deploy"],
+            &["design", "eng"],
         );
-        out.expect("the op POSTs the invite");
-        let body = cap.expect("the op reached the transport");
-        // The op_id is the canonical hyphenated form (the plane's `parse_op_id` requires it).
-        let uuid = uuid::Uuid::parse_str(&body.op_id).expect("op_id is a UUID");
-        assert_eq!(uuid.as_hyphenated().to_string(), body.op_id);
-        // Scope + role ride the body (no acting-device field — it is the Bearer credential's row).
-        assert_eq!(body.workspace_id, WS);
-        assert_eq!(body.role, Some(WorkspaceRole::Reviewer));
-        let skill_ids: Vec<&str> = body.skills.iter().map(|s| s.skill_id.as_str()).collect();
-        assert_eq!(skill_ids, vec!["s_review", "s_deploy"]);
+        out.expect("the op POSTs the invitation");
+        let (ws, body) = cap.expect("the op reached the transport");
+        assert_eq!(ws, WS);
+        assert_eq!(body.emails, vec!["alice@acme.com".to_owned()]);
+        assert_eq!(body.channels, vec!["design".to_owned(), "eng".to_owned()]);
     }
 
     #[test]
-    fn ok_envelope_maps_to_invite_data() {
+    fn ok_envelope_maps_to_invitation_data() {
         let rig = Rig::new("ok");
         rig.seed_enrolled();
-        let (out, _cap) = run_invite(
-            &rig,
-            Resp::Ok(InviteData {
-                invite_link: format!("{BASE_URL}/i/tok_xyz"),
-                roster_added: vec!["alice@acme.com".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
-            }),
-            &["alice@acme.com"],
-            Some(WorkspaceRole::Member),
-            &["s_deploy"],
-        );
+        let (out, _cap) = run_invite(&rig, Resp::Ok(ok_data()), &["alice@acme.com"], &[]);
         let data = out.expect("ok");
-        assert_eq!(data.invite_link, format!("{BASE_URL}/i/tok_xyz"));
-        assert_eq!(data.roster_added, vec!["alice@acme.com".to_owned()]);
-        assert_eq!(data.skills, vec!["s_deploy".to_owned()]);
+        assert_eq!(data.address, format!("{BASE_URL}/acme"));
+        assert_eq!(data.invited, vec!["alice@acme.com".to_owned()]);
+        assert!(!data.mailed);
     }
 
     #[test]
@@ -393,7 +345,6 @@ mod tests {
             &rig,
             Resp::Denied("NOT_AUTHORIZED".to_owned()),
             &["alice@acme.com"],
-            Some(WorkspaceRole::Owner),
             &[],
         );
         // The op still POSTed (the deny is the plane's authority verdict, surfaced as a typed error).
@@ -406,20 +357,20 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_invite_with_no_emails_is_a_marked_seam() {
+        // The no-mutation read (address + policy) is a later leg — bare `invite` refuses typed, never POSTs.
+        let rig = Rig::new("bare");
+        rig.seed_enrolled();
+        let (out, cap) = run_invite(&rig, Resp::Ok(ok_data()), &[], &[]);
+        assert!(cap.is_none(), "a bare invite never reaches the transport");
+        assert_eq!(out.unwrap_err().code(), "INVALID_ARGUMENT");
+    }
+
+    #[test]
     fn invite_without_enrollment_is_run_follow_first() {
-        // No instance.json seeded — the op refuses before signing or contacting any transport.
+        // No instance.json seeded — the op refuses before contacting any transport.
         let rig = Rig::new("not-enrolled");
-        let (out, cap) = run_invite(
-            &rig,
-            Resp::Ok(InviteData {
-                invite_link: String::new(),
-                roster_added: Vec::new(),
-                skills: Vec::new(),
-            }),
-            &["alice@acme.com"],
-            None,
-            &[],
-        );
+        let (out, cap) = run_invite(&rig, Resp::Ok(ok_data()), &["alice@acme.com"], &[]);
         assert!(
             cap.is_none(),
             "a not-enrolled invite never reaches the transport"
@@ -431,105 +382,23 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_skills_token_is_refused_at_the_argv_boundary() {
-        let rig = Rig::new("bad-skill-token");
-        rig.seed_enrolled();
-        // A mixed-case token: the client refuses with the id rule BEFORE signing or POSTing (the plane's
-        // own parse enforces the same lowercase charset).
-        let (out, cap) = run_invite(
-            &rig,
-            Resp::Ok(InviteData {
-                invite_link: String::new(),
-                roster_added: Vec::new(),
-                skills: Vec::new(),
-            }),
-            &["alice@acme.com"],
-            None,
-            &["S_Deploy"],
-        );
-        assert!(cap.is_none(), "a refused token never reaches the transport");
-        match out.unwrap_err() {
-            ClientError::InvalidArgument(m) => {
-                assert!(m.contains("S_Deploy"), "an ASCII token is named: {m}");
-                assert!(m.contains("--skills"), "the flag is named: {m}");
-            }
-            other => panic!("expected INVALID_ARGUMENT, got {other:?}"),
-        }
-
-        // A non-ASCII token is DESCRIBED, never echoed.
-        let (out, cap) = run_invite(
-            &rig,
-            Resp::Ok(InviteData {
-                invite_link: String::new(),
-                roster_added: Vec::new(),
-                skills: Vec::new(),
-            }),
-            &["alice@acme.com"],
-            None,
-            &["s_dëploy"],
-        );
-        assert!(cap.is_none());
-        match out.unwrap_err() {
-            ClientError::InvalidArgument(m) => {
-                assert!(!m.contains("dëploy"), "never echo non-ASCII bytes: {m}");
-                assert!(m.contains("non-ASCII"), "the shape is described: {m}");
-            }
-            other => panic!("expected INVALID_ARGUMENT, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn mixed_case_argv_emails_fold_into_the_wire_body() {
         // The op folds argv emails to the kernel canonical (ASCII-lowercase) form ONCE, before the wire
         // body — so the roster rows carry one identity per human regardless of how the address was typed.
-        // (The plane re-folds at its parse boundary, so the client fold is a courtesy, not a trust step.)
         let rig = Rig::new("fold-mixed-case");
         rig.seed_enrolled();
         let (out, cap) = run_invite(
             &rig,
-            Resp::Ok(InviteData {
-                invite_link: format!("{BASE_URL}/i/tok_fold"),
-                roster_added: vec!["alice@acme.com".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
-            }),
+            Resp::Ok(ok_data()),
             &["Alice@Acme.COM", "bob@x.io"],
-            None,
-            &["s_deploy"],
+            &[],
         );
-        out.expect("the op POSTs the invite");
-        let body = cap.expect("the op reached the transport");
-        // The wire body carries the FOLDED forms, argv order preserved (no client-side dedup — the plane's
-        // set-build dedups server-side).
+        out.expect("the op POSTs the invitation");
+        let (_ws, body) = cap.expect("the op reached the transport");
         assert_eq!(
             body.emails,
             vec!["alice@acme.com".to_owned(), "bob@x.io".to_owned()],
             "the wire body's emails are the folded forms, order preserved"
-        );
-    }
-
-    #[test]
-    fn case_variant_argv_emails_both_fold_to_one_canonical_form() {
-        // Two case-variants of one address fold to the SAME canonical form; the wire body carries both
-        // folded entries verbatim (the plane's parse+set-build dedups them server-side).
-        let rig = Rig::new("fold-dup-variants");
-        rig.seed_enrolled();
-        let (out, cap) = run_invite(
-            &rig,
-            Resp::Ok(InviteData {
-                invite_link: format!("{BASE_URL}/i/tok_dup"),
-                roster_added: vec!["alice@x.io".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
-            }),
-            &["Alice@X.io", "alice@x.io"],
-            None,
-            &["s_deploy"],
-        );
-        out.expect("the op POSTs the invite");
-        let body = cap.expect("the op reached the transport");
-        assert_eq!(
-            body.emails,
-            vec!["alice@x.io".to_owned(), "alice@x.io".to_owned()],
-            "both case-variants fold to the SAME canonical form on the wire"
         );
     }
 }

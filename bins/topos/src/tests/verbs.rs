@@ -1,7 +1,6 @@
 //! End-to-end verb invariants over the injected seams: deterministic `add` minting, `add → list`, the
-//! `--footprint` oracle, the I/O-side rejects, `diff`/`log`, `uninstall` byte-safety, and `add` under
-//! fault (draft survival + all-or-nothing). The `--json` envelopes are asserted byte-equal to the
-//! committed goldens.
+//! `--footprint` oracle, the I/O-side rejects, `diff`/`log`, and `add` under fault (draft survival +
+//! all-or-nothing). The `--json` envelopes are asserted byte-equal to the committed goldens.
 
 use std::path::{Path, PathBuf};
 
@@ -721,37 +720,6 @@ fn log_reports_local_action_and_git_history() {
 }
 
 #[test]
-fn uninstall_removes_home_and_binary_but_no_skill_bytes() {
-    let src = editable_source();
-    let root = src.0.join("pr-describe");
-    let before = fs_hashes(&root);
-
-    let h = Harness::new("uninst");
-    ops::add(&h.ctx(), &root).unwrap();
-    // A fake binary to remove (never the test runner).
-    let fake_bin = h.home.0.parent().unwrap().join("topos-fake-bin");
-    std::fs::write(&fake_bin, b"binary").unwrap();
-
-    let out = ops::uninstall(&h.ctx(), true, Some(&fake_bin)).unwrap();
-    assert!(out.home_removed);
-    assert!(out.footprint.is_some());
-    assert_eq!(
-        out.binary_removed.as_deref(),
-        Some(fake_bin.to_string_lossy().as_ref())
-    );
-
-    assert!(!h.home.0.exists(), "~/.topos removed");
-    assert!(!fake_bin.exists(), "binary removed");
-    // The user's source skill dir is byte-for-byte unchanged.
-    assert_eq!(
-        fs_hashes(&root),
-        before,
-        "uninstall must not touch skill bytes"
-    );
-    let _ = std::fs::remove_file(&fake_bin);
-}
-
-#[test]
 fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -909,7 +877,7 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     // The hook landed in the harness settings.json (the only write outside ~/.topos/).
     let settings = std::fs::read_to_string(claude.0.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos pull --quiet"),
+        settings.contains("topos update --quiet"),
         "hook command installed"
     );
     assert!(settings.contains("# topos:currency"), "sentinel present");
@@ -965,56 +933,6 @@ fn re_adding_the_same_dir_is_refused_as_already_tracked() {
         1,
         "no second record was minted"
     );
-}
-
-#[test]
-fn uninstall_scrubs_the_hook_and_leaves_claude_skills_byte_identical() {
-    let h = Harness::new("cc-uninst");
-    let claude = Scratch::new("cc-uninst-home");
-    let skill = claude_skill(&claude.0, "pr-describe", "# pr\nWrite a clear PR.\n");
-    let before = fs_hashes(&skill);
-
-    let cfg = RealFs;
-    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
-    let ctx = h.ctx_with(&cc);
-    ops::add(&ctx, &skill).unwrap();
-    let settings_path = claude.0.join("settings.json");
-    assert!(
-        std::fs::read_to_string(&settings_path)
-            .unwrap()
-            .contains("topos pull")
-    );
-
-    let fake_bin = h.home.0.parent().unwrap().join("topos-fake-cc-bin");
-    std::fs::write(&fake_bin, b"binary").unwrap();
-    let out = ops::uninstall(&ctx, true, Some(&fake_bin)).unwrap();
-
-    // The hook was scrubbed; settings.json is still valid JSON without our entry.
-    assert_eq!(out.currency.as_ref().unwrap().state, TriggerState::Inactive);
-    let settings = std::fs::read_to_string(&settings_path).unwrap();
-    assert!(!settings.contains("topos pull"), "the managed hook is gone");
-    serde_json::from_str::<Value>(&settings).expect("settings.json stays valid JSON");
-
-    // --footprint disclosed the settings.json path (captured before the scrub), never as a delete.
-    let footprint = out.footprint.unwrap();
-    assert!(
-        footprint.iter().any(|p| p.ends_with("settings.json")),
-        "settings.json disclosed in the footprint: {footprint:?}"
-    );
-    assert!(
-        settings_path.exists(),
-        "settings.json is scrubbed, never deleted"
-    );
-
-    // The user's skill dir is byte-for-byte unchanged, and ~/.topos + the binary are gone.
-    assert_eq!(
-        fs_hashes(&skill),
-        before,
-        "uninstall must not touch skill bytes"
-    );
-    assert!(out.home_removed && !h.home.0.exists());
-    assert!(!fake_bin.exists());
-    let _ = std::fs::remove_file(&fake_bin);
 }
 
 #[test]

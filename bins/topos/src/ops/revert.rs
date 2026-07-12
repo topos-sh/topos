@@ -1,4 +1,4 @@
-//! `revert <skill> --to <good> [--confirm]` — undo a release for the TEAM.
+//! `revert <skill> --to <good> [--yes]` — undo a release for the TEAM.
 //!
 //! A **forward** pointer-move: the server builds a new 1-parent commit `{tree: good.tree, parents:
 //! [current]}` that restores the GOOD version's bytes on top of `current` — nothing is deleted (the bad
@@ -133,7 +133,7 @@ pub(crate) fn revert(
         }
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
     map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex)
 }
 

@@ -3,10 +3,11 @@
 
 use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
+use topos_types::requests::InvitationData;
 use topos_types::results::{
-    AddData, AddedNote, DiffData, FollowData, InviteData, LogData, ProposeData, PublishData,
-    PullData, PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData,
-    ReviewDecision, SkillEntry, UnfollowData, UntrackedEntry,
+    AddData, AddedNote, DiffData, FollowData, LogData, ProposeData, PublishData, PullData,
+    PullSkill, RemoteFollowState, RemoteSkillEntry, RevertData, ReviewData, ReviewDecision,
+    SkillEntry, UnfollowData, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -14,7 +15,7 @@ use topos_types::{
 };
 
 use crate::error::ClientError;
-use crate::ops::{ListOutcome, UninstallOutcome};
+use crate::ops::ListOutcome;
 
 /// A success envelope wrapping a verb's typed `data`.
 pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelope {
@@ -72,22 +73,22 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
-        // A stale base — pull to rebase, then re-show the diff and retry. Never a silent retry.
+        // A stale base — update to rebase, then re-show the diff and retry. Never a silent retry.
         ClientError::Conflict { skill, .. } => vec![NextAction {
             code: ActionCode::RebaseAndRetry,
             argv: vec![
                 "topos".into(),
-                "pull".into(),
+                "update".into(),
                 skill.clone(),
                 "--json".into(),
             ],
         }],
-        // An unresolved author merge blocks publish — resolve it (the pull surfaces/runs the resolution).
+        // An unresolved author merge blocks publish — resolve it (the update surfaces/runs the resolution).
         ClientError::PublishBlocked { skill } => vec![NextAction {
             code: ActionCode::ResolveDivergedDraft,
             argv: vec![
                 "topos".into(),
-                "pull".into(),
+                "update".into(),
                 skill.clone(),
                 "--json".into(),
             ],
@@ -118,12 +119,23 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::Retry,
             argv: Vec::new(),
         }],
+        // `topos upgrade` disambiguates to two concrete commands the agent can pick between.
+        ClientError::UpgradeAmbiguous => vec![
+            NextAction {
+                code: ActionCode::from("UPDATE_SKILLS".to_owned()),
+                argv: vec!["topos".into(), "update".into(), "--json".into()],
+            },
+            NextAction {
+                code: ActionCode::from("UPDATE_CLI".to_owned()),
+                argv: vec!["topos".into(), "self-update".into()],
+            },
+        ],
         _ => Vec::new(),
     }
 }
 
 /// The success-path next actions for `follow`: a pending enrollment ⇒ re-invoke `follow` (re-invoking IS
-/// the resume — the pending WAL drives it); a completed enrollment that disclosed offers ⇒ `pull` to
+/// the resume — the pending WAL drives it); a completed enrollment that disclosed offers ⇒ `update` to
 /// surface/place them.
 pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
     if data.pending.is_some() {
@@ -136,7 +148,7 @@ pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
     if data.enrolled && !data.skills.is_empty() {
         return vec![NextAction {
             code: ActionCode::ApplyWaitingUpdate,
-            argv: vec!["topos".into(), "pull".into(), "--json".into()],
+            argv: vec!["topos".into(), "update".into(), "--json".into()],
         }];
     }
     Vec::new()
@@ -197,13 +209,13 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         }
     }
     // Disclose the one write `add` makes outside ~/.topos/ — the currency trigger — honestly (it is
-    // plumbing: it runs a no-op `pull` until something is followed; never "it auto-updates"). The copy
+    // plumbing: it runs a no-op `update` until something is followed; never "it auto-updates"). The copy
     // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
     // (a session-start hook fires at session start; an inject surface only on the first `topos` touch).
     if let Some(report) = &data.currency {
         out.push_str(match (report.state, report.currency_kind) {
             (TriggerState::Active, CurrencyKind::SessionStart) => {
-                "\nInstalled the session-start currency hook (runs `topos pull` at session start)."
+                "\nInstalled the session-start currency hook (runs `topos update` at session start)."
             }
             (TriggerState::Active, CurrencyKind::FirstToposTouch) => {
                 "\nInstalled the currency trigger (updates surface on the first `topos` touch)."
@@ -212,19 +224,19 @@ pub(crate) fn add_tty(data: &AddData) -> String {
                 "\nInstalled the currency trigger (updates surface on the first turn)."
             }
             (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
-                "\nNo automatic currency trigger — run `topos pull` to check for updates."
+                "\nNo automatic currency trigger — run `topos update` to check for updates."
             }
             (TriggerState::AlreadyPresentUnmanaged, CurrencyKind::SessionStart) => {
-                "\nLeft your existing `topos pull` session-start hook untouched."
+                "\nLeft your existing session-start currency hook untouched."
             }
             (TriggerState::AlreadyPresentUnmanaged, _) => {
-                "\nLeft your existing `topos pull` currency trigger untouched."
+                "\nLeft your existing currency trigger untouched."
             }
             (TriggerState::Degraded, CurrencyKind::SessionStart) => {
                 "\nCouldn't update settings.json for the currency hook — left it untouched."
             }
             (TriggerState::Degraded, _) => {
-                "\nCouldn't update the harness config for the currency trigger — left it untouched; run `topos pull` to check for updates."
+                "\nCouldn't update the harness config for the currency trigger — left it untouched; run `topos update` to check for updates."
             }
             (TriggerState::Inactive, _) => "",
         });
@@ -345,7 +357,7 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
         RemoteFollowState::Available => "(available)".to_owned(),
         RemoteFollowState::Following => "(following)".to_owned(),
         RemoteFollowState::FollowingBehind => {
-            format!("(update available — run `topos pull {name}`)")
+            format!("(update available — run `topos update {name}`)")
         }
     };
     let proposals = if r.open_proposals > 0 {
@@ -521,60 +533,17 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-pub(crate) fn uninstall_tty(data: &UninstallOutcome) -> String {
-    let mut out = String::new();
-    if let Some(footprint) = &data.footprint {
-        out.push_str(&format!(
-            "Removing {} topos-owned paths:\n",
-            footprint.len()
-        ));
-        for p in footprint {
-            out.push_str(&format!("  {p}\n"));
-        }
-    }
-    if let Some(report) = &data.currency {
-        out.push_str(match (report.state, report.currency_kind) {
-            (TriggerState::Inactive, CurrencyKind::SessionStart) => {
-                "Scrubbed the session-start currency hook.\n"
-            }
-            (TriggerState::Inactive, _) => {
-                "Scrubbed the currency trigger from the harness config.\n"
-            }
-            (TriggerState::AlreadyPresentUnmanaged, _) => {
-                "Left your own (unmanaged) `topos pull` hook in place.\n"
-            }
-            (TriggerState::Degraded, CurrencyKind::SessionStart) => {
-                "Couldn't scrub the currency hook from settings.json — remove it by hand if present.\n"
-            }
-            (TriggerState::Degraded, _) => {
-                "Couldn't scrub the currency trigger from the harness config — remove it by hand if present.\n"
-            }
-            (TriggerState::Active, _) => "",
-        });
-    }
-    out.push_str(if data.home_removed {
-        "Removed ~/.topos."
-    } else {
-        "Nothing to remove (~/.topos absent)."
-    });
-    if let Some(bin) = &data.binary_removed {
-        out.push_str(&format!("\nRemoved the binary at {bin}."));
-    }
-    out.push_str("\nNo skill bytes were touched.");
-    out
-}
-
-pub(crate) fn upgrade_tty(o: &crate::ops::UpgradeOutcome) -> String {
-    use crate::ops::UpgradeAction::*;
+pub(crate) fn self_update_tty(o: &crate::ops::SelfUpdateOutcome) -> String {
+    use crate::ops::SelfUpdateAction::*;
     let mut s = match o.action {
         Checked if o.update_available => format!(
-            "A newer topos is available: {} -> {}.\nRun `topos upgrade` to install it.",
+            "A newer topos is available: {} -> {}.\nRun `topos self-update` to install it.",
             o.current_version,
             o.latest_version.as_deref().unwrap_or("?")
         ),
         Checked | AlreadyCurrent => format!("topos is up to date ({}).", o.current_version),
         Upgraded => format!(
-            "Upgraded topos {} -> {}.",
+            "Updated topos {} -> {}.",
             o.current_version,
             o.latest_version.as_deref().unwrap_or("?")
         ),
@@ -637,38 +606,33 @@ pub(crate) fn follow_tty(out: &crate::ops::FollowOutcome) -> String {
                 short(&sk.offer.version_id)
             ));
         }
-        s.push_str("\nApprove a skill with `topos follow <skill>` (or `topos pull <skill>`).");
+        s.push_str("\nApprove a skill with `topos follow <skill>` (or `topos update <skill>`).");
         s
     };
     // The resume disclosure: a skill-path follow flipped a paused entry back on (TTY-only; the pinned
     // `FollowData` shape has no resume field).
     for name in &out.resumed {
         s.push_str(&format!(
-            "\nResumed following {name} — auto-updates are back on; the next `topos pull` lands the \
+            "\nResumed following {name} — auto-updates are back on; the next `topos update` lands the \
              team's current."
         ));
     }
     s
 }
 
-pub(crate) fn invite_tty(data: &InviteData) -> String {
-    let mut out = format!("Invite link: {}", data.invite_link);
-    if !data.roster_added.is_empty() {
-        out.push_str(&format!(
-            "\nSeeded onto the roster: {}",
-            data.roster_added.join(", ")
-        ));
-    }
-    if data.skills.is_empty() {
-        out.push_str("\nA membership-only door (no skills pre-offered).");
+pub(crate) fn invite_tty(data: &InvitationData) -> String {
+    let mut out = if data.invited.is_empty() {
+        "No new invitations.".to_owned()
     } else {
-        out.push_str(&format!("\nPre-offers: {}", data.skills.join(", ")));
+        format!("Invited: {}", data.invited.join(", "))
+    };
+    if data.mailed {
+        out.push_str("\nInvitation email sent.");
     }
-    out.push_str(
-        "\nTeammates just paste the link to their agent and ask it to follow — the link itself \
-         walks the agent through install, sign-in, and landing the skills. Redeeming it never \
-         enrolls anyone on its own.",
-    );
+    out.push_str(&format!(
+        "\nThey join at {} — ask them to run `topos follow {}` and sign in with their invited email.",
+        data.address, data.address,
+    ));
     out
 }
 
@@ -718,12 +682,11 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         short(&data.bundle_digest),
         gen_text,
     ));
-    // On a first (genesis) publish that minted a shareable door, surface the link.
-    if let Some(link) = &data.invite_link {
+    // When the plane disclosed the workspace address (a genesis standup), surface the paste-able share line.
+    if let Some(line) = &data.share_line {
         out.push_str(&format!(
-            "\nShare this skill: {link}\nTeammates just paste that link to their agent and ask it \
-             to follow — the link itself walks the agent through install, sign-in, and landing the \
-             skill.",
+            "\nShare this skill: {line}\nTeammates just paste that address to their agent and ask it \
+             to follow — the address walks the agent through install, sign-in, and landing the skill.",
         ));
     }
     out
@@ -798,7 +761,7 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
                 .map(|g| format!("({},{})", g.epoch, g.seq))
                 .unwrap_or_else(|| "the new version".to_owned());
             format!(
-                "Approved {} — current moved to {moved_to}. Every follower picks it up on their next pull.",
+                "Approved {} — current moved to {moved_to}. Every follower picks it up on their next update.",
                 data.proposal,
             )
         }
@@ -806,10 +769,14 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
             "Rejected {}. It will no longer be applied; `current` is unchanged.",
             data.proposal,
         ),
+        ReviewDecision::Withdraw => format!(
+            "Withdrew {}. Your proposal is closed; `current` is unchanged.",
+            data.proposal,
+        ),
     }
 }
 
-/// The human `pull` view — one line per skill that needs attention (gh-status style: name, what
+/// The human `update` view — one line per skill that needs attention (gh-status style: name, what
 /// happened, and the concrete next command where one exists), up-to-date rows summarized compactly,
 /// isolated per-skill failures (`warnings` — the same stable lines the `--json` envelope carries)
 /// rendered visibly, and the awaiting-review trailer. The `--quiet` hook path never reaches this
@@ -888,7 +855,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
                 .map(|o| short(&o.version_id))
                 .unwrap_or("?");
             (
-                format!("update offered @{v} — run `topos pull {name}`"),
+                format!("update offered @{v} — run `topos update {name}`"),
                 Vec::new(),
             )
         }
@@ -917,7 +884,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             (
                 format!(
                     "diverged from the new current @{v} — your local draft is kept; run \
-                     `topos pull {name}` to merge it (or `topos pull {name} --onto-current` to \
+                     `topos update {name}` to merge it (or `topos update {name} --onto-current` to \
                      keep your bytes and drop the update)"
                 ),
                 Vec::new(),
@@ -952,7 +919,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             (
                 format!(
                     "merge conflict with the new current @{v} — markers written; edit the files, \
-                     then run `topos pull {name} --onto-current` to commit your resolution \
+                     then run `topos update {name} --onto-current` to commit your resolution \
                      (publish is blocked until then)"
                 ),
                 extra,
@@ -960,7 +927,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         }
         PullAction::Held => (
             format!(
-                "held — pinned at a local go-back; run `topos pull {name}` to resume following current"
+                "held — pinned at a local go-back; run `topos update {name}` to resume following current"
             ),
             Vec::new(),
         ),
@@ -1100,14 +1067,17 @@ mod tests {
         // Offered: the short hash + the accept command.
         assert!(out.contains("docs"), "{out}");
         assert!(
-            out.contains("update offered @ab12cd34ef56 — run `topos pull docs`"),
+            out.contains("update offered @ab12cd34ef56 — run `topos update docs`"),
             "{out}"
         );
         // Fast-forwarded names the new generation.
         assert!(out.contains("fast-forwarded — now at (1,2)"), "{out}");
         // Diverged: both the merge command and the disclosed escape.
-        assert!(out.contains("`topos pull deploy`"), "{out}");
-        assert!(out.contains("`topos pull deploy --onto-current`"), "{out}");
+        assert!(out.contains("`topos update deploy`"), "{out}");
+        assert!(
+            out.contains("`topos update deploy --onto-current`"),
+            "{out}"
+        );
         assert!(
             out.contains(&format!("@{}", &"77".repeat(32)[..12])),
             "{out}"
@@ -1116,14 +1086,14 @@ mod tests {
         assert!(out.contains("`topos diff runbook`"), "{out}");
         // Conflicted: the resolving command + the conflicting path checklist.
         assert!(
-            out.contains("`topos pull api-notes --onto-current`"),
+            out.contains("`topos update api-notes --onto-current`"),
             "{out}"
         );
         assert!(out.contains("SKILL.md (content"), "{out}");
         assert!(out.contains("publish is blocked"), "{out}");
         // Held says it is pinned by a local go-back and how to resume.
         assert!(out.contains("held — pinned at a local go-back"), "{out}");
-        assert!(out.contains("`topos pull pinned`"), "{out}");
+        assert!(out.contains("`topos update pinned`"), "{out}");
         // Up-to-date rows stay compact: counted in the summary, no `style` action row.
         assert!(!out.contains("style  up to date"), "{out}");
         assert!(
@@ -1300,9 +1270,9 @@ mod tests {
         assert!(text.contains("deploy@abababababab  (available)"), "{text}");
         assert!(!text.contains("topos follow deploy"), "{text}");
         assert!(text.contains("runbook@abababababab  (following)"), "{text}");
-        // Behind points at `topos pull` (the real advance path).
+        // Behind points at `topos update` (the real advance path).
         assert!(
-            text.contains("audit@abababababab  (update available — run `topos pull audit`)"),
+            text.contains("audit@abababababab  (update available — run `topos update audit`)"),
             "{text}"
         );
         // The per-workspace degradation warning surfaces.

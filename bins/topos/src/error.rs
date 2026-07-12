@@ -193,9 +193,9 @@ pub(crate) enum ClientError {
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
-    /// A `revert` needs `--confirm` to proceed (a degenerate/no-op revert — e.g. `--to` names the version
-    /// that is ALREADY `current`). Re-run with `--confirm`, or pick a different good version.
-    #[error("revert needs --confirm: {reason}")]
+    /// A `revert` needs `--yes` to proceed (a degenerate/no-op revert — e.g. `--to` names the version
+    /// that is ALREADY `current`). Re-run with `--yes`, or pick a different good version.
+    #[error("revert needs --yes: {reason}")]
     ConfirmRequired { reason: String },
     /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
     /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
@@ -290,6 +290,14 @@ pub(crate) enum ClientError {
         code: String,
         retryable: bool,
     },
+    /// `topos upgrade` is ambiguous under the reshaped verbs — it could mean "update my skills" (now
+    /// `topos update`) or "update the topos CLI itself" (now `topos self-update`). Refuse and disambiguate
+    /// rather than silently pick one; the `next_actions` carry both concrete commands.
+    #[error(
+        "`topos upgrade` is ambiguous — run `topos update` to update your skills, or `topos self-update` \
+         to update the topos CLI itself"
+    )]
+    UpgradeAmbiguous,
 }
 
 impl ClientError {
@@ -350,6 +358,7 @@ impl ClientError {
             ClientError::PlacementOccupied { .. } => "PLACEMENT_OCCUPIED",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
+            ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
         }
     }
 

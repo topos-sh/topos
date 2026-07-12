@@ -1048,16 +1048,12 @@ impl FollowHarness {
                 plane: &inert_plane,
                 follow: &inert_follow,
             };
-            ops::invite(
-                &ctx,
-                &governance,
-                vec![email.to_owned()],
-                None,
-                skills.iter().map(|s| (*s).to_owned()).collect(),
-                None,
-            )
-            .map(|d| d.invite_link)
-            .map_err(|e| e.to_string())
+            // The reshaped `invite` seats emails as invited members (no skill pre-offer, no `/i/` link);
+            // the pre-offer/channel-placement semantics belong to the tests/ rewrite. Compile-shaped here.
+            let _ = skills;
+            ops::invite(&ctx, &governance, vec![email.to_owned()], Vec::new(), None)
+                .map(|d| d.address)
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -1096,15 +1092,15 @@ impl FollowHarness {
                 plane: &inert_plane,
                 follow: &inert_follow,
             };
+            let _ = skills;
             ops::invite(
                 &ctx,
                 &governance,
                 vec![email.to_owned()],
-                None,
-                skills.iter().map(|s| (*s).to_owned()).collect(),
+                Vec::new(),
                 Some(workspace),
             )
-            .map(|d| d.invite_link)
+            .map(|d| d.address)
             .map_err(|e| e.to_string())
         })
     }

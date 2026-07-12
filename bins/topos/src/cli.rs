@@ -1,10 +1,14 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
+//!
+//! The behavior verbs are grouped by SCOPE — self-scoped (affect only your machine), team-scoped (change
+//! shared state), and maintenance. Many of the reshaped verbs accept a richer grammar (multi-target
+//! positionals, `--channel`/`--skill` selectors, a two-phase describe/`--yes` flow) whose full resolution
+//! lands in a later leg; those extra shapes parse here and refuse with a marked seam at dispatch (see
+//! `ops::not_yet`), so the argv surface is frozen ahead of the semantics.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
-use topos_types::requests::WorkspaceRole;
-
-/// `topos` — share agent skills across a team. The agent drives it non-interactively with `--json`.
+/// `topos` — share agent behaviors across a team. The agent drives it non-interactively with `--json`.
 #[derive(Debug, Parser)]
 #[command(name = "topos", version, about = "Share agent behaviors across a team")]
 pub(crate) struct Cli {
@@ -13,9 +17,8 @@ pub(crate) struct Cli {
     pub(crate) json: bool,
 
     /// Act in a specific workspace when this install follows skills from more than one on the same plane.
-    /// Selects the workspace for the ambient write verbs (a genesis `publish`, `invite`) and disambiguates
-    /// a skill name shared across workspaces (`publish`/`review`/`revert`, and the `follow` positional
-    /// skill). Optional — with a single workspace it is inferred.
+    /// Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates
+    /// a skill name shared across workspaces. Optional — with a single workspace it is inferred.
     #[arg(long, global = true, value_name = "ID")]
     pub(crate) workspace: Option<String>,
 
@@ -23,88 +26,136 @@ pub(crate) struct Cli {
     pub(crate) command: Command,
 }
 
-/// The local, accountless verbs available this increment.
+/// The verb tree. Ordered by scope (self-scoped, then team-scoped, then maintenance).
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    // ---- Self-scoped (affect only you) ----
+    /// Follow skills or channels — enroll if needed, then subscribe. `follow <link>` (an `/i/` admin CLAIM
+    /// link, or a bare token once enrolled) enrolls; `follow <skill>` places a disclosed first-receive
+    /// offer (or resumes a skill `unfollow` paused). While a device-flow enrollment is pending, re-invoking
+    /// `follow` RESUMES it. Multi-target + `--channel`/`--skill` selectors parse but land later.
+    Follow {
+        /// One or more follow targets — a claim link, a workspace address, or a followed skill name.
+        /// Omitted, it resumes a pending enrollment.
+        targets: Vec<String>,
+        /// Follow a channel by name (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        channel: Vec<String>,
+        /// Follow a specific skill by name (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        skill: Vec<String>,
+        /// Apply the described changes (the one-shot consent). Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
+        /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
+        #[arg(long)]
+        manual: bool,
+        /// Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait`
+        /// waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
+        wait: Option<Option<u64>>,
+    },
+    /// Stop following a skill (or channel). Your local copy is KEPT as a frozen copy (nothing is deleted);
+    /// auto-updates stop, and `follow <skill>` resumes. Local-only.
+    Unfollow {
+        /// The skill name(s) to stop following.
+        targets: Vec<String>,
+        /// Unfollow a channel by name (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        channel: Vec<String>,
+        /// Unfollow a specific skill by name (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        skill: Vec<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Check for and apply updates to followed skills — the harness currency entry point. Bare = the sweep
+    /// over every followed skill (the installed currency trigger runs `update --quiet`). `<skill>` accepts a
+    /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
+    #[command(alias = "pull")]
+    Update {
+        /// Optional target(s): `<name>` accepts a pending update / resumes a hold / resolves a divergence;
+        /// `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill.
+        targets: Vec<String>,
+        /// Update only this channel's skills (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        channel: Vec<String>,
+        /// Update only this skill (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        skill: Vec<String>,
+        /// Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe.
+        #[arg(long)]
+        reset: bool,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
+        /// Resolve a diverged draft via the escape: commit YOUR bytes on top of `current`, dropping the
+        /// merge (the dropped changes are disclosed). Requires exactly one `<skill>` target.
+        #[arg(long = "onto-current", hide = true)]
+        onto_current: bool,
+        /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
+        /// still go to stderr with a non-zero exit. Overrides `--json`.
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Adopt a skill into topos. The source is polymorphic:
     ///   • a skill NAME (`deploy`, `deploy@claude-code`) — resolved against the untracked skills
     ///     `topos list` discovers (`@<harness>` disambiguates across harnesses);
     ///   • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place;
-    ///   • a REMOTE source (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL, incl. a
-    ///     `/tree/<ref>/<subdir>` URL) — fetch it and adopt it.
+    ///   • a REMOTE source (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch it.
     /// Local adopts are offline. A remote import fetches a public repo (no account); the source's
     /// trustworthiness is yours to verify.
     Add {
-        /// The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL (see the command
-        /// help). Path shapes (`./ ../ ~/ /`) adopt in place; `owner/repo` is a GitHub shorthand.
+        /// The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL.
         source: String,
-        /// Pick ONE skill from a repo that holds several (a remote source). A lone skill needs no `--skill`;
-        /// several without it is a typed error listing the choices.
+        /// Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none.
         #[arg(long, short = 's', value_name = "NAME")]
-        skill: Option<String>,
-        /// Land a remote import into THIS harness's skills dir (a registry slug, e.g. `cursor`). Default:
-        /// the active harness. Ignored for a local path / name adopt (those stay where they are).
-        #[arg(long, value_name = "SLUG")]
-        harness: Option<String>,
+        skill: Vec<String>,
+        /// The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable;
+        /// `'*'` = all). Default: the active harness. Ignored for a local path / name adopt.
+        #[arg(long, short = 'a', value_name = "SLUG")]
+        agent: Vec<String>,
         /// Land a remote import in the harness's global/user skills dir instead of the project (cwd) dir.
         #[arg(long, short = 'g')]
         global: bool,
-    },
-    /// Enroll with a plane and follow its skills, or place/resume a followed skill — dispatched by the
-    /// single positional. `follow <link>` (an `/i/` invite, a one-time admin CLAIM link, or a bare token
-    /// once enrolled) starts enrollment; `follow <skill>[@<hash>]` places a disclosed first-receive offer
-    /// (or resumes a skill `unfollow` paused). A device-flow enrollment returns a verification URL; while
-    /// one is pending, re-invoking `follow` (with any target, or none) RESUMES it — no separate flag.
-    Follow {
-        /// An `/i/<token>` invite or claim link (the full URL, or a bare token once enrolled) to enroll —
-        /// OR a followed skill name, optionally `<skill>@<hash>`, to place its offer / resume it. Omitted,
-        /// it resumes a pending enrollment.
-        target: Option<String>,
-        /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
-        manual: bool,
-        /// Block until the browser approval settles, finishing enrollment in ONE command (no manual
-        /// re-run). Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Without
-        /// `--wait`, an agent (`--json`) run returns the pending state immediately; an interactive run
-        /// always waits. Put `--wait` AFTER any positional (its value binds greedily).
-        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
-        wait: Option<Option<u64>>,
+        yes: bool,
     },
-    /// Stop following a skill's `current`. Your local copy is KEPT as a frozen copy (nothing is deleted);
-    /// auto-updates stop, and `follow <skill>` resumes. Local-only.
-    Unfollow {
-        /// The skill name to stop following.
-        skill: String,
-    },
-    /// Mint an `/i/<token>` invite link (OWNER only): sign the governance Invite op with this device's key,
-    /// then POST it. Seeds the invited emails onto the workspace roster and pre-offers the named skills.
-    /// Requires prior enrollment (run `follow` first); the link itself never carries a role.
-    Invite {
-        /// The emails to invite (0 or more). Seeded onto the roster as `invited`; bound as a set in the
-        /// signed governance frame (order is irrelevant — the kernel sorts + dedups).
-        emails: Vec<String>,
-        /// The role the invitees are granted; omitted defaults to `member` (the least-privilege default).
+    /// Remove skills from this machine (or from specific agents). A followed skill becomes a per-device
+    /// exclusion (your other devices keep receiving it); an untracked local copy is cleaned. Lands later.
+    Remove {
+        /// The skill name(s) to remove.
+        skill: Vec<String>,
+        /// Remove only from these agents (harness slugs; repeatable; `'*'` = all).
+        #[arg(long, short = 'a', value_name = "SLUG")]
+        agent: Vec<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
-        role: Option<RoleArg>,
-        /// The skill ids to pre-offer on the invite (bound as a set in the signed frame).
-        #[arg(long = "skills")]
-        skills: Vec<String>,
+        yes: bool,
     },
     /// Inventory the skills on this machine. By default also discovers **untracked** skills sitting in
     /// any known harness's skill dir (across the baked registry) that topos could `add`.
     List {
-        /// Narrow to one skill by name (errors if the name is ambiguous).
-        skill: Option<String>,
-        /// Also report the paths topos owns outside skill directories.
-        #[arg(long)]
-        footprint: bool,
-        /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.
-        #[arg(long)]
-        tracked: bool,
+        /// Narrow to one or more skills by name (errors if a name is ambiguous).
+        name: Vec<String>,
         /// Also list skills available in the workspace(s) you follow (the remote catalog), annotated
         /// with your follow-state. Requires enrollment; `--workspace <id>` narrows.
         #[arg(long)]
         remote: bool,
+        /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.
+        #[arg(long)]
+        tracked: bool,
+        /// Also report the paths topos owns outside skill directories.
+        #[arg(long)]
+        footprint: bool,
+        /// Narrow to one channel's skills (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        channel: Vec<String>,
+        /// Narrow to a specific skill (repeatable). Lands with the full resolution grammar.
+        #[arg(long, value_name = "NAME")]
+        skill: Vec<String>,
     },
     /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
     /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`
@@ -116,57 +167,66 @@ pub(crate) enum Command {
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
     },
-    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. The target is a
-    /// tracked skill NAME, or an untracked LOCAL source topos adopts before publishing — a discovered
-    /// `<skill>` / `<skill>@<harness>` (disambiguates across harnesses) or a `<dir>` path (adopted in
-    /// place) — so one command does `add` + `publish`. (A remote `owner/repo`/URL is NOT adopted here — run
-    /// `topos add <source>` first.) `publish` moves `current` to your draft (or genesis-creates a never-yet-
-    /// published skill); `--propose` opens a PR **without** moving `current`. Pin the bytes with an optional
-    /// `@<digest>` suffix (the disclosed consent digest — when present it must match the bytes being
-    /// shipped, refusing on mismatch; when absent the computed digest just ships). Under review-required a
-    /// direct publish fails typed — re-run as `--propose` (never an auto-flip). Un-enrolled, a direct
-    /// publish STANDS UP a workspace on the hosted plane (a human signs in to approve; an interactive run
-    /// then auto-creates the workspace and publishes in the same command, and `--wait` makes an agent run
-    /// block until it does); `--propose` still requires prior enrollment (`follow` first). Device-signed;
-    /// roster-gated.
+    /// Show a skill's local action log + embedded-git history.
+    Log {
+        /// The skill name.
+        skill: String,
+    },
+
+    // ---- Team-scoped ----
+    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves
+    /// `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without
+    /// moving `current`. Pin the bytes with an optional `@<digest>` suffix. Un-enrolled, a direct publish
+    /// STANDS UP a workspace on the hosted plane (a human signs in to approve). Roster-gated.
     Publish {
         /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
-        /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>` (the
-        /// byte-exact consent digest of the bytes being shipped).
+        /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
         target: String,
+        /// Place the skill's reference into this channel (created on first use; a curated channel needs
+        /// reviewer+). A brand-new skill with no `--to` lands in `everyone`.
+        #[arg(long, value_name = "CHANNEL")]
+        to: Option<String>,
         /// Open a proposal (a PR) instead of moving `current`.
         #[arg(long)]
         propose: bool,
-        /// Place the skill's reference into this channel (created on first use; a curated channel
-        /// needs reviewer+). A brand-new skill with no `--to` lands in `everyone`.
-        #[arg(long, value_name = "CHANNEL")]
-        to: Option<String>,
+        /// The commit message for this version (threaded into the candidate commit id).
+        #[arg(long, short = 'm', value_name = "MSG")]
+        message: Option<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
         /// Block until the browser sign-in settles, then auto-create the workspace and publish in ONE
-        /// command (the un-enrolled standup path). Bare `--wait` waits until the code expires; `--wait
-        /// <seconds>` caps the wait. Without `--wait`, an agent (`--json`) run returns the pending state
-        /// immediately; an interactive run always waits. Put `--wait` AFTER the positional target.
+        /// command (the un-enrolled standup path). Put `--wait` AFTER the positional target.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
-    /// Resolve a proposal (the `gh pr review --approve` model). `--approve` moves `current` to the candidate
-    /// (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer) or
-    /// withdraws your own (proposer). Exactly one of `--approve` / `--reject` is required — enforced by
-    /// clap (the `verdict` group), so a violation is a standard usage error at exit 2. Device-signed.
-    #[command(group(clap::ArgGroup::new("verdict").required(true).args(["approve", "reject"])))]
+    /// Resolve a proposal (the `gh pr review` model). `--approve` moves `current` to the candidate (a
+    /// compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer,
+    /// `-m <reason>` required); `--withdraw` retracts your own open proposal. A bare `review` (no target /
+    /// no verdict) is the review inbox/describe (lands later). Roster-gated.
+    #[command(group(clap::ArgGroup::new("verdict").args(["approve", "reject", "withdraw"])))]
     Review {
-        /// The proposal to resolve, as `<skill>@<hash>`.
-        target: String,
+        /// The proposal to resolve, as `<skill>@<hash>`. Omitted = the review inbox (lands later).
+        target: Option<String>,
         /// Approve the proposal — move `current` to the candidate.
         #[arg(long)]
         approve: bool,
-        /// Reject the proposal (reviewer) or withdraw your own (proposer).
+        /// Reject the proposal (needs `-m <reason>`).
         #[arg(long)]
         reject: bool,
+        /// Withdraw your own open proposal.
+        #[arg(long)]
+        withdraw: bool,
+        /// The reject reason / withdrawal note (required with `--reject`).
+        #[arg(long, short = 'm', value_name = "MSG")]
+        message: Option<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
     },
     /// Undo a release for the TEAM: move `current` to the older version named by `--to` — a **forward**
     /// pointer-move (nothing deleted; invertible). `--to <hash>` is the sole source of the GOOD version you
-    /// go back TO (not the bad one). `--confirm` for a no-op (already-current) revert. Team-only — the local
-    /// go-back is `pull <skill>@<hash>`. Device-signed; roster-gated.
+    /// go back TO (not the bad one). Team-only — the local go-back is `update <skill>@<hash>`. Roster-gated.
     Revert {
         /// The skill to revert.
         skill: String,
@@ -174,94 +234,109 @@ pub(crate) enum Command {
         /// the bad version.
         #[arg(long = "to")]
         to: String,
-        /// Acknowledge a no-op revert (the `--to` version is already `current`).
+        /// Acknowledge a no-op revert (the `--to` version is already `current`), and apply without a describe.
         #[arg(long)]
-        confirm: bool,
+        yes: bool,
     },
-    /// Show a skill's local action log + embedded-git history.
-    Log {
-        /// The skill name.
-        skill: String,
-    },
-    /// Check for and apply updates to followed skills — the harness currency entry point. Bare = the
-    /// sweep over every followed skill (the installed currency trigger runs `pull --quiet`). `<skill>` accepts a
-    /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
-    Pull {
-        /// Optional target: `<name>` accepts a pending update / resumes a hold / resolves a divergence;
-        /// `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill.
-        skill: Option<String>,
-        /// Resolve a diverged draft via the escape: commit YOUR bytes on top of `current`, dropping the
-        /// merge (the dropped changes are disclosed). Requires a `<skill>` target (enforced by clap);
-        /// not valid with `@<hash>`.
-        #[arg(long = "onto-current", requires = "skill")]
-        onto_current: bool,
-        /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
-        /// still go to stderr with a non-zero exit. Overrides `--json`.
+    /// Group skills into channels. `channel add <channel> <skill>...` places a skill's reference into a
+    /// channel (created on first placement); `channel remove <channel> <skill>...` removes it. Curated
+    /// channels need reviewer+.
+    Channel {
+        /// The channel subcommand and its args: `add <channel> <skill>...` or `remove <channel> <skill>...`.
+        #[arg(value_name = "ARGS")]
+        args: Vec<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
-        quiet: bool,
+        yes: bool,
     },
-    /// Remove topos: scrub the harness currency hook, then delete the binary + `~/.topos/`. Touches no
-    /// skill bytes.
-    Uninstall {
-        /// First report the paths topos owns outside skill directories.
+    /// Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated`
+    /// (channel) — reviewer+; `open` loosens it back — owner. Lands later.
+    Protect {
+        /// The skill or channel to protect.
+        target: String,
+        /// The level (`reviewed` / `curated` / `open`); omitted tightens to the reviewed/curated default.
+        #[arg(value_name = "LEVEL")]
+        level: Option<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
-        footprint: bool,
+        yes: bool,
     },
+    /// Seat emails as invited members of the workspace (a roster write). Every CLI invitee starts as a
+    /// member; joining is `follow <address>` plus proof of the invited email. Requires prior enrollment.
+    /// A bare `invite` (no emails) reads the workspace address + policy (lands later).
+    Invite {
+        /// The emails to invite (folded to canonical form; seeded onto the roster as `invited`).
+        email: Vec<String>,
+        /// Pre-place each invitee into this channel (repeatable).
+        #[arg(long, value_name = "NAME")]
+        channel: Vec<String>,
+        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    // ---- Maintenance ----
     /// Update the `topos` binary itself to the latest release, verifying the download's sha256 against the
     /// release SHA256SUMS (never skippable) and replacing the running binary atomically. A MAINTENANCE
-    /// command — it touches no skills, no plane, no account, and mints no device identity.
-    Upgrade {
+    /// command — it touches no skills, no plane, no account. (Skills are updated by `topos update`.)
+    SelfUpdate {
         /// Only check whether a newer release exists; report and exit without downloading or replacing.
         #[arg(long)]
         check: bool,
         /// Install a specific release tag (e.g. v0.2.0) instead of the latest — allows a pinned downgrade.
-        /// Bypasses the latest-version check and downloads that tag directly.
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
+    /// Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth status`. Lands later.
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCmd,
+    },
+
+    // ---- Hidden aliases ----
+    /// Hidden: `topos upgrade` is ambiguous — it maps to a disambiguation refusal (skills → `topos update`,
+    /// the CLI → `topos self-update`), so the old spelling never silently does the wrong thing.
+    #[command(hide = true)]
+    Upgrade,
 }
 
-/// The workspace role an invite grants, as a CLI arg — maps 1:1 to [`WorkspaceRole`]. The client signs the
-/// SAME role byte the plane re-derives + verifies, so this mapping is load-bearing.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum RoleArg {
-    /// Full governance authority (invite, roster, revoke).
-    Owner,
-    /// A reviewer (review-gate authority; no governance authority in v0).
-    Reviewer,
-    /// An ordinary member (no governance authority).
-    Member,
-}
-
-impl RoleArg {
-    /// Map to the wire [`WorkspaceRole`]. The op then maps that to the governance signing byte the plane
-    /// agrees on (Owner=1, Reviewer=2, Member=3).
-    pub(crate) fn to_workspace_role(self) -> WorkspaceRole {
-        match self {
-            RoleArg::Owner => WorkspaceRole::Owner,
-            RoleArg::Reviewer => WorkspaceRole::Reviewer,
-            RoleArg::Member => WorkspaceRole::Member,
-        }
-    }
+/// The `auth` sign-in subcommands.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AuthCmd {
+    /// Sign in to a plane (device flow). An optional `<server>` names the plane's URL.
+    Login {
+        /// The plane URL to sign in to (optional; the enrolled plane otherwise).
+        #[arg(value_name = "SERVER_URL")]
+        server_url: Option<String>,
+    },
+    /// Sign out of this install (revoke this device best-effort, delete credentials; keep skills).
+    Logout,
+    /// Show who you are, per-workspace credential health, hook health, and reporting posture.
+    Status,
 }
 
 impl Command {
     /// The verb name carried in the `--json` envelope + receipt.
     pub(crate) fn name(&self) -> &'static str {
         match self {
-            Command::Add { .. } => "add",
             Command::Follow { .. } => "follow",
             Command::Unfollow { .. } => "unfollow",
-            Command::Invite { .. } => "invite",
+            // `pull` is a hidden alias of `update` — the envelope always reads "update".
+            Command::Update { .. } => "update",
+            Command::Add { .. } => "add",
+            Command::Remove { .. } => "remove",
             Command::List { .. } => "list",
             Command::Diff { .. } => "diff",
+            Command::Log { .. } => "log",
             Command::Publish { .. } => "publish",
             Command::Review { .. } => "review",
             Command::Revert { .. } => "revert",
-            Command::Log { .. } => "log",
-            Command::Pull { .. } => "pull",
-            Command::Uninstall { .. } => "uninstall",
-            Command::Upgrade { .. } => "upgrade",
+            Command::Channel { .. } => "channel",
+            Command::Protect { .. } => "protect",
+            Command::Invite { .. } => "invite",
+            Command::SelfUpdate { .. } => "self-update",
+            Command::Auth { .. } => "auth",
+            Command::Upgrade => "upgrade",
         }
     }
 }
@@ -279,126 +354,105 @@ mod tests {
     }
 
     #[test]
-    fn review_verdict_is_a_clap_usage_error_at_exit_2() {
-        // Both flags is a conflict; neither is missing-required — both are STANDARD usage errors
-        // (help hint, exit code 2), never a CORRUPT_STATE envelope.
-        let both = Cli::try_parse_from(["topos", "review", "docs@abc", "--approve", "--reject"])
-            .unwrap_err();
-        assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
-        assert_eq!(both.exit_code(), 2);
-        let neither = Cli::try_parse_from(["topos", "review", "docs@abc"]).unwrap_err();
-        assert_eq!(neither.kind(), ErrorKind::MissingRequiredArgument);
-        assert_eq!(neither.exit_code(), 2);
+    fn pull_is_a_hidden_alias_of_update() {
+        // The armed hooks in the field run `topos pull --quiet`; it must parse as Update and read "update".
+        let pull = Cli::try_parse_from(["topos", "pull", "--quiet"]).unwrap();
+        assert!(matches!(pull.command, Command::Update { quiet: true, .. }));
+        assert_eq!(pull.command.name(), "update");
+        // A targeted go-back over the alias parses too.
+        let go_back = Cli::try_parse_from(["topos", "pull", "docs@abc"]).unwrap();
+        assert!(matches!(go_back.command, Command::Update { .. }));
     }
 
     #[test]
-    fn pull_onto_current_requires_a_skill_target_in_clap() {
-        let err = Cli::try_parse_from(["topos", "pull", "--onto-current"]).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-        assert_eq!(err.exit_code(), 2);
-        // With the target present it parses (the `@<hash>` exclusivity stays a runtime usage error).
-        assert!(Cli::try_parse_from(["topos", "pull", "docs", "--onto-current"]).is_ok());
+    fn update_onto_current_is_hidden_but_parses() {
+        let out = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
+        assert!(matches!(
+            out.command,
+            Command::Update {
+                onto_current: true,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn publish_requires_a_single_positional_target_and_has_no_approve_flag() {
-        // A bare `publish` with no positional is a standard missing-required usage error at exit 2.
-        let missing = Cli::try_parse_from(["topos", "publish"]).unwrap_err();
-        assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
-        assert_eq!(missing.exit_code(), 2);
-        // The bare skill and the `<skill>@<digest>` pin both parse as the single positional.
-        assert!(Cli::try_parse_from(["topos", "publish", "docs"]).is_ok());
-        let pinned = format!("docs@{}", "ab".repeat(32));
-        assert!(Cli::try_parse_from(["topos", "publish", &pinned, "--propose"]).is_ok());
-        // The removed `--approve` flag is now an unknown-argument usage error.
-        let approve =
-            Cli::try_parse_from(["topos", "publish", "docs", "--approve", &pinned]).unwrap_err();
-        assert_eq!(approve.kind(), ErrorKind::UnknownArgument);
+    fn review_verdict_group_is_now_optional() {
+        // A bare `review` (no target, no verdict) parses — the inbox/describe is a runtime seam.
+        assert!(Cli::try_parse_from(["topos", "review"]).is_ok());
+        // A verdict + target parses.
+        assert!(Cli::try_parse_from(["topos", "review", "docs@abc", "--approve"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["topos", "review", "docs@abc", "--reject", "-m", "no"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["topos", "review", "docs@abc", "--withdraw"]).is_ok());
     }
 
     #[test]
-    fn revert_requires_a_skill_and_to_and_has_no_approve_flag() {
-        let hash = "ab".repeat(32);
-        assert!(Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash]).is_ok());
-        // Skill is now required.
-        let no_skill = Cli::try_parse_from(["topos", "revert", "--to", &hash]).unwrap_err();
-        assert_eq!(no_skill.kind(), ErrorKind::MissingRequiredArgument);
-        // The removed `--approve` flag is an unknown argument.
-        let approve = Cli::try_parse_from([
-            "topos",
-            "revert",
-            "docs",
-            "--to",
-            &hash,
-            "--approve",
-            &format!("docs@{hash}"),
-        ])
-        .unwrap_err();
-        assert_eq!(approve.kind(), ErrorKind::UnknownArgument);
+    fn publish_takes_message_and_channel_flags() {
+        let out = Cli::try_parse_from(["topos", "publish", "docs", "-m", "tidy up", "--to", "eng"])
+            .unwrap();
+        assert!(matches!(
+            out.command,
+            Command::Publish {
+                message: Some(_),
+                to: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn add_takes_one_polymorphic_source_positional() {
-        // A name, a `<skill>@<harness>` name, a path, and a remote all parse as the single positional.
-        assert!(Cli::try_parse_from(["topos", "add", "deploy"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "add", "deploy@claude-code"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "add", "./skills/deploy"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "add", "vercel-labs/agent-skills"]).is_ok());
-        // The remote flags parse (short forms too).
+    fn add_uses_agent_not_harness_and_accepts_multiples() {
+        // `--harness` is gone; `-a`/`--agent` replace it (repeatable).
+        assert!(
+            Cli::try_parse_from(["topos", "add", "deploy", "-a", "cursor", "-a", "windsurf"])
+                .is_ok()
+        );
         assert!(
             Cli::try_parse_from([
                 "topos",
                 "add",
                 "vercel-labs/agent-skills",
                 "-s",
-                "web-design",
-                "--harness",
-                "cursor",
-                "-g",
+                "web-design"
             ])
             .is_ok()
         );
-        // The source is required: omitting it is a missing-required usage error at exit 2.
-        let neither = Cli::try_parse_from(["topos", "add"]).unwrap_err();
-        assert_eq!(neither.kind(), ErrorKind::MissingRequiredArgument);
-        assert_eq!(neither.exit_code(), 2);
-        // `--path` is gone (path-ness is now inferred from the positional's shape).
-        let removed = Cli::try_parse_from(["topos", "add", "--path", "/tmp/x"]).unwrap_err();
+        let removed =
+            Cli::try_parse_from(["topos", "add", "deploy", "--harness", "cursor"]).unwrap_err();
         assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn follow_has_an_optional_positional_and_no_resume_or_approve_flags() {
-        // Bare, a link, and a skill positional all parse.
-        assert!(Cli::try_parse_from(["topos", "follow"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "follow", "https://topos.sh/i/tok"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "follow", "docs", "--manual"]).is_ok());
-        // The removed `--resume` / `--approve` flags are unknown arguments.
-        assert_eq!(
-            Cli::try_parse_from(["topos", "follow", "--resume"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::UnknownArgument
-        );
-        assert_eq!(
-            Cli::try_parse_from(["topos", "follow", "--approve", "docs"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::UnknownArgument
-        );
+    fn revert_replaces_confirm_with_yes() {
+        let hash = "ab".repeat(32);
+        assert!(Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash, "--yes"]).is_ok());
+        // The old `--confirm` flag is gone.
+        let removed = Cli::try_parse_from(["topos", "revert", "docs", "--to", &hash, "--confirm"])
+            .unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn channel_and_auth_and_protect_parse() {
+        assert!(Cli::try_parse_from(["topos", "channel", "add", "eng", "deploy"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "channel"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "protect", "docs", "reviewed"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "auth", "login"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "auth", "status"]).is_ok());
+    }
+
+    #[test]
+    fn upgrade_is_a_hidden_disambiguation_subcommand() {
+        let out = Cli::try_parse_from(["topos", "upgrade"]).unwrap();
+        assert!(matches!(out.command, Command::Upgrade));
+        assert_eq!(out.command.name(), "upgrade");
     }
 
     #[test]
     fn wait_flag_is_an_optional_valued_flag_on_publish_and_follow() {
-        // Absent ⇒ None; bare `--wait` ⇒ Some(None) (wait until the code expires); `--wait <n>` ⇒
-        // Some(Some(n)) (cap the wait). The value binds greedily, so `--wait` goes AFTER the positional.
-        let absent = Cli::try_parse_from(["topos", "publish", "docs"]).unwrap();
         let bare = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap();
-        let valued = Cli::try_parse_from(["topos", "publish", "docs", "--wait", "300"]).unwrap();
-        assert!(matches!(
-            absent.command,
-            Command::Publish { wait: None, .. }
-        ));
         assert!(matches!(
             bare.command,
             Command::Publish {
@@ -406,6 +460,7 @@ mod tests {
                 ..
             }
         ));
+        let valued = Cli::try_parse_from(["topos", "publish", "docs", "--wait", "300"]).unwrap();
         assert!(matches!(
             valued.command,
             Command::Publish {
@@ -413,7 +468,6 @@ mod tests {
                 ..
             }
         ));
-        // Same shape on `follow` (bare here — no positional to compete for the value).
         let follow_bare = Cli::try_parse_from(["topos", "follow", "--wait"]).unwrap();
         assert!(matches!(
             follow_bare.command,
@@ -422,7 +476,5 @@ mod tests {
                 ..
             }
         ));
-        // A non-numeric value is a parse error (not silently swallowed).
-        assert!(Cli::try_parse_from(["topos", "publish", "docs", "--wait", "soon"]).is_err());
     }
 }

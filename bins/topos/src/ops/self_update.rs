@@ -1,6 +1,7 @@
-//! `topos upgrade` — the native self-updater. Resolve the target release, download the asset for THIS
-//! build's target triple, verify its sha256 against the release SHA256SUMS (never skippable), and
-//! atomically replace the running binary. A maintenance command: no skills, no plane, no account.
+//! `topos self-update` — the native self-updater for the CLI binary itself. Resolve the target release,
+//! download the asset for THIS build's target triple, verify its sha256 against the release SHA256SUMS
+//! (never skippable), and atomically replace the running binary. A maintenance command: no skills, no
+//! plane, no account. (Skills are updated by `topos update`; this updates the `topos` program.)
 
 use std::io::Read;
 use std::path::Path;
@@ -21,7 +22,7 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_BASE_URL: &str = "https://github.com/topos-sh/topos/releases";
 
 #[derive(Debug, Clone)]
-pub(crate) struct UpgradeOpts {
+pub(crate) struct SelfUpdateOpts {
     pub check: bool,
     /// An explicit tag, verbatim-ish (normalized to a leading 'v').
     pub version: Option<String>,
@@ -31,17 +32,17 @@ pub(crate) struct UpgradeOpts {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum UpgradeAction {
+pub(crate) enum SelfUpdateAction {
     Checked,
     Upgraded,
     AlreadyCurrent,
 }
 
 /// Ad-hoc outcome — this maintenance command has no frozen wire schema (the envelope stays valid with a
-/// free-form `data`, mirroring `uninstall`). Serialized into the `--json` envelope's `data`.
+/// free-form `data`). Serialized into the `--json` envelope's `data`.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct UpgradeOutcome {
-    pub action: UpgradeAction,
+pub(crate) struct SelfUpdateOutcome {
+    pub action: SelfUpdateAction,
     pub current_version: String,
     /// The resolved target (latest, or the pinned tag), sans 'v'.
     pub latest_version: Option<String>,
@@ -61,12 +62,12 @@ pub(crate) struct UpgradeOutcome {
 /// [`ClientError::ChecksumMismatch`] when the download does not match the release SHA256SUMS (never
 /// skippable); [`ClientError::WireInvalid`] on an unreadable tarball / a SHA256SUMS missing the asset;
 /// an [`FsOps`](crate::fs_seam::FsOps) failure (e.g. a not-writable install dir) on the atomic replace.
-pub(crate) fn upgrade(
+pub(crate) fn self_update(
     ctx: &Ctx<'_>,
     releases: &dyn ReleaseSource,
     current_exe: &Path,
-    opts: UpgradeOpts,
-) -> Result<UpgradeOutcome, ClientError> {
+    opts: SelfUpdateOpts,
+) -> Result<SelfUpdateOutcome, ClientError> {
     let base_url = opts
         .base_url
         .as_deref()
@@ -98,8 +99,8 @@ pub(crate) fn upgrade(
 
     // 2. check mode — report and stop.
     if opts.check {
-        return Ok(UpgradeOutcome {
-            action: UpgradeAction::Checked,
+        return Ok(SelfUpdateOutcome {
+            action: SelfUpdateAction::Checked,
             current_version: CURRENT_VERSION.to_owned(),
             latest_version: Some(latest_version),
             update_available,
@@ -115,8 +116,8 @@ pub(crate) fn upgrade(
         update_available
     };
     if !should_install {
-        return Ok(UpgradeOutcome {
-            action: UpgradeAction::AlreadyCurrent,
+        return Ok(SelfUpdateOutcome {
+            action: SelfUpdateAction::AlreadyCurrent,
             current_version: CURRENT_VERSION.to_owned(),
             latest_version: Some(latest_version),
             update_available: false,
@@ -158,8 +159,8 @@ pub(crate) fn upgrade(
         return Err(map_replace_error(e, current_exe));
     }
 
-    Ok(UpgradeOutcome {
-        action: UpgradeAction::Upgraded,
+    Ok(SelfUpdateOutcome {
+        action: SelfUpdateAction::Upgraded,
         current_version: CURRENT_VERSION.to_owned(),
         latest_version: Some(latest_version),
         update_available: true,
@@ -285,8 +286,8 @@ mod tests {
     use topos_harness::ClaudeCode;
 
     use super::{
-        CURRENT_VERSION, TARGET_TRIPLE, UpgradeAction, UpgradeOpts, expected_sum, extract_topos,
-        map_replace_error, normalize_tag, parse_core, upgrade, version_gt,
+        CURRENT_VERSION, SelfUpdateAction, SelfUpdateOpts, TARGET_TRIPLE, expected_sum,
+        extract_topos, map_replace_error, normalize_tag, parse_core, self_update, version_gt,
     };
     use crate::ctx::Ctx;
     use crate::error::ClientError;
@@ -458,11 +459,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &releases,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: false,
                     version: Some(tag.to_owned()),
                     base_url: None,
@@ -471,7 +472,7 @@ mod tests {
         })
         .expect("a matching checksum installs");
 
-        assert!(matches!(out.action, UpgradeAction::Upgraded));
+        assert!(matches!(out.action, SelfUpdateAction::Upgraded));
         assert_eq!(out.latest_version.as_deref(), Some("9.9.9"));
         // The running binary now holds the extracted `topos` bytes, byte-exact.
         assert_eq!(std::fs::read(&current_exe).unwrap(), new_bin);
@@ -496,11 +497,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let err = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &releases,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: false,
                     version: Some(tag.to_owned()),
                     base_url: None,
@@ -531,11 +532,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &releases,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: true,
                     version: None,
                     base_url: None,
@@ -544,7 +545,7 @@ mod tests {
         })
         .expect("check mode reports");
 
-        assert!(matches!(out.action, UpgradeAction::Checked));
+        assert!(matches!(out.action, SelfUpdateAction::Checked));
         assert!(out.update_available, "v9.9.9 is newer than this build");
         assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
     }
@@ -562,11 +563,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &releases,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: false,
                     version: Some(pinned),
                     base_url: None,
@@ -575,7 +576,7 @@ mod tests {
         })
         .expect("already current is a clean success");
 
-        assert!(matches!(out.action, UpgradeAction::AlreadyCurrent));
+        assert!(matches!(out.action, SelfUpdateAction::AlreadyCurrent));
         assert!(!out.update_available);
         assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
     }
@@ -601,11 +602,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &releases,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: false,
                     version: Some(tag.to_owned()),
                     // A non-HTTPS mirror the operator controls — the checksum is still enforced.
@@ -615,7 +616,7 @@ mod tests {
         })
         .expect("a non-HTTPS mirror still installs with the checksum enforced");
 
-        assert!(matches!(out.action, UpgradeAction::Upgraded));
+        assert!(matches!(out.action, SelfUpdateAction::Upgraded));
         assert!(
             out.warning
                 .as_deref()
@@ -663,11 +664,11 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let err = with_ctx(|ctx| {
-            upgrade(
+            self_update(
                 ctx,
                 &Unreachable,
                 &current_exe,
-                UpgradeOpts {
+                SelfUpdateOpts {
                     check: false,
                     version: None,
                     base_url: Some("https://mirror.example/releases".to_owned()),

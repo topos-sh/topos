@@ -37,7 +37,6 @@ use super::follow::{
     EnrollConnect, complete_uri, device_fingerprint, guard_one_plane, machine_name, promote_core,
     resolve_api_base,
 };
-use super::invite::{GovernanceConnect, invite as mint_invite};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
@@ -102,13 +101,13 @@ const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     standup: &StandupConnectors<'_>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
+    message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE. A pin only
     // ever rides a standup RESUME, by which point the skill is already tracked, so it never collides with a
@@ -130,13 +129,13 @@ pub(crate) fn publish(
     let outcome = publish_tracked(
         ctx,
         connect,
-        gov_connect,
         standup,
         &skill_name,
         pin.as_deref(),
         propose,
         channel,
         workspace,
+        message,
     )?;
     Ok(stamp_added(outcome, added))
 }
@@ -149,13 +148,13 @@ pub(crate) fn publish(
 fn publish_tracked(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     standup: &StandupConnectors<'_>,
     skill_name: &str,
     pin: Option<&str>,
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
+    message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
     // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup. Absent + propose was
@@ -165,7 +164,7 @@ fn publish_tracked(
             !propose,
             "propose + un-enrolled is refused in publish() before adoption"
         );
-        return standup_publish(ctx, connect, gov_connect, standup, skill_name, pin);
+        return standup_publish(ctx, connect, standup, skill_name, pin, message);
     }
     // `instance.json` PRESENT does not yet mean the promotion COMPLETED: promote_core writes it FIRST and
     // `user.json` later, so a crash inside a standup promotion leaves instance present, user absent, and
@@ -183,18 +182,10 @@ fn publish_tracked(
         && let enroll::EnrollPhase::Redeemed { context, .. } = &wal.state
         && matches!(context.root, enroll::EnrollRoot::Standup)
     {
-        return standup_publish(ctx, connect, gov_connect, standup, skill_name, pin);
+        return standup_publish(ctx, connect, standup, skill_name, pin, message);
     }
     enrolled_publish(
-        ctx,
-        connect,
-        gov_connect,
-        skill_name,
-        propose,
-        channel,
-        pin,
-        None,
-        workspace,
+        ctx, connect, skill_name, propose, channel, pin, None, workspace, message,
     )
 }
 
@@ -341,13 +332,13 @@ fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> Publish
 fn enrolled_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     skill_name: &str,
     propose: bool,
     channel: Option<&str>,
     pin: Option<&str>,
     standup_receipt: Option<StandupReceipt>,
     workspace: Option<&str>,
+    message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -430,34 +421,22 @@ fn enrolled_publish(
             channel,
             &scanned,
             scanned.bundle_digest,
+            message,
         )?,
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
     let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name)?;
 
-    // First-publish invite fold: a GENESIS publish (no prior `current`) also mints a shareable `/i/` link
-    // pre-offering the just-published skill, so a first publish stands up a door to it. BEST-EFFORT +
-    // owner-gated — minting the link signs a governance op the plane DENIES for a non-owner; on any failure
-    // the publish STILL succeeds with `invite_link: None` (the pointer move is the real outcome, the link a
-    // convenience). Fires only for a genesis publish (`expected == (0,0)`), never an ordinary one.
-    if let PublishOutcome::Published(data) = &mut outcome
-        && rec.expected_generation == GENESIS
-    {
-        data.invite_link = mint_invite(
-            ctx,
-            gov_connect,
-            Vec::new(),
-            None,
-            vec![rec.skill_id.clone()],
-            // Mint the door in the SAME workspace this genesis publish signed in.
-            Some(workspace_id.as_str()),
-        )
-        .ok()
-        .map(|inv| inv.invite_link);
-    }
-    // A workspace-creating invocation discloses what it stood up and who owns it (hijack visibility).
+    // A workspace-creating invocation discloses what it stood up and who owns it (hijack visibility), and —
+    // when the standup disclosed the workspace ADDRESS — folds in the paste-able share line for the shipped
+    // skill (`<workspace address>/skills/<name>`). An ordinary enrolled publish has no standup address, so
+    // `share_line` is simply omitted (the pointer move is the real outcome; the line is a convenience). The
+    // client-side post-genesis invite mint is retired — the workspace address IS the share surface now.
     if let PublishOutcome::Published(data) = &mut outcome {
+        if let Some(addr) = standup_receipt.as_ref().and_then(|r| r.address.as_deref()) {
+            data.share_line = Some(format!("{addr}/skills/{}", lock.name));
+        }
         data.standup = standup_receipt;
     }
     Ok(outcome)
@@ -474,10 +453,10 @@ fn enrolled_publish(
 fn standup_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     standup: &StandupConnectors<'_>,
     skill_name: &str,
     pin: Option<&str>,
+    message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // FULL pre-flight FIRST — skill resolution, scan, digest computation, the optional `@<digest>` match —
     // so the consent decision binds BEFORE any network call ever happens. Returns the computed digest the
@@ -499,11 +478,11 @@ fn standup_publish(
         }) => standup_resume(
             ctx,
             connect,
-            gov_connect,
             standup,
             skill_name,
             pin,
             &computed_digest,
+            message,
             StandupWal {
                 base_url,
                 deployment_mode,
@@ -534,13 +513,16 @@ fn standup_publish(
                 &signer,
             )?;
             // Only a STANDUP-rooted enrollment claims the standup receipt — a crashed invite/claim
-            // promotion completed here is disclosed as the ordinary publish it then is.
+            // promotion completed here is disclosed as the ordinary publish it then is. The workspace
+            // ADDRESS is not on the recovery WAL (a crash residual — the share line lands on the normal
+            // granted path, below), so it is omitted here.
             let receipt =
                 matches!(context.root, enroll::EnrollRoot::Standup).then(|| StandupReceipt {
                     workspace_display_name: context.workspace_display_name.clone(),
+                    address: None,
                     owner_principal: principal.clone(),
                 });
-            continue_enrolled(ctx, connect, gov_connect, skill_name, pin, receipt)
+            continue_enrolled(ctx, connect, skill_name, pin, receipt, message)
         }
         Some(enroll::EnrollPhase::Authorizing { .. }) => Err(ClientError::Enrollment(
             "an invite enrollment is in progress; re-run `topos follow` to finish it first".into(),
@@ -666,11 +648,11 @@ struct StandupWal {
 fn standup_resume(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     standup: &StandupConnectors<'_>,
     skill_name: &str,
     pin: Option<&str>,
     computed_digest: &str,
+    message: Option<&str>,
     wal: StandupWal,
 ) -> Result<PublishOutcome, ClientError> {
     // The in-flight session's base URL is authoritative for this session (a changed TOPOS_PLANE_URL
@@ -722,6 +704,9 @@ fn standup_resume(
                     "the redeemed workspace does not match the granted session".into(),
                 ));
             }
+            // The workspace ADDRESS (server-built on the public link base) is the standup receipt's share
+            // surface — captured before `workspace`'s fields move into the enroll context.
+            let workspace_address = workspace.address.clone();
             let context = enroll::EnrollContext {
                 base_url: wal.base_url,
                 deployment_mode: wal.deployment_mode,
@@ -766,13 +751,14 @@ fn standup_resume(
             continue_enrolled(
                 ctx,
                 connect,
-                gov_connect,
                 skill_name,
                 pin,
                 Some(StandupReceipt {
                     workspace_display_name: context.workspace_display_name.clone(),
+                    address: workspace_address,
                     owner_principal: redeem.principal,
                 }),
+                message,
             )
         }
     }
@@ -784,15 +770,14 @@ fn standup_resume(
 fn continue_enrolled(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    gov_connect: &GovernanceConnect<'_>,
     skill_name: &str,
     pin: Option<&str>,
     standup_receipt: Option<StandupReceipt>,
+    message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     enrolled_publish(
         ctx,
         connect,
-        gov_connect,
         skill_name,
         false,
         // A standup-resumed publish is the genesis of a brand-new workspace — no channel flag rode the
@@ -802,6 +787,7 @@ fn continue_enrolled(
         standup_receipt,
         // The standup created exactly ONE workspace membership — resolve it ambiently (no `--workspace`).
         None,
+        message,
     )
 }
 
@@ -838,7 +824,7 @@ fn pending_outcome(
             version_id: None,
             bundle_digest: computed_digest.to_owned(),
             current_generation: None,
-            invite_link: None,
+            share_line: None,
             pending: Some(PublishPending {
                 status: PublishPendingStatus::SigninRequired,
                 verification_uri_complete,
@@ -905,7 +891,12 @@ fn build_publish_op(
     channel: Option<&str>,
     scanned: &scan::ScannedBundle,
     digest: [u8; 32],
+    message: Option<&str>,
 ) -> Result<OpRecord, ClientError> {
+    // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
+    // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
+    // byte-identical candidate (`render_candidate` reads the message back from the store).
+    let commit_message = message.unwrap_or(PUBLISH_MESSAGE);
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
 
@@ -929,12 +920,12 @@ fn build_publish_op(
     };
 
     // The byte-identical id the plane re-derives (I-COMMIT-PARITY): author = the device id, message = the
-    // fixed publish message — both folded into `commit_id`.
+    // publish message (`-m` or the default) — both folded into `commit_id`.
     let commit_id = identity::commit_id(&Commit {
         parents: &parents,
         tree: digest,
         author: &ctx.device_id,
-        message: PUBLISH_MESSAGE,
+        message: commit_message,
     })
     .map_err(|_| ClientError::Corrupt("commit id preimage".to_owned()))?;
 
@@ -951,7 +942,7 @@ fn build_publish_op(
         })
         .collect();
     let tree = store.write_bundle(&import)?;
-    store.commit(commit_id, &parents, &tree, &ctx.device_id, PUBLISH_MESSAGE)?;
+    store.commit(commit_id, &parents, &tree, &ctx.device_id, commit_message)?;
     // The candidate's own objects + ref — durable before the WAL names it; never the whole store.
     sync_engine::fsync_batch(ctx, &store.version_durability(&commit_id)?)?;
 
@@ -1004,7 +995,7 @@ fn map_outcome(
                 version_id: Some(rec.candidate_commit.clone()),
                 bundle_digest: rec.bundle_digest.clone(),
                 current_generation: Some(new_gen),
-                invite_link: None,
+                share_line: None,
                 pending: None,
                 standup: None,
                 added: None,

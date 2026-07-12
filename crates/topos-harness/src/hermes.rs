@@ -3,7 +3,7 @@
 //!
 //! Hermes's currency mechanism is its **injecting `pre_llm_call` hook**: a shell hook Hermes runs
 //! before *every* LLM turn (its `on_session_start` event exists but is observer-only and is
-//! deliberately NOT registered here). The registered command is `topos pull --quiet` — the same
+//! deliberately NOT registered here). The registered command is `topos update --quiet` — the same
 //! byte-silent sweep the Claude Code adapter arms — so a followed skill's placement bytes are
 //! refreshed before the turn and an update is current **on the first turn**.
 //!
@@ -59,23 +59,31 @@ const EVENT_NAME: &str = "pre_llm_call";
 /// The exact argv command Hermes runs each turn (`shlex.split`, `shell=False` — no shell one-liner,
 /// no `command -v` guard is possible). Byte-stable across topos updates, so the string-keyed
 /// allowlist approval never re-prompts. `--quiet` keeps the sweep byte-silent on stdout.
-const HOOK_COMMAND: &str = "topos pull --quiet";
+const HOOK_COMMAND: &str = "topos update --quiet";
 
-/// The command-identity substring marking any `topos pull` hook (managed or hand-rolled).
+/// The command-identity substring marking a HAND-ROLLED `topos pull` hook — one present WITHOUT our
+/// sentinel, which we adopt-or-leave. It is NOT part of the managed-ours check: ownership keys on the
+/// sentinel alone (see [`SENTINEL`]), so our own current `topos update` entry is recognized regardless.
 const COMMAND_IDENTITY: &str = "topos pull";
+
+/// The version-agnostic ownership sentinel — a trailing YAML comment topos writes on its managed entry
+/// line (outside the command scalar, so Hermes parses the command as exactly [`HOOK_COMMAND`]). The
+/// managed-entry recognizer keys on THIS alone (never the command text), so a re-arm recognizes an
+/// entry an earlier build wrote under a different command spelling (e.g. `topos pull`) and REPLACES it.
+const SENTINEL: &str = "# topos:currency";
 
 /// The managed entry line as this adapter writes it (compared against `str::trim`ed config lines).
 /// The trailing `# topos:currency` is a YAML comment *outside* the scalar — Hermes parses the
 /// command as exactly [`HOOK_COMMAND`]; the comment is the ownership sentinel.
-const ENTRY_LINE: &str = "- command: topos pull --quiet  # topos:currency";
+const ENTRY_LINE: &str = "- command: topos update --quiet  # topos:currency";
 
 /// The structured marker identity reported in [`TriggerReport::marker_id`].
 const MARKER_ID: &str = "topos:hermes:currency:1";
 
 /// The 3-line block registering the managed hook (also the whole fresh-file config). Verified to
-/// parse: `hooks.pre_llm_call[0].command == "topos pull --quiet"`.
+/// parse: `hooks.pre_llm_call[0].command == "topos update --quiet"`.
 const HOOK_BLOCK: &str =
-    "hooks:\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n";
+    "hooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n";
 
 /// The shipped default form of an empty hooks block — the one line the surgical install replaces
 /// (and a clean removal restores).
@@ -454,6 +462,13 @@ fn is_command_line(trimmed: &str) -> bool {
     trimmed.starts_with("- command:") || trimmed.starts_with("command:")
 }
 
+/// Whether a trimmed line is a topos-MANAGED entry: a `- command:` list item carrying our ownership
+/// sentinel. Keys on the sentinel ALONE (never the command text), so an entry an earlier build wrote
+/// under a different command (e.g. `topos pull`) is still recognized as ours and replaced on re-arm.
+fn is_managed_entry(trimmed: &str) -> bool {
+    trimmed.starts_with("- command:") && trimmed.contains(SENTINEL)
+}
+
 /// Whether a zero-indent line could introduce the top-level `hooks` key in a valid YAML spelling
 /// OTHER than the one canonical `hooks:` form this merge reasons about — a quoted key
 /// (`"hooks":` / `'hooks':`) or a space before the colon (`hooks :`). Such a config already HAS a
@@ -539,7 +554,9 @@ fn analyze(text: &str) -> Analysis {
             .find(|l| !is_blank_or_comment(l) && l.trim().starts_with("- "))
             .map(indent_of);
         let entry_lines: Vec<usize> = (event_idx + 1..block_end)
-            .filter(|&i| lines[i].trim() == ENTRY_LINE && Some(indent_of(lines[i])) == item_indent)
+            .filter(|&i| {
+                is_managed_entry(lines[i].trim()) && Some(indent_of(lines[i])) == item_indent
+            })
             .collect();
         if !entry_lines.is_empty() {
             return Analysis::Managed(ManagedEntry {
@@ -587,7 +604,30 @@ fn plan_install(current: Option<&[u8]>, live: bool) -> EditPlan {
         },
     };
     match analyze(text) {
-        Analysis::Managed(_) => EditPlan::Leave(install_state(live)), // ours → true no-op
+        Analysis::Managed(m) => {
+            // Ours — but an entry an earlier build wrote may carry a stale command (e.g. the old
+            // `topos pull`); the sentinel is version-agnostic, so we still recognize it. Rewrite each
+            // managed entry line to the current canonical entry (preserving its indent); a true no-op
+            // when every managed line already matches. This is how a re-arm REPLACES an old
+            // `topos pull` entry with the current `topos update` one, in place, never duplicating it.
+            let lines = split_lines(text);
+            if m.entry_lines.iter().all(|&i| lines[i].trim() == ENTRY_LINE) {
+                return EditPlan::Leave(install_state(live)); // already canonical → true no-op
+            }
+            let mut out = Vec::with_capacity(text.len());
+            for (i, line) in lines.iter().enumerate() {
+                if m.entry_lines.contains(&i) {
+                    out.extend(std::iter::repeat_n(b' ', indent_of(line)));
+                    out.extend_from_slice(ENTRY_LINE.as_bytes());
+                    if line.ends_with('\n') {
+                        out.push(b'\n');
+                    }
+                } else {
+                    out.extend_from_slice(line.as_bytes());
+                }
+            }
+            EditPlan::Write(out, install_state(live))
+        }
         Analysis::UnmanagedToposPull => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
         Analysis::Populated | Analysis::Unprovable => EditPlan::Leave(TriggerState::Degraded),
         Analysis::NoHooksKey => {
@@ -795,7 +835,7 @@ mod tests {
     const FRESH_INSTALL: &str = "\
 hooks:
   pre_llm_call:
-  - command: topos pull --quiet  # topos:currency
+  - command: topos update --quiet  # topos:currency
 ";
 
     /// A shipped-default-shaped config: sibling keys + the literal empty hooks line.
@@ -816,7 +856,7 @@ approvals:
   mode: manual
 hooks:
   pre_llm_call:
-  - command: topos pull --quiet  # topos:currency
+  - command: topos update --quiet  # topos:currency
 hooks_auto_accept: false
 personalities: {}
 ";
@@ -883,7 +923,7 @@ personalities: {}
         assert_eq!(
             cfg.config_text().as_deref(),
             Some(
-                "model: gpt-9\nhooks:\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n"
+                "model: gpt-9\nhooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n"
             ),
             "a separator newline lands before the appended top-level block"
         );
@@ -922,6 +962,41 @@ personalities: {}
             assert_eq!(cfg.writes(), 1, "second install writes nothing");
             assert_eq!(cfg.config_text(), after_first, "bytes unchanged on re-run");
         }
+    }
+
+    #[test]
+    fn rearming_over_an_old_pull_hook_replaces_it_with_exactly_one_update_hook() {
+        // A config already holding the OLD managed entry — the `topos pull --quiet` command carrying
+        // our sentinel. Re-arming must recognize it (sentinel alone), rewrite it to the new
+        // `topos update` command IN PLACE, and never leave the old one or append a second.
+        let cfg = MemConfig::with_config(
+            "hooks:\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n",
+        );
+        let report = adapter(&cfg).install_currency_trigger();
+        // No acceptance evidence → registered but honestly not live.
+        assert_eq!(report.state, TriggerState::Inactive);
+        assert!(report.touched_path.is_some(), "the old entry is rewritten");
+        assert_eq!(cfg.writes(), 1, "exactly one replacing write");
+
+        let text = cfg.config_text().unwrap();
+        assert_eq!(
+            text.matches("# topos:currency").count(),
+            1,
+            "exactly ONE managed entry line — never a duplicate"
+        );
+        assert!(
+            text.contains("topos update --quiet"),
+            "rewritten to the new update command"
+        );
+        assert!(
+            !text.contains("topos pull"),
+            "no old `topos pull` managed entry remains"
+        );
+        assert_eq!(
+            text.as_str(),
+            FRESH_INSTALL,
+            "byte-exact: only the command changed; indent and structure preserved"
+        );
     }
 
     #[test]
@@ -989,7 +1064,7 @@ personalities: {}
     fn an_entry_line_inside_foreign_content_is_never_claimed() {
         // Our exact line inside a block scalar (user notes) is content, not a hook: install sees
         // no top-level hooks key and appends a real one; remove scrubs only the real one.
-        let before = "notes: |\n  - command: topos pull --quiet  # topos:currency\n";
+        let before = "notes: |\n  - command: topos update --quiet  # topos:currency\n";
         let cfg = MemConfig::with_config(before);
         adapter(&cfg).install_currency_trigger();
         let installed = cfg.config_text().unwrap();
@@ -1002,7 +1077,7 @@ personalities: {}
         assert_eq!(report.state, TriggerState::Inactive);
         let after = cfg.config_text().unwrap();
         assert!(
-            after.contains("notes: |\n  - command: topos pull --quiet  # topos:currency"),
+            after.contains("notes: |\n  - command: topos update --quiet  # topos:currency"),
             "remove never deletes a look-alike line outside the hooks block"
         );
         assert!(
@@ -1022,7 +1097,7 @@ personalities: {}
         // Persisted allowlist evidence (Hermes's own record, exact string key) → Active.
         let cfg = MemConfig::default();
         cfg.set_allowlist(
-            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos pull --quiet\"}]}",
+            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos update --quiet\"}]}",
         );
         let report = adapter(&cfg).install_currency_trigger();
         assert_eq!(report.state, TriggerState::Active);
@@ -1092,7 +1167,7 @@ personalities: {}
         // surface: the entry and its approval key are byte-identical run over run).
         let cfg = MemConfig::default();
         cfg.set_allowlist(
-            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos pull --quiet\"}]}",
+            "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos update --quiet\"}]}",
         );
         adapter(&cfg).install_currency_trigger();
         let report = adapter(&cfg).install_currency_trigger();
@@ -1123,7 +1198,7 @@ personalities: {}
     #[test]
     fn remove_keeps_user_items_and_comments_in_the_block() {
         let cfg = MemConfig::with_config(
-            "hooks:\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n  # keep me\n  - command: echo keep\n",
+            "hooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n  # keep me\n  - command: echo keep\n",
         );
         let report = adapter(&cfg).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Inactive);
@@ -1157,7 +1232,7 @@ personalities: {}
     #[test]
     fn remove_keeps_a_user_comment_on_the_hooks_key_line() {
         let cfg = MemConfig::with_config(
-            "hooks:  # keep this comment\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n",
+            "hooks:  # keep this comment\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n",
         );
         let report = adapter(&cfg).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Inactive);
@@ -1171,7 +1246,7 @@ personalities: {}
     #[test]
     fn remove_keeps_sibling_event_blocks() {
         let cfg = MemConfig::with_config(
-            "hooks:\n  pre_llm_call:\n  - command: topos pull --quiet  # topos:currency\n  post_llm_call:\n  - command: echo bye\n",
+            "hooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n  post_llm_call:\n  - command: echo bye\n",
         );
         let report = adapter(&cfg).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Inactive);

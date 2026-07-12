@@ -26,11 +26,10 @@ use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest,
-    DeviceTokenResponse, DeviceTokenStatus, InviteRequest, ProposeRequest, PublishRequest,
-    RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent, WireFileMode,
-    WireProposalList, WireSkillIndex, WireVersionMeta,
+    DeviceTokenResponse, DeviceTokenStatus, InvitationData, InvitationRequest, ProposeRequest,
+    PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent,
+    WireFileMode, WireProposalList, WireSkillIndex, WireVersionMeta,
 };
-use topos_types::results::InviteData;
 use topos_types::{BootstrapData, JsonEnvelope, WireCurrentRecord};
 
 use crate::error::ClientError;
@@ -665,14 +664,16 @@ impl EnrollSource for UreqDeviceClient {
 
     fn device_authorize(
         &self,
-        token: &str,
+        workspace: &str,
         device_public_key: [u8; 32],
         machine_name: &str,
     ) -> Result<DeviceAuthorize, ClientError> {
+        // The enroll-intent start names the workspace by its ADDRESS; the address-follow dispatch is a
+        // marked seam in `ops::follow`, so this reshaped body compiles ahead of that leg wiring it.
         let resp = self.post_device_authorize(
             DeviceAuthorizeRequest {
-                invite_token: Some(token.to_owned()),
-                intent: None,
+                workspace: Some(workspace.to_owned()),
+                intent: Some(SessionIntent::Enroll),
                 device_public_key: b64(&device_public_key),
                 machine_name: machine_name.to_owned(),
             },
@@ -688,7 +689,7 @@ impl EnrollSource for UreqDeviceClient {
     ) -> Result<StandupAuthorize, ClientError> {
         let resp = self.post_device_authorize(
             DeviceAuthorizeRequest {
-                invite_token: None,
+                workspace: None,
                 intent: Some(SessionIntent::Standup),
                 device_public_key: b64(&device_public_key),
                 machine_name: machine_name.to_owned(),
@@ -735,6 +736,7 @@ impl EnrollSource for UreqDeviceClient {
                             Some(GrantedWorkspace {
                                 workspace_id: w.workspace_id,
                                 display_name: w.display_name,
+                                address: w.address,
                             })
                         }
                         None => None,
@@ -876,33 +878,45 @@ fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
 }
 
 // =================================================================================================
-// The governance-write side of `UreqDeviceClient` — the owner's Invite POST under the workspace Bearer
+// The governance-write side of `UreqDeviceClient` — the invitation roster-write under the workspace Bearer
 // credential (the acting device is the credential's registry row); mirrors the write 200 envelope mapping.
+// The workspace id rides the URL path; the body carries only the emails + channel pre-placements.
 // =================================================================================================
 
 impl GovernanceSource for UreqDeviceClient {
-    fn create_invite(&self, body: InviteRequest) -> Result<InviteData, ClientError> {
+    fn invite(
+        &self,
+        workspace_id: &str,
+        body: InvitationRequest,
+    ) -> Result<InvitationData, ClientError> {
+        // The workspace id is spliced into the URL path — refuse anything outside the validated charset.
+        crate::id::validate_workspace_id(workspace_id).map_err(crate::id::wire_flavor)?;
         let value = serde_json::to_value(&body)
             .map_err(|e| ClientError::Corrupt(format!("invite body: {e}")))?;
-        let credential = self.credential_for(&body.workspace_id)?;
-        let url = format!("{}/v1/invites", self.base_url);
-        let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invite")?;
+        let credential = self.credential_for(workspace_id)?;
+        let url = format!(
+            "{}/v1/workspaces/{}/invitations",
+            self.base_url, workspace_id
+        );
+        let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invitation")?;
         map_invite_envelope(status, &bytes)
     }
 }
 
-/// Map a create-invite response — the all-outcome **200 envelope** — to the typed result. A non-200 is a
-/// transport/auth/integrity fault; `ok` carries the [`InviteData`]; `!ok` is a typed DENIED error carrying
-/// the wire error's code (never a secret). **Pure** (status + bytes in), so the ok / denied / non-200 /
-/// malformed arms are all unit-tested without a socket (mirrors [`build_fetched_version`]).
-fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientError> {
+/// Map an invitation response — the all-outcome **200 envelope** — to the typed result. A non-200 is a
+/// transport/auth/integrity fault; `ok` carries the [`InvitationData`]; `!ok` is a typed DENIED error
+/// carrying the wire error's code (never a secret). **Pure** (status + bytes in), so the ok / denied /
+/// non-200 / malformed arms are all unit-tested without a socket (mirrors [`build_fetched_version`]).
+fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InvitationData, ClientError> {
     if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(format!("create invite: HTTP {status}")));
+        return Err(ClientError::Plane(format!(
+            "create invitation: HTTP {status}"
+        )));
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::WireInvalid(format!("invite envelope is malformed: {e}")))?;
+        .map_err(|e| ClientError::WireInvalid(format!("invitation envelope is malformed: {e}")))?;
     if !env.ok {
-        // A DENIED invite (e.g. the signer is not an owner) — surface the code, never any secret.
+        // A DENIED invitation (e.g. the workspace restricts inviting to owners) — surface the code.
         let code = env
             .error
             .map(|e| e.code)
@@ -910,7 +924,7 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InviteData, ClientEr
         return Err(ClientError::Plane(format!("invite refused ({code})")));
     }
     serde_json::from_value(env.data)
-        .map_err(|e| ClientError::WireInvalid(format!("invite data is malformed: {e}")))
+        .map_err(|e| ClientError::WireInvalid(format!("invitation data is malformed: {e}")))
 }
 
 // =================================================================================================
@@ -1294,22 +1308,22 @@ mod tests {
         assert!(matches!(err, PlaneError::NotFound), "got {err:?}");
     }
 
-    // ---- The create-invite all-outcome 200 envelope mapping. ----
+    // ---- The invitation all-outcome 200 envelope mapping. ----
 
     fn envelope_bytes(env: &JsonEnvelope) -> Vec<u8> {
         serde_json::to_vec(env).expect("serialize envelope")
     }
 
     #[test]
-    fn map_invite_envelope_ok_yields_invite_data() {
+    fn map_invite_envelope_ok_yields_invitation_data() {
         let env = JsonEnvelope {
             schema_version: 1,
             command: "invite".to_owned(),
             ok: true,
-            data: serde_json::to_value(InviteData {
-                invite_link: "https://acme.topos.test/i/tok_abc".to_owned(),
-                roster_added: vec!["alice@acme.com".to_owned()],
-                skills: vec!["s_deploy".to_owned()],
+            data: serde_json::to_value(InvitationData {
+                address: "https://acme.topos.test/acme".to_owned(),
+                invited: vec!["alice@acme.com".to_owned()],
+                mailed: false,
             })
             .unwrap(),
             warnings: Vec::new(),
@@ -1317,10 +1331,11 @@ mod tests {
             receipt: None,
             error: None,
         };
-        let data = map_invite_envelope(200, &envelope_bytes(&env)).expect("ok maps to InviteData");
-        assert_eq!(data.invite_link, "https://acme.topos.test/i/tok_abc");
-        assert_eq!(data.roster_added, vec!["alice@acme.com".to_owned()]);
-        assert_eq!(data.skills, vec!["s_deploy".to_owned()]);
+        let data =
+            map_invite_envelope(200, &envelope_bytes(&env)).expect("ok maps to InvitationData");
+        assert_eq!(data.address, "https://acme.topos.test/acme");
+        assert_eq!(data.invited, vec!["alice@acme.com".to_owned()]);
+        assert!(!data.mailed);
     }
 
     #[test]

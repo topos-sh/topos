@@ -30,8 +30,8 @@ use crate::error::ClientError;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    ContributeSource, DeviceAuthorize, EnrollSource, GovernanceSource, Grant, GrantedToken,
-    GrantedWorkspace, InertFollow, InertPlane, Redeem, StandupAuthorize, TokenPoll, WriteReceipt,
+    ContributeSource, DeviceAuthorize, EnrollSource, Grant, GrantedToken, GrantedWorkspace,
+    InertFollow, InertPlane, Redeem, StandupAuthorize, TokenPoll, WriteReceipt,
 };
 use crate::plane_http::SkillCred;
 use crate::sidecar::Layout;
@@ -233,6 +233,8 @@ impl EnrollSource for FakeStandup {
                 workspace: Some(GrantedWorkspace {
                     workspace_id: STANDUP_WS.to_owned(),
                     display_name: "robert's workspace".to_owned(),
+                    // The workspace ADDRESS the standup receipt's share line rides.
+                    address: Some(format!("{HOSTED}/roberts-workspace")),
                 }),
             }),
         })
@@ -358,17 +360,6 @@ impl ContributeSource for SigningPlane {
     }
 }
 
-struct NoInvite;
-impl GovernanceSource for NoInvite {
-    fn create_invite(
-        &self,
-        _body: topos_types::requests::InviteRequest,
-    ) -> Result<topos_types::results::InviteData, ClientError> {
-        // The genesis invite fold-in is best-effort — a failure must never fail the publish.
-        Err(ClientError::Plane("invite mint unavailable".into()))
-    }
-}
-
 /// Drive `ops::publish` with the standup connectors over the fakes (never the compiled-in base). `target`
 /// is the single positional — `<skill>` or `<skill>@<digest>`.
 fn run_publish(
@@ -379,7 +370,6 @@ fn run_publish(
 ) -> Result<ops::PublishOutcome, ClientError> {
     let ctx = rig.ctx();
     let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
-    let governance = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(NoInvite) };
     let standup_enroll = |_b: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) };
     let standup = ops::StandupConnectors {
         enroll: &standup_enroll,
@@ -388,11 +378,11 @@ fn run_publish(
     ops::publish(
         &ctx,
         &contribute,
-        &governance,
         &standup,
         None, // roots — the standup tests act on an already-tracked skill (no auto-add)
         target,
         propose,
+        None,
         None,
         None,
     )
@@ -589,8 +579,15 @@ fn reinvoke_granted_redeems_promotes_and_publishes_in_one_invocation() {
         standup.owner_principal.as_deref(),
         Some("robert@example.com")
     );
-    // The invite fold-in failed (best-effort) — the publish still succeeded.
-    assert!(data.invite_link.is_none());
+    // The genesis standup disclosed the workspace address, so the publish folds in the paste-able share
+    // line for the shipped skill (the client-side invite mint is retired — the address IS the share surface).
+    assert!(
+        data.share_line
+            .as_deref()
+            .is_some_and(|l| l.starts_with(HOSTED) && l.contains("/skills/")),
+        "the share line rides the standup address: {:?}",
+        data.share_line
+    );
 
     // The enrollment was promoted: instance.json at the standup plane, user.json carries the
     // principal + the NON-invite root, the WAL is gone.
@@ -652,7 +649,6 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
     let approve = format!("{name}@{digest_hex}");
     let ctx = rig.ctx();
     let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
-    let governance = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(NoInvite) };
     let standup = ops::StandupConnectors {
         enroll: &panicking_standup_connect,
         base_url: HOSTED.to_owned(),
@@ -660,11 +656,11 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
     let err = ops::publish(
         &ctx,
         &contribute,
-        &governance,
         &standup,
         None, // roots — already-tracked skill, no auto-add
         &approve,
         true,
+        None,
         None,
         None,
     )
@@ -698,7 +694,6 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
     .unwrap();
     let ctx = rig.ctx();
     let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
-    let governance = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(NoInvite) };
     let standup = ops::StandupConnectors {
         enroll: &panicking_standup_connect,
         base_url: HOSTED.to_owned(),
@@ -706,11 +701,11 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
     let err = ops::publish(
         &ctx,
         &contribute,
-        &governance,
         &standup,
         None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
+        None,
         None,
         None,
     )
@@ -1084,7 +1079,6 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
     // standup device-auth seam is never touched (nothing to poll) — the panicking connector proves it.
     let ctx = rig.ctx();
     let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
-    let governance = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(NoInvite) };
     let standup = ops::StandupConnectors {
         enroll: &panicking_standup_connect,
         base_url: HOSTED.to_owned(),
@@ -1092,11 +1086,11 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
     let outcome = ops::publish(
         &ctx,
         &contribute,
-        &governance,
         &standup,
         None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
+        None,
         None,
         None,
     )

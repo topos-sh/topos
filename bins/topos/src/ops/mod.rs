@@ -1,7 +1,7 @@
 //! The verb layer — one file per CLI verb — plus the shared engine machinery those verbs compose.
 //!
 //! **Verbs** (each maps 1:1 to a `cli::Command` arm): [`add`], [`follow`], [`unfollow`], [`invite`],
-//! [`list`], [`diff`], [`publish`], [`review`], [`revert`], [`log`], [`pull`], [`uninstall`].
+//! [`list`], [`diff`], [`publish`], [`review`], [`revert`], [`log`], [`update`](pull), [`self_update`].
 //!
 //! **Shared machinery** (no verb of its own — the verbs above drive it):
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` currency machine over the kernel's
@@ -28,10 +28,9 @@ mod publish;
 mod pull;
 mod revert;
 mod review;
+mod self_update;
 mod sync_engine;
 mod unfollow;
-mod uninstall;
-mod upgrade;
 
 pub(crate) use add::{
     AddRemoteOpts, add, add_remote, add_with_name, resolve_add_target, split_target,
@@ -52,10 +51,9 @@ pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull, pull_reconcile};
 pub(crate) use revert::revert;
-pub(crate) use review::review;
+pub(crate) use review::{ReviewVerdict, review};
+pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use unfollow::unfollow;
-pub(crate) use uninstall::{UninstallOutcome, uninstall};
-pub(crate) use upgrade::{UpgradeAction, UpgradeOpts, UpgradeOutcome, upgrade};
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;
@@ -66,6 +64,15 @@ use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::sidecar::SkillPaths;
 use crate::{doc, enroll};
+
+/// A MARKED SEAM: a verb path that parses today but whose full behavior (resolution grammar, describe /
+/// `--yes` two-phase flow, or a new server call) lands in a later leg. Returns a typed `INVALID_ARGUMENT`
+/// refusal so the caller gets an honest answer, and the later leg finds every seam by grepping `not_yet(`.
+pub(crate) fn not_yet(what: &str) -> ClientError {
+    ClientError::InvalidArgument(format!(
+        "`{what}` is recognized but not wired yet — coming with the full verb grammar"
+    ))
+}
 
 /// Resolve a skill name to its `(id, lock)` across the tracked skills, WITHOUT a workspace filter — the
 /// common case (the local verbs that do not act in a workspace: `add`, `log`, `diff`, `unfollow`, `pull`,

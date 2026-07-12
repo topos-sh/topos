@@ -36,6 +36,7 @@ use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
 use crate::identity::{self, DeviceKeyRef};
+use crate::ops::not_yet;
 use crate::plane::{EnrollSource, FollowContext, PlaneSource, PointerFetch, TokenPoll};
 use crate::plane_http::SkillCred;
 use crate::{doc, enroll, sidecar};
@@ -179,8 +180,14 @@ fn begin(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
     link: &str,
-    manual: bool,
+    _manual: bool,
 ) -> Result<FollowData, ClientError> {
+    // Only the `/i/` door is wired today. A non-`/i/` URL — and a bare word that reached here — is an
+    // ADDRESS follow (`topos follow <workspace-address>`), whose enroll-intent device flow lands in a later
+    // leg; refuse it as a marked seam so nothing half-enrolls under an unwired posture.
+    if !link.contains("/i/") {
+        return Err(not_yet("address follow"));
+    }
     let (link_base, token) = parse_link(ctx, link)?;
 
     // `begin` is only reached with NO pending enrollment WAL on disk: the [`follow`] dispatch resumes an
@@ -191,9 +198,9 @@ fn begin(
     let bootstrap = (connectors.enroll)(&link_base).fetch_bootstrap(&token)?;
     // RE-ROOT onto the plane's declared API base. The link is only where the bootstrap lives (a hosted
     // team's share links ride its web origin); the bootstrap declares the plane every later call — the
-    // device flow, the redeem, every pull — must dial. The declared base passes the same gate as the
-    // link base and may never downgrade the transport. This adds no attacker capability: whoever mints
-    // the link already controls the bootstrap (the link IS the channel the human chose to trust).
+    // redeem, every pull — must dial. The declared base passes the same gate as the link base and may never
+    // downgrade the transport. This adds no attacker capability: whoever mints the link already controls the
+    // bootstrap (the link IS the channel the human chose to trust).
     let base_url = resolve_api_base(&link_base, &bootstrap.plane.base_url)?;
     // v0 is one plane per install: refuse a follow that would enroll against a DIFFERENT plane than the one
     // already on disk (keyed on the RE-ROOTED API base — the base every later call dials and `instance.json`
@@ -201,82 +208,18 @@ fn begin(
     // content-addressed version id.
     guard_one_plane(ctx, &base_url)?;
 
-    // Branch on the enrollment method the bootstrap disclosed. A method this build does not understand
-    // fails CLOSED — proceeding would enroll under a posture the human was never able to review.
+    // Branch on the enrollment method the bootstrap disclosed. `/i/` is now the admin-CLAIM door ONLY.
     match bootstrap.plane.enrollment_method.as_str() {
         // The one-shot admin-claim door (self-host bearer): no device-auth session, enrolls in one call.
-        "admin_claim" => {
-            return claim_follow(ctx, connectors, &base_url, &token, &bootstrap);
-        }
-        // The device-authorization flow (with or without the passcode identity leg on the verify page).
-        "device_code" | "passcode" => {}
-        other => {
-            return Err(ClientError::Enrollment(format!(
-                "this plane offers enrollment method '{other}', which this topos build does not \
-                 support; upgrade topos"
-            )));
-        }
+        "admin_claim" => claim_follow(ctx, connectors, &base_url, &token, &bootstrap),
+        // The old invite-link device/passcode enrollment is retired — joining an existing workspace is an
+        // ADDRESS follow now (a later leg). An `/i/` link that still declares one of these is a seam.
+        "device_code" | "passcode" => Err(not_yet("invite-link enrollment")),
+        other => Err(ClientError::Enrollment(format!(
+            "this plane offers enrollment method '{other}', which this topos build does not \
+             support; upgrade topos"
+        ))),
     }
-
-    // Load (or, on first use, mint) the device signer — its public key starts the device authorization.
-    // The transport is (re)built on the RE-ROOTED API base: only the one bootstrap GET rode the link base.
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-    let enroll_src = (connectors.enroll)(&base_url);
-    let auth = enroll_src.device_authorize(&token, signer.public_key(), &machine_name(&signer))?;
-
-    let context = enroll::EnrollContext {
-        base_url,
-        deployment_mode: bootstrap.plane.deployment_mode,
-        enrollment_method: bootstrap.plane.enrollment_method.clone(),
-        workspace_id: bootstrap.workspace.workspace_id.clone(),
-        workspace_display_name: bootstrap.workspace.display_name.clone(),
-        verified_domain: bootstrap.workspace.verified_domain.clone(),
-        verified_domain_status: bootstrap.workspace.verified_domain_status,
-        offered_skills: bootstrap
-            .offered_skills
-            .iter()
-            .map(|s| enroll::OfferedSkill {
-                skill_id: s.skill_id.clone(),
-                name: s.name.clone(),
-            })
-            .collect(),
-        mode: if manual {
-            enroll::FollowModeDoc::ConfirmEach
-        } else {
-            enroll::FollowModeDoc::Auto
-        },
-        root: enroll::EnrollRoot::Invite,
-    };
-
-    // The 0600 WAL — written BEFORE returning, so re-invoking `follow` can pick up exactly this session.
-    let expires_at_millis = now_millis(ctx).saturating_add(
-        i64::try_from(auth.expires_in)
-            .unwrap_or(0)
-            .saturating_mul(1000),
-    );
-    let wal = enroll::PendingEnrollment {
-        schema_version: PERSISTED_SCHEMA_VERSION,
-        state: enroll::EnrollPhase::Authorizing {
-            context: context.clone(),
-            device_code: auth.device_code,
-            user_code: auth.user_code.clone(),
-            verification_uri_complete: auth.verification_uri_complete.clone(),
-            interval: auth.interval,
-            expires_at_millis,
-        },
-    };
-    enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
-
-    // The SERVER-built complete URI wins verbatim; the client-side embed is only the older-plane fallback.
-    let complete = auth
-        .verification_uri_complete
-        .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
-    Ok(pending_followdata(
-        &context,
-        &auth.user_code,
-        complete,
-        device_fingerprint(&signer),
-    ))
 }
 
 /// The one-plane-per-install guard, shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).

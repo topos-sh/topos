@@ -287,6 +287,9 @@ impl std::fmt::Debug for Grant {
 pub(crate) struct GrantedWorkspace {
     pub workspace_id: String,
     pub display_name: String,
+    /// The workspace's full ADDRESS (server-built on the public link base) — the standup receipt's share
+    /// surface; `None` when the plane predates addresses or the grant is workspace-less.
+    pub address: Option<String>,
 }
 
 /// A granted `device/token` poll: the opaque grant (redacted `Debug`) + the optional workspace context.
@@ -350,13 +353,17 @@ pub(crate) trait EnrollSource {
     /// for a malformed body.
     fn fetch_bootstrap(&self, token: &str) -> Result<topos_types::BootstrapData, ClientError>;
 
-    /// `POST /v1/device/authorize` — begin a device-authorization against the invite.
+    /// `POST /v1/device/authorize` with `intent = "enroll"` — begin a device-authorization to join the
+    /// workspace named by its ADDRESS. Built ahead of its caller: the address-follow dispatch that drives
+    /// it is a marked seam in `ops::follow` (an `/i/` link is claims-only now), so no production path calls
+    /// this yet — the later leg wires the `follow <address>` grammar onto it.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::Corrupt`] on a malformed body.
+    #[allow(dead_code)]
     fn device_authorize(
         &self,
-        token: &str,
+        workspace: &str,
         device_public_key: [u8; 32],
         machine_name: &str,
     ) -> Result<DeviceAuthorize, ClientError>;
@@ -414,29 +421,31 @@ pub(crate) trait EnrollSource {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The governance-write seam — the OWNER's write side (invite today), behind a port so the `invite`
-// tests run against a fake WITHOUT HTTP. The body names the `device_key_id`; the in-txn authz resolves
-// the non-revoked registry row for (ws, device_key_id) → its principal → the role matrix. The base URL is
-// baked in when the connector builds it from `instance.json`. The real impl is
-// `crate::plane_http::UreqDeviceClient` (the same client that speaks enrollment); the fake lives in the
-// invite tests.
+// The governance-write seam — the invitation roster-write, behind a port so the `invite` tests run
+// against a fake WITHOUT HTTP. The acting device rides the workspace Bearer credential (the in-txn authz
+// resolves its registry row → principal → the invite-policy gate); the workspace id is a URL path segment
+// (the body carries none). The base URL is baked in when the connector builds it from `instance.json`. The
+// real impl is `crate::plane_http::UreqDeviceClient`; the fake lives in the invite tests.
 // ---------------------------------------------------------------------------------------------
 
-/// The owner's governance-write transport. The `invite` op drives it: POST the governance Invite op to
-/// `/v1/invites` (the body names the acting `device_key_id`).
+/// The governance-write transport. The `invite` op drives it: POST the invitation roster-write to
+/// `POST /v1/workspaces/{ws}/invitations` under the workspace Bearer credential.
 pub(crate) trait GovernanceSource {
-    /// `POST /v1/invites` — submit the governance Invite op (the body is the
-    /// [`InviteRequest`](topos_types::requests::InviteRequest), naming the acting `device_key_id`). Maps the
-    /// all-outcome **200 envelope**: `ok` ⇒ the [`InviteData`](topos_types::results::InviteData); `!ok` ⇒ a
-    /// typed error carrying the wire error's code (a role-DENIED surfaces as a clear "not authorized").
+    /// `POST /v1/workspaces/{ws}/invitations` — seat each email as an invited member (+ optional channel
+    /// pre-placement). The body is the
+    /// [`InvitationRequest`](topos_types::requests::InvitationRequest); the workspace id rides the URL path.
+    /// Maps the all-outcome **200 envelope**: `ok` ⇒ the
+    /// [`InvitationData`](topos_types::requests::InvitationData); `!ok` ⇒ a typed error carrying the wire
+    /// error's code (a policy-DENIED surfaces as a clear "not authorized").
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault, a non-200 status, or a 200+DENIED envelope (e.g. the
-    /// acting device is not an owner); [`ClientError::Corrupt`] on a malformed body.
-    fn create_invite(
+    /// workspace restricts inviting to owners); [`ClientError::Corrupt`] on a malformed body.
+    fn invite(
         &self,
-        body: topos_types::requests::InviteRequest,
-    ) -> Result<topos_types::results::InviteData, ClientError>;
+        workspace_id: &str,
+        body: topos_types::requests::InvitationRequest,
+    ) -> Result<topos_types::requests::InvitationData, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------

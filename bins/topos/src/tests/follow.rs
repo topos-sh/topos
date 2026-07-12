@@ -207,10 +207,21 @@ impl EnrollSource for FakeEnroll {
     fn admin_claim(
         &self,
         _claim_token: &str,
-        _device_public_key: [u8; 32],
+        device_public_key: [u8; 32],
         _display_name: &str,
     ) -> Result<Redeem, ClientError> {
-        panic!("the invite follow flow never redeems an admin claim")
+        // The LIVE `/i/` door is the claim door: enroll in ONE call, minting the workspace credential.
+        // `Poll::Denied` models a refused claim (consumed / expired), which sweeps the ClaimPending WAL.
+        if matches!(self.poll, Poll::Denied) {
+            return Err(ClientError::Enrollment("the claim link was refused".into()));
+        }
+        let dk = topos_core::identity::device_key_id(&device_public_key);
+        Ok(Redeem {
+            workspace_id: WS.to_owned(),
+            device_key_id: dk,
+            principal: Some("alice@acme.com".to_owned()),
+            credential: format!("wsc_secret_{WS}"),
+        })
     }
 }
 
@@ -226,7 +237,8 @@ fn bootstrap(offered: &[(&str, &str)]) -> BootstrapData {
         plane: BootstrapPlane {
             base_url: BASE_URL.into(),
             deployment_mode: DeploymentMode::Cloud,
-            enrollment_method: "device_code".into(),
+            // The live `/i/` door is the admin CLAIM door (the device-code invite enrollment is retired).
+            enrollment_method: "admin_claim".into(),
         },
         workspace: BootstrapWorkspace {
             workspace_id: WS.into(),
@@ -457,6 +469,53 @@ fn opts(manual: bool) -> ops::FollowOpts {
     }
 }
 
+/// Enroll a workspace the way the live flow's lockout fence leaves it: write a `Redeemed` WAL (the
+/// single-use grant already spent, its minted credential + offered skills persisted), then re-invoke
+/// `follow` to PROMOTE from it. This drives the SAME `promote` machinery the claim door, the standup, and
+/// the (later) address follow all share — no device-flow poll (the invite device flow is retired). Returns
+/// the promoted `FollowData`.
+fn enroll_via_redeemed_wal(
+    rig: &Rig,
+    plane: &FixturePlane,
+    ws: &str,
+    display: &str,
+    offered: &[(&str, &str)],
+) -> topos_types::results::FollowData {
+    rig.mint_identity();
+    let context = enroll::EnrollContext {
+        base_url: BASE_URL.into(),
+        deployment_mode: DeploymentMode::Cloud,
+        enrollment_method: "admin_claim".into(),
+        workspace_id: ws.into(),
+        workspace_display_name: display.into(),
+        verified_domain: Some("acme.com".into()),
+        verified_domain_status: VerifiedDomainStatus::Verified,
+        offered_skills: offered
+            .iter()
+            .map(|(id, name)| enroll::OfferedSkill {
+                skill_id: (*id).into(),
+                name: Some((*name).into()),
+            })
+            .collect(),
+        mode: enroll::FollowModeDoc::Auto,
+        // Joining an existing workspace is invite-rooted (the address-follow leg drives this path live).
+        root: enroll::EnrollRoot::Invite,
+    };
+    let wal = enroll::PendingEnrollment {
+        schema_version: 1,
+        state: enroll::EnrollPhase::Redeemed {
+            context,
+            credential: format!("wsc_secret_{ws}"),
+            device_key_id: device_key_id_for(&device_pubkey(rig)),
+            principal: Some("alice@acme.com".into()),
+            enrolled_at_millis: 1,
+        },
+    };
+    enroll::write_wal(&rig.fs, &rig.layout(), &wal).unwrap();
+    // A pending WAL → the follow dispatch RESUMES it (rule 1), promoting from the persisted credential.
+    run_follow(rig, &fake(offered, Poll::Granted), plane, None, opts(false)).unwrap()
+}
+
 fn mode_of(p: &std::path::Path) -> u32 {
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
 }
@@ -471,60 +530,14 @@ const GENESIS_FILES: &[(&str, FileMode, &[u8])] = &[
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn follow_link_returns_pending_writes_a_0600_wal_and_discloses_provenance() {
-    let rig = Rig::new("pending");
-    let fk = fake(&[("s_deploy", "deploy")], Poll::Pending);
-    let plane = FixturePlane::default();
-    let link = format!("{BASE_URL}/i/tok_abc");
-
-    let data = run_follow(&rig, &fk, &plane, Some(&link), opts(false)).unwrap();
-
-    // The pending arm: not enrolled, the verification URL + provenance disclosed.
-    assert!(!data.enrolled);
-    let pending = data.pending.expect("a pending enrollment");
-    // The SERVER-built complete URI is surfaced verbatim (the client-side reconstruction is only the
-    // fallback for an older plane that omits the field).
-    assert_eq!(
-        pending.verification_uri_complete,
-        format!("{BASE_URL}/verify/WXYZ-1234")
-    );
-    assert_eq!(pending.user_code, "WXYZ-1234");
-    assert_eq!(data.workspace_display_name.as_deref(), Some("Acme Inc"));
-    assert_eq!(data.verified_domain.as_deref(), Some("acme.com"));
-    assert_eq!(
-        data.verified_domain_status,
-        Some(VerifiedDomainStatus::Verified)
-    );
-
-    // The WAL is on disk at 0600.
-    let wal_path = rig.layout().enrollment_path();
-    assert_eq!(mode_of(&wal_path), 0o600, "the enrollment WAL must be 0600");
-    // No enrollment is finalized yet.
-    assert!(
-        enroll::read_instance(&rig.fs, &rig.layout())
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() {
+fn a_redeemed_wal_promote_writes_all_docs_records_the_key_and_clears_the_wal() {
     let rig = Rig::new("granted");
-    let fk = fake(&[("s_deploy", "deploy")], Poll::Granted);
     let mut plane = FixturePlane::default();
     plane.serve_genesis("s_deploy", GENESIS_FILES);
-    let link = format!("{BASE_URL}/i/tok_abc");
 
-    // Call 1: begin (pending), then call 2: resume (granted) — two op invocations sharing the WAL.
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&link),
-        opts(false),
-    )
-    .unwrap();
-    let data = run_follow(&rig, &fk, &plane, None, opts(false)).unwrap();
+    // Promote from the lockout-fence `Redeemed` WAL (the live flow's shared promote path — the device-code
+    // invite enrollment that once produced this two-call is retired).
+    let data = enroll_via_redeemed_wal(&rig, &plane, WS, "Acme Inc", &[("s_deploy", "deploy")]);
 
     assert!(data.enrolled);
     assert_eq!(data.workspace_id, WS);
@@ -607,64 +620,6 @@ fn resume_granted_promotes_writes_all_docs_records_the_key_and_clears_the_wal() 
 
     // The WAL is gone.
     assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
-}
-
-#[test]
-fn a_second_follow_to_another_skill_merges_and_preserves_the_first() {
-    let rig = Rig::new("merge");
-    let mut plane = FixturePlane::default();
-    plane.serve_genesis("s_deploy", GENESIS_FILES);
-    plane.serve_genesis("s_review", GENESIS_FILES);
-    let link = format!("{BASE_URL}/i/tok");
-
-    // First enrollment: s_deploy.
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&link),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Granted),
-        &plane,
-        None,
-        opts(false),
-    )
-    .unwrap();
-
-    // Second enrollment to the SAME plane (bare token), offering s_review.
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_review", "review")], Poll::Pending),
-        &plane,
-        Some("tok2"),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_review", "review")], Poll::Granted),
-        &plane,
-        None,
-        opts(false),
-    )
-    .unwrap();
-
-    // follows.json now carries BOTH — the first was not clobbered.
-    let follows = enroll::read_follows(&rig.fs, &rig.layout())
-        .unwrap()
-        .unwrap();
-    let ids: Vec<&str> = follows
-        .follows
-        .iter()
-        .map(|f| f.skill_id.as_str())
-        .collect();
-    assert!(ids.contains(&"s_deploy"), "first follow preserved: {ids:?}");
-    assert!(ids.contains(&"s_review"), "second follow merged: {ids:?}");
-    assert_eq!(follows.follows.len(), 2);
 }
 
 #[test]
@@ -770,29 +725,22 @@ impl EnrollSource for PanicEnroll {
 }
 
 #[test]
-fn a_denied_poll_is_a_typed_error_and_sweeps_the_wal() {
+fn a_denied_claim_is_a_typed_error_and_sweeps_the_wal() {
+    // A refused claim (consumed / expired) at the `/i/` door: one call, a typed error, and the
+    // ClaimPending WAL swept so a later `follow <other-link>` is never wedged behind it.
     let rig = Rig::new("denied");
     let plane = FixturePlane::default();
     let link = format!("{BASE_URL}/i/tok");
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&link),
-        opts(false),
-    )
-    .unwrap();
-
     let err = run_follow(
         &rig,
         &fake(&[("s_deploy", "deploy")], Poll::Denied),
         &plane,
-        None,
+        Some(&link),
         opts(false),
     )
     .unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
-    // The dead session's WAL is swept.
+    // The dead claim's WAL is swept.
     assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
 }
 
@@ -801,20 +749,12 @@ fn a_cross_base_url_follow_is_refused() {
     let rig = Rig::new("crossplane");
     let mut plane = FixturePlane::default();
     plane.serve_genesis("s_deploy", GENESIS_FILES);
-    // Enroll with the first plane.
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/t")),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
+    // Enroll with the first plane (the one-call claim door).
+    run_follow(
         &rig,
         &fake(&[("s_deploy", "deploy")], Poll::Granted),
         &plane,
-        None,
+        Some(&format!("{BASE_URL}/i/t")),
         opts(false),
     )
     .unwrap();
@@ -860,7 +800,7 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
     let rig = Rig::new("reroot");
     let mut plane = FixturePlane::default();
     plane.serve_genesis("s_deploy", GENESIS_FILES);
-    let f = fake(&[("s_deploy", "deploy")], Poll::Pending);
+    let f = fake(&[("s_deploy", "deploy")], Poll::Granted);
 
     // A recording connector: which bases the op built enrollment transports for, in order.
     let bases = RefCell::new(Vec::<String>::new());
@@ -879,28 +819,25 @@ fn a_share_host_link_re_roots_onto_the_declared_api_base() {
         enroll: &enroll_connect,
         plane: &plane_connect,
     };
+    // The claim door enrolls in ONE call, re-rooting first.
     let data = ops::follow(
         &ctx,
         &connectors,
         Some("https://links.example/i/tok_abc".to_owned()),
         opts(false),
     )
-    .expect("begin re-roots")
+    .expect("the claim door enrolls in one call after re-rooting")
     .data;
 
+    assert!(data.enrolled);
     // The receipt disclosed the plane the device actually enrolls against (not the share host).
     assert_eq!(data.plane_base_url.as_deref(), Some(BASE_URL));
-    // The bootstrap GET rode the link base; the device authorization rode the re-rooted API base.
+    // The bootstrap GET rode the link base; the claim redeem rode the re-rooted API base.
     assert_eq!(
         bases.borrow().as_slice(),
         ["https://links.example", BASE_URL]
     );
-
-    // Complete the enrollment; the pinned instance records the API base — the share host is nowhere.
-    let granted = fake(&[("s_deploy", "deploy")], Poll::Granted);
-    let done = run_follow(&rig, &granted, &plane, None, opts(false)).unwrap();
-    assert!(done.enrolled);
-    assert_eq!(done.plane_base_url.as_deref(), Some(BASE_URL));
+    // The pinned instance records the API base — the share host is nowhere.
     let instance = enroll::read_instance(&rig.fs, &rig.layout())
         .unwrap()
         .unwrap();
@@ -967,23 +904,9 @@ fn the_first_receive_baseline_is_laid_then_a_fixture_plane_pull_offers_then_plac
     let mut plane = FixturePlane::default();
     plane.serve_genesis("s_deploy", GENESIS_FILES);
 
-    // Enroll + follow s_deploy.
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/t")),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Granted),
-        &plane,
-        None,
-        opts(false),
-    )
-    .unwrap();
+    // Enroll + follow s_deploy (the live promote path lays the first-receive baseline from the WAL's
+    // offered skills).
+    enroll_via_redeemed_wal(&rig, &plane, WS, "Acme Inc", &[("s_deploy", "deploy")]);
 
     // The first-receive baseline is laid: a NEVER-RECEIVED sync (empty recorded, genesis floor), a store,
     // and a map carrying the harness placement target.
@@ -1077,22 +1000,7 @@ fn approve_places_the_named_first_receive_offer() {
     let rig = Rig::new("approve");
     let mut plane = FixturePlane::default();
     plane.serve_genesis("s_deploy", GENESIS_FILES);
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/t")),
-        opts(false),
-    )
-    .unwrap();
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Granted),
-        &plane,
-        None,
-        opts(false),
-    )
-    .unwrap();
+    enroll_via_redeemed_wal(&rig, &plane, WS, "Acme Inc", &[("s_deploy", "deploy")]);
 
     // `follow deploy` drives the engine through ctx.plane (a separate, post-enroll
     // invocation where the plane is live).
@@ -1128,51 +1036,6 @@ fn approve_places_the_named_first_receive_offer() {
 // re-polled; a Redeemed-but-unpromoted grant is completed from its single-use creds; a dead (expired)
 // session is superseded by the start-of-command recovery sweep, then a fresh follow begins.
 // ---------------------------------------------------------------------------------------------
-
-#[test]
-fn a_second_follow_while_the_first_is_still_pending_resumes_it_and_keeps_the_wal() {
-    let rig = Rig::new("interleave-live");
-    let plane = FixturePlane::default();
-
-    // Begin A: writes a LIVE Authorizing WAL (expires_at = now + 900s, so >= the rig's fixed clock).
-    let _ = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/tok_a")),
-        opts(false),
-    )
-    .unwrap();
-    let wal_before = enroll::read_wal(&rig.fs, &rig.layout())
-        .unwrap()
-        .expect("A left a live Authorizing WAL");
-    assert!(matches!(
-        &wal_before.state,
-        enroll::EnrollPhase::Authorizing { .. }
-    ));
-
-    // A second `follow` (any target) while A is still pending RESUMES A (re-invoking IS the resume): it
-    // polls A's session — still pending — and re-emits the pending receipt. A's WAL is byte-for-byte
-    // intact; it is never clobbered.
-    let data = run_follow(
-        &rig,
-        &fake(&[("s_review", "review")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/tok_b")),
-        opts(false),
-    )
-    .expect("a second follow resumes the in-flight session, it never clobbers it");
-    assert!(!data.enrolled);
-    assert!(
-        data.pending.is_some(),
-        "resuming a still-pending session re-emits the pending receipt"
-    );
-    let wal_after = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
-    assert_eq!(
-        wal_before, wal_after,
-        "a pending poll leaves the in-flight enrollment WAL byte-for-byte intact"
-    );
-}
 
 #[test]
 fn a_follow_while_a_redeemed_wal_is_unpromoted_completes_the_promotion() {
@@ -1223,67 +1086,6 @@ fn a_follow_while_a_redeemed_wal_is_unpromoted_completes_the_promotion() {
     assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
 }
 
-#[test]
-fn recovery_then_a_follow_supersedes_an_expired_authorizing_wal() {
-    // An EXPIRED authorizing session is dead (the human never approved in time). Production runs the
-    // start-of-command recovery sweep first, which reaps the dead WAL; a fresh `follow <link>` then begins
-    // cleanly and writes its own live WAL. (Without the sweep, a re-invoke would re-poll the dead session.)
-    let rig = Rig::new("interleave-expired");
-    let plane = FixturePlane::default();
-    rig.mint_identity();
-
-    let expired = enroll::PendingEnrollment {
-        schema_version: 1,
-        state: enroll::EnrollPhase::Authorizing {
-            context: tiny_context(),
-            device_code: "dc_old".into(),
-            user_code: "OLD-CODE".into(),
-            verification_uri_complete: None,
-            interval: 5,
-            // Far in the past vs the rig's FixedClock(1_700_000_000_000) → expired.
-            expires_at_millis: 1_000,
-        },
-    };
-    enroll::write_wal(&rig.fs, &rig.layout(), &expired).unwrap();
-
-    // The recovery sweep production runs at the start of every command reaps the expired WAL.
-    crate::sidecar::recover(&rig.fs, &rig.layout(), 1_700_000_000_000).unwrap();
-    assert!(
-        enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none(),
-        "recovery reaps the expired authorizing WAL"
-    );
-
-    let data = run_follow(
-        &rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        &plane,
-        Some(&format!("{BASE_URL}/i/tok_fresh")),
-        opts(false),
-    )
-    .expect("a fresh follow begins after the expired WAL is reaped");
-    assert!(!data.enrolled);
-    assert!(data.pending.is_some(), "the fresh follow is itself pending");
-
-    // The WAL is now the FRESH session (the fake's user_code + a live expiry), not the dead one.
-    let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
-    let enroll::EnrollPhase::Authorizing {
-        user_code,
-        expires_at_millis,
-        ..
-    } = wal.state
-    else {
-        panic!("expected a fresh Authorizing WAL after the supersede");
-    };
-    assert_eq!(
-        user_code, "WXYZ-1234",
-        "the fresh session's user code replaced the dead one"
-    );
-    assert!(
-        expires_at_millis > 1_000,
-        "the fresh session carries a live expiry, not the dead one"
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // Multi-workspace promotion crash gate.
 //
@@ -1297,27 +1099,12 @@ fn recovery_then_a_follow_supersedes_an_expired_authorizing_wal() {
 const WS_B: &str = "w_beta";
 const B_SKILL: &str = "s_report";
 
-/// Fully enroll workspace A (skill `s_deploy`) through the real two-call device flow, so instance.json is
-/// written, follows.json + user.json carry A, host.json holds the device key, and A's first-receive
-/// baseline is laid. Leaves no WAL (A's own promote deleted it).
+/// Fully enroll workspace A (skill `s_deploy`) through the live promote path (the shared `Redeemed`-WAL
+/// resume the claim door / standup / address follow all use), so instance.json is written, follows.json +
+/// user.json carry A, host.json holds the device key, and A's first-receive baseline is laid. Leaves no
+/// WAL (A's own promote deleted it).
 fn enroll_workspace_a(rig: &Rig, plane: &FixturePlane) {
-    let link = format!("{BASE_URL}/i/tok_a");
-    run_follow(
-        rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Pending),
-        plane,
-        Some(&link),
-        opts(false),
-    )
-    .expect("A: begin");
-    run_follow(
-        rig,
-        &fake(&[("s_deploy", "deploy")], Poll::Granted),
-        plane,
-        None,
-        opts(false),
-    )
-    .expect("A: resume promotes");
+    enroll_via_redeemed_wal(rig, plane, WS, "Acme Inc", &[("s_deploy", "deploy")]);
 }
 
 /// Hand-write workspace B's `Redeemed` WAL exactly as the lockout fence records it BEFORE promotion — the

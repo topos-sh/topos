@@ -1,7 +1,6 @@
 //! End-to-end coverage of the binary composition root the in-crate unit tests can't reach: real argv
 //! parsing (clap), `TOPOS_HOME` resolution, the recover + first-use identity startup, and the `--json`
-//! envelope on stdout. (`uninstall` is exercised via `ops::uninstall` with an injected fake binary in
-//! the unit tests — running it here would unlink the test binary itself.)
+//! envelope on stdout.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,7 +136,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
 
     let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos pull --quiet"),
+        settings.contains("topos update --quiet"),
         "the hook command was installed"
     );
     assert!(
@@ -157,15 +156,16 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     assert!(ok);
     assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
 
-    // The installed hook runs `topos pull --quiet` — it must exit 0 and emit NOTHING on stdout (a
-    // SessionStart hook's stdout is injected into the session).
+    // The installed hook runs `topos update --quiet`; the field's already-armed hooks run the retained
+    // `topos pull --quiet` alias. BOTH must exit 0 and emit NOTHING on stdout (a SessionStart hook's
+    // stdout is injected into the session). Exercise the alias here (it must keep working).
     let out = Command::new(bin())
         .env("TOPOS_HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &claude)
         .args(["pull", "--quiet"])
         .output()
         .expect("spawn topos pull");
-    assert!(out.status.success(), "pull exits 0");
+    assert!(out.status.success(), "the pull alias exits 0");
     assert!(
         out.stdout.is_empty(),
         "pull --quiet emits nothing on stdout"
@@ -298,20 +298,24 @@ fn a_bad_review_hash_is_invalid_argument_on_both_surfaces() {
 }
 
 #[test]
-fn review_verdict_exclusivity_is_a_clap_usage_error_at_exit_2() {
+fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_describe_seam() {
     let home = scratch("verdict");
     let target = format!("docs@{}", "ab".repeat(32));
 
-    // Both flags → a standard clap conflict (usage + help hint, exit 2 — never an envelope).
+    // Two verdict flags → a standard clap conflict (the optional `verdict` ArgGroup stays mutually
+    // exclusive; usage + help hint, exit 2 — never an envelope).
     let out = run_raw(&home, &["review", &target, "--approve", "--reject"], false);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--approve"), "{stderr}");
     assert!(stderr.contains("Usage"), "{stderr}");
 
-    // Neither flag → missing-required, same surface.
-    let out = run_raw(&home, &["review", &target], false);
-    assert_eq!(out.status.code(), Some(2));
+    // NO verdict is now allowed by clap (the group is OPTIONAL) — a bare target is the two-phase describe,
+    // a marked runtime seam (INVALID_ARGUMENT, exit 1), not a clap usage error.
+    let out = run_raw(&home, &["review", &target, "--json"], false);
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -387,16 +391,23 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
 }
 
 #[test]
-fn pull_onto_current_flag_shapes_are_usage_errors() {
+fn update_onto_current_flag_shapes_are_usage_errors() {
     let home = scratch("ontousage");
 
-    // Missing <skill> target → clap's requires (standard usage error, exit 2).
-    let out = run_raw(&home, &["pull", "--onto-current"], false);
-    assert_eq!(out.status.code(), Some(2));
+    // Missing <skill> target → the runtime usage error (INVALID_ARGUMENT, exit 1). `--onto-current` is a
+    // hidden flag on `update` (reached here through the `pull` alias the field's armed hooks still run).
+    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
     // Combined with @<hash> → the runtime usage error rides the envelope as INVALID_ARGUMENT.
     let target = format!("docs@{}", "ab".repeat(32));
-    let out = run_raw(&home, &["pull", &target, "--onto-current", "--json"], false);
+    let out = run_raw(
+        &home,
+        &["update", &target, "--onto-current", "--json"],
+        false,
+    );
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");

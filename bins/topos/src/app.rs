@@ -11,7 +11,7 @@ use serde::Serialize;
 use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw};
 use topos_types::HarnessId;
 
-use crate::cli::{Cli, Command, RoleArg};
+use crate::cli::{AuthCmd, Cli, Command};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
@@ -82,7 +82,7 @@ pub fn run() -> ExitCode {
         // `publish` authors the candidate commit and `revert` the forward-revert commit, so both load (and
         // on first use mint) the device id.
         Command::Add { .. }
-        | Command::Pull { .. }
+        | Command::Update { .. }
         | Command::Follow { .. }
         | Command::Publish { .. }
         | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
@@ -123,58 +123,80 @@ pub fn run() -> ExitCode {
         Command::Add {
             source,
             skill,
-            harness,
+            agent,
             global,
+            yes,
         } => {
+            // The two-phase describe/`--yes` flow lands in a later leg; today `add` applies directly.
+            let _ = yes;
             // The one positional is classified by shape (crate::source): a local path adopts in place; a
             // bare name resolves against `list`'s untracked discovery; a remote `owner/repo`/URL fetches +
             // imports. No prompts — a remote import is fully non-interactive (the source's trust is the
-            // user/agent's to verify).
-            let result = match crate::source::classify(&source) {
-                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
-                crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
-                    // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
-                    // agree on the name even for a harness the active adapter does not recognize.
-                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
-                        .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
-                    None => Err(ClientError::InvalidArgument(
-                        "cannot resolve a skill name without $HOME set — adopt a directory by path \
-                         (`topos add ./<dir>`)"
-                            .into(),
-                    )),
-                },
-                crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
-                    Some(roots) => {
-                        let git = crate::plane_http::UreqGitSource::new();
-                        ops::add_remote(
-                            &ctx,
-                            &git,
-                            &spec,
-                            &roots,
-                            &ops::AddRemoteOpts {
-                                skill,
-                                harness,
-                                global,
-                            },
-                        )
+            // user/agent's to verify). The `-s/--agent` selectors stay single-valued for now (multi + `'*'`
+            // are marked seams).
+            let result = single_selector(skill, "add --skill with multiple values or '*'")
+                .and_then(|skill| {
+                    single_selector(agent, "add --agent with multiple values or '*'")
+                        .map(|agent| (skill, agent))
+                })
+                .and_then(|(skill, harness)| {
+                    match crate::source::classify(&source) {
+                    crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
+                    crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
+                        // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
+                        // agree on the name even for a harness the active adapter does not recognize.
+                        Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
+                            .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
+                        None => Err(ClientError::InvalidArgument(
+                            "cannot resolve a skill name without $HOME set — adopt a directory by \
+                             path (`topos add ./<dir>`)"
+                                .into(),
+                        )),
+                    },
+                    crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
+                        Some(roots) => {
+                            let git = crate::plane_http::UreqGitSource::new();
+                            ops::add_remote(
+                                &ctx,
+                                &git,
+                                &spec,
+                                &roots,
+                                &ops::AddRemoteOpts {
+                                    skill,
+                                    harness,
+                                    global,
+                                },
+                            )
+                        }
+                        None => Err(ClientError::InvalidArgument(
+                            "cannot import a remote skill without $HOME set (needed to resolve the \
+                             harness skills dir)"
+                                .into(),
+                        )),
+                    },
+                    crate::source::SourceSpec::Unsupported(msg) => {
+                        Err(ClientError::InvalidArgument(msg))
                     }
-                    None => Err(ClientError::InvalidArgument(
-                        "cannot import a remote skill without $HOME set (needed to resolve the harness \
-                         skills dir)"
-                            .into(),
-                    )),
-                },
-                crate::source::SourceSpec::Unsupported(msg) => {
-                    Err(ClientError::InvalidArgument(msg))
                 }
-            };
+                });
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
         Command::Follow {
-            target,
+            targets,
+            channel,
+            skill,
+            yes,
             manual,
             wait,
         } => {
+            // The two-phase describe/`--yes` flow lands later; today `follow` applies directly.
+            let _ = yes;
+            // Multi-target + `--channel`/`--skill` selectors resolve with the full grammar in a later leg.
+            // Today the single-positional path stays wired: >1 target or any selector is a marked seam.
+            let target = match single_target(targets, &channel, &skill, "follow") {
+                Ok(t) => t,
+                Err(e) => return finish_follow(json, cmd_name, Err(e), &diag),
+            };
             // The transports are built per-base-URL (known only after the op parses the link / reads the
             // WAL): the shared creds-free `ureq` enroll connector + the read transport for the offer
             // disclosure (the one connector that carries per-skill creds, so it stays a local closure).
@@ -211,37 +233,56 @@ pub fn run() -> ExitCode {
                 });
             finish_follow(json, cmd_name, result, &diag)
         }
-        Command::Unfollow { skill } => finish(
-            json,
-            cmd_name,
-            ops::unfollow(&ctx, &skill),
-            render::unfollow_tty,
-            &diag,
-        ),
-        Command::Invite {
-            emails,
-            role,
-            skills,
-        } => finish(
-            json,
-            cmd_name,
-            ops::invite(
-                &ctx,
-                &connect_governance,
-                emails,
-                role.map(RoleArg::to_workspace_role),
-                skills,
-                workspace.as_deref(),
-            ),
-            render::invite_tty,
-            &diag,
-        ),
-        Command::List {
+        Command::Unfollow {
+            targets,
+            channel,
             skill,
-            footprint,
-            tracked,
-            remote,
+            yes,
         } => {
+            let _ = yes;
+            let result = match single_target(targets, &channel, &skill, "unfollow") {
+                Ok(Some(name)) => ops::unfollow(&ctx, &name),
+                Ok(None) => Err(ClientError::InvalidArgument(
+                    "unfollow needs a skill name".into(),
+                )),
+                Err(e) => Err(e),
+            };
+            finish(json, cmd_name, result, render::unfollow_tty, &diag)
+        }
+        Command::Invite {
+            email,
+            channel,
+            yes,
+        } => {
+            let _ = yes;
+            finish(
+                json,
+                cmd_name,
+                ops::invite(
+                    &ctx,
+                    &connect_governance,
+                    email,
+                    channel,
+                    workspace.as_deref(),
+                ),
+                render::invite_tty,
+                &diag,
+            )
+        }
+        Command::List {
+            name,
+            remote,
+            tracked,
+            footprint,
+            channel,
+            skill,
+        } => {
+            // A single positional name filter stays wired; the `--channel`/`--skill` selectors and
+            // multi-name resolution land with the full grammar in a later leg (a marked seam).
+            let name_filter = match single_target(name, &channel, &skill, "list") {
+                Ok(n) => n,
+                Err(e) => return finish_list(json, cmd_name, Err(e), &diag),
+            };
             // Under `--remote`, resolve the enrolled plane + memberships (a typed "run follow first" when
             // there is no enrollment), then build the credentialed catalog transport as a local so the
             // scope borrows it across the `list()` call. The transport holds the per-workspace credential
@@ -271,7 +312,7 @@ pub fn run() -> ExitCode {
                 cmd_name,
                 ops::list(
                     &ctx,
-                    skill.as_deref(),
+                    name_filter.as_deref(),
                     footprint,
                     list_discovery(tracked),
                     scope,
@@ -288,10 +329,14 @@ pub fn run() -> ExitCode {
         ),
         Command::Publish {
             target,
-            propose,
             to,
+            propose,
+            message,
+            yes,
             wait,
         } => {
+            // The two-phase describe/`--yes` flow lands later; today `publish` applies directly.
+            let _ = yes;
             // The standup branch's plane base: the env override, else the compiled-in hosted default.
             // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
             let standup = ops::StandupConnectors {
@@ -305,13 +350,13 @@ pub fn run() -> ExitCode {
                 ops::publish(
                     &ctx,
                     &connect_contribute,
-                    &connect_governance,
                     &standup,
                     roots.as_ref(),
                     t,
                     propose,
                     to.as_deref(),
                     workspace.as_deref(),
+                    message.as_deref(),
                 )
             };
             let first = publish_once(&target);
@@ -332,33 +377,44 @@ pub fn run() -> ExitCode {
             target,
             approve,
             reject,
+            withdraw,
+            message,
+            yes,
         } => {
-            // clap's `verdict` ArgGroup guarantees exactly one flag (a violation was a standard usage
-            // error at exit 2 before this point) — the verdict IS `approve`.
-            debug_assert!(approve ^ reject, "clap enforces exactly one verdict flag");
-            finish(
-                json,
-                cmd_name,
-                ops::review(
-                    &ctx,
-                    &connect_contribute,
-                    &target,
-                    approve,
-                    workspace.as_deref(),
-                ),
-                render::review_tty,
-                &diag,
-            )
+            let _ = yes;
+            // clap's `verdict` ArgGroup (now OPTIONAL) guarantees AT MOST one flag is set.
+            let verdict = if approve {
+                Some(ops::ReviewVerdict::Approve)
+            } else if reject {
+                Some(ops::ReviewVerdict::Reject { reason: message })
+            } else if withdraw {
+                Some(ops::ReviewVerdict::Withdraw)
+            } else {
+                None
+            };
+            let result = match (target, verdict) {
+                (Some(t), Some(v)) => {
+                    ops::review(&ctx, &connect_contribute, &t, v, workspace.as_deref())
+                }
+                // A bare `review` (the inbox) and a bare target (the describe) are the two-phase seam.
+                (None, None) => Err(ops::not_yet("review inbox")),
+                (Some(_), None) => Err(ops::not_yet("review describe")),
+                (None, Some(_)) => Err(ClientError::InvalidArgument(
+                    "review needs a <skill>@<hash> target".into(),
+                )),
+            };
+            finish(json, cmd_name, result, render::review_tty, &diag)
         }
-        Command::Revert { skill, to, confirm } => finish(
+        Command::Revert { skill, to, yes } => finish(
             json,
             cmd_name,
+            // `--yes` replaces the old `--confirm` (same acknowledge-the-no-op semantics).
             ops::revert(
                 &ctx,
                 &connect_contribute,
                 &skill,
                 &to,
-                confirm,
+                yes,
                 workspace.as_deref(),
             ),
             render::revert_tty,
@@ -371,18 +427,31 @@ pub fn run() -> ExitCode {
             render::log_tty,
             &diag,
         ),
-        Command::Pull {
+        Command::Update {
+            targets,
+            channel,
             skill,
+            reset,
+            yes,
             onto_current,
             quiet,
         } => {
+            let _ = yes;
             // The bare sweep prefers the delivery-driven reconcile when enrolled (one delivery
             // call per workspace answers "what should this device have"); every targeted form and
-            // the un-enrolled state keep the classic engine.
+            // the un-enrolled state keep the classic engine. `--reset` and the `--channel`/`--skill`
+            // selectors + multi-target resolution land with the full grammar in a later leg.
             let delivery = enrollment
                 .as_ref()
                 .map(|e| &e.plane as &dyn crate::plane::DeliverySource);
-            let result = pull_with_name_fallback(&ctx, skill, onto_current, delivery);
+            let result = if reset {
+                Err(ops::not_yet("update --reset"))
+            } else {
+                match single_target(targets, &channel, &skill, "update") {
+                    Ok(target) => pull_with_name_fallback(&ctx, target, onto_current, delivery),
+                    Err(e) => Err(e),
+                }
+            };
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
@@ -397,17 +466,13 @@ pub fn run() -> ExitCode {
                 finish_pull(json, cmd_name, result, &diag)
             }
         }
-        Command::Uninstall { footprint } => {
-            let binary = std::env::current_exe().ok();
-            finish(
-                json,
-                cmd_name,
-                ops::uninstall(&ctx, footprint, binary.as_deref()),
-                render::uninstall_tty,
-                &diag,
-            )
-        }
-        Command::Upgrade { check, version } => {
+        // `remove` (the followed→exclusion / untracked-clean verb) is dispatch-seamed — the exclusion PUT
+        // and the agent-dir clean land with the full grammar in a later leg.
+        Command::Remove { .. } => emit_err(json, cmd_name, &ops::not_yet("remove"), &diag),
+        // `channel add/remove` are dispatch seams; a bare `channel` teaches usage and recognizes `create`.
+        Command::Channel { args, .. } => emit_err(json, cmd_name, &channel_seam(&args), &diag),
+        Command::Protect { .. } => emit_err(json, cmd_name, &ops::not_yet("protect"), &diag),
+        Command::SelfUpdate { check, version } => {
             // A MAINTENANCE command: it replaces the binary itself. It mints no device identity (kept out
             // of the device-id match above) and never touches a skill / the plane / the account.
             let releases = connect_releases();
@@ -415,20 +480,77 @@ pub fn run() -> ExitCode {
             let result = std::env::current_exe()
                 .map_err(ClientError::from)
                 .and_then(|exe| {
-                    ops::upgrade(
+                    ops::self_update(
                         &ctx,
                         releases.as_ref(),
                         &exe,
-                        ops::UpgradeOpts {
+                        ops::SelfUpdateOpts {
                             check,
                             version,
                             base_url,
                         },
                     )
                 });
-            finish(json, cmd_name, result, render::upgrade_tty, &diag)
+            finish(json, cmd_name, result, render::self_update_tty, &diag)
         }
+        Command::Auth { cmd } => {
+            let what = match cmd {
+                AuthCmd::Login { .. } => "auth login",
+                AuthCmd::Logout => "auth logout",
+                AuthCmd::Status => "auth status",
+            };
+            emit_err(json, cmd_name, &ops::not_yet(what), &diag)
+        }
+        // `topos upgrade` is ambiguous — the disambiguation refusal points skills → `topos update`, the CLI
+        // → `topos self-update`, so the retired spelling never silently does the wrong thing.
+        Command::Upgrade => emit_err(json, cmd_name, &ClientError::UpgradeAmbiguous, &diag),
     }
+}
+
+/// Map a `topos channel …` invocation to its typed refusal. `add`/`remove` are marked seams (the placement
+/// writes land later); a bare `channel` (or an unrecognized subword) teaches channel-first usage; `create`
+/// is recognized as a hint keyword — channels are created on first placement, never as a standalone verb.
+fn channel_seam(args: &[String]) -> ClientError {
+    match args.first().map(String::as_str) {
+        Some("add") | Some("remove") => ops::not_yet("channel add/remove"),
+        Some("create") => ClientError::InvalidArgument(
+            "channels are created on first placement — run `topos channel add <channel> <skill>` (a \
+             new channel is created automatically); there is no separate `channel create`"
+                .into(),
+        ),
+        _ => ClientError::InvalidArgument(
+            "usage: `topos channel add <channel> <skill>...` or `topos channel remove <channel> \
+             <skill>...` (a channel is created on first placement)"
+                .into(),
+        ),
+    }
+}
+
+/// Collapse a repeatable value selector (`-s/--skill`, `-a/--agent`) to at most ONE concrete value. More
+/// than one — or a `'*'` — parses today but resolves in a later leg, so it is a marked seam ([`ops::not_yet`]).
+fn single_selector(values: Vec<String>, what: &str) -> Result<Option<String>, ClientError> {
+    match values.as_slice() {
+        [] => Ok(None),
+        [one] if one != "*" => Ok(values.into_iter().next()),
+        _ => Err(ops::not_yet(what)),
+    }
+}
+
+/// Collapse a multi-target positional + the dual-kind `--channel`/`--skill` selectors to at most ONE
+/// positional target. Any selector, or more than one positional, parses today but resolves with the full
+/// grammar in a later leg — a marked seam — so the single-target verb paths stay wired meanwhile.
+fn single_target(
+    targets: Vec<String>,
+    channel: &[String],
+    skill: &[String],
+    verb: &str,
+) -> Result<Option<String>, ClientError> {
+    if !channel.is_empty() || !skill.is_empty() || targets.len() > 1 {
+        return Err(ops::not_yet(&format!(
+            "{verb} with --channel/--skill selectors or multiple targets"
+        )));
+    }
+    Ok(targets.into_iter().next())
 }
 
 /// The ENROLLMENT connector: `UreqDeviceClient` with an EMPTY credential map — the device-flow routes are
@@ -1029,7 +1151,7 @@ mod tests {
                 version_id: None,
                 bundle_digest: "d1".to_owned(),
                 current_generation: None,
-                invite_link: None,
+                share_line: None,
                 pending: Some(PublishPending {
                     status: PublishPendingStatus::SigninRequired,
                     verification_uri_complete: "https://topos.sh/verify/tok".to_owned(),

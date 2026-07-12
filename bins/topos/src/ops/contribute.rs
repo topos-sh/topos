@@ -34,11 +34,24 @@ use crate::plane::{
 use crate::sidecar::SkillPaths;
 use crate::{doc, materialize, op_wal, scan};
 
-/// The fixed, controlled-ASCII publish message — folded into the candidate `version_id`, so it must stay
-/// constant for a reproducible, retry-stable id (no `-m` flag in v0; vocab exposes none).
+/// The DEFAULT publish message — folded into the candidate `version_id` when `publish` carries no `-m`.
+/// A `-m <message>` overrides it (also folded into the id); either way the message rides the local store
+/// commit, so a WAL replay re-renders the byte-identical candidate (`render_candidate` reads it back).
 pub(crate) const PUBLISH_MESSAGE: &str = "topos: publish";
 /// The fixed forward-revert message — folded into the forward commit id (which the plane reconstructs).
 pub(crate) const REVERT_MESSAGE: &str = "topos: revert";
+
+/// The review verdict + reason a `review` invocation threads into its POST — the parts of a
+/// [`ReviewRequest`] not derivable from the durable [`OpRecord`] (which has no verdict-reason field). The
+/// current invocation supplies them on both the fresh send and a WAL replay (a resume is the same argv
+/// re-run), so a replayed reject re-carries its reason. `None` for publish / revert callers.
+pub(crate) struct ReviewSend {
+    /// The wire verdict — `approve`, `reject`, or `withdraw` (a `withdraw` stores as an `OpKind::ReviewReject`
+    /// WAL, so the durable op alone cannot recover it).
+    pub decision: ReviewDecision,
+    /// The reject/withdraw reason (REQUIRED by the plane on `reject`; `None` otherwise).
+    pub reason: Option<String>,
+}
 
 /// Builds the device-signed contribute transport for a plane base URL — known only after reading
 /// `instance.json`, so it can't be pre-built in the composition root (mirrors `invite`'s connector).
@@ -175,9 +188,10 @@ pub(crate) fn run_write(
     transport: &dyn ContributeSource,
     sp: &SkillPaths,
     rec: &OpRecord,
+    review: Option<&ReviewSend>,
 ) -> Result<WriteReceipt, ClientError> {
     op_wal::write(ctx.fs, &ctx.layout, rec)?;
-    match send_op(transport, ctx, sp, rec) {
+    match send_op(transport, ctx, sp, rec, review) {
         Ok(receipt) => {
             // A terminal protocol outcome (any 200): the op is settled — drop the WAL. A subsequent retry
             // is a fresh op (after a rebase, say), never a replay of a settled one.
@@ -225,6 +239,7 @@ fn send_op(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
     rec: &OpRecord,
+    review: Option<&ReviewSend>,
 ) -> Result<WriteReceipt, ClientError> {
     let commit_id = parse_hex32(&rec.candidate_commit)?;
     let bundle_digest = parse_hex32(&rec.bundle_digest)?;
@@ -272,10 +287,20 @@ fn send_op(
             })
         }
         OpKind::ReviewApprove | OpKind::ReviewReject => {
-            let decision = if matches!(rec.op, OpKind::ReviewApprove) {
-                ReviewDecision::Approve
-            } else {
-                ReviewDecision::Reject
+            // The verdict + reason ride the CURRENT invocation (`review` passes them; a WAL replay is the
+            // same argv re-run, so it re-supplies them). Fall back to the op-derived decision with no reason
+            // when absent — a `withdraw` stores as an `OpKind::ReviewReject` WAL, so the durable op alone
+            // cannot tell reject from withdraw; the current invocation's `ReviewSend` is authoritative.
+            let (decision, reason) = match review {
+                Some(rs) => (rs.decision, rs.reason.clone()),
+                None => (
+                    if matches!(rec.op, OpKind::ReviewApprove) {
+                        ReviewDecision::Approve
+                    } else {
+                        ReviewDecision::Reject
+                    },
+                    None,
+                ),
             };
             transport.review(ReviewRequest {
                 workspace_id: rec.workspace_id.clone(),
@@ -284,6 +309,7 @@ fn send_op(
                 expected: rec.expected_generation,
                 proposal: rec.candidate_commit.clone(),
                 decision,
+                reason,
             })
         }
     }
@@ -628,7 +654,7 @@ mod tests {
         };
 
         // First attempt: the send is UNCERTAIN — run_write keeps the WAL.
-        let first = run_write(&ctx, &fake, &sp, &rec);
+        let first = run_write(&ctx, &fake, &sp, &rec, None);
         assert!(first.is_err(), "an uncertain send surfaces the error");
         assert!(
             crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_some(),
@@ -647,7 +673,7 @@ mod tests {
         .expect("a pending review op to resume");
         assert_eq!(pending.op_id, op_id, "the replay reuses the same op_id");
 
-        let second = run_write(&ctx, &fake, &sp, &pending);
+        let second = run_write(&ctx, &fake, &sp, &pending, None);
         assert!(second.is_ok(), "the replay settles");
         assert!(
             crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_none(),

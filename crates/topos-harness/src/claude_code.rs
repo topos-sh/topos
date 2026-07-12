@@ -24,25 +24,26 @@ pub(crate) const LAYER_USER: &str = "user";
 /// topos still recognizes (and could migrate) an entry an earlier build wrote.
 const SENTINEL: &str = "# topos:currency";
 
-/// The handler-command identity we also require (alongside the sentinel) to claim an entry as ours, so
-/// a stray `echo nope # topos:currency` is never mistaken for the managed hook — and which, present
-/// WITHOUT our sentinel, marks a hand-rolled `topos pull` we adopt-or-leave (never blind-touch).
+/// The command identity that marks a HAND-ROLLED currency hook — a `topos pull` command present
+/// WITHOUT our sentinel, which we adopt-or-leave (never blind-touch). This is NOT part of the
+/// managed-ours check any more: ownership keys on the sentinel alone (see [`is_managed_command`]), so
+/// our own current `topos update` hook is recognized without enumerating every command spelling here.
 const COMMAND_IDENTITY: &str = "topos pull";
 
 /// The structured marker identity reported in [`TriggerReport::marker_id`] — topos + harness id +
 /// schema version + command identity.
 const MARKER_ID: &str = "topos:claude-code:currency:1";
 
-/// The exact session-start hook command topos installs. The `command -v topos` guard skips the pull
+/// The exact session-start hook command topos installs. The `command -v topos` guard skips the update
 /// when the binary is gone (post-uninstall safety); the trailing `|| true` then makes the whole line
 /// exit 0 *regardless* — critically when topos is absent (`command -v` itself exits non-zero, and that
 /// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
-/// equally when a pull degrades (plane down): a best-effort currency sweep must never surface as an
+/// equally when an update degrades (plane down): a best-effort currency sweep must never surface as an
 /// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
 /// stdout empty (a SessionStart hook's stdout is injected into the session context); the trailing
 /// comment is the idempotency sentinel.
 const HOOK_COMMAND: &str =
-    "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
+    "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
 
 /// The per-hook timeout (seconds). A real sweep makes network calls (one conditional GET per followed
 /// skill, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a dead
@@ -437,16 +438,19 @@ fn command_of(handler: &Value) -> Option<&str> {
     handler.get("command").and_then(Value::as_str)
 }
 
-/// Ours iff the command carries our sentinel AND the `topos pull` command identity — so a stray comment
-/// (`echo nope # topos:currency`) is never mistaken for the managed hook.
+/// Ours iff the command carries our sentinel — the version-agnostic ownership marker topos writes.
+/// Keying on the sentinel ALONE (never the command text) is what lets a re-arm recognize an entry an
+/// earlier build wrote under a different command spelling (e.g. the old `topos pull`) and rewrite it in
+/// place, so the current `topos update` command REPLACES it instead of duplicating alongside it.
 fn is_managed_command(cmd: &str) -> bool {
-    cmd.contains(SENTINEL) && cmd.contains(COMMAND_IDENTITY)
+    cmd.contains(SENTINEL)
 }
 
 /// Rewrite every topos-managed handler's `command` to the current [`HOOK_COMMAND`], returning whether
 /// anything changed. Idempotent: a handler already carrying the canonical command is left byte-for-byte,
 /// so re-running install after a migration writes nothing. The rewritten string still satisfies
-/// [`is_managed_command`] (it keeps the sentinel + identity), so the entry stays classified as ours.
+/// [`is_managed_command`] (it keeps the sentinel), so the entry stays classified as ours — this is how a
+/// re-arm REPLACES an old `topos pull` managed entry with the current `topos update` one, in place.
 fn migrate_managed_command(session_start: &mut [Value]) -> bool {
     let mut changed = false;
     for group in session_start.iter_mut() {
@@ -589,7 +593,7 @@ mod tests {
       {
         \"hooks\": [
           {
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -642,8 +646,9 @@ mod tests {
 
     #[test]
     fn install_migrates_a_stale_managed_command_to_the_current_one() {
-        // An entry an earlier build wrote (the guard without the `|| true` exit-0 tail) — same sentinel,
-        // same identity, so still classified as ours.
+        // An entry an earlier build wrote — the old `topos pull` command, without the `|| true` exit-0
+        // tail, carrying our sentinel. Recognized by the sentinel ALONE, so it is still classified as
+        // ours and rewritten to the current `topos update` command.
         let stale = "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
         let cfg = MemConfig::with(&format!(
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{stale}\",\"timeout\":60}}]}}]}}}}"
@@ -678,6 +683,49 @@ mod tests {
             "no second write after migration"
         );
         assert_eq!(cfg.writes(), 1, "migration does not re-fire");
+    }
+
+    #[test]
+    fn rearming_over_an_old_pull_hook_replaces_it_with_exactly_one_update_hook() {
+        // A config already holding the FULL old managed hook line — the `topos pull --quiet` command
+        // carrying our sentinel. Re-arming must recognize it (sentinel alone), rewrite it to the new
+        // `topos update` command IN PLACE, and never append a second managed group beside it.
+        let old =
+            "command -v topos >/dev/null 2>&1 && topos pull --quiet || true  # topos:currency";
+        let cfg = MemConfig::with(&format!(
+            "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{old}\",\"timeout\":60}}]}}]}}}}"
+        ));
+
+        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert!(report.touched_path.is_some(), "the old hook is rewritten");
+        assert_eq!(cfg.writes(), 1, "exactly one replacing write");
+
+        let text = cfg.text().unwrap();
+        assert_eq!(
+            text.matches("# topos:currency").count(),
+            1,
+            "exactly ONE managed hook line — never a duplicate"
+        );
+        assert!(
+            text.contains("topos update --quiet"),
+            "rewritten to the new update command"
+        );
+        assert!(
+            !text.contains("topos pull"),
+            "no old `topos pull` managed entry remains"
+        );
+
+        let root: Value = serde_json::from_str(&text).unwrap();
+        let groups = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "still exactly one SessionStart group");
+        let handlers = groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1, "still exactly one handler");
+        assert_eq!(
+            handlers[0]["command"].as_str().unwrap(),
+            HOOK_COMMAND,
+            "the single managed hook is the canonical update command"
+        );
     }
 
     #[test]
@@ -737,15 +785,29 @@ mod tests {
     }
 
     #[test]
-    fn a_stray_sentinel_comment_is_not_mistaken_for_the_managed_hook() {
-        // The sentinel alone (without the `topos pull` identity) must NOT count as managed.
+    fn a_sentinel_carrying_entry_is_claimed_as_ours_by_the_marker_alone() {
+        // Ownership keys on the `# topos:currency` sentinel ALONE — so an entry carrying it is ours
+        // regardless of the command text. A foreign command wearing our sentinel is claimed and
+        // normalized to the canonical managed command IN PLACE (never duplicated beside it).
         let cfg = MemConfig::with(
             "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"echo nope  # topos:currency\"}]}]}}",
         );
         let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
-        // Neither our managed hook nor a `topos pull` → treated as absent, so we install ours.
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(cfg.writes(), 1);
+        assert_eq!(cfg.writes(), 1, "the sentinel-carrying entry is rewritten");
+
+        let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
+        let groups = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            groups.len(),
+            1,
+            "no second group appended — rewritten in place"
+        );
+        assert_eq!(
+            groups[0]["hooks"][0]["command"].as_str().unwrap(),
+            HOOK_COMMAND,
+            "normalized to the canonical managed command"
+        );
     }
 
     #[test]
@@ -755,7 +817,7 @@ mod tests {
         );
         let home = PathBuf::from("/h");
         adapter(&home, &cfg).install_currency_trigger();
-        assert!(cfg.text().unwrap().contains("topos pull"));
+        assert!(cfg.text().unwrap().contains("topos update"));
 
         let report = adapter(&home, &cfg).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Inactive);

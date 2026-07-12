@@ -1,18 +1,21 @@
-//! `review <skill>@<hash> --approve | --reject` — resolve a proposal (the `gh pr review` model).
+//! `review [TARGET] [--approve | --reject | --withdraw] [-m <message>]` — resolve a proposal (the
+//! `gh pr review` model).
 //!
 //! `--approve` moves `current` to the candidate (a compare-and-set on the proposal's base; a stale base
-//! re-dos); `--reject` declines a proposal (reviewer) or withdraws your own (proposer). The reviewer binds
-//! the proposal's RECORDED identity (its `commit_id` = the `@hash`, its `bundle_digest` re-derived from the
-//! fetched bytes and asserted to reproduce the hash — so a tampered plane can't get the reviewer to sign
-//! over forged bytes) at `expected` = the FRESH `current` generation (which equals a reviewable proposal's
-//! base, so a reviewer who has not pulled is still correct). Viewing the change is `diff`; this verb decides.
+//! re-dos); `--reject` declines a proposal (reviewer, `-m <reason>` required); `--withdraw` retracts your
+//! own open proposal (proposer). The reviewer binds the proposal's RECORDED identity (its `commit_id` = the
+//! `@hash`, its `bundle_digest` re-derived from the fetched bytes and asserted to reproduce the hash — so a
+//! tampered plane can't get the reviewer to sign over forged bytes) at `expected` = the FRESH `current`
+//! generation (which equals a reviewable proposal's base, so a reviewer who has not pulled is still
+//! correct). Viewing the change is `diff`; this verb decides. A bare `review` (no target / no verdict) is
+//! the two-phase describe — a MARKED SEAM until that leg lands.
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::{OpKind, OpRecord};
 use topos_types::results::{ReviewData, ReviewDecision};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
-use super::contribute::{self, ContributeConnect};
+use super::contribute::{self, ContributeConnect, ReviewSend};
 use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
 use crate::ctx::Ctx;
 use crate::enroll;
@@ -20,19 +23,52 @@ use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::{op_wal, sidecar};
 
-/// Approve or reject the proposal named `<skill>@<hash>`.
+/// A review verdict, parsed from the CLI's `--approve` / `--reject` / `--withdraw` group. `Reject` carries
+/// its (required) reason; `Withdraw` is the author retracting their own open proposal.
+#[derive(Debug, Clone)]
+pub(crate) enum ReviewVerdict {
+    Approve,
+    Reject { reason: Option<String> },
+    Withdraw,
+}
+
+impl ReviewVerdict {
+    /// The wire verdict this maps to.
+    fn decision(&self) -> ReviewDecision {
+        match self {
+            ReviewVerdict::Approve => ReviewDecision::Approve,
+            ReviewVerdict::Reject { .. } => ReviewDecision::Reject,
+            ReviewVerdict::Withdraw => ReviewDecision::Withdraw,
+        }
+    }
+    /// Whether this verdict is an approve (drives the WAL op kind + the resume-match check).
+    fn is_approve(&self) -> bool {
+        matches!(self, ReviewVerdict::Approve)
+    }
+}
+
+/// Resolve the proposal named `<skill>@<hash>` with `verdict`.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::Conflict`] on a stale base (approve);
-/// [`ClientError::Denied`] on four-eyes self-approve / not-a-reviewer / an already-resolved proposal; an
-/// integrity error if the fetched proposal does not reproduce its `@hash`; a transport failure otherwise.
+/// [`ClientError::InvalidArgument`] for a `--reject` with no `-m <reason>`; [`ClientError::Enrollment`] if
+/// not enrolled; [`ClientError::Conflict`] on a stale base (approve); [`ClientError::Denied`] on four-eyes
+/// self-approve / not-a-reviewer / an already-resolved proposal; an integrity error if the fetched proposal
+/// does not reproduce its `@hash`; a transport failure otherwise.
 pub(crate) fn review(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     target: &str,
-    approve: bool,
+    verdict: ReviewVerdict,
     workspace: Option<&str>,
 ) -> Result<ReviewData, ClientError> {
+    // A reject must carry its reason (the plane requires it, and the author is owed one). Refused at the
+    // argv boundary, before any resolution or network.
+    if let ReviewVerdict::Reject { reason: None } = &verdict {
+        return Err(ClientError::InvalidArgument(
+            "`review --reject` needs a reason — pass `-m <message>`".into(),
+        ));
+    }
+    let approve = verdict.is_approve();
     // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
     // (a malformed target is a usage error however un-enrolled the machine is). Unlike the go-back /
     // revert / diff refs, this hash stays FULL-64 only: an open proposal's candidate id exists on the
@@ -122,8 +158,18 @@ pub(crate) fn review(
         }
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
-    map_outcome(ctx, &sp, &rec, &receipt, target)
+    // The verdict + reason ride the current invocation into the POST (the durable `OpRecord` has no
+    // verdict-reason field — a `withdraw` stores as an `OpKind::ReviewReject` WAL, so a replay re-supplies
+    // both from this same argv).
+    let review_send = ReviewSend {
+        decision: verdict.decision(),
+        reason: match &verdict {
+            ReviewVerdict::Reject { reason } => reason.clone(),
+            _ => None,
+        },
+    };
+    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, Some(&review_send))?;
+    map_outcome(ctx, &sp, &rec, &receipt, target, verdict.decision())
 }
 
 fn map_outcome(
@@ -132,12 +178,8 @@ fn map_outcome(
     rec: &OpRecord,
     receipt: &WriteReceipt,
     target: &str,
+    decision: ReviewDecision,
 ) -> Result<ReviewData, ClientError> {
-    let decision = if matches!(rec.op, OpKind::ReviewApprove) {
-        ReviewDecision::Approve
-    } else {
-        ReviewDecision::Reject
-    };
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // Approve moved `current` to the proposal — advance the reviewer's floor (the bytes land at the

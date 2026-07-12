@@ -14,7 +14,7 @@
 //! honest one-beat-in latency — never at bare session open. OpenClaw's `session_start` surface is
 //! observer-only (it cannot inject into LLM context) and a cron job's stdout never reaches context,
 //! so neither is ever a currency path here, including as a fallback: every failure mode degrades
-//! plainly to an explicit `topos pull` (`TriggerState::Degraded` + the `ExplicitPullOnly` floor).
+//! plainly to an explicit `topos update` (`TriggerState::Degraded` + the `ExplicitPullOnly` floor).
 //!
 //! READINESS PROBE — this adapter is build-first behind the frozen trait: the concrete config bytes
 //! below are PROVISIONAL until verified against the pilot's EXACT OpenClaw build (not latest-main).
@@ -79,7 +79,7 @@ const INJECT_CHAR_BUDGET: usize = 4096;
 /// whether or not a gateway loads it. The per-`topos`-touch refresh of this surface's CONTENTS is
 /// the sync engine's job, not this adapter's, and is **not yet wired** — until it lands, the
 /// installed surface keeps exactly these bytes, which claim no update (`lastRefreshed: null`) and
-/// point at `topos pull`, so it never announces an update it has not seen. Install checks only
+/// point at `topos update`, so it never announces an update it has not seen. Install checks only
 /// marker-ownership, never byte-equality, so a refreshed file is still a true no-op re-install.
 const PLUGIN_CONTENT: &str = "\
 // topos:openclaw:currency:1 — the topos-managed bootstrap-inject surface.
@@ -89,7 +89,7 @@ const PLUGIN_CONTENT: &str = "\
 //
 // This surface shows its LAST-REFRESHED state: skill updates surface on the
 // first `topos` touch of a session — an honest one-beat-in latency — never at
-// bare session open, and never via cron. To refresh now, run: topos pull
+// bare session open, and never via cron. To refresh now, run: topos update
 export default {
   topos: \"currency\",
   version: 1,
@@ -232,7 +232,7 @@ impl<'a> OpenClaw<'a> {
         TriggerReport {
             harness: HarnessId::OpenClaw,
             // Honest labeling: FirstToposTouch only for a verified, active trigger we own; every
-            // other state advertises just the guaranteed floor — an explicit `topos pull`.
+            // other state advertises just the guaranteed floor — an explicit `topos update`.
             currency_kind: if state == TriggerState::Active {
                 CurrencyKind::FirstToposTouch
             } else {
