@@ -376,7 +376,13 @@ pub fn run() -> ExitCode {
             onto_current,
             quiet,
         } => {
-            let result = pull_with_name_fallback(&ctx, skill, onto_current);
+            // The bare sweep prefers the delivery-driven reconcile when enrolled (one delivery
+            // call per workspace answers "what should this device have"); every targeted form and
+            // the un-enrolled state keep the classic engine.
+            let delivery = enrollment
+                .as_ref()
+                .map(|e| &e.plane as &dyn crate::plane::DeliverySource);
+            let result = pull_with_name_fallback(&ctx, skill, onto_current, delivery);
             if quiet {
                 // Byte-silent stdout: the session-start hook injects stdout into the session context, so a
                 // clean sweep emits nothing. An error surfaces on stderr with a non-zero exit — never on
@@ -896,9 +902,13 @@ pub(crate) fn pull_with_name_fallback(
     ctx: &Ctx<'_>,
     skill: Option<String>,
     onto_current: bool,
+    delivery: Option<&dyn crate::plane::DeliverySource>,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
-    let first = build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(ctx, scope));
+    let first = build_pull_scope(skill, onto_current).and_then(|scope| match (&scope, delivery) {
+        (ops::PullScope::AllFollowed, Some(d)) => ops::pull_reconcile(ctx, d),
+        _ => ops::pull(ctx, scope),
+    });
     match first {
         Err(ClientError::NoSuchSkill { .. })
             if arg.as_ref().is_some_and(|a| {
@@ -953,7 +963,8 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
     let plane = UreqPlane::new(
         instance.base_url,
         enroll::skill_creds(&follows, &credentials),
-    );
+    )
+    .with_workspace_credentials(credentials.into_map());
     let follow = FileFollow::new(enroll::follow_contexts(&follows));
     Ok(Some(Enrollment { plane, follow }))
 }

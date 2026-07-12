@@ -857,16 +857,6 @@ pub(crate) fn scoped_version_id(
 // Small helpers.
 // ---------------------------------------------------------------------------------------------
 
-fn fetch(
-    ctx: &Ctx<'_>,
-    skill_id: &str,
-    version_id: [u8; 32],
-) -> Result<crate::plane::FetchedVersion, ClientError> {
-    fetch_served(ctx, skill_id, version_id)?.ok_or_else(|| {
-        ClientError::Plane(format!("version {} not served", to_hex(&version_id)))
-    })
-}
-
 /// [`fetch`] distinguishing the NOT-SERVED miss (`Ok(None)` — the backfill's shallow-stop signal:
 /// a purged/pruned ancestor) from real faults (transport, availability, malformed — all still
 /// errors: the state is retryable, never silently shallow).

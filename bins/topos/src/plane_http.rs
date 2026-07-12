@@ -84,6 +84,9 @@ impl std::fmt::Debug for SkillCred {
 pub(crate) struct UreqPlane {
     base_url: String,
     creds: HashMap<String, SkillCred>,
+    /// workspace_id → the workspace Bearer credential (the delivery/report lane's key — one call
+    /// per WORKSPACE, unlike the per-skill read creds above). **SECRET values.**
+    ws_creds: HashMap<String, String>,
     agent: ureq::Agent,
 }
 
@@ -105,8 +108,17 @@ impl UreqPlane {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             creds,
+            ws_creds: HashMap::new(),
             agent: ureq::Agent::new_with_config(agent_config()),
         }
+    }
+
+    /// Attach the per-WORKSPACE credential map (`credentials.json`) — what arms the delivery-driven
+    /// reconcile ([`crate::plane::DeliverySource`]). Without it the transport still serves the
+    /// per-skill reads; the sweep just has no delivery lane to drive.
+    pub(crate) fn with_workspace_credentials(mut self, ws_creds: HashMap<String, String>) -> Self {
+        self.ws_creds = ws_creds;
+        self
     }
 
     /// A `GET` carrying `Authorization: Bearer <credential>` (current + versions + bundles). Returns the
@@ -232,6 +244,81 @@ impl PlaneSource for UreqPlane {
             // A 404 is the indistinguishable not-served (unknown/expired token, scope mismatch) ⇒ none visible.
             Err(PlaneError::NotFound) => Ok(Vec::new()),
             Err(e) => Err(e),
+        }
+    }
+}
+
+impl crate::plane::DeliverySource for UreqPlane {
+    fn workspaces(&self) -> Vec<String> {
+        let mut ws: Vec<String> = self.ws_creds.keys().cloned().collect();
+        ws.sort();
+        ws
+    }
+
+    fn fetch_delivery(&self, workspace_id: &str) -> Result<crate::plane::DeliverySnapshot, PlaneError> {
+        let cred = self
+            .ws_creds
+            .get(workspace_id)
+            .ok_or(PlaneError::NotFound)?;
+        ensure_url_safe_ids("delivery", workspace_id)?;
+        let url = format!("{}/v1/workspaces/{}/delivery", self.base_url, workspace_id);
+        let body = self.bearer_get(&url, cred)?;
+        let wire: topos_types::requests::WireDelivery = serde_json::from_slice(&body)
+            .map_err(|e| PlaneError::Malformed(format!("delivery body: {e}")))?;
+        let mut skills = Vec::with_capacity(wire.skills.len());
+        for ds in wire.skills {
+            skills.push(crate::plane::DeliverySkill {
+                version_id: parse_id(&ds.version_id)?,
+                review_required: ds.protection == "reviewed",
+                skill_id: ds.skill_id,
+                name: ds.name,
+                generation: ds.generation,
+            });
+        }
+        Ok(crate::plane::DeliverySnapshot {
+            skills,
+            detached: wire.detached,
+            proposals_awaiting: wire.proposals_awaiting,
+        })
+    }
+
+    fn report_applied(
+        &self,
+        workspace_id: &str,
+        applied: &[(String, [u8; 32])],
+    ) -> Result<(), PlaneError> {
+        let cred = self
+            .ws_creds
+            .get(workspace_id)
+            .ok_or(PlaneError::NotFound)?;
+        ensure_url_safe_ids("report", workspace_id)?;
+        let url = format!("{}/v1/workspaces/{}/report", self.base_url, workspace_id);
+        let report = topos_types::requests::WireAppliedReport {
+            schema_version: topos_types::WIRE_SCHEMA_VERSION,
+            applied: applied
+                .iter()
+                .map(|(skill_id, commit)| topos_types::requests::WireAppliedSkill {
+                    skill_id: skill_id.clone(),
+                    version_id: topos_core::digest::to_hex(commit),
+                })
+                .collect(),
+        };
+        let body = serde_json::to_vec(&report)
+            .map_err(|e| PlaneError::Malformed(format!("report body: {e}")))?;
+        let resp = self
+            .agent
+            .put(&url)
+            .header("authorization", format!("Bearer {cred}"))
+            .header("content-type", "application/json")
+            .send(&body[..])
+            .map_err(|e| PlaneError::Unreachable(format!("PUT {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => Ok(()),
+            HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(PlaneError::Unavailable(format!("PUT {url}: HTTP {status}")))
+            }
         }
     }
 }

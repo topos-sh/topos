@@ -50,7 +50,7 @@ pub(crate) use publish::{PublishOutcome, StandupConnectors, publish};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
-pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull};
+pub(crate) use pull::{PullOutcome, PullScope, TargetMode, pull, pull_reconcile};
 pub(crate) use revert::revert;
 pub(crate) use review::review;
 pub(crate) use unfollow::unfollow;
