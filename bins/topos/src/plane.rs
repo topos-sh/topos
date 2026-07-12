@@ -146,6 +146,60 @@ pub(crate) trait FollowSource {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The delivery seam — the server-computed "what should this device have" the reconcile sweep
+// drives (one call per workspace instead of a per-skill pointer fan-out), plus the applied-state
+// report that feeds the fleet page. Behind a port so the reconcile is tested against a fake
+// with no HTTP; the production impl is the `ureq` transport.
+// ---------------------------------------------------------------------------------------------
+
+/// One skill the workspace delivers to this device — the reconcile's install/update target.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliverySkill {
+    /// The stable plane-minted skill id (the sidecar key).
+    pub skill_id: String,
+    /// The catalog's user-facing name (a fresh install's directory name).
+    pub name: String,
+    /// Whether the bundle is effectively `reviewed` (the client's publish-preflight posture; the
+    /// server re-decides authoritatively on every write).
+    pub review_required: bool,
+    /// The pinned current version (the sync target — the engine re-verifies bytes by digest).
+    pub version_id: [u8; 32],
+    pub generation: Generation,
+}
+
+/// The per-workspace delivery snapshot: what to have, and what the PERSON detached (freeze in
+/// place — absence alone cannot distinguish "you detached this" from "upstream withdrew this",
+/// and the two have opposite on-disk consequences).
+#[derive(Debug, Clone)]
+pub(crate) struct DeliverySnapshot {
+    pub skills: Vec<DeliverySkill>,
+    /// Skill ids the person detached (unfollowed / lapsed): bytes stay in place, frozen.
+    pub detached: Vec<String>,
+    /// OPEN proposals across the delivered set (the `proposals_awaiting` gauge).
+    pub proposals_awaiting: u64,
+}
+
+/// The delivery + fleet transport, per enrolled workspace. The production impl rides the workspace
+/// Bearer credential; the reconcile tests feed fixtures.
+pub(crate) trait DeliverySource {
+    /// The enrolled workspaces this device can ask deliveries for (from `credentials.json`).
+    fn workspaces(&self) -> Vec<String>;
+
+    /// One workspace's delivery snapshot. [`PlaneError::NotFound`] means THIS DEVICE lost the whole
+    /// workspace (removed from the roster / revoked): the sweep freezes everything in place and
+    /// warns — never a clean.
+    fn fetch_delivery(&self, workspace_id: &str) -> Result<DeliverySnapshot, PlaneError>;
+
+    /// Report what this device holds after its reconcile (skill id → applied version). Best-effort
+    /// visibility (the fleet page's truth): a failure warns, never blocks the sync.
+    fn report_applied(
+        &self,
+        workspace_id: &str,
+        applied: &[(String, [u8; 32])],
+    ) -> Result<(), PlaneError>;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The enrollment seam — the device-flow CLIENT's read/write side, behind a port so the `follow`
 // tests run against a fake WITHOUT HTTP. Creds-free (it holds no read token): the device code + the
 // grant are the only secrets it carries, and they are redacted from every `Debug`. The real impl is

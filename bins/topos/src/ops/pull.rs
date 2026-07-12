@@ -18,15 +18,25 @@
 //! hang the harness.
 
 use std::cell::Cell;
+use std::collections::HashSet;
+use std::path::Path;
 
-use topos_types::results::PullData;
+use topos_core::digest::to_hex;
+use topos_types::persisted::{Lock, PlacementMap, SyncState};
+use topos_types::results::{PullAction, PullData, PullSkill};
+use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::ctx::Ctx;
+use crate::enroll::{self, FollowEntry, FollowModeDoc};
 use crate::error::ClientError;
 use crate::id::SkillId;
-use crate::plane::{FetchedVersion, KnownCurrent, PlaneError, PlaneSource, PointerFetch};
+use crate::plane::{
+    DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, KnownCurrent,
+    PlaneError, PlaneSource, PointerFetch,
+};
+use crate::{doc, sidecar};
 
-use super::sync_engine;
+use super::sync_engine::{self, WorkState};
 
 /// What a `pull` invocation targets.
 #[derive(Debug)]
@@ -166,6 +176,299 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             })
         }
     }
+}
+
+/// The DELIVERY-DRIVEN sweep — the reconcile engine: one delivery call per enrolled workspace
+/// answers "what should this device have", and the client converges on it. Replaces the bare
+/// sweep's per-skill pointer fan-out when a delivery transport is available (an enrolled install);
+/// the targeted single-skill paths keep [`pull`].
+///
+/// Per workspace: **install** delivered skills this device has never followed (a first-receive
+/// baseline + the kernel's I-TOFU offer — following a channel is standing consent, but a brand-new
+/// skill's first bytes are still disclosed, never silently landed), **update** the known ones
+/// (feeding the engine the already-resolved target — no second pointer GET), and classify every
+/// followed-but-undelivered skill by WHO ACTED: in the snapshot's `detached` set → the PERSON
+/// detached it (an unfollow / a lapsed channel leave) → freeze in place, bytes untouched; absent
+/// otherwise → UPSTREAM withdrew it (archived / its last delivering channel dropped it) → snapshot
+/// any draft, CLEAN the agent dirs, keep the sidecar bytes ("keep it as yours" is one narration
+/// away). A whole-workspace miss (removed from the roster / a revoked device) freezes EVERYTHING
+/// with a warning — never a clean (the copies are yours; re-adding re-enables). Afterwards each
+/// workspace gets this device's applied-state report — best-effort fleet visibility, never a sync
+/// blocker.
+pub(crate) fn pull_reconcile(
+    ctx: &Ctx<'_>,
+    delivery: &dyn DeliverySource,
+) -> Result<PullOutcome, ClientError> {
+    let mut skills = Vec::new();
+    let mut warnings = Vec::new();
+    let mut proposals_awaiting: u32 = 0;
+
+    // The follow-state snapshot this sweep classifies against (per-skill mutations below re-read
+    // under the identity lock, so a stale entry here costs at most one extra row next sweep).
+    let followed = ctx.follow.followed();
+
+    for ws in delivery.workspaces() {
+        let snapshot = match delivery.fetch_delivery(&ws) {
+            Ok(s) => s,
+            Err(PlaneError::NotFound) => {
+                // The whole workspace is gone for THIS device (removed from the roster, revoked,
+                // or the workspace itself is no more). The who-acts principle: an upstream person
+                // acted on YOU — every copy stays, frozen; nothing is cleaned.
+                warnings.push(format!(
+                    "ACCESS_GONE {ws}: this device no longer has access; its skills stay frozen in \
+                     place (re-adding the member re-enables them)"
+                ));
+                continue;
+            }
+            Err(PlaneError::Unreachable(m) | PlaneError::Unavailable(m)) => {
+                // Transient: keep state, retry next session — the hook must never block a session.
+                warnings.push(format!("PLANE_UNAVAILABLE {ws}: {m}"));
+                continue;
+            }
+            Err(PlaneError::Malformed(m)) => {
+                warnings.push(format!("WIRE_INVALID {ws}: {m}"));
+                continue;
+            }
+        };
+        proposals_awaiting = proposals_awaiting
+            .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
+
+        let mut delivered_ids: HashSet<&str> = HashSet::with_capacity(snapshot.skills.len());
+        for ds in &snapshot.skills {
+            delivered_ids.insert(ds.skill_id.as_str());
+            let entry = followed.iter().find(|(id, _)| *id == ds.skill_id);
+            let row = match entry {
+                // A locally-frozen entry (an explicit local unfollow this plane still delivers —
+                // the legacy local-only verb, or a freeze this sweep applied earlier): respect the
+                // freeze, exactly as the bare sweep skips a `following = false` entry. The server
+                // rows are the subscription truth; re-attaching is `follow`'s move, never a silent
+                // sweep flip.
+                Some((_, f)) if !f.following => continue,
+                Some((_, f)) => sync_delivered(ctx, &ws, ds, f),
+                None => install_new_arrival(ctx, &ws, ds),
+            };
+            match row {
+                Ok(mut row) => {
+                    row.workspace_id = Some(ws.clone());
+                    skills.push(row);
+                }
+                Err(e) => note_skill_failure(ctx, &mut warnings, &ds.skill_id, &e),
+            }
+        }
+
+        // The undelivered remainder: who acted decides the on-disk consequence.
+        let detached: HashSet<&str> = snapshot.detached.iter().map(String::as_str).collect();
+        for (skill_id, follow) in followed
+            .iter()
+            .filter(|(id, f)| f.workspace_id == ws && f.following && !delivered_ids.contains(id.as_str()))
+        {
+            let _ = follow;
+            let sid = match SkillId::parse(skill_id) {
+                Ok(sid) => sid,
+                Err(e) => {
+                    note_skill_failure(ctx, &mut warnings, skill_id, &e);
+                    continue;
+                }
+            };
+            let row = if detached.contains(skill_id.as_str()) {
+                freeze_detached(ctx, &sid)
+            } else {
+                withdraw_upstream(ctx, &sid)
+            };
+            match row {
+                Ok(mut row) => {
+                    row.workspace_id = Some(ws.clone());
+                    skills.push(row);
+                }
+                Err(e) => note_skill_failure(ctx, &mut warnings, skill_id, &e),
+            }
+        }
+
+        // The applied-state report — the fleet page's truth, POST-reconcile (the acceptance bar:
+        // after an update, the fleet reflects applied versions). Best-effort: a failure warns.
+        match applied_snapshot(ctx, &ws) {
+            Ok(applied) => {
+                if let Err(e) = delivery.report_applied(&ws, &applied) {
+                    let m = match e {
+                        PlaneError::NotFound => "access gone".to_owned(),
+                        PlaneError::Unreachable(m)
+                        | PlaneError::Unavailable(m)
+                        | PlaneError::Malformed(m) => m,
+                    };
+                    warnings.push(format!("REPORT_FAILED {ws}: {m}"));
+                }
+            }
+            Err(e) => warnings.push(format!("REPORT_FAILED {ws}: {}", e.detail())),
+        }
+    }
+
+    Ok(PullOutcome {
+        data: PullData {
+            skills,
+            proposals_awaiting,
+        },
+        warnings,
+    })
+}
+
+/// Sync one already-followed delivered skill, feeding the engine the delivery's resolved target
+/// (no second pointer GET) and the FRESH per-bundle protection posture (the stored doc's flag may
+/// lag; the runtime context never does).
+fn sync_delivered(
+    ctx: &Ctx<'_>,
+    ws: &str,
+    ds: &DeliverySkill,
+    follow: &FollowContext,
+) -> Result<PullSkill, ClientError> {
+    let sid = SkillId::parse(&ds.skill_id)?;
+    let follow = FollowContext {
+        review_required: ds.review_required,
+        ..follow.clone()
+    };
+    let rec = delivered_record(ws, ds);
+    sync_engine::sync_one_with(ctx, &sid, &follow, sync_engine::Invocation::Sweep, Some(&rec))
+}
+
+/// A brand-new delivered skill this device has never held: record the follow entry (person-scoped
+/// truth lives on the plane; the local entry is install-state), lay the first-receive baseline
+/// under the skill's CATALOG name, and run the engine — whose kernel consent OFFERS the first
+/// bytes (I-TOFU), never silently lands them.
+fn install_new_arrival(ctx: &Ctx<'_>, ws: &str, ds: &DeliverySkill) -> Result<PullSkill, ClientError> {
+    let sid = SkillId::parse(&ds.skill_id)?;
+    enroll::write_follows_merged(
+        ctx.fs,
+        &ctx.layout,
+        &[FollowEntry {
+            skill_id: ds.skill_id.clone(),
+            workspace_id: ws.to_owned(),
+            mode: FollowModeDoc::Auto,
+            review_required: ds.review_required,
+            following: true,
+        }],
+    )?;
+    super::follow::lay_first_receive_baseline(ctx, &sid, ds.name.clone(), ws)?;
+    let follow = FollowContext {
+        workspace_id: ws.to_owned(),
+        mode: FollowMode::Auto,
+        review_required: ds.review_required,
+        following: true,
+    };
+    let rec = delivered_record(ws, ds);
+    sync_engine::sync_one_with(ctx, &sid, &follow, sync_engine::Invocation::Sweep, Some(&rec))
+}
+
+/// The wire pointer record a delivery row resolves to — the engine's sync target (scope-checked
+/// there like any served pointer; integrity stays the content-addressed version id, re-verified by
+/// digest on apply).
+fn delivered_record(ws: &str, ds: &DeliverySkill) -> WireCurrentRecord {
+    WireCurrentRecord {
+        schema_version: WIRE_SCHEMA_VERSION,
+        scope: PointerScope {
+            workspace_id: ws.to_owned(),
+            skill_id: ds.skill_id.clone(),
+        },
+        record: CurrentRecord {
+            version_id: to_hex(&ds.version_id),
+            generation: ds.generation,
+        },
+    }
+}
+
+/// The PERSON detached this skill (an unfollow, or a channel leave that lapsed it) — freeze in
+/// place: delivery ends, every byte stays exactly where it is, `follow` re-attaches.
+fn freeze_detached(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
+    let sync = read_sync(ctx, sid)?;
+    enroll::set_following(ctx.fs, &ctx.layout, sid.as_str(), false)?;
+    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Detached))
+}
+
+/// UPSTREAM withdrew this skill (archived, or its last delivering channel dropped it) — managed
+/// distribution cleans what it managed: snapshot any draft into the sidecar store first (nothing
+/// is ever lost), remove the agent dirs, keep every sidecar byte, and freeze the entry. Idempotent
+/// across a crash at any step (a re-run re-snapshots nothing, re-removes nothing, re-flips
+/// nothing).
+fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let sync: Option<SyncState>;
+    {
+        let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+        sync = doc::read_doc(ctx.fs, &sp.sync)?;
+        let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+        let map: Option<PlacementMap> = doc::read_doc(ctx.fs, &sp.map)?;
+        if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
+            // A draft delta is retained before any byte leaves the agent dir.
+            if let WorkState::Present {
+                eq_base: false,
+                scanned,
+                ..
+            } = sync_engine::compute_work(ctx, map, lock)?
+            {
+                sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
+            }
+            for placement in &map.placements {
+                let p = Path::new(placement);
+                if ctx.fs.exists(p) {
+                    ctx.fs.remove_dir_all(p)?;
+                }
+            }
+        }
+        // The skill lock drops BEFORE the identity-locked follow flip below — the promote path
+        // takes identity → skill, and holding both in the opposite order here would be an
+        // inversion.
+    }
+    enroll::set_following(ctx.fs, &ctx.layout, sid.as_str(), false)?;
+    Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
+}
+
+/// A row for a skill the sweep did NOT sync (frozen / withdrawn): last-known generations, no offer.
+fn undelivered_row(sid: &SkillId, sync: Option<&SyncState>, action: PullAction) -> PullSkill {
+    let (observed, applied) = sync.map_or(
+        (
+            topos_types::Generation { epoch: 0, seq: 0 },
+            topos_types::Generation { epoch: 0, seq: 0 },
+        ),
+        |s| (s.observed, s.applied),
+    );
+    PullSkill {
+        skill: sid.as_str().to_owned(),
+        workspace_id: None,
+        observed,
+        applied,
+        action,
+        offer: None,
+        conflict: None,
+        merge: None,
+    }
+}
+
+fn read_sync(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<SyncState>, ClientError> {
+    let sp = ctx.layout.published(sid);
+    doc::read_doc(ctx.fs, &sp.sync)
+}
+
+/// What this device HOLDS after the reconcile, per followed skill of `ws`: the materialized
+/// version from `map.json` (the honest "applied"; an offered-but-unaccepted first receive has
+/// none and is skipped). Read-only.
+fn applied_snapshot(ctx: &Ctx<'_>, ws: &str) -> Result<Vec<(String, [u8; 32])>, ClientError> {
+    let mut out = Vec::new();
+    for (skill_id, follow) in ctx.follow.followed() {
+        if follow.workspace_id != ws || !follow.following {
+            continue;
+        }
+        let Ok(sid) = SkillId::parse(&skill_id) else {
+            continue;
+        };
+        let sp = ctx.layout.published(&sid);
+        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)? else {
+            continue;
+        };
+        if let Ok(commit) = super::parse_hex32(&map.applied_commit)
+            && commit != [0u8; 32]
+        {
+            out.push((skill_id, commit));
+        }
+    }
+    Ok(out)
 }
 
 /// One isolated per-skill failure as a stable, machine-parseable envelope warning:

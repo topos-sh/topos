@@ -892,6 +892,14 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
                 Vec::new(),
             )
         }
+        PullAction::Withdrawn => (
+            String::from("withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally"),
+            Vec::new(),
+        ),
+        PullAction::Detached => (
+            String::from("detached (you unfollowed) — frozen in place; `topos follow` re-attaches"),
+            Vec::new(),
+        ),
         PullAction::Diverged => {
             let v = s
                 .conflict

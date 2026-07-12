@@ -85,6 +85,23 @@ pub(crate) fn sync_one(
     follow: &FollowContext,
     inv: Invocation,
 ) -> Result<PullSkill, ClientError> {
+    sync_one_with(ctx, skill_id, follow, inv, None)
+}
+
+/// [`sync_one`] with an already-resolved sync target — the delivery-driven reconcile's entry: the
+/// per-workspace delivery answered "what should this device have" in ONE call, so the per-skill
+/// pointer GET is skipped and the served `(generation, version_id)` is adopted directly. `None`
+/// keeps the conditional per-skill GET (the targeted-pull path). Everything downstream — the scope
+/// check, the four-state plan, fetch + re-verify, consent, materialization — is identical: the
+/// target's integrity story is the content-addressed version id re-verified by digest on apply,
+/// however the pointer arrived.
+pub(crate) fn sync_one_with(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    follow: &FollowContext,
+    inv: Invocation,
+    target: Option<&topos_types::WireCurrentRecord>,
+) -> Result<PullSkill, ClientError> {
     let explicit = inv.is_explicit();
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
@@ -133,7 +150,13 @@ pub(crate) fn sync_one(
     let mut raised = false;
 
     // ---- checkForUpdates ----
-    match ctx.plane.get_current(skill_id, known) {
+    let fetched = match target {
+        // The delivery already answered for this workspace — no per-skill GET, no conditional
+        // validator needed (the snapshot is fresher than any cache header).
+        Some(rec) => Ok(PointerFetch::Record(rec.clone())),
+        None => ctx.plane.get_current(skill_id, known),
+    };
+    match fetched {
         Ok(PointerFetch::NotModified) => {}
         Ok(PointerFetch::Record(rec)) => {
             // Scope-check the served record (a mis-scoped record is a malformed response, not the target).

@@ -434,16 +434,7 @@ fn enrolled_publish(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec)?;
-    let mut outcome = map_outcome(
-        ctx,
-        &sp,
-        &lock,
-        &map,
-        &rec,
-        &receipt,
-        skill_name,
-        &digest_hex,
-    )?;
+    let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name)?;
 
     // First-publish invite fold: a GENESIS publish (no prior `current`) also mints a shareable `/i/` link
     // pre-offering the just-published skill, so a first publish stands up a door to it. BEST-EFFORT +
@@ -1000,7 +991,6 @@ fn map_outcome(
     rec: &OpRecord,
     receipt: &WriteReceipt,
     skill_name: &str,
-    digest: &str,
 ) -> Result<PublishOutcome, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {

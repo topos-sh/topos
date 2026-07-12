@@ -74,6 +74,13 @@ pub enum PullAction {
     Conflicted,
     /// A transient local hold (e.g. a local go-back is pinned).
     Held,
+    /// UPSTREAM withdrew the skill (archived, or its last delivering channel dropped it): the agent
+    /// dirs were cleaned; the sidecar keeps the bytes + any draft delta ("keep it as yours" is a
+    /// narration away).
+    Withdrawn,
+    /// The PERSON detached the skill (an unfollow, or a channel leave that lapsed it) on some
+    /// device: this copy froze in place — bytes untouched, delivery ended.
+    Detached,
 }
 
 /// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the

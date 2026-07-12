@@ -761,7 +761,7 @@ pub(super) fn promote_core(
 /// `lock` (the name + zero base/digest, no files), and a `map` carrying the harness placement target (so
 /// the existing apply path can first-install there) but no applied content. Idempotent: a skill dir that
 /// already exists (already baselined, or received) is left untouched — `follow` never clobbers bytes.
-fn lay_first_receive_baseline(
+pub(crate) fn lay_first_receive_baseline(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     name: String,
