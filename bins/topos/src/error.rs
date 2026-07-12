@@ -169,10 +169,6 @@ pub(crate) enum ClientError {
         expected: String,
         got: String,
     },
-    /// A direct `publish` under `review-required`: the plane refused it closed (`APPROVAL_REQUIRED`),
-    /// ingesting nothing. The agent re-runs it as `publish --propose` (NEVER an auto-flip).
-    #[error("this workspace requires review; re-run as `publish --propose`")]
-    ApprovalRequired { skill: String, digest: String },
     /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
     /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
     #[error("the team moved past your base; pull to rebase, then retry")]
@@ -331,7 +327,6 @@ impl ClientError {
             ClientError::Plane(_) => "PLANE_ERROR",
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
-            ClientError::ApprovalRequired { .. } => "APPROVAL_REQUIRED",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",
             // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
@@ -389,7 +384,6 @@ impl ClientError {
             },
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
-            ClientError::ApprovalRequired { .. } => TerminalOutcome::ApprovalRequired,
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
             ClientError::Denied(_) | ClientError::RedeemDenied { .. } => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,

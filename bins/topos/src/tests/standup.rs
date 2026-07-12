@@ -394,6 +394,7 @@ fn run_publish(
         target,
         propose,
         None,
+        None,
     )
 }
 
@@ -665,6 +666,7 @@ fn unenrolled_propose_keeps_the_typed_error_and_never_touches_the_network() {
         &approve,
         true,
         None,
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, ClientError::Enrollment(_)), "got {err:?}");
@@ -709,6 +711,7 @@ fn an_enrolled_device_never_hits_the_standup_branch() {
         None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
+        None,
         None,
     )
     .unwrap_err();
@@ -1094,6 +1097,7 @@ fn a_crash_between_instance_and_user_json_recovers_on_the_next_publish() {
         None, // roots — already-tracked skill, no auto-add
         &approve,
         false,
+        None,
         None,
     )
     .expect("the torn promotion heals and the genesis publish lands");

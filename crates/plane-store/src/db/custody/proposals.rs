@@ -23,6 +23,10 @@ pub(crate) enum ProposalStatus {
     Open,
     Accepted,
     Rejected,
+    /// Circumstantially closed — no human verdict: the skill was archived, or a version the
+    /// proposal rests on was purged (the reason lives in `resolved_reason`). Written only by the
+    /// lifecycle policy functions; the review paths treat it as already-resolved.
+    Closed,
 }
 
 impl ProposalStatus {
@@ -32,6 +36,7 @@ impl ProposalStatus {
             ProposalStatus::Open => "open",
             ProposalStatus::Accepted => "accepted",
             ProposalStatus::Rejected => "rejected",
+            ProposalStatus::Closed => "closed",
         }
     }
 }
@@ -456,6 +461,26 @@ pub(super) async fn resolve_proposal(
     }
 }
 
+/// The proposal's author (for the verdict notice), by row id. `None` if the row vanished (it never
+/// does — proposals transition status, they are not deleted; the caller treats absence as no-notice).
+pub(super) async fn proposal_proposer(
+    tx: &mut Transaction<'_, Postgres>,
+    ws: &WorkspaceId,
+    id: &str,
+) -> Result<Option<Principal>> {
+    let ws_s = ws.as_str();
+    let row = sqlx::query!(
+        r#"SELECT proposer AS "proposer!" FROM proposals WHERE workspace_id = $1 AND id = $2"#,
+        ws_s,
+        id,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    row.map(|r| Principal::parse(&r.proposer).map_err(AuthorityError::integrity))
+        .transpose()
+}
+
 /// Transition a proposal's stored status (`open → accepted | rejected`), stamping the resolving principal,
 /// the resolution time, and — on a session reject — the mandatory reason (`None` everywhere else: an
 /// accept has no reason field, and device rejects deliberately carry none).
@@ -523,6 +548,7 @@ fn parse_status(s: &str) -> Result<ProposalStatus> {
         "open" => Ok(ProposalStatus::Open),
         "accepted" => Ok(ProposalStatus::Accepted),
         "rejected" => Ok(ProposalStatus::Rejected),
+        "closed" => Ok(ProposalStatus::Closed),
         _ => Err(AuthorityError::integrity(BadProposalStatus)),
     }
 }

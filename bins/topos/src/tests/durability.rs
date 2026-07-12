@@ -312,6 +312,7 @@ fn migration_dispatch_is_fail_closed() {
         good: None,
         // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
         display_name: Some("deploy-helper".to_owned()),
+        channel: Some("ops".to_owned()),
         last_receipt: None,
     });
 }

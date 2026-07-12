@@ -14,7 +14,7 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::error::Result;
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{CommitId, Principal, SkillId, WorkspaceId};
 
 /// A device resolved from its presented workspace credential — the registry row's facts.
 #[derive(Debug, Clone)]
@@ -43,10 +43,88 @@ pub(crate) enum SessionWriteGate {
     Unproven,
 }
 
+/// A confirmed member's role band, as custody consumes it (the string vocabulary stays on the
+/// directory side). The bands decide who a protection gate downgrades: a `Member`'s direct publish
+/// on a reviewed bundle becomes a proposal; `Reviewer`/`Owner` land directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActorRole {
+    Member,
+    Reviewer,
+    Owner,
+}
+
+impl ActorRole {
+    /// Whether this role lands directly on a `reviewed` bundle (the protected-branch model:
+    /// reviewers and owners bypass the downgrade; members' publishes become proposals).
+    pub(crate) fn lands_on_reviewed(self) -> bool {
+        matches!(self, Self::Reviewer | Self::Owner)
+    }
+}
+
+/// The catalog's answer for a skill a write is about to touch: its lifecycle status + the resolved
+/// per-bundle protection (the per-bundle pin, else the workspace default — the cascade lives on the
+/// directory side; custody sees only the resolved boolean).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillGate {
+    /// No catalog row yet — a genesis, or a pre-catalog seeded pointer (the registration below
+    /// self-heals it). The workspace default still answers the protection question.
+    Missing { reviewed: bool },
+    /// In circulation.
+    Active { reviewed: bool },
+    /// Archived — out of circulation, not out of history: every pointer write is refused typed.
+    Archived,
+    /// Deleted — a tombstone; every pointer write is refused typed.
+    Deleted,
+}
+
+impl SkillGate {
+    /// The resolved protection for gating a write (archived/deleted never reach the gate — their
+    /// arms refuse first).
+    pub(crate) fn reviewed(self) -> bool {
+        match self {
+            Self::Missing { reviewed } | Self::Active { reviewed } => reviewed,
+            Self::Archived | Self::Deleted => false,
+        }
+    }
+}
+
+/// The outcome of placing a skill reference into a channel (`publish --to`, or the `everyone`
+/// default at genesis) — the directory's curation policy, answered for the receipt's detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlacementDecision {
+    /// Placed into the existing channel.
+    Placed { channel: String },
+    /// The channel did not exist; created (member-level self-serve) and placed.
+    Created { channel: String },
+    /// The channel is `curated` and the actor's role is below reviewer — the placement is refused;
+    /// the publish itself still stands (the channel mode gates curation independently of the
+    /// version gate).
+    RoleDenied { channel: String },
+    /// The channel name violates the charset (placement refused; the publish stands).
+    BadName { channel: String },
+}
+
+/// The outcome of registering a skill in the catalog at its first publish (or self-healing a
+/// pre-catalog pointer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GenesisRegistration {
+    /// Registered (or already present) under this catalog name; the placement decision for the
+    /// requested channel (or the `everyone` default) rides along.
+    Registered {
+        name: String,
+        placement: PlacementDecision,
+    },
+    /// The derived name is already taken by a DIFFERENT skill — the publish is refused typed (two
+    /// identities cannot share one name; the author renames their folder or follows the existing
+    /// skill).
+    NameTaken { name: String },
+}
+
 /// The directory's answers to custody's access questions. Implemented by the directory over its own
-/// tables; consumed by custody's transactions and read paths. Every method is a QUESTION (or, for
-/// [`seat_roster`](Self::seat_roster), the one directory write the genesis pointer-move must make
-/// atomically) — policy semantics stay on the directory side of the seam.
+/// tables; consumed by custody's transactions and read paths. Every method is a QUESTION or one of
+/// the few directory writes the pointer-move must make atomically (catalog registration, channel
+/// placement, the advisory display name, verdict notices) — policy semantics stay on the directory
+/// side of the seam.
 pub(crate) trait AccessWitness {
     /// Resolve a presented workspace credential (by its sha256) to its registry row, inside the live
     /// transaction. The lookup IS the authentication. `None` ⇒ no such credential (an unknown
@@ -59,14 +137,24 @@ pub(crate) trait AccessWitness {
         credential_sha256: &[u8; 32],
     ) -> Result<Option<DeviceIdentity>>;
 
-    /// Whether the principal is a CONFIRMED workspace member — the device lane's write gate (and the
-    /// genesis-standup gate): membership is the ONE authorization predicate on every lane.
+    /// Whether the principal is a CONFIRMED workspace member — the reject transaction's write gate
+    /// (and the standup doors'): membership is the ONE authorization predicate on every lane.
     async fn confirmed_member(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
         principal: &Principal,
     ) -> Result<bool>;
+
+    /// The principal's confirmed role band, or `None` for no confirmed seat — the device lane's
+    /// write gate AND the protection gate's input (a reviewer's direct publish lands on a reviewed
+    /// bundle; a member's downgrades to a proposal).
+    async fn member_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        principal: &Principal,
+    ) -> Result<Option<ActorRole>>;
 
     /// The session lane's write gate — the directory's role matrix, answered as the three-way outcome
     /// custody's receipt discipline needs (who may review/revert; who is entitled to a durable typed
@@ -78,23 +166,70 @@ pub(crate) trait AccessWitness {
         principal: &Principal,
     ) -> Result<SessionWriteGate>;
 
-    /// Whether the workspace's review-required policy is on (read inside the transaction — the
-    /// authoritative read; any preflight read is advisory).
-    async fn review_required(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ws: &WorkspaceId,
-    ) -> Result<bool>;
-
-    /// Seat the principal on the skill's roster — the genesis self-seat, the ONE directory write the
-    /// pointer-move performs (atomically with the genesis pointer, so no orphan row can outlive a
-    /// rolled-back genesis). Idempotent.
-    async fn seat_roster(
+    /// The skill's catalog gate: lifecycle status + resolved protection (per-bundle pin, else the
+    /// workspace default), read inside the transaction — the authoritative policy read for the
+    /// downgrade decision, the four-eyes trigger, and the archived/deleted refusals.
+    async fn skill_gate(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
         skill: &SkillId,
-        principal: &Principal,
+    ) -> Result<SkillGate>;
+
+    /// Register a skill in the catalog at its first publish — the genesis directory writes, atomic
+    /// with the pointer: the catalog row (name minted from the advisory display name, else the skill
+    /// id), the structural `everyone` channel, the placement (the requested `--to` channel, else
+    /// `everyone`), and the author's self-follow (an author follows what they create). Idempotent
+    /// for an existing registration (then only the placement/display-name halves apply).
+    #[allow(clippy::too_many_arguments)]
+    async fn register_publish(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        display_name: Option<&str>,
+        author: &Principal,
+        to_channel: Option<&str>,
+        created_at: &str,
+    ) -> Result<GenesisRegistration>;
+
+    /// Place a skill reference into a channel (`publish --to` on an already-registered skill) —
+    /// creating the channel on first use; the channel's mode gates it (open → member, curated →
+    /// reviewer+), independently of the version gate.
+    async fn place_skill(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        channel: &str,
+        actor: &Principal,
+        created_at: &str,
+    ) -> Result<PlacementDecision>;
+
+    /// Record the skill's advisory display name on the catalog (last-writer-wins among writers that
+    /// express one; never part of any digest).
+    async fn set_display_name(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        display_name: &str,
+    ) -> Result<()>;
+
+    /// Emit a person-scoped verdict notice (approve/reject carrying its reason) to the proposal's
+    /// author — written inside the deciding transaction so a verdict and its notice commit together.
+    #[allow(clippy::too_many_arguments)]
+    async fn notify_verdict(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        version: CommitId,
+        recipient: &Principal,
+        outcome: &str,
+        reason: Option<&str>,
+        actor: &Principal,
+        created_at: &str,
     ) -> Result<()>;
 
     /// The pool-level principal gate for reads — a CONFIRMED `workspace_member` row exists. The gate

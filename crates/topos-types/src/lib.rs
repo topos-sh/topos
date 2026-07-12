@@ -96,10 +96,8 @@ pub struct JsonEnvelope {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TerminalOutcome {
     Ok,
-    /// A direct `publish` under `review-required`: refused, uploads/opens **nothing**, carries the
-    /// `publish --propose` next-action.
-    ApprovalRequired,
-    /// Returned only for a successfully-opened proposal (an explicit `--propose`).
+    /// A successfully-opened proposal — an explicit `--propose`, or a direct publish/revert the
+    /// per-bundle protection DOWNGRADED to one (the receipt's `details.downgraded` says which).
     NeedsReview,
     Conflict,
     Diverged,
@@ -530,10 +528,6 @@ mod tests {
 
     #[test]
     fn terminal_outcome_is_screaming_snake() {
-        assert_eq!(
-            serde_json::to_string(&TerminalOutcome::ApprovalRequired).unwrap(),
-            "\"APPROVAL_REQUIRED\""
-        );
         assert_eq!(
             serde_json::to_string(&TerminalOutcome::AmbiguousName).unwrap(),
             "\"AMBIGUOUS_NAME\""

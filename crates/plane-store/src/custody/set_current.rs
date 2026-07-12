@@ -137,9 +137,12 @@ pub(crate) struct PromoteInput<'a> {
     pub candidate_bundle_digest: [u8; 32],
     pub parents: &'a [CommitId],
     pub object_ids: &'a [ObjectId],
-    /// The skill's advisory display name to record on a pointer move (`None` ⇒ keep any existing name).
-    /// UNSIGNED — it is never in the device-op preimage or the bundle digest; only the `current` upsert reads it.
+    /// The skill's advisory display name (`None` ⇒ keep any existing name). UNSIGNED — never in the
+    /// device-op preimage or the bundle digest; recorded on the CATALOG row (and, at a genesis, it
+    /// seeds the catalog name).
     pub display_name: Option<&'a str>,
+    /// The `--to` channel placement (`None` ⇒ no explicit placement; a genesis defaults to `everyone`).
+    pub channel: Option<&'a str>,
     pub created_at: &'a str,
     pub now: i64,
 }
@@ -160,6 +163,7 @@ pub(crate) async fn publish(
     staged: &StagedCandidate,
     device: &DeviceOpRequest,
     display_name: Option<&str>,
+    channel: Option<&str>,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
@@ -182,6 +186,7 @@ pub(crate) async fn publish(
             parents: &staged.parents,
             object_ids: &object_ids,
             display_name,
+            channel,
         },
         WriteActor::Device {
             credential_sha256: device.credential_sha256,
@@ -419,8 +424,9 @@ pub(crate) async fn revert(
             bundle_digest: good_digest,
             parents: &parents,
             object_ids: &object_ids,
-            // A revert restores prior bytes; it never renames the skill — keep any existing display name.
+            // A revert restores prior bytes; it never renames or re-places the skill.
             display_name: None,
+            channel: None,
         },
         actor,
         DeviceOp::Revert,
@@ -462,6 +468,7 @@ pub(crate) async fn propose(
     staged: &StagedCandidate,
     device: &DeviceOpRequest,
     display_name: Option<&str>,
+    channel: Option<&str>,
     created_at: &str,
     now: i64,
 ) -> Result<SetCurrentReceipt> {
@@ -480,8 +487,8 @@ pub(crate) async fn propose(
             bundle_digest: staged.bundle_digest,
             parents: &staged.parents,
             object_ids: &object_ids,
-            // Carried for symmetry; a propose moves no pointer, so the `run` propose arm records no name.
             display_name,
+            channel,
         },
         WriteActor::Device {
             credential_sha256: device.credential_sha256,
@@ -616,8 +623,9 @@ pub(crate) async fn review_approve(
         candidate_bundle_digest: digest,
         parents: std::slice::from_ref(&inputs.base_commit),
         object_ids: &inputs.object_ids,
-        // An approve promotes already-reviewed bytes; it carries no rename — keep any existing display name.
+        // An approve promotes already-reviewed bytes; it carries no rename and no placement.
         display_name: None,
+        channel: None,
         created_at,
         now,
     };
@@ -790,8 +798,10 @@ struct Candidate<'a> {
     bundle_digest: [u8; 32],
     parents: &'a [CommitId],
     object_ids: &'a [ObjectId],
-    /// The skill's advisory display name to record on a pointer move (`None` ⇒ keep any existing name).
+    /// The skill's advisory display name (`None` ⇒ keep any existing name).
     display_name: Option<&'a str>,
+    /// The `--to` channel placement (`None` ⇒ no explicit placement).
+    channel: Option<&'a str>,
 }
 
 /// The shared driver: bridge the op id, render-verify the migrated candidate (a pre-transaction filesystem
@@ -849,99 +859,11 @@ async fn drive(
         parents: cand.parents,
         object_ids: cand.object_ids,
         display_name: cand.display_name,
+        channel: cand.channel,
         created_at,
         now,
     };
     authority.db().set_current_txn(input).await
-}
-
-/// The cheap **review-required preflight** (before any ingest): a direct publish into a `review_required`
-/// workspace short-circuits to `APPROVAL_REQUIRED` having uploaded/migrated/opened **nothing**. The
-/// in-transaction read+lock remains the authoritative source of truth (policy may flip between here and the
-/// txn). Returns `None` when the caller may proceed to ingest.
-///
-/// The acting device is already LIVE here: a revoked device is synthesized-DENIED at the shared
-/// `resolve_device_op` front door (unless it is replaying a stored receipt, which the replay probes below
-/// then serve), so this gate's durable `APPROVAL_REQUIRED` write only ever fires for a live device.
-///
-/// # Errors
-/// [`AuthorityError::Internal`] on a database fault.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn publish_preflight(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    skill: &SkillId,
-    op: DeviceOp,
-    device_key_id: &str,
-    op_id: &OpId,
-    claimed_commit: Option<CommitId>,
-    claimed_digest: Option<[u8; 32]>,
-    expected: Generation,
-    created_at: &str,
-) -> Result<Option<SetCurrentReceipt>> {
-    // Only a DIRECT publish is gated; revert + genesis are forward safety/creation moves that bypass it.
-    if !matches!(op, DeviceOp::PublishDirect) {
-        return Ok(None);
-    }
-    // A same-op-id retry must not be RE-GATED across a `review_required` flip: the gate binds `commit = None`,
-    // so re-gating an op that already terminated would mismatch its stored receipt and burn OP_ID_REUSED.
-    // (1) Replay a stored GATED outcome directly (it must not be re-ingested — a gated op's lease is released,
-    // so a re-ingest would hit LeaseNotLive; this also keeps it sticky if the policy flipped OFF). (2) Skip
-    // the gate for a stored OK so the promote path's in-txn replay (which runs BEFORE the in-txn gate) returns
-    // the original OK — safe because an OK leaves a completed (non-expiring) lease, so the re-ingest succeeds.
-    // Any other stored outcome (CONFLICT/DENIED) keeps its prior behaviour. Only a FRESH op id reaches the
-    // policy gate below. Mirrors the revert path's pre-txn replay.
-    if let Some(replayed) = authority
-        .db()
-        .replay_gated_publish(ws, device_key_id, op_id.as_str(), skill, expected)
-        .await?
-    {
-        return Ok(Some(replayed));
-    }
-    if authority
-        .db()
-        .published_ok_exists(ws, device_key_id, op_id.as_str())
-        .await?
-    {
-        return Ok(None);
-    }
-    if !authority.db().workspace_review_required(ws).await? {
-        return Ok(None);
-    }
-    // Genesis (no current pointer yet) bypasses the gate — someone must create the first version, and it
-    // cannot be proposed against a base that does not exist. (Matches the in-txn genesis branch, which
-    // returns before the gate.) A cheap read, still well before any ingest.
-    if authority
-        .db()
-        .read_current_commit(ws, skill)
-        .await?
-        .is_none()
-    {
-        return Ok(None);
-    }
-    // This gated receipt binds `commit/digest = None` (nothing is ingested yet), whereas the promote path
-    // binds `commit = Some(candidate)`. A single op id that took the promote on one attempt and this preflight
-    // on another would see those bound identities disagree and burn as OP_ID_REUSED. That split requires
-    // `review_required` to FLIP between attempts — now possible (the set-policy surface exists), so the retry
-    // guards above keep it consistent: a stored gated receipt is replayed before the policy is re-read, and a
-    // stored OK skips this gate (its in-txn replay returns it). Only a fresh op id ever reaches this line.
-    let receipt = authority
-        .db()
-        .record_pretxn(pretxn(
-            ws,
-            device_key_id,
-            op_id.as_str(),
-            device_op_command(op),
-            skill,
-            claimed_commit,
-            claimed_digest,
-            expected,
-            TerminalOutcome::ApprovalRequired,
-            detail_msg("direct publish under review-required; re-run as a proposal"),
-            created_at,
-        ))
-        .await?;
-    Ok(Some(receipt))
 }
 
 /// A pre-transaction terminal outcome to record (idempotently) by the outer orchestration — every pre-txn

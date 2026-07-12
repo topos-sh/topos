@@ -81,11 +81,11 @@ impl Db {
         }
     }
 
-    /// The skills an invite offers (with optional display names). The display name PREFERS the skill's live
-    /// `current.display_name` (the author's folder name, the authoritative human label) and falls back to
-    /// the name carried on the invite — so an offer reflects the latest published name, and yields `None`
-    /// only when a skill has neither. The LEFT JOIN keeps a skill with no `current` (never published) in the
-    /// offer with a `NULL` display name.
+    /// The skills an invite offers (with optional display names). The display name PREFERS the skill's
+    /// live catalog label (display name, else the catalog name — the authoritative human labels) and
+    /// falls back to the name carried on the invite — so an offer reflects the latest published name,
+    /// and yields `None` only when a skill has none anywhere. The LEFT JOIN keeps a skill with no
+    /// catalog row (never published) in the offer with a `NULL` display name.
     pub(crate) async fn read_invite_skills(
         &self,
         token_sha256: &[u8; 32],
@@ -93,10 +93,10 @@ impl Db {
         let key = token_sha256.as_slice();
         let rows = sqlx::query!(
             r#"SELECT isk.skill_id AS "skill_id!",
-                      COALESCE(c.display_name, isk.name) AS "name?"
+                      COALESCE(cat.display_name, cat.name, isk.name) AS "name?"
                FROM invite_skill isk
                JOIN invites i ON i.token_sha256 = isk.token_sha256
-               LEFT JOIN current c ON c.workspace_id = i.workspace_id AND c.skill_id = isk.skill_id
+               LEFT JOIN catalog cat ON cat.workspace_id = i.workspace_id AND cat.skill_id = isk.skill_id
                WHERE isk.token_sha256 = $1
                ORDER BY isk.skill_id"#,
             key,

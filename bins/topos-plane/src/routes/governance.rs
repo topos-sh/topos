@@ -50,7 +50,7 @@ pub(crate) async fn create_invite(
     let skills = parse_invite_skills(req.skills)?;
     // An omitted role defaults to `member`.
     let role = role_or_default(req.role);
-    let (created_at, _now) = wire::now_utc();
+    let (created_at, now) = wire::now_utc();
     let request = GovernanceRequest {
         credential,
         op: GovernanceOp::Invite {
@@ -63,7 +63,7 @@ pub(crate) async fn create_invite(
     };
     let outcome = state
         .authority()
-        .create_invite(&ws, &req.op_id, request, &created_at)
+        .create_invite(&ws, &req.op_id, request, &created_at, now)
         .await?;
     Ok((StatusCode::OK, Json(map::invite_envelope(outcome))).into_response())
 }
@@ -96,7 +96,7 @@ pub(crate) async fn roster_set(
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let target = parse_target(&email)?;
-    let (created_at, _now) = wire::now_utc();
+    let (created_at, now) = wire::now_utc();
     let request = GovernanceRequest {
         credential,
         op: GovernanceOp::RosterSet {
@@ -106,7 +106,7 @@ pub(crate) async fn roster_set(
     };
     let outcome = state
         .authority()
-        .roster_set(&ws, &req.op_id, request, &created_at)
+        .roster_set(&ws, &req.op_id, request, &created_at, now)
         .await?;
     Ok((
         StatusCode::OK,
@@ -146,14 +146,14 @@ pub(crate) async fn roster_remove(
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let target = parse_target(&email)?;
-    let (created_at, _now) = wire::now_utc();
+    let (created_at, now) = wire::now_utc();
     let request = GovernanceRequest {
         credential,
         op: GovernanceOp::RosterRemove { target },
     };
     let outcome = state
         .authority()
-        .roster_remove(&ws, &req.op_id, request, &created_at)
+        .roster_remove(&ws, &req.op_id, request, &created_at, now)
         .await?;
     Ok((
         StatusCode::OK,
@@ -191,7 +191,7 @@ pub(crate) async fn revoke_device(
     let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-    let (created_at, _now) = wire::now_utc();
+    let (created_at, now) = wire::now_utc();
     let request = GovernanceRequest {
         credential,
         op: GovernanceOp::DeviceRevoke {
@@ -200,7 +200,7 @@ pub(crate) async fn revoke_device(
     };
     let outcome = state
         .authority()
-        .revoke_device(&ws, &req.op_id, request, &created_at)
+        .revoke_device(&ws, &req.op_id, request, &created_at, now)
         .await?;
     Ok((
         StatusCode::OK,

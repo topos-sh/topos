@@ -270,6 +270,10 @@ pub struct OpRecord {
     /// entry, never the digest or the op's bound identity. `None` for a revert/review and for pre-existing WALs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The `--to` channel placement sent alongside a publish/propose so a replay re-sends the identical
+    /// value. `None` when no placement was requested (and for a revert/review and pre-existing WALs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

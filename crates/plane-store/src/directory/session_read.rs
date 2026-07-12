@@ -39,13 +39,19 @@ use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 #[derive(Debug, Clone)]
 pub struct SkillIndexRow {
     pub skill_id: String,
+    /// The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id).
+    pub name: String,
+    /// The catalog lifecycle status (`active` / `archived`; a deleted skill's `current` row is gone).
+    /// Delivery excludes archived skills; the index deliberately still lists them (history is
+    /// inspectable, and the dashboard names the state).
+    pub status: String,
     pub version_id: [u8; 32],
     pub generation: Generation,
     /// Epoch **milliseconds** (the server clock unit) of the last pointer move.
     pub updated_at: i64,
     pub bundle_digest: [u8; 32],
-    /// The skill's UNSIGNED advisory display name (the author's folder name), or `None` (show the skill
-    /// id). Display only — never part of the digest or any signature.
+    /// The skill's UNSIGNED advisory display name (the author's folder name), or `None` (show the
+    /// name). Display only — never part of the digest or any signature.
     pub display_name: Option<String>,
     pub open_proposals: u64,
 }
@@ -103,6 +109,8 @@ async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Ve
         generation,
         updated_at,
         bundle_digest,
+        name,
+        status,
         display_name,
     } in rows
     {
@@ -111,6 +119,8 @@ async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Ve
         let skill = SkillId::parse(&skill_id).map_err(AuthorityError::integrity)?;
         let open_proposals = authority.db().open_proposal_rows(ws, &skill).await?.len() as u64;
         out.push(SkillIndexRow {
+            name: name.unwrap_or_else(|| skill_id.clone()),
+            status: status.unwrap_or_else(|| "active".to_owned()),
             skill_id,
             version_id: commit,
             generation,
@@ -287,7 +297,12 @@ pub(crate) async fn read_proposal_detail_session(
     else {
         return Ok(None);
     };
-    let review_required = authority.db().workspace_review_required(ws).await?;
+    // The disclosed policy is the PER-BUNDLE effective protection (the pin, else the workspace
+    // default) — what actually gates this proposal's approve (four-eyes) and the author's next publish.
+    let review_required = authority
+        .db()
+        .effective_protection_reviewed(ws, scope.skill())
+        .await?;
     Ok(Some(ProposalDetailSession {
         version_id: commit,
         status: row.status.as_str().to_owned(),

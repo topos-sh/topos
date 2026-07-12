@@ -207,7 +207,6 @@ fn wire_command(domain: &str) -> &str {
 fn next_actions_for(outcome: TerminalOutcome) -> Vec<NextAction> {
     let codes = match outcome {
         TerminalOutcome::Conflict => vec![ActionCode::RebaseAndRetry],
-        TerminalOutcome::ApprovalRequired => vec![ActionCode::ProposePublish],
         TerminalOutcome::Denied => vec![ActionCode::RequestAccess, ActionCode::ContactAdmin],
         TerminalOutcome::Unavailable | TerminalOutcome::RetryableFailure => vec![ActionCode::Retry],
         _ => vec![],
@@ -243,7 +242,6 @@ fn error_code(receipt: &SetCurrentReceipt) -> String {
 fn default_code(outcome: TerminalOutcome) -> &'static str {
     match outcome {
         TerminalOutcome::Ok => "OK",
-        TerminalOutcome::ApprovalRequired => "APPROVAL_REQUIRED",
         TerminalOutcome::NeedsReview => "NEEDS_REVIEW",
         TerminalOutcome::Conflict => "CONFLICT",
         TerminalOutcome::Diverged => "DIVERGED",

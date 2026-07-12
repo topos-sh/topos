@@ -488,45 +488,35 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // A direct `publish` refused under review-required: uploads/opens nothing, carries the propose argv.
-    let propose_action = NextAction {
-        code: ActionCode::ProposePublish,
-        argv: argv(&["topos", "publish", "pr-describe", "--propose"]),
-    };
-    let publish_approval_required = JsonEnvelope {
+    // A direct `publish` a protected bundle DOWNGRADED to a proposal (never a rejection): the
+    // version is safely staged as NEEDS_REVIEW and the receipt's `details.downgraded` says why the
+    // pointer did not move.
+    let publish_downgraded = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
-        ok: false,
+        ok: true,
         data: serde_json::json!({}),
         warnings: vec![],
-        next_actions: vec![propose_action.clone()],
+        next_actions: vec![],
         receipt: Some(Receipt {
             schema_version: 1,
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
             command: "publish".to_owned(),
-            outcome: TerminalOutcome::ApprovalRequired,
+            outcome: TerminalOutcome::NeedsReview,
             workspace_id: "w_demo".to_owned(),
             skill_id: Some("s_prdescribe".to_owned()),
-            version_id: None,
-            bundle_digest: None,
-            expected_generation: None,
-            current_generation: Some(Generation { epoch: 1, seq: 42 }),
-            created_at: "2026-06-25T00:00:00Z".to_owned(),
-            details: None,
-        }),
-        error: Some(WireError {
-            code: "REVIEW_REQUIRED".to_owned(),
-            outcome: TerminalOutcome::ApprovalRequired,
-            retryable: false,
-            affected: Affected {
-                skill: Some("pr-describe".to_owned()),
-                ..Default::default()
-            },
-            expected_generation: None,
+            version_id: Some(
+                "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed".to_owned(),
+            ),
+            bundle_digest: Some(
+                "89e6c98d92887913cadf06b2adb97f26cde4849b89e6c98d92887913cadf06b2".to_owned(),
+            ),
+            expected_generation: Some(Generation { epoch: 1, seq: 42 }),
             current_generation: None,
-            context: serde_json::json!({}),
-            next_actions: vec![propose_action],
+            created_at: "2026-06-25T00:00:00Z".to_owned(),
+            details: Some(serde_json::json!({ "downgraded": true })),
         }),
+        error: None,
     };
 
     // A publish that lost the race — the team moved current; rebase and retry.
@@ -647,10 +637,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),
-        (
-            "json/publish.approval-required",
-            emit_json(&publish_approval_required),
-        ),
+        ("json/publish.downgraded", emit_json(&publish_downgraded)),
         ("json/publish.conflict", emit_json(&publish_conflict)),
         ("json/publish.pending", emit_json(&publish_pending)),
         ("json/follow.claim.ok", emit_json(&follow_claim_ok)),

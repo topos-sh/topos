@@ -164,7 +164,7 @@ impl PlaneState {
                 reason: "role must be member or reviewer".to_owned(),
             });
         };
-        let (created_at, _now) = wire::now_utc();
+        let (created_at, now) = wire::now_utc();
         let outcome = self
             .authority()
             .invite_members_session(
@@ -175,6 +175,7 @@ impl PlaneState {
                 role,
                 mode,
                 &created_at,
+                now,
             )
             .await
             .map_err(|error| anyhow::anyhow!("inviting members: {error}"))?;
@@ -215,7 +216,7 @@ impl PlaneState {
                 reason: "invalid workspace id".to_owned(),
             });
         };
-        let (created_at, _now) = wire::now_utc();
+        let (created_at, now) = wire::now_utc();
         let outcome = self
             .authority()
             .roster_remove_session(
@@ -225,6 +226,7 @@ impl PlaneState {
                 target_email,
                 mode,
                 &created_at,
+                now,
             )
             .await
             .map_err(|error| anyhow::anyhow!("removing the member: {error}"))?;
@@ -255,10 +257,10 @@ impl PlaneState {
                 reason: "invalid workspace id".to_owned(),
             });
         };
-        let (created_at, _now) = wire::now_utc();
+        let (created_at, now) = wire::now_utc();
         let outcome = self
             .authority()
-            .rotate_join_link_session(&ws, request_id, acting_email, mode, &created_at)
+            .rotate_join_link_session(&ws, request_id, acting_email, mode, &created_at, now)
             .await
             .map_err(|error| anyhow::anyhow!("rotating the join link: {error}"))?;
         Ok(match outcome {

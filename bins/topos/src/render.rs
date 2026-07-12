@@ -72,19 +72,6 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
-        // The plane refused a direct publish under review-required — the agent re-runs it as a proposal.
-        // The CLIENT fills the executable argv (the plane sends an empty one — it doesn't know the local
-        // skill name); the `<skill>@<digest>` positional pin re-binds the same bytes; never an auto-flip.
-        ClientError::ApprovalRequired { skill, digest } => vec![NextAction {
-            code: ActionCode::ProposePublish,
-            argv: vec![
-                "topos".into(),
-                "publish".into(),
-                "--propose".into(),
-                format!("{skill}@{digest}"),
-                "--json".into(),
-            ],
-        }],
         // A stale base — pull to rebase, then re-show the diff and retry. Never a silent retry.
         ClientError::Conflict { skill, .. } => vec![NextAction {
             code: ActionCode::RebaseAndRetry,

@@ -127,6 +127,7 @@ pub(crate) fn revert(
                 good: Some(good_hex.clone()),
                 // A revert renames nothing — carry no name so the plane preserves the stored one.
                 display_name: None,
+                channel: None,
                 last_receipt: None,
             }
         }

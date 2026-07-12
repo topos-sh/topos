@@ -289,6 +289,7 @@ pub fn run() -> ExitCode {
         Command::Publish {
             target,
             propose,
+            to,
             wait,
         } => {
             // The standup branch's plane base: the env override, else the compiled-in hosted default.
@@ -309,6 +310,7 @@ pub fn run() -> ExitCode {
                     roots.as_ref(),
                     t,
                     propose,
+                    to.as_deref(),
                     workspace.as_deref(),
                 )
             };

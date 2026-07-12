@@ -233,6 +233,7 @@ fn send_op(
             let candidate = render_candidate(sp, commit_id, bundle_digest)?;
             if matches!(rec.op, OpKind::PublishDirect) {
                 transport.publish(PublishRequest {
+                    channel: rec.channel.clone(),
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
                     op_id: rec.op_id.clone(),
@@ -243,6 +244,7 @@ fn send_op(
                 })
             } else {
                 transport.propose(ProposeRequest {
+                    channel: rec.channel.clone(),
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
                     op_id: rec.op_id.clone(),
@@ -616,6 +618,7 @@ mod tests {
             expected_generation: Generation { epoch: 1, seq: 1 },
             good: None,
             display_name: None,
+            channel: None,
             last_receipt: None,
         };
 

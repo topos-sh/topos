@@ -288,6 +288,8 @@ pub(crate) struct GovernanceInput<'a> {
     pub request: &'a GovernanceRequest,
     /// The server-stamped creation timestamp (governance rows are timestamped by `created_at`, not the clock).
     pub created_at: &'a str,
+    /// The server clock (epoch ms) — the member-removal detach reconcile stamps `detached_at` with it.
+    pub now: i64,
 }
 
 // ── the orchestration ops (the public Authority methods delegate to these) ─────────────────────────────
@@ -300,6 +302,7 @@ pub(crate) async fn create_invite(
     op_id: &str,
     request: &GovernanceRequest,
     created_at: &str,
+    now: i64,
 ) -> Result<CreateInviteOutcome> {
     let GovernanceOp::Invite {
         role,
@@ -345,6 +348,7 @@ pub(crate) async fn create_invite(
         credential_sha256: sha256_token(&request.credential),
         request,
         created_at,
+        now,
     };
     match authority
         .db()
@@ -369,6 +373,7 @@ pub(crate) async fn governance_mutation(
     op_id: &str,
     request: &GovernanceRequest,
     created_at: &str,
+    now: i64,
 ) -> Result<GovernanceOutcome> {
     // The canonical-UUID check keeps the idempotency slot's key 1:1 with one op-id spelling.
     if parse_op_id(op_id).is_none() {
@@ -380,6 +385,7 @@ pub(crate) async fn governance_mutation(
         credential_sha256: sha256_token(&request.credential),
         request,
         created_at,
+        now,
     };
     authority.db().governance_mutation_txn(&input).await
 }

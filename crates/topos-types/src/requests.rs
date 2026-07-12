@@ -114,6 +114,12 @@ pub struct PublishRequest {
     /// (never clobbered to NULL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The `--to` channel placement: place the skill's reference into this channel (created on first
+    /// use, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the
+    /// receipt's details, independently of the version gate). Absent ⇒ no explicit placement (a
+    /// brand-new skill still lands in `everyone`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -142,6 +148,11 @@ pub struct ProposeRequest {
     /// candidate; the plane records a name only when the pointer actually moves (a later approve/publish).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The `--to` channel placement (same semantics as `PublishRequest.channel`): the placement
+    /// applies when the proposal opens — a placement is curation, gated by the channel's mode,
+    /// independent of the version's review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the
@@ -807,6 +818,7 @@ mod tests {
     #[test]
     fn publish_request_round_trips_snake_case_no_created_at() {
         let req = PublishRequest {
+            channel: None,
             workspace_id: "w_demo".to_owned(),
             skill_id: "s_prdescribe".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),

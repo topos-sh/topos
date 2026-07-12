@@ -18,7 +18,9 @@ use topos_types::{
     WireCurrentRecord,
 };
 
-use super::witness::{AccessWitness, SessionWriteGate};
+use super::witness::{
+    AccessWitness, ActorRole, GenesisRegistration, PlacementDecision, SessionWriteGate, SkillGate,
+};
 use crate::actor::{
     REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG, SESSION_REVIEW_ACTING_DENIED,
     WriteActor,
@@ -26,12 +28,12 @@ use crate::actor::{
 use crate::custody::set_current::{DeviceOp, PromoteInput, RejectInput, SetCurrentReceipt};
 use crate::db::custody::proposals::{
     ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
-    read_open_proposal, resolve_proposal, set_proposal_status,
+    proposal_proposer, read_open_proposal, resolve_proposal, set_proposal_status,
 };
 use crate::db::custody::receipts::{
-    BoundIdentity, Replay, StoredReceipt, approval_required, conflict, denied, denied_code,
-    denied_preauth, first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse,
-    reject_denied, reject_denied_code, reject_denied_preauth, reject_terminal, replay, retryable,
+    BoundIdentity, Replay, StoredReceipt, conflict, denied, denied_code, denied_preauth,
+    first_parent_mismatch, insert_receipt, permanent, permanent_key_reuse, reject_denied,
+    reject_denied_code, reject_denied_preauth, reject_terminal, replay, retryable,
 };
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
@@ -271,21 +273,18 @@ async fn run(
         Replay::Fresh => {}
     }
 
-    // (2) Policy — read inside the txn via the witness (the source of truth; a preflight may have read a
-    // now-stale value).
-    let review_required = witness.review_required(tx, input.ws).await?;
-
-    // (3 + 3b) Authorization — authoritative + in-txn, and the ONE place the transaction branches on the
-    // lane. Both arms read `current` only after their authentication step, so an unauthorized caller never
-    // learns the live generation; both hoist the acting principal the actor-blind tails consume.
+    // (2 + 3) Authorization — authoritative + in-txn, and the ONE place the transaction branches on
+    // the lane. Both arms read `current` only after their authentication step, so an unauthorized
+    // caller never learns the live generation; both hoist the acting principal the actor-blind tails
+    // consume.
     //
     // ONE MEMBERSHIP PREDICATE, EVERY LANE: both arms gate on a CONFIRMED `workspace_member` seat —
     // the same directory join the read path runs (deleting the membership row kills writes AND reads
-    // the moment it commits). The remaining lane asymmetry is ROLE alone: the session arm (a
-    // review/revert surface) additionally requires an owner|reviewer seat; the device arm's writes
-    // take any confirmed member (per-skill `roster` gates nothing — it survives only as the genesis
-    // self-seat's interim follow-state).
-    let (acting, genesis_standup, current) = match &input.actor {
+    // the moment it commits). The remaining lane asymmetry is ROLE: the session arm (a
+    // review/revert surface) requires an owner|reviewer seat; the device arm takes any confirmed
+    // member, with the ROLE BAND feeding the per-bundle protection gate below (a member's direct
+    // publish on a reviewed bundle downgrades to a proposal; reviewer+ lands directly).
+    let (acting, device_role, current) = match &input.actor {
         WriteActor::Device { .. } => {
             // Authenticated at step (0) — the in-transaction credential resolution, so a revoke or a
             // membership removal committed before this transaction is serialized ahead and decides it.
@@ -297,11 +296,8 @@ async fn run(
             }
             let current = read_current(tx, input.ws, input.skill).await?;
             // THE MEMBERSHIP GATE: a confirmed workspace seat authorizes the write (the git/GitHub
-            // model — push access is workspace-wide; protection + channels add finer gates later).
-            if !witness
-                .confirmed_member(tx, input.ws, &device.principal)
-                .await?
-            {
+            // model — push access is workspace-wide; protection + channel modes are the finer gates).
+            let Some(role) = witness.member_role(tx, input.ws, &device.principal).await? else {
                 return denied(
                     tx,
                     input,
@@ -309,17 +305,8 @@ async fn run(
                     "principal is not a confirmed workspace member",
                 )
                 .await;
-            }
-            // The genesis self-seat: a zero-parent direct publish creating a fresh skill seats its
-            // author on the per-skill roster (interim follow-state — an author follows what they
-            // create; NOT an authorization row). The INSERT is DEFERRED to just before the op tail:
-            // every terminal writer below (denied/conflict/retryable) COMMITS its receipt, so an
-            // inline insert here would commit an orphan roster row alongside a later
-            // availability/lineage DENIED.
-            let genesis_standup = current.is_none()
-                && matches!(input.op, DeviceOp::PublishDirect)
-                && input.parents.is_empty();
-            (device.principal, genesis_standup, current)
+            };
+            (device.principal, Some(role), current)
         }
         WriteActor::Session { acting, .. } => {
             // The public session API constructs ONLY a review approve or a revert (both promote to
@@ -353,9 +340,25 @@ async fn run(
                 }
             }
             let current = read_current(tx, input.ws, input.skill).await?;
-            ((*acting).clone(), false, current)
+            ((*acting).clone(), None, current)
         }
     };
+
+    // (3c) The catalog gate — the skill's lifecycle status + resolved protection, read inside the
+    // txn (the per-bundle pin, else the workspace default: the cascade is the directory's). An
+    // archived or deleted skill refuses EVERY pointer write, typed, before the CAS (a DENIED, never
+    // a confusing CONFLICT against a frozen pointer). `Missing` is a genesis (or a pre-catalog
+    // seeded pointer) — registered at step (6c) below, after every deny-returning gate has passed.
+    let gate = witness.skill_gate(tx, input.ws, input.skill).await?;
+    match gate {
+        SkillGate::Archived => {
+            return denied(tx, input, &bound, "the skill is archived").await;
+        }
+        SkillGate::Deleted => {
+            return denied(tx, input, &bound, "the skill is deleted").await;
+        }
+        SkillGate::Missing { .. } | SkillGate::Active { .. } => {}
+    }
 
     // (4) Compare-and-set on the WHOLE (epoch, seq). Absent pointer ⇒ the genesis branch (a zero-parent
     // create-at-(1,1)); a present pointer whose generation differs ⇒ CONFLICT carrying the LIVE generation.
@@ -477,34 +480,110 @@ async fn run(
             Some(p0) if *p0 == cur.commit => {}
             _ => return first_parent_mismatch(tx, input, &bound, cur).await,
         }
-        // The review-required gate (typed fail): a DIRECT publish only — revert + genesis bypass it. The
-        // lease is released by the terminal-receipt writer (every non-OK outcome releases it).
-        if matches!(input.op, DeviceOp::PublishDirect) && review_required {
-            return approval_required(tx, input, &bound).await;
+    }
+
+    // (6b) The protection gate — REROUTES instead of refusing (never reject an intent the system
+    // can honor at a safer level): a DEVICE-lane direct publish or revert on an effectively-REVIEWED
+    // bundle by a plain MEMBER runs the propose arm below and answers NEEDS_REVIEW with a
+    // `downgraded` detail; reviewer+ lands directly (the protected-branch model). Genesis (no
+    // `current`) always lands — a proposal against nothing is meaningless, and the role matrix gives
+    // members brand-new skills. The session lane never downgrades (its owner|reviewer gate already
+    // ran; the web revert is the safety net by design).
+    let downgrade = matches!(input.op, DeviceOp::PublishDirect | DeviceOp::Revert)
+        && current.is_some()
+        && gate.reviewed()
+        && matches!(device_role, Some(ActorRole::Member));
+
+    // (6c) The catalog + channel directory writes — every deny-returning gate above has passed, so
+    // for a genesis the catalog row, the placement, the author's self-follow, and the pointer land
+    // in ONE transaction, never an orphan. A publish that carries `--to` places its reference here
+    // (gated by the CHANNEL's mode, independently of the version gate — the outcome rides the
+    // receipt's details either way); the advisory display name is recorded last-writer-wins. This
+    // block must stay the LAST work before the op tail: the tails write receipts, and a
+    // receipted-terminal between here and them would commit these rows alongside a failure. (The
+    // one reachable case — the propose arm's pathological op-id-collision permanent — commits an
+    // idempotent placement row, which curation semantics make harmless: placements apply
+    // immediately and independently of the version gate.)
+    let mut extra_details = serde_json::Map::new();
+    if matches!(input.op, DeviceOp::PublishDirect | DeviceOp::PublishPropose) {
+        let placement = match gate {
+            SkillGate::Missing { .. } => {
+                match witness
+                    .register_publish(
+                        tx,
+                        input.ws,
+                        input.skill,
+                        input.display_name,
+                        &acting,
+                        input.channel,
+                        input.created_at,
+                    )
+                    .await?
+                {
+                    GenesisRegistration::Registered { placement, .. } => Some(placement),
+                    GenesisRegistration::NameTaken { name } => {
+                        return denied(
+                            tx,
+                            input,
+                            &bound,
+                            &format!("the skill name {name:?} is already taken in this workspace"),
+                        )
+                        .await;
+                    }
+                }
+            }
+            SkillGate::Active { .. } => {
+                if let Some(dn) = input.display_name {
+                    witness
+                        .set_display_name(tx, input.ws, input.skill, dn)
+                        .await?;
+                }
+                match input.channel {
+                    Some(ch) => Some(
+                        witness
+                            .place_skill(tx, input.ws, input.skill, ch, &acting, input.created_at)
+                            .await?,
+                    ),
+                    None => None,
+                }
+            }
+            SkillGate::Archived | SkillGate::Deleted => None, // denied at (3c)
+        };
+        if let Some(p) = placement {
+            let (key, channel) = match p {
+                PlacementDecision::Placed { channel } => ("placed_channel", channel),
+                PlacementDecision::Created { channel } => ("created_channel", channel),
+                PlacementDecision::RoleDenied { channel } => ("placement_denied", channel),
+                PlacementDecision::BadName { channel } => ("placement_bad_name", channel),
+            };
+            extra_details.insert(key.to_owned(), serde_json::Value::String(channel));
         }
     }
-
-    // (6b) The genesis standup — every deny-returning gate above has passed, and for a genesis (`current`
-    // absent) the only outcomes past this point are the promote's OK or a rolling-back `Err`, so the
-    // self-inserted roster row and the pointer land in ONE transaction, never an orphan. This insert must
-    // stay the LAST statement before the op tail — a future receipted-terminal between here and the promote
-    // would re-open the orphan-row window.
-    if genesis_standup {
-        witness
-            .seat_roster(tx, input.ws, input.skill, &acting)
-            .await?;
+    if downgrade {
+        extra_details.insert("downgraded".to_owned(), serde_json::Value::Bool(true));
     }
+    let details = if extra_details.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(extra_details))
+    };
 
-    // (7) The op-specific tail — over the SAME shared body above (replay, policy, authz, the whole-`(epoch,
-    // seq)` CAS, availability, lineage, the first-parent assert, all of which ran for EVERY op). A direct
-    // publish and a revert PROMOTE; `--propose` opens a proposal (no pointer move, nothing signed); `review
-    // --approve` promotes the locked proposal sideways through the SAME promote plus the status handoff.
-    // (`review --reject` never reaches `run` — it is a standalone status-flip transaction.)
+    // (7) The op-specific tail — over the SAME shared body above (replay, authz, the catalog gate,
+    // the whole-`(epoch, seq)` CAS, availability, lineage, the first-parent assert, all of which ran
+    // for EVERY op). A direct publish and a revert PROMOTE — or, downgraded by the protection gate,
+    // open a proposal; `--propose` opens one voluntarily; `review --approve` promotes the locked
+    // proposal sideways through the SAME promote plus the status handoff. (`review --reject` never
+    // reaches `run` — it is a standalone status-flip transaction.)
     match input.op {
-        DeviceOp::PublishDirect | DeviceOp::Revert => promote(tx, input, new_gen, &bound).await,
-        DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &acting).await,
+        DeviceOp::PublishDirect | DeviceOp::Revert if downgrade => {
+            propose_arm(tx, input, &bound, &acting, details).await
+        }
+        DeviceOp::PublishDirect | DeviceOp::Revert => {
+            promote(tx, input, new_gen, &bound, details).await
+        }
+        DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &acting, details).await,
         DeviceOp::ReviewApprove => {
-            approve_arm(tx, input, new_gen, &bound, review_required, &acting).await
+            approve_arm(tx, input, new_gen, &bound, gate.reviewed(), &acting, witness).await
         }
         DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
     }
@@ -520,6 +599,7 @@ async fn advance_current(
     input: &PromoteInput<'_>,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
+    details: Option<serde_json::Value>,
 ) -> Result<SetCurrentReceipt> {
     insert_skill_commit(
         tx,
@@ -540,7 +620,6 @@ async fn advance_current(
         input.candidate_commit,
         new_gen,
         &record,
-        input.display_name,
         input.now,
     )
     .await?;
@@ -555,7 +634,7 @@ async fn advance_current(
         current: Some(new_gen),
         record: Some(record),
         created_at: input.created_at.to_owned(),
-        details: None,
+        details,
     };
     insert_receipt(tx, input.ws, &input.actor.receipt_actor(), &stored).await?;
     Ok(stored.into_receipt())
@@ -568,8 +647,9 @@ async fn promote(
     input: &PromoteInput<'_>,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
+    details: Option<serde_json::Value>,
 ) -> Result<SetCurrentReceipt> {
-    let receipt = advance_current(tx, input, new_gen, bound).await?;
+    let receipt = advance_current(tx, input, new_gen, bound, details).await?;
     delete_lease(tx, input.ws, input.op_id).await?;
     Ok(receipt)
 }
@@ -586,6 +666,7 @@ async fn propose_arm(
     input: &PromoteInput<'_>,
     bound: &BoundIdentity<'_>,
     proposer: &Principal,
+    details: Option<serde_json::Value>,
 ) -> Result<SetCurrentReceipt> {
     let base = input.expected;
     // A DIFFERENT device minting this op_id (a ~122-bit UUID collision; a same-device retry already replayed
@@ -641,7 +722,7 @@ async fn propose_arm(
         current: None,
         record: None,
         created_at: input.created_at.to_owned(),
-        details: None,
+        details,
     };
     insert_receipt(tx, input.ws, &input.actor.receipt_actor(), &stored).await?;
     delete_lease(tx, input.ws, input.op_id).await?;
@@ -651,16 +732,18 @@ async fn propose_arm(
 /// `review --approve`: promote the locked open proposal SIDEWAYS to `current`. The shared body already ran
 /// the CAS (a stale base ⇒ CONFLICT *before* here), availability (against the shared `present`/tombstone
 /// predicate, no lease gate), and the first-parent assert. Here: lock + assert the open proposal under the
-/// write lock; enforce four-eyes under `review_required`; record the approval; advance `current` (whose
-/// `commit_object` write is the handoff from the gated `proposal_object` root to the permanent trunk root);
-/// flip the proposal to `accepted`. No lease to release.
+/// write lock; enforce four-eyes on an effectively-REVIEWED bundle; record the approval; advance `current`
+/// (whose `commit_object` write is the handoff from the gated `proposal_object` root to the permanent trunk
+/// root); flip the proposal to `accepted`; notify the author (the verdict and its notice commit together).
+/// No lease to release.
 async fn approve_arm(
     tx: &mut Transaction<'_, Postgres>,
     input: &PromoteInput<'_>,
     new_gen: Generation,
     bound: &BoundIdentity<'_>,
-    review_required: bool,
+    reviewed: bool,
     reviewer: &Principal,
+    witness: &impl AccessWitness,
 ) -> Result<SetCurrentReceipt> {
     let base = input.expected; // == current.es (the CAS proved it) ⇒ this is NOT a stale CONFLICT
     let Some(proposal) =
@@ -676,14 +759,15 @@ async fn approve_arm(
         )
         .await;
     };
-    // Four-eyes (the anti-poisoning gate): fires ONLY under `review_required`, where the gate's value needs
-    // a SECOND actor. With it off, a solo author may approve their own proposal (a deferred self-publish).
-    if review_required && reviewer.as_str() == proposal.proposer.as_str() {
+    // Four-eyes (the anti-poisoning gate): fires ONLY on an effectively-reviewed bundle (the
+    // per-bundle pin, else the workspace default), where the gate's value needs a SECOND actor.
+    // On an open bundle, a solo author may approve their own proposal (a deferred self-publish).
+    if reviewed && reviewer.as_str() == proposal.proposer.as_str() {
         return denied(
             tx,
             input,
             bound,
-            "the proposer may not approve their own proposal under review-required",
+            "the proposer may not approve their own proposal on a reviewed bundle",
         )
         .await;
     }
@@ -696,7 +780,7 @@ async fn approve_arm(
         input.created_at,
     )
     .await?;
-    let receipt = advance_current(tx, input, new_gen, bound).await?;
+    let receipt = advance_current(tx, input, new_gen, bound, None).await?;
     set_proposal_status(
         tx,
         input.ws,
@@ -707,6 +791,22 @@ async fn approve_arm(
         input.created_at,
     )
     .await?;
+    // The author's verdict notice — skipped for a self-approve (the actor already knows).
+    if reviewer.as_str() != proposal.proposer.as_str() {
+        witness
+            .notify_verdict(
+                tx,
+                input.ws,
+                input.skill,
+                input.candidate_commit,
+                &proposal.proposer,
+                "accepted",
+                None,
+                reviewer,
+                input.created_at,
+            )
+            .await?;
+    }
     Ok(receipt)
 }
 
@@ -809,6 +909,18 @@ async fn reject_run(
                 r.created_at,
             )
             .await?;
+            // The author's verdict notice, committed with the verdict — skipped for a withdraw
+            // (the proposer rejecting their own proposal already knows).
+            if let Some(author) = proposal_proposer(tx, r.ws, &id).await?
+                && author.as_str() != acting.as_str()
+            {
+                witness
+                    .notify_verdict(
+                        tx, r.ws, r.skill, r.commit, &author, "rejected", r.reason, &acting,
+                        r.created_at,
+                    )
+                    .await?;
+            }
             reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_REJECTED").await
         }
         // Idempotent: a lost-ack retry under a NEW op_id (the original op_id replays at step 1) — already done.
@@ -818,6 +930,11 @@ async fn reject_run(
         // An accepted proposal is terminal the other way; absent means there is nothing to reject.
         Some((_, ProposalStatus::Accepted)) => {
             reject_denied(tx, r, "the proposal is already accepted").await
+        }
+        // Circumstantially closed (the skill archived / a version purged) — already resolved, with
+        // its own recorded reason; a late reject must not overwrite that story.
+        Some((_, ProposalStatus::Closed)) => {
+            reject_denied(tx, r, "the proposal was closed when its skill left circulation").await
         }
         None => reject_denied(tx, r, "no open proposal for this candidate and base").await,
     }
@@ -976,7 +1093,6 @@ async fn insert_commit_object(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn upsert_current(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
@@ -984,7 +1100,6 @@ async fn upsert_current(
     commit: CommitId,
     generation: Generation,
     record: &[u8],
-    display_name: Option<&str>,
     updated_at: i64,
 ) -> Result<()> {
     let ws_s = ws.as_str();
@@ -992,17 +1107,14 @@ async fn upsert_current(
     let cid = commit.0.as_slice();
     let epoch = u64_to_i64(generation.epoch)?;
     let seq = u64_to_i64(generation.seq)?;
-    // `display_name` is UNSIGNED advisory metadata (never in the pointer preimage or the digest). On the
-    // update path it is LAST-WRITER-WINS among writers that express a name: `COALESCE(excluded, existing)`
-    // keeps the current name when this move carries none (a revert / approve / a name-less publish), so a
-    // pointer move never blanks a name it didn't mean to touch.
+    // The advisory display name lives on the CATALOG row (recorded through the witness at the
+    // directory-writes step); the pointer row carries only pointer facts.
     sqlx::query!(
-        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at, display_name) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+        "INSERT INTO current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (workspace_id, skill_id) DO UPDATE SET \
            commit_id = excluded.commit_id, epoch = excluded.epoch, seq = excluded.seq, \
-           record = excluded.record, updated_at = excluded.updated_at, \
-           display_name = COALESCE(excluded.display_name, current.display_name)",
+           record = excluded.record, updated_at = excluded.updated_at",
         ws_s,
         skill_s,
         cid,
@@ -1010,7 +1122,6 @@ async fn upsert_current(
         seq,
         record,
         updated_at,
-        display_name,
     )
     .execute(&mut **tx)
     .await

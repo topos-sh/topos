@@ -1007,6 +1007,7 @@ impl FollowHarness {
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 false,
+                None,
                 workspace,
             )
             .map_err(|e| e.to_string())?
@@ -1541,7 +1542,7 @@ impl ContributeHarness {
                 base_url: "http://127.0.0.1:0".to_owned(),
             };
             match ops::publish(
-                ctx, contribute, governance, &standup, None, approve, propose, None,
+                ctx, contribute, governance, &standup, None, approve, propose, None, None,
             )
             .map_err(|e| e.to_string())?
             {

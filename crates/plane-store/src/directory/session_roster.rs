@@ -173,6 +173,8 @@ pub(crate) struct SessionInput<'a> {
     pub(crate) acting: &'a Principal,
     /// The server-stamped creation timestamp.
     pub(crate) created_at: &'a str,
+    /// The server clock (epoch ms) — the member-removal detach reconcile stamps `detached_at` with it.
+    pub(crate) now: i64,
 }
 
 /// The session request identity: sha256 over the versioned domain tag + u64-be length-prefixed
@@ -219,6 +221,7 @@ pub(crate) async fn invite_members_session(
     role: SessionInviteRole,
     plane_mode: DeploymentMode,
     created_at: &str,
+    now: i64,
 ) -> Result<SessionInviteOutcome> {
     if plane_mode == DeploymentMode::SelfHost {
         return Ok(SessionInviteOutcome::Denied(
@@ -268,6 +271,7 @@ pub(crate) async fn invite_members_session(
         request_sha256,
         acting: &acting,
         created_at,
+        now,
     };
     authority
         .db()
@@ -287,6 +291,7 @@ pub(crate) async fn roster_remove_session(
     target_email: &str,
     plane_mode: DeploymentMode,
     created_at: &str,
+    now: i64,
 ) -> Result<GovernanceOutcome> {
     if plane_mode == DeploymentMode::SelfHost {
         return Ok(GovernanceOutcome::Denied(
@@ -312,6 +317,7 @@ pub(crate) async fn roster_remove_session(
         request_sha256,
         acting: &acting,
         created_at,
+        now,
     };
     authority.db().session_remove_txn(&input, &target).await
 }
@@ -327,6 +333,7 @@ pub(crate) async fn rotate_join_link_session(
     acting_email: &str,
     plane_mode: DeploymentMode,
     created_at: &str,
+    now: i64,
 ) -> Result<SessionRotateOutcome> {
     if plane_mode == DeploymentMode::SelfHost {
         return Ok(SessionRotateOutcome::Denied(
@@ -349,6 +356,7 @@ pub(crate) async fn rotate_join_link_session(
         request_sha256,
         acting: &acting,
         created_at,
+        now,
     };
     authority.db().session_rotate_txn(&input, secret).await
 }

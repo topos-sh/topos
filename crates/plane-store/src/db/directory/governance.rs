@@ -357,10 +357,12 @@ async fn governance_mutation_run(
                 let tgt = target.as_str();
                 // Remove the workspace membership — the membership row IS the access: every read and
                 // write gate joins against a CONFIRMED `workspace_member` row, so deleting it kills the
-                // principal's access the moment this commits (their devices' credentials still
-                // authenticate, and then every gate denies — fail closed, nothing cached). The per-skill
-                // roster rows go too: they gate nothing anymore, but they are this principal's
-                // follow-state in this workspace and a removed member has none.
+                // principal's access the moment this commits (their devices'
+                // credentials still authenticate, and then every gate denies — fail closed, nothing
+                // cached; re-adding the member re-enables the same devices, the git/GitHub model).
+                // Then the LAPSE-DETACH reconcile: with the seat gone the person's entitlement union
+                // is empty, so every one of their devices' fleet rows gets its final detach record
+                // ("removed — last known state" — audit-retained, the fleet page's blind-spot list).
                 sqlx::query!(
                     "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
                     ws_s,
@@ -370,11 +372,12 @@ async fn governance_mutation_run(
                 .await
                 .map_err(AuthorityError::internal)?;
                 sqlx::query!(
-                    "DELETE FROM roster WHERE workspace_id = $1 AND principal = $2",
+                    r#"SELECT topos_detach_lapsed($1, $2, $3) AS "n!""#,
                     ws_s,
                     tgt,
+                    input.now,
                 )
-                .execute(&mut **tx)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(AuthorityError::internal)?;
                 GovernanceOutcome::Ok
@@ -508,6 +511,12 @@ async fn seat_workspace_and_owner(
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
+    // Every workspace is born with the structural `everyone` channel (idempotent; the genesis
+    // publish converges on the same function for fixture-seeded workspaces).
+    sqlx::query!(r#"SELECT topos_ensure_everyone($1, $2) AS "ok""#, ws_s, created_at)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
     Ok(GenesisSeat::Created)
 }
 

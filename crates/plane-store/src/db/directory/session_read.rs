@@ -10,23 +10,31 @@ use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::id::WorkspaceId;
 
-/// One row of the skill index as stored: the skill, its `current` pointer facts, and the pointed
-/// version's provenance digest. The proposal count is NOT here — the orchestration delegates it
-/// per-skill to `open_proposal_rows` so the staleness predicate stays in its one listing home.
+/// One row of the skill index as stored: the skill, its `current` pointer facts, the pointed
+/// version's provenance digest, and its CATALOG facts (name + status + advisory display name).
+/// The proposal count is NOT here — the orchestration delegates it per-skill to
+/// `open_proposal_rows` so the staleness predicate stays in its one listing home.
 pub(crate) struct SkillIndexDbRow {
     pub(crate) skill_id: String,
     pub(crate) commit: [u8; 32],
     pub(crate) generation: Generation,
     pub(crate) updated_at: i64,
     pub(crate) bundle_digest: [u8; 32],
-    /// The skill's UNSIGNED advisory display name (`current.display_name`), or `None` (the reader falls
-    /// back to the skill id). Never part of the digest or any signature.
+    /// The catalog's user-facing name, or `None` for a pre-catalog seeded pointer (the reader falls
+    /// back to the skill id).
+    pub(crate) name: Option<String>,
+    /// The catalog lifecycle status (`active`/`archived`/`deleted`), or `None` when unregistered
+    /// (read as active).
+    pub(crate) status: Option<String>,
+    /// The skill's UNSIGNED advisory display name (now a catalog column), or `None` (the reader falls
+    /// back to the name). Never part of the digest or any signature.
     pub(crate) display_name: Option<String>,
 }
 
 impl Db {
     /// Every skill in the workspace holding a `current` row, with its pointer generation, update time
-    /// (epoch-milliseconds, the server clock unit), and the pointed version's `bundle_digest` — ordered
+    /// (epoch-milliseconds, the server clock unit), the pointed version's `bundle_digest`, and its
+    /// catalog facts (LEFT JOIN — a fixture-seeded pointer without a catalog row still lists) — ordered
     /// by `skill_id` for a stable enumeration. Principal-free (the caller's member gate has already run;
     /// an autocommit pool read, so a publish committed elsewhere is visible to the next call).
     ///
@@ -42,10 +50,13 @@ impl Db {
                    c.epoch         AS "epoch!: i64",
                    c.seq           AS "seq!: i64",
                    c.updated_at    AS "updated_at!: i64",
-                   c.display_name  AS "display_name?",
+                   cat.name         AS "name?",
+                   cat.status       AS "status?",
+                   cat.display_name AS "display_name?",
                    sc.bundle_digest AS "bundle_digest?: Vec<u8>"
             FROM current c
             JOIN skill_commit sc ON sc.workspace_id = c.workspace_id AND sc.commit_id = c.commit_id
+            LEFT JOIN catalog cat ON cat.workspace_id = c.workspace_id AND cat.skill_id = c.skill_id
             WHERE c.workspace_id = $1
             ORDER BY c.skill_id
             "#,
@@ -68,6 +79,8 @@ impl Db {
                         &r.bundle_digest
                             .ok_or_else(|| AuthorityError::integrity(MissingIndexDigest))?,
                     )?,
+                    name: r.name,
+                    status: r.status,
                     display_name: r.display_name,
                 })
             })

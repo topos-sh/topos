@@ -44,8 +44,30 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         Ok(())
     }
-    /// Stage a roster membership (the principal becomes entitled to read/upload the skill).
-    pub(crate) async fn seed_roster(
+    /// Stage a catalog row (the name→skill mapping every channel/subscription row FKs onto).
+    pub(crate) async fn seed_catalog(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        name: &str,
+    ) -> Result<()> {
+        let (ws, skill) = (ws.as_str(), skill.as_str());
+        sqlx::query!(
+            "INSERT INTO catalog (workspace_id, skill_id, name, status, created_at) \
+             VALUES ($1, $2, $3, 'active', 'seed') \
+             ON CONFLICT (workspace_id, skill_id) DO NOTHING",
+            ws,
+            skill,
+            name,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(())
+    }
+
+    /// Stage a person-scoped DIRECT follow (requires the catalog row — seed it first).
+    pub(crate) async fn seed_follow(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
@@ -53,11 +75,12 @@ impl Db {
     ) -> Result<()> {
         let (ws, skill, principal) = (ws.as_str(), skill.as_str(), principal.as_str());
         sqlx::query!(
-            "INSERT INTO roster (workspace_id, skill_id, principal) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, skill_id, principal) DO NOTHING",
+            "INSERT INTO skill_follows (workspace_id, principal, skill_id, created_at) \
+             VALUES ($1, $2, $3, 'seed') \
+             ON CONFLICT (workspace_id, principal, skill_id) DO NOTHING",
             ws,
-            skill,
             principal,
+            skill,
         )
         .execute(&self.pool)
         .await

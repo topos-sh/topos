@@ -71,6 +71,7 @@ pub(crate) async fn propose(
             candidate,
             auth,
             req.display_name.as_deref(),
+            req.channel.as_deref(),
             &created_at,
             now,
         )

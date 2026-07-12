@@ -390,14 +390,18 @@ impl Authority {
     }
 
     /// Publish a candidate as the skill's new `current` — a direct publish, or **genesis** for the first
-    /// version. The full backbone flow: a review-required preflight (uploads nothing if gated) → ingest +
-    /// migrate (the crash-safe quarantine → lease → install → record) → the one pure-DB pointer-move
-    /// transaction (compare-and-set, sign, re-root, durable receipt). Returns the durable, replayable
-    /// receipt; a retry with the same `op_id` + bound identity returns it byte-identically.
+    /// version. The full backbone flow: ingest + migrate (the crash-safe quarantine → lease → install →
+    /// record) → the one pure-DB pointer-move transaction (compare-and-set, the catalog/protection gates,
+    /// re-root, durable receipt). On an effectively-REVIEWED bundle a plain member's direct publish is
+    /// DOWNGRADED in-transaction to a proposal (`NEEDS_REVIEW` + a `downgraded` detail — never a
+    /// rejection); reviewer+ lands directly. Returns the durable, replayable receipt; a retry with the
+    /// same `op_id` + bound identity returns it byte-identically.
     ///
     /// `display_name` is UNSIGNED ADVISORY metadata (the author's skill-folder name) recorded on the
-    /// pointer row last-writer-wins — never in the digest, the candidate, or the device-op preimage; `None`
-    /// keeps any existing name.
+    /// CATALOG row last-writer-wins — never in the digest, the candidate, or the device-op preimage; at a
+    /// genesis it also seeds the catalog NAME. `channel` is the `--to` placement (a channel reference,
+    /// created on first use, gated by the channel's mode independently of the version gate); a genesis
+    /// with no `channel` is placed in `everyone`.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`]/[`AuthorityError::Integrity`] on a store fault.
@@ -410,6 +414,7 @@ impl Authority {
         candidate: CandidateUpload,
         auth: DeviceOpAuth,
         display_name: Option<&str>,
+        channel: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
@@ -423,33 +428,14 @@ impl Authority {
             Err(receipt) => return Ok(receipt),
         };
         // A direct publish must arrive as exactly that. Forwarding an arbitrary device op (e.g. a
-        // `Revert`-labelled candidate of new bytes) would skip the direct-publish review gate while still
-        // reaching the promote path — a review bypass. Reject anything but `PublishDirect` BEFORE ingesting
-        // (so a misuse uploads/migrates/leases nothing).
+        // `Revert`-labelled candidate of new bytes) would skip the direct-publish protection gate while
+        // still reaching the promote path — a gate bypass. Reject anything but `PublishDirect` BEFORE
+        // ingesting (so a misuse uploads/migrates/leases nothing).
         if !matches!(device.op, crate::set_current::DeviceOp::PublishDirect) {
             return crate::set_current::reject_non_publish_op(
                 self, ws, skill, op_id, &device, created_at,
             )
             .await;
-        }
-        // A revoked device is already synthesized-DENIED at `resolve_device_op` (unless it is replaying a
-        // stored receipt, which the preflight's own replay path then serves), so the preflight below runs
-        // its durable-minting arm only for a LIVE device.
-        if let Some(receipt) = crate::set_current::publish_preflight(
-            self,
-            ws,
-            skill,
-            device.op,
-            &device.device_key_id,
-            op_id,
-            None,
-            None,
-            device.expected,
-            created_at,
-        )
-        .await?
-        {
-            return Ok(receipt);
         }
         let staged = crate::lifecycle::ingest(self, ws, op_id, candidate, now).await?;
         crate::lifecycle::migrate(self, ws, &staged, now).await?;
@@ -460,6 +446,7 @@ impl Authority {
             &staged,
             &device,
             display_name,
+            channel,
             created_at,
             now,
         )
@@ -548,6 +535,7 @@ impl Authority {
         candidate: CandidateUpload,
         auth: DeviceOpAuth,
         display_name: Option<&str>,
+        channel: Option<&str>,
         created_at: &str,
         now: i64,
     ) -> Result<SetCurrentReceipt> {
@@ -596,6 +584,7 @@ impl Authority {
             &staged,
             &device,
             display_name,
+            channel,
             created_at,
             now,
         )
@@ -880,8 +869,9 @@ impl Authority {
         op_id: &str,
         request: GovernanceRequest,
         created_at: &str,
+        now: i64,
     ) -> Result<CreateInviteOutcome> {
-        crate::governance::create_invite(self, ws, op_id, &request, created_at).await
+        crate::governance::create_invite(self, ws, op_id, &request, created_at, now).await
     }
 
     /// Resolve an invite link to its **bootstrap payload** — the workspace identity, the offered skills,
@@ -1187,6 +1177,7 @@ impl Authority {
         role: SessionInviteRole,
         plane_mode: DeploymentMode,
         created_at: &str,
+        now: i64,
     ) -> Result<SessionInviteOutcome> {
         crate::session_roster::invite_members_session(
             self,
@@ -1197,16 +1188,18 @@ impl Authority {
             role,
             plane_mode,
             created_at,
+            now,
         )
         .await
     }
 
     /// **Remove a member from a verified owner session.** Same acting gate + idempotency shape as
     /// [`invite_members_session`](Self::invite_members_session); reuses the device lane's
-    /// last-owner-lockout guard and its exact removal transaction (the `workspace_member` seat + the
-    /// principal's per-skill roster rows dropped in one txn — every read/write gate joins the seat, so
-    /// removal severs access the instant it commits; the device's credential row stays, gating nothing
-    /// without a seat).
+    /// last-owner-lockout guard and its exact removal transaction (the `workspace_member` seat dropped
+    /// + the lapse-detach reconcile writing the person's final per-device detach records, in one txn —
+    /// every read/write gate joins the seat, so removal severs access the instant it commits; the
+    /// device's credential row stays, gating nothing without a seat, and re-adding the member
+    /// re-enables the same devices).
     /// Removing a merely-invited seat un-invites it; removing an absent principal is an idempotent `Ok`.
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
@@ -1221,6 +1214,7 @@ impl Authority {
         target_email: &str,
         plane_mode: DeploymentMode,
         created_at: &str,
+        now: i64,
     ) -> Result<GovernanceOutcome> {
         crate::session_roster::roster_remove_session(
             self,
@@ -1230,6 +1224,7 @@ impl Authority {
             target_email,
             plane_mode,
             created_at,
+            now,
         )
         .await
     }
@@ -1244,6 +1239,7 @@ impl Authority {
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    #[allow(clippy::too_many_arguments)]
     pub async fn rotate_join_link_session(
         &self,
         ws: &WorkspaceId,
@@ -1251,6 +1247,7 @@ impl Authority {
         acting_email: &str,
         plane_mode: DeploymentMode,
         created_at: &str,
+        now: i64,
     ) -> Result<SessionRotateOutcome> {
         crate::session_roster::rotate_join_link_session(
             self,
@@ -1259,6 +1256,7 @@ impl Authority {
             acting_email,
             plane_mode,
             created_at,
+            now,
         )
         .await
     }
@@ -1438,11 +1436,12 @@ impl Authority {
         op_id: &str,
         request: GovernanceRequest,
         created_at: &str,
+        now: i64,
     ) -> Result<GovernanceOutcome> {
         if !matches!(request.op, GovernanceOp::RosterSet { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a roster_set"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at, now).await
     }
 
     /// **Remove** a principal from the workspace roster (owner-only, with the last-owner-lockout guard).
@@ -1456,11 +1455,12 @@ impl Authority {
         op_id: &str,
         request: GovernanceRequest,
         created_at: &str,
+        now: i64,
     ) -> Result<GovernanceOutcome> {
         if !matches!(request.op, GovernanceOp::RosterRemove { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a roster_remove"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at, now).await
     }
 
     /// **Revoke** a registered device — flip `revoked` in one transaction (instant
@@ -1475,11 +1475,12 @@ impl Authority {
         op_id: &str,
         request: GovernanceRequest,
         created_at: &str,
+        now: i64,
     ) -> Result<GovernanceOutcome> {
         if !matches!(request.op, GovernanceOp::DeviceRevoke { .. }) {
             return Ok(GovernanceOutcome::Denied("op is not a device_revoke"));
         }
-        crate::governance::governance_mutation(self, ws, op_id, &request, created_at).await
+        crate::governance::governance_mutation(self, ws, op_id, &request, created_at, now).await
     }
 
     /// Every workspace currently holding stored objects (an `object_presence` row exists) — the enumeration

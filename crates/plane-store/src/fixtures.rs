@@ -14,17 +14,25 @@ use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
 use crate::set_current::{DeviceOp, DeviceOpAuth, SetCurrentReceipt};
 
 impl Authority {
-    /// Stage a roster membership (the read/write entitlement for a principal on a skill). Test-only.
+    /// Stage a catalog row (name→skill; the FK target for channel/subscription seeds). Test-only.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
-    pub async fn seed_roster(
+    pub async fn seed_catalog(&self, ws: &WorkspaceId, skill: &SkillId, name: &str) -> Result<()> {
+        self.db().seed_catalog(ws, skill, name).await
+    }
+
+    /// Stage a person-scoped DIRECT follow (seed the catalog row first). Test-only.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a database fault.
+    pub async fn seed_follow(
         &self,
         ws: &WorkspaceId,
         skill: &SkillId,
         principal: &Principal,
     ) -> Result<()> {
-        self.db().seed_roster(ws, skill, principal).await
+        self.db().seed_follow(ws, skill, principal).await
     }
 
     /// Register a device WITH its workspace credential — the row every credential resolution (reads,
@@ -138,7 +146,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, auth, None, created_at, now)
+        self.publish(ws, skill, op_id, candidate, auth, None, None, created_at, now)
             .await
     }
 
@@ -189,7 +197,7 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, auth, None, created_at, now)
+        self.publish(ws, skill, op_id, candidate, auth, None, None, created_at, now)
             .await
     }
 

@@ -520,8 +520,11 @@ async fn session_remove_run(
         return Ok(GovernanceOutcome::Denied("would remove the last owner"));
     }
     // The device lane's exact removal shape: drop the membership — the row every read/write gate
-    // joins against, so access dies the moment this commits — and, in the same transaction, the
-    // principal's per-skill roster rows (their follow-state here; a removed member has none).
+    // joins against, so access dies the moment this commits (the person's devices and their
+    // credentials stay: re-adding the member re-enables them, the git/GitHub model) — and, in the
+    // same transaction, the lapse-detach reconcile: with the seat gone the entitlement union is
+    // empty, so every one of their devices' fleet rows gets its final detach record ("removed —
+    // last known state", audit-retained for the fleet page's blind-spot list).
     let (ws_s, tgt) = (input.ws.as_str(), target.as_str());
     sqlx::query!(
         "DELETE FROM workspace_member WHERE workspace_id = $1 AND principal = $2",
@@ -532,11 +535,12 @@ async fn session_remove_run(
     .await
     .map_err(AuthorityError::internal)?;
     sqlx::query!(
-        "DELETE FROM roster WHERE workspace_id = $1 AND principal = $2",
+        r#"SELECT topos_detach_lapsed($1, $2, $3) AS "n!""#,
         ws_s,
         tgt,
+        input.now,
     )
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
     record_session_event(

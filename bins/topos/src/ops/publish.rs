@@ -96,7 +96,7 @@ const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
 /// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
 /// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
 /// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
-/// [`ClientError::Conflict`] / [`ClientError::ApprovalRequired`] / [`ClientError::Denied`] on the plane's
+/// [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's
 /// typed verdict; a signing / transport / store failure otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
@@ -107,6 +107,7 @@ pub(crate) fn publish(
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
+    channel: Option<&str>,
     workspace: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE. A pin only
@@ -134,6 +135,7 @@ pub(crate) fn publish(
         &skill_name,
         pin.as_deref(),
         propose,
+        channel,
         workspace,
     )?;
     Ok(stamp_added(outcome, added))
@@ -152,6 +154,7 @@ fn publish_tracked(
     skill_name: &str,
     pin: Option<&str>,
     propose: bool,
+    channel: Option<&str>,
     workspace: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
@@ -188,6 +191,7 @@ fn publish_tracked(
         gov_connect,
         skill_name,
         propose,
+        channel,
         pin,
         None,
         workspace,
@@ -340,6 +344,7 @@ fn enrolled_publish(
     gov_connect: &GovernanceConnect<'_>,
     skill_name: &str,
     propose: bool,
+    channel: Option<&str>,
     pin: Option<&str>,
     standup_receipt: Option<StandupReceipt>,
     workspace: Option<&str>,
@@ -422,6 +427,7 @@ fn enrolled_publish(
             &lock,
             &workspace_id,
             propose,
+            channel,
             &scanned,
             scanned.bundle_digest,
         )?,
@@ -798,6 +804,9 @@ fn continue_enrolled(
         gov_connect,
         skill_name,
         false,
+        // A standup-resumed publish is the genesis of a brand-new workspace — no channel flag rode the
+        // resume; the genesis default (`everyone`) places it.
+        None,
         pin,
         standup_receipt,
         // The standup created exactly ONE workspace membership — resolve it ambiently (no `--workspace`).
@@ -902,6 +911,7 @@ fn build_publish_op(
     lock: &Lock,
     workspace_id: &str,
     propose: bool,
+    channel: Option<&str>,
     scanned: &scan::ScannedBundle,
     digest: [u8; 32],
 ) -> Result<OpRecord, ClientError> {
@@ -975,6 +985,7 @@ fn build_publish_op(
         // The author's folder name — advisory, so the plane can name the followers' folders + dashboard
         // entry after it (a revert/review carries no name and preserves the stored one).
         display_name: Some(lock.name.clone()),
+        channel: channel.map(str::to_owned),
         last_receipt: None,
     })
 }
@@ -1016,10 +1027,6 @@ fn map_outcome(
             body: None,
             added: None,
         })),
-        TerminalOutcome::ApprovalRequired => Err(ClientError::ApprovalRequired {
-            skill: skill_name.to_owned(),
-            digest: digest.to_owned(),
-        }),
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_name.to_owned(),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),

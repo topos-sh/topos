@@ -120,77 +120,6 @@ impl Db {
         }))
     }
 
-    /// Fast-path replay of a prior **gated** (`APPROVAL_REQUIRED`) direct-publish outcome, keyed on the
-    /// STABLE (command, skill, expected) — so a retry of a gated op stays sticky across a `review_required`
-    /// flip without re-gating (which would mismatch a `commit = None` gate receipt and burn `OP_ID_REUSED`)
-    /// or re-ingesting (a gated op's lease is released, so a re-ingest hits `LeaseNotLive`). Only the gated
-    /// outcome is fast-pathed; any other returns `None`, and the preflight skip-gates a stored **OK** (whose
-    /// completed lease makes a re-ingest safe) via [`published_ok_exists`](Self::published_ok_exists), leaving
-    /// the commit comparison to the in-txn replay. Mirrors [`replay_revert`](Self::replay_revert).
-    pub(crate) async fn replay_gated_publish(
-        &self,
-        ws: &WorkspaceId,
-        device_key_id: &str,
-        op_id: &str,
-        skill: &SkillId,
-        expected: Generation,
-    ) -> Result<Option<SetCurrentReceipt>> {
-        let Some(stored) = get_receipt(self.pool(), ws, device_key_id, op_id).await? else {
-            return Ok(None);
-        };
-        // A gated outcome MUST be replayed on this pre-ingest fast path rather than left to the promote: every
-        // non-OK outcome RELEASES its migrate lease, so re-ingesting a gated op would hit `LeaseNotLive`. Both
-        // gate paths can produce it — the PREFLIGHT (pre-ingest, `commit = None`) and the rare IN-TXN gate
-        // (post-ingest, `commit = Some`, when `review_required` flips on mid-publish). The unbound one NEEDS
-        // this fast path (the promote's commit-comparison replay can't match a `None` commit). The bound one
-        // is replayed here too, deliberately: a gated op published NO bytes, so replaying `APPROVAL_REQUIRED`
-        // for a same-op_id retry of different bytes — instead of `OP_ID_REUSED` — denies the publish either
-        // way (the client re-runs as a proposal) and avoids re-migrating its released lease. Any OTHER stored
-        // outcome returns `None`; the preflight then skip-gates a stored OK (whose COMPLETED lease makes a
-        // re-ingest safe) via `published_ok_exists`.
-        if stored.outcome != TerminalOutcome::ApprovalRequired {
-            return Ok(None);
-        }
-        let stable_match = stored.command == "publish-direct"
-            && stored.skill_id == skill.as_str()
-            && stored.expected == expected;
-        Ok(Some(if stable_match {
-            stored.into_receipt()
-        } else {
-            // The op id was reused for a DIFFERENT direct publish (skill/expected differ): the byte-stable
-            // reuse receipt, bound on the gated request's stable key (no commit/digest — nothing ingested).
-            let bound = BoundIdentity {
-                command: "publish-direct",
-                skill_id: skill.as_str(),
-                commit: None,
-                bundle_digest: None,
-                expected,
-            };
-            permanent_key_reuse(op_id, &bound, &stored.created_at)
-        }))
-    }
-
-    /// Whether a prior **OK** pointer-move receipt exists for this `(workspace, device, op id)`. The publish
-    /// preflight consults it to avoid RE-GATING a publish that already SUCCEEDED: re-gating would bind a fresh
-    /// `commit = None` receipt and mismatch the stored OK (burning the op as `OP_ID_REUSED` once
-    /// `review_required` flips ON between attempts). A stored OK instead skips the gate so the promote path's
-    /// in-txn replay (which runs BEFORE the in-txn gate) returns the original OK — safe because an OK leaves a
-    /// **completed** (non-expiring) lease, so the re-ingest succeeds. (Non-OK outcomes release their lease, so
-    /// they are NOT skip-gated; a gated one is replayed by [`replay_gated_publish`](Self::replay_gated_publish),
-    /// and a CONFLICT/DENIED retry keeps its prior behaviour — re-gated to `OP_ID_REUSED` under review-on, or
-    /// the unchanged review-off flow.)
-    pub(crate) async fn published_ok_exists(
-        &self,
-        ws: &WorkspaceId,
-        device_key_id: &str,
-        op_id: &str,
-    ) -> Result<bool> {
-        Ok(matches!(
-            get_receipt(self.pool(), ws, device_key_id, op_id).await?,
-            Some(stored) if stored.outcome == TerminalOutcome::Ok
-        ))
-    }
-
     /// Whether a durable receipt already exists for this device's `op_id` (a pool read). The **revoked-device
     /// gate**: a since-revoked device is admitted past `resolve_device_op` ONLY when it has a receipt to
     /// replay, so it still gets its stored outcome byte-identically (OK-publish or a stored typed failure);
@@ -346,23 +275,6 @@ pub(super) async fn first_parent_mismatch(
         Some(cur.generation),
         None,
         details,
-    )
-    .await
-}
-
-pub(super) async fn approval_required(
-    tx: &mut Transaction<'_, Postgres>,
-    input: &PromoteInput<'_>,
-    bound: &BoundIdentity<'_>,
-) -> Result<SetCurrentReceipt> {
-    write_terminal(
-        tx,
-        input,
-        bound,
-        TerminalOutcome::ApprovalRequired,
-        None,
-        None,
-        detail("direct publish under review-required; re-run as a proposal"),
     )
     .await
 }
@@ -750,7 +662,7 @@ impl StoredReceipt {
 // --- the op_receipts row SQL (workspace-scoped; the one durable receipt slot per (device, op id)) ---
 
 /// The DEVICE-only point lookup (the pre-txn replay fast paths: `replay_revert` /
-/// `replay_gated_publish` / `published_ok_exists`). The explicit `method = 'device'` keeps a
+/// `device_receipt_exists`). The explicit `method = 'device'` keeps a
 /// session receipt out of a device flow even if the two lanes ever shared an actor string.
 async fn get_receipt<'e, E>(
     executor: E,
@@ -930,7 +842,6 @@ pub(super) async fn insert_receipt(
 fn outcome_str(o: TerminalOutcome) -> &'static str {
     match o {
         TerminalOutcome::Ok => "OK",
-        TerminalOutcome::ApprovalRequired => "APPROVAL_REQUIRED",
         TerminalOutcome::NeedsReview => "NEEDS_REVIEW",
         TerminalOutcome::Conflict => "CONFLICT",
         TerminalOutcome::Diverged => "DIVERGED",
@@ -945,7 +856,6 @@ fn outcome_str(o: TerminalOutcome) -> &'static str {
 fn parse_outcome(s: &str) -> Result<TerminalOutcome> {
     Ok(match s {
         "OK" => TerminalOutcome::Ok,
-        "APPROVAL_REQUIRED" => TerminalOutcome::ApprovalRequired,
         "NEEDS_REVIEW" => TerminalOutcome::NeedsReview,
         "CONFLICT" => TerminalOutcome::Conflict,
         "DIVERGED" => TerminalOutcome::Diverged,

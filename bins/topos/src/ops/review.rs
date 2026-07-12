@@ -116,6 +116,7 @@ pub(crate) fn review(
                 good: None,
                 // A review renames nothing — carry no name so the plane preserves the stored one.
                 display_name: None,
+                channel: None,
                 last_receipt: None,
             }
         }

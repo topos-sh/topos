@@ -137,6 +137,10 @@ pub(crate) enum Command {
         /// Open a proposal (a PR) instead of moving `current`.
         #[arg(long)]
         propose: bool,
+        /// Place the skill's reference into this channel (created on first use; a curated channel
+        /// needs reviewer+). A brand-new skill with no `--to` lands in `everyone`.
+        #[arg(long, value_name = "CHANNEL")]
+        to: Option<String>,
         /// Block until the browser sign-in settles, then auto-create the workspace and publish in ONE
         /// command (the un-enrolled standup path). Bare `--wait` waits until the code expires; `--wait
         /// <seconds>` caps the wait. Without `--wait`, an agent (`--json`) run returns the pending state

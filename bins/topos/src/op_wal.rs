@@ -148,6 +148,7 @@ mod tests {
             expected_generation: Generation { epoch: 1, seq: 1 },
             good: None,
             display_name: None,
+            channel: None,
             last_receipt: None,
         }
     }
