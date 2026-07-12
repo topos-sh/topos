@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n               FROM proposals p\n               JOIN current c ON c.workspace_id = p.workspace_id AND c.skill_id = p.skill_id\n               WHERE p.workspace_id = $1 AND p.status = 'open'\n                 AND c.epoch = p.base_epoch AND c.seq = p.base_seq\n                 AND p.skill_id = ANY($2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a86151d21e2fff206a8be049d04aa70dbc8325b693b3dc700e39059b95a5f9d7"
+}

@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT w.name AS \"name!\", w.display_name AS \"display_name!\",\n                      m.role AS \"role!\", m.invited_by AS \"invited_by?\",\n                      topos_invite_policy($1) AS \"invite_policy!\"\n               FROM workspace w\n               JOIN workspace_member m ON m.workspace_id = w.workspace_id\n               WHERE w.workspace_id = $1 AND m.principal = $2 AND m.status = 'confirmed'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "invited_by?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "invite_policy!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "2fadaea570348a943dcc9c0d2811faf06bd64324c6cd6ae8ee253e4fb5abb327"
+}

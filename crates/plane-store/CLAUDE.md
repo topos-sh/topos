@@ -67,22 +67,26 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   the ONE entitlement SRF + via attribution + the person's detached set + the unacked notices feed
   + the open-proposal count) and the fleet's applied-state report (snapshot upsert; detach records
   immutable; `last_report_at` the staleness clock).
-- `enroll.rs` / `db/directory/enroll.rs` — enrollment issuance (invites-bootstrap read, device-auth,
-  passcodes, grants, the central redeem — which mints the ONE **workspace credential** per device) and
-  the device READ lane's resolver (`resolve_read_scope`). The shared credential derivations (HMAC mint,
-  sha256 storage
-  form, the server-derived device key id) and the cross-domain in-txn helpers (`read_device`, `blob32`)
-  live here.
-- `governance.rs` / `db/directory/governance.rs` — the role-gated governance surface (create-invite +
-  roster/revoke, authenticated by in-transaction device-credential lookup and bound to a canonical request
+- `enroll.rs` / `db/directory/enroll.rs` — enrollment issuance BY ADDRESS (device-auth toward a
+  workspace NAME, passcodes, grants, the central redeem — which gates on the ROSTER and mints the ONE
+  **workspace credential** per device — and the LOGIN door, which re-mints that credential in every
+  confirmed seat) and the device READ lane's resolver (`resolve_read_scope`). The shared credential
+  derivations (HMAC mint, sha256 storage form, the server-derived device key id) and the cross-domain
+  in-txn helpers (`read_device`, `blob32`) live here.
+- `governance.rs` / `db/directory/governance.rs` — the role-gated governance surface (roster/revoke,
+  authenticated by in-transaction device-credential lookup and bound to a canonical request
   identity under `TOPOS_DEVICE_GOVERNANCE_V1`; the last-owner-lockout guard; the `workspace_events` audit +
-  idempotency) + the workspace-standup genesis ops (the one-time `admin_claim` mint/redeem,
-  `create_workspace`, `approve_standup`, and the shared `seat_workspace_and_owner` genesis seat).
+  idempotency) + the workspace ADDRESS-name rules (`validate_workspace_name` — charset/reserved/
+  archived-pattern — and the slugify/dedupe/fallback resolution) + the workspace-standup genesis ops
+  (the one-time `admin_claim` mint/redeem, `create_workspace`, `approve_standup`, and the shared
+  `seat_workspace_and_owner` genesis seat — every genesis names an address and returns it as the
+  share line; no invite link exists to mint).
 - `session_read.rs` / `db/directory/session_read.rs` — the web-session READ lane (privileged lib-level, no
   OSS HTTP route): pool reads only, no `run_serializable!`, no op_id/`workspace_events`/receipts (the ONE
   new query is the skill index; everything else re-uses `read.rs`'s machinery over the member gate).
-- `session_roster.rs` / `db/directory/session_roster.rs` — the web-session roster leg (invite-at-member-or-
-  reviewer / remove / rotate-the-standing-door / roster read), authorized by an in-transaction
+- `session_roster.rs` / `db/directory/session_roster.rs` — the web-session roster leg (invite-at-member-
+  or-reviewer / remove / roster read — an invitation is a ROSTER WRITE, and the ops disclose the
+  workspace ADDRESS, never a tokened link), authorized by an in-transaction
   confirmed-OWNER acting gate (the composing caller's session verification is the authentication),
   `request_id`-idempotent through the `workspace_events` slot, uniformly denied on self-host.
 - `session_review.rs` (+ `actor.rs`) — the web-session review leg: approve/reject/revert from a verified
@@ -145,6 +149,13 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   FUNCTIONS (curation, membership, subscriptions, protect, lifecycle, the lapse-detach/re-attach
   reconciles) + the `topos_person_entitled`/`topos_entitled_skills` entitlement SRFs — and the LIFT: the
   interim per-skill `roster` rows moved into person-scoped direct follows, then **`DROP TABLE roster`**.
+  **`0016` is the VERB-SURFACE schema**: the workspace ADDRESS (`workspace.name` — unique,
+  charset-checked, backfilled from display names), the `invite_policy` + `staleness_window_ms` policy
+  knobs with their guarded `topos_*` setters/readers, `topos_invite` (the roster-row invitation with
+  channel pre-placement) + `topos_notices_ack`, the token-less enrollment session shape
+  (`device_auth_sessions.requested_workspace`, the `login` intent, a nullable grant workspace + a grant
+  `intent` discriminant) — and the tokened invite door's interment: `DROP TABLE invites, invite_skill`,
+  the session/grant `invite_sha256` columns and the standing-door `workspace.link_epoch` dropped.
 - **`Authority::read_object`** — the skill-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
@@ -293,8 +304,15 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   locks the open proposal, enforces **four-eyes under `review_required`** (the proposer may not self-approve),
   records an `approvals` row, and reuses the SAME promote — whose `commit_object` write is the
   **`proposal_object → commit_object` handoff** to the permanent trunk root — then flips the status to
-  `accepted` (sideways `seq += 1`). **`reject`/withdraw** is a small standalone status-flip txn (no
-  pointer move); the gate then stops matching and ordinary GC reclaims the unique bytes. All
+  `accepted` (sideways `seq += 1`). **`reject`** — with a
+  MANDATORY non-empty reason on BOTH lanes now (typed + SYNTHESIZED when empty, since the reason is not
+  in the receipt's bound identity; recorded on the row AND the author's verdict notice) — and the
+  author-only **`withdraw`** (actor must equal the proposer, a typed durable denial otherwise; closes as
+  `withdrawn` with NO notice, idempotent re-withdraw) are small standalone status-flip txns (no pointer
+  move); the gate then stops matching and ordinary GC reclaims the unique bytes. A fresh `propose`
+  SUPERSEDES the author's other open drafts on the skill (closed as `superseded`, no notice; the
+  idempotent same-(candidate, base) re-propose still converges), and `revert` refuses a PURGED target
+  typed (`TARGET_PURGED`, after the replay probe, before any staging) on both lanes. All
   outcomes are op_id'd + receipted (lost-ack replay is byte-identical); a reclaimed object reads **404, never
   Integrity** (the read-time re-authorize guard). Driven in-process by the **stale-approve** interleaving
   (approve@stale ⇒ CONFLICT → rebase + re-propose → approve@new ⇒ OK) and the **ABA** interleaving (a `revert`
@@ -322,20 +340,33 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   consumed grant re-derives the SAME workspace credential (naturally idempotent redeem), and a revoke is an
   instant row
   flip; `device_code`/`user_code`/`passcode` are fresh `getrandom`. The ops, all decided IN-Authority against
-  server-trusted rows (never a client-asserted id): **`create_invite`** (device-credential, owner-role-gated;
-  mints the `/i/<token>` link, seeds the invited members, op_id-idempotent), **`read_invite_bootstrap`** (the
-  no-bytes, no-role payload), **`start_device_auth`** (RFC-8628-shaped; the device key id is
-  **server-derived** `dk_<…>` from the public key, never client-asserted; cloud sessions are `pending`,
-  self-host born `confirmed` device-rooted), **`poll_device_auth`** (pending/slow-down/denied/expired/granted;
-  the grant is deterministic so a re-poll re-issues the SAME one), **`start_passcode`**/**`complete_passcode`**
-  (the email parsed INSIDE the op, a constant-shaped ack, brute-force locked after a cap), the central
-  **`redeem_enrollment`** (ONE `run_serializable!` txn: a binding-equality check — the presented device key must
-  equal the GRANT's bound key → the deployment-mode roster gate [cloud requires a confirmed, already-rostered
-  identity; self-host grants membership from the bearer] → device registry register with anti-squat, WRITING
+  server-trusted rows (never a client-asserted id): **`start_device_auth`** (RFC-8628-shaped, toward a
+  workspace ADDRESS name — syntax-validated typed; RESOLUTION is never disclosed: an unknown name opens
+  the same `pending` session and runs to the redeem's one uniform denial; the device key id is
+  **server-derived** `dk_<…>` from the public key, never client-asserted; sessions are born `pending` on
+  EVERY posture — identity proof is always a passcode or a web approval, the self-host born-confirmed
+  shortcut died with the invite bearer token that anchored it), **`start_login_device_auth`** (the
+  workspace-less LOGIN session — sign-in + credential recovery, allowed on BOTH postures),
+  **`poll_device_auth`** (pending/slow-down/denied/expired/granted;
+  the grant is deterministic so a re-poll re-issues the SAME one, records the session's INTENT — a
+  standup session issues an enroll-intent grant — and a granted poll's workspace context carries the
+  ADDRESS), **`start_passcode`**/**`complete_passcode`**
+  (the email parsed INSIDE the op, a constant-shaped ack, brute-force locked after a cap; the identity
+  legs serve enroll AND login sessions — only standup is excluded), the central
+  **`redeem_enrollment`** (ONE `run_serializable!` txn: grant → expiry → intent [a login grant here reads
+  as the uniform denial] → binding equality — the presented device key must equal the GRANT's bound key →
+  THE MEMBERSHIP GATE, the roster as the lock on EVERY posture: an unresolved address, a wrong-workspace
+  redeem, a vanished workspace row, and an off-roster identity all answer ONE byte-identical
+  `ENROLL_UNAVAILABLE` denial → the invited→confirmed seat flip → device registry register with
+  anti-squat, WRITING
   the device's ONE **workspace credential** (`derive_token(b"wscred", [grant_sha256])` — deterministic, so a
   lost-ack replay re-returns the identical plaintext; only its sha256 lands on the registry row; a re-redeem
-  through a FRESH grant rotates it) — **NEVER a user token, never a per-skill token**; no roster rows are
-  written at redeem anymore), and **`admin_claim`** (self-host first-boot standup — same `b"wscred"` mint over
+  through a FRESH grant rotates it) — **NEVER a user token, never a per-skill token**),
+  **`redeem_login`** (the LOGIN door: prove the grant's bound key, then register this device + re-mint
+  its credential in EVERY workspace where the proven identity holds a confirmed seat —
+  `derive_token(b"wscred", [grant_sha256, ws])`, deterministic per (grant, workspace) so a lost-ack
+  replay re-returns identical plaintexts; a revoked or key-squatted seat comes back `blocked` with no
+  side effect there; zero seats is a valid empty success), and **`admin_claim`** (self-host first-boot standup — same `b"wscred"` mint over
   the claim's sha256, so the consumed-replay probe re-returns the identical credential).
   The **governance** mutations (`roster_set`/`roster_remove`/`revoke_device`) resolve the ACTING workspace
   credential to its registered device in-transaction (resolve → request identity bound to the RESOLVED
@@ -371,15 +402,18 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   for a composing web leg with an already-verified email) runs cap → fresh-`w_<hex32>`-id seat → the
   session's pending→confirmed CAS in ONE txn — the CAS is the idempotency (same-email re-click ⇒
   `AlreadyApproved`; different email / unknown / expired / enroll-intent ⇒ the single indistinguishable
-  `NotFound`). The granted poll now carries the workspace's `{id, display name}` and the redeem
+  `NotFound`). The granted poll now carries the workspace's `{id, display name, address}` and the redeem
   outcome its `principal`. (2) **`create_workspace`**
   (lib-only) — the same genesis body for a verified email, idempotent per `request_id` via
-  `genesis_requests` (same request + same owner replays the SAME workspace + the SAME deterministic
-  self-invite, minted through the same `mint_invite_row` the owner-driven `create_invite` also
-  writes through; a different owner is denied; `genesis_requests_pkey` joined the serializable runner's
-  convergent-23505 set so racing same-request creates converge). Both doors share the per-identity creation
+  `genesis_requests` (same request + same owner replays the SAME workspace + the SAME ADDRESS — the
+  genesis mints no invite link: the address IS the share line; a different owner is denied;
+  `genesis_requests_pkey` and `workspace_by_name` sit in the serializable runner's
+  convergent-23505 set so racing same-request/same-name creates converge). Both doors share the per-identity creation
   cap (3 confirmed-owner memberships), the freemail-aware domain claim (a non-freemail owner domain is
-  recorded `verified` — the sign-in proved an address on it), and the server-side display-name default.
+  recorded `verified` — the sign-in proved an address on it), the server-side display-name default, and
+  the ADDRESS-name resolution (`name: Some` is validated + must be free, both refusals typed; `None`
+  slugifies the display name, dedupes `-2`…`-9`, and falls back to an id-derived `ws-…` name — the
+  admin-claim redeem derives its slug from the mint-time display name through the same helper).
   (3) **The hardened one-time claim** — `mint_admin_claim` (typed refusals: an existing workspace; a
   cloud-mode mint without an owner email) stores mint-time facts (display name / owner email / expiry) the
   redeem trusts (the request's display name is disclosure-only); the refactored `admin_claim` orders
@@ -395,22 +429,18 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   standup suite (`src/tests/standup.rs`): the full standup chain through the genesis-publish gate, the
   same-device replay + racing double redeem (exactly one owner row), the cap at the 4th create, the
   cross-door token separation, and the intent/first-writer-wins guards.
-- **The web-session roster leg (real, but basic).** Four PRIVILEGED lib-level ops (no OSS HTTP route —
-  a hosted composition's authenticated admin routes call them; self-host is uniformly denied in-op,
-  keeping bearer + invite-chain the self-host membership story): **`invite_members_session`** (seats
+- **The web-session roster leg (real, but basic).** Three PRIVILEGED lib-level ops (no OSS HTTP route —
+  a hosted composition's authenticated admin routes call them; self-host is uniformly denied in-op —
+  self-host joining is the device lane): **`invite_members_session`** (seats
   emails at member|reviewer — owner is unrepresentable in `SessionInviteRole` — through the shared
-  never-demote row-writer, and returns the STANDING WORKSPACE DOOR), **`roster_remove_session`**
+  never-demote row-writer; an invitation is a ROSTER WRITE and nothing more, and what comes back is the
+  workspace ADDRESS), **`roster_remove_session`**
   (the device lane's exact instant-revoke txn shape + `would_orphan_owner` lockout),
-  **`rotate_join_link_session`** ("reset link"), and the **`read_roster`** privileged read (seats for
-  any confirmed member; the door link disclosed ONLY to a confirmed owner). The STANDING DOOR is
-  deterministic — `derive_token(secret, b"door", [ws, link_epoch])` over a new `workspace.link_epoch`
-  counter (migration `0009`) — so it re-shows without storing plaintext; a create-page-born
-  workspace's door at epoch 0 IS its genesis self-invite (re-derived through `genesis_requests`, now
-  indexed by workspace), a standup/claim-born workspace mints `door(0)` lazily at the first session
-  invite, and rotation revokes the WHOLE standing family (epoch door + genesis row — the FIRST writer
-  of `invites.revoked`) and bumps the epoch: future redemption blocks at the existing bootstrap /
-  device-auth entry gates with the redeem path byte-untouched, and nothing already exchanged is
-  severed (device-leg invite links are deliberately out of rotation's scope). Authorization is a
+  and the **`read_roster`** privileged read (seats for
+  any confirmed member, plus the address — member-visible: it is a name, not a door; joining still
+  gates on the roster). The tokened standing-door machinery (its deterministic `b"door"` derivation,
+  the genesis self-invite continuity, `link_epoch` rotation) died with the invite tables in 0016 —
+  there is nothing to rotate when links carry nothing. Authorization is a
   signature-FREE session gate: replay BEFORE authz through the same `workspace_events` slot under a
   fresh `TOPOS_SESSION_ROSTER_V1` request identity (a device op id and a session request id fail
   closed against each other as key reuse), then the in-txn confirmed-OWNER check — ONE uniform denial
@@ -418,11 +448,10 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   stranger cannot grow the ledger or squat op-id slots). Receipts gain the `method` discriminant
   (`web_session` with the acting EMAIL as actor vs `device` with the presented device key id) —
   the audit trail says which leg acted, forever. Driven in-process by `src/tests/session_roster.rs`:
-  the uniform acting gate + recording rule, role-on-the-seat seeding (a reviewer invitee redeems into
-  a confirmed reviewer), self-host denial, identical replay / divergent-payload + cross-leg key
-  reuse / epoch-pinned rotate replay, lockout + same-txn token drop, genesis-door continuity, the
-  lazy epoch mint, rotation-blocks-future-only (an already-issued grant completes; a rotated door's
-  entry gates 404), and the receipt method/actor matrix.
+  the uniform acting gate + recording rule, role-on-the-seat seeding (a reviewer invitee redeems
+  through the ADDRESS into a confirmed reviewer while a verified stranger dies at the roster gate),
+  self-host denial, identical replay / divergent-payload + cross-leg key reuse in both directions,
+  lockout + the raced mutual removes, canonical-principal folding, and the receipt method/actor matrix.
 - **The web-session READ lane (member-scoped session reads).** Five PRIVILEGED lib-level read ops
   (no OSS HTTP route — a hosted composition's authenticated admin routes call them):
   **`list_skills_session`** (the workspace catalog — every skill holding a `current` row, with its
@@ -514,7 +543,8 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   `request_sha256` (the session lane's
   full-request identity; NULL on the device lane, whose identity is the resolved device key id) + a
   reserved `step_up_attestation` column + the `(workspace_id, op_id)` index, and adds
-  `proposals.resolved_reason` + `resolved_at` (a device reject writes NULL — the CLI keeps its surface).
+  `proposals.resolved_reason` + `resolved_at` (both lanes REQUIRE the reason now — the device lane
+  caught up in the verb reshape).
   The receipt replay probe is now **lane-blind** per `(workspace, op_id)`: cross-lane id reuse fails
   closed in BOTH directions (a device op id and a session request id never replay each other), while each
   lane's own slot still replays byte-identically on a full `(method, actor, request_sha256)` match — the
@@ -613,8 +643,8 @@ re-enroll IS the rotation; an in-place rotate-without-re-enroll op is later work
 domain-ownership **verification** (`verified_domain_status` is operator-asserted);
 **at-rest encryption / KMS of the enrollment secret** (a plaintext `0600` seed for
 now); the `purge`/lifecycle WEB CEREMONIES (the authority ops + guarded functions are BUILT; the step-up
-pages are the web tier's); notices ACK (the read-state column exists; the fetch-without-ack rides
-delivery; the ack write is a later surface); two-parent author merges; per-skill encryption-at-rest.
+pages are the web tier's); two-parent author merges; per-skill encryption-at-rest. (Notices ACK left
+this list — `topos_notices_ack` + `Authority::ack_notices` are BUILT.)
 
 ## Build note
 

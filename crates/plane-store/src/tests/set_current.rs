@@ -1621,6 +1621,7 @@ async fn an_unknown_device_denied_is_never_persisted(pool: PgPool) {
                 op: DeviceOp::ReviewReject,
                 expected: gn(1, 1),
             },
+            "not this one",
             &ghost_reject,
             CREATED_AT,
         )

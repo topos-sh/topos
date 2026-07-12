@@ -13,36 +13,29 @@ use topos_core::digest;
 
 use crate::db::{Db, blob32};
 use crate::enroll::{
-    self, ConfirmOutcome, DeploymentMode, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued,
-    PasscodeComplete, RedeemInput, RedeemOutcome,
+    self, ConfirmOutcome, DeviceAuthPoll, EnrollmentRedeemed, GrantIssued, LoginOutcome,
+    LoginRedeemed, LoginSeat, PasscodeComplete, RedeemInput, RedeemOutcome,
 };
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{Principal, WorkspaceId};
 
 // ── pool reads (the orchestration classifies on these) ─────────────────────────────────────────────────
 
-/// A `workspace` row (the deployment posture + display fields).
+/// A `workspace` row (the address name + deployment posture + display fields).
 pub(crate) struct WorkspaceRow {
+    pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) verified_domain: Option<String>,
     pub(crate) verified_domain_status: String,
-    pub(crate) deployment_mode: String,
-}
-
-/// A live `invites` row (resolved by the presented token's sha256).
-pub(crate) struct InviteRow {
-    pub(crate) workspace_id: WorkspaceId,
-    pub(crate) expires_at: Option<i64>,
-    pub(crate) revoked: bool,
 }
 
 impl Db {
-    /// Read a workspace row (deployment posture + display fields). `None` if the workspace does not exist.
+    /// Read a workspace row (address name + posture + display fields). `None` if the workspace does not exist.
     pub(crate) async fn read_workspace(&self, ws: &WorkspaceId) -> Result<Option<WorkspaceRow>> {
         let ws_s = ws.as_str();
         let row = sqlx::query!(
-            r#"SELECT display_name AS "display_name!", verified_domain AS "verified_domain?",
-                      verified_domain_status AS "verified_domain_status!", deployment_mode AS "deployment_mode!"
+            r#"SELECT name AS "name!", display_name AS "display_name!", verified_domain AS "verified_domain?",
+                      verified_domain_status AS "verified_domain_status!"
                FROM workspace WHERE workspace_id = $1"#,
             ws_s,
         )
@@ -50,68 +43,26 @@ impl Db {
         .await
         .map_err(AuthorityError::internal)?;
         Ok(row.map(|r| WorkspaceRow {
+            name: r.name,
             display_name: r.display_name,
             verified_domain: r.verified_domain,
             verified_domain_status: r.verified_domain_status,
-            deployment_mode: r.deployment_mode,
         }))
     }
 
-    /// Resolve an invite by its token's sha256 — the live row, whatever its revoked/expiry state (the caller
-    /// applies the `non-revoked ∧ non-expired` gate so a miss and a dead invite are the same `NotFound`).
-    pub(crate) async fn read_invite(&self, token_sha256: &[u8; 32]) -> Result<Option<InviteRow>> {
-        let key = token_sha256.as_slice();
+    /// Resolve a workspace ADDRESS name to its id (the enroll-by-address lookup). `None` when no
+    /// workspace holds the name — the caller opens the session anyway (resolution is never disclosed
+    /// on the authorize route).
+    pub(crate) async fn workspace_id_by_name(&self, name: &str) -> Result<Option<WorkspaceId>> {
         let row = sqlx::query!(
-            r#"SELECT workspace_id AS "workspace_id!", expires_at AS "expires_at?: i64",
-                      revoked AS "revoked!: i64"
-               FROM invites WHERE token_sha256 = $1"#,
-            key,
+            r#"SELECT workspace_id AS "workspace_id!" FROM workspace WHERE name = $1"#,
+            name,
         )
         .fetch_optional(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
-        match row {
-            None => Ok(None),
-            Some(r) => Ok(Some(InviteRow {
-                workspace_id: WorkspaceId::parse(&r.workspace_id)
-                    .map_err(AuthorityError::integrity)?,
-                expires_at: r.expires_at,
-                revoked: r.revoked != 0,
-            })),
-        }
-    }
-
-    /// The skills an invite offers (with optional display names). The display name PREFERS the skill's
-    /// live catalog label (display name, else the catalog name — the authoritative human labels) and
-    /// falls back to the name carried on the invite — so an offer reflects the latest published name,
-    /// and yields `None` only when a skill has none anywhere. The LEFT JOIN keeps a skill with no
-    /// catalog row (never published) in the offer with a `NULL` display name.
-    pub(crate) async fn read_invite_skills(
-        &self,
-        token_sha256: &[u8; 32],
-    ) -> Result<Vec<(SkillId, Option<String>)>> {
-        let key = token_sha256.as_slice();
-        let rows = sqlx::query!(
-            r#"SELECT isk.skill_id AS "skill_id!",
-                      COALESCE(cat.display_name, cat.name, isk.name) AS "name?"
-               FROM invite_skill isk
-               JOIN invites i ON i.token_sha256 = isk.token_sha256
-               LEFT JOIN catalog cat ON cat.workspace_id = i.workspace_id AND cat.skill_id = isk.skill_id
-               WHERE isk.token_sha256 = $1
-               ORDER BY isk.skill_id"#,
-            key,
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok((
-                    SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
-                    r.name,
-                ))
-            })
-            .collect()
+        row.map(|r| WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity))
+            .transpose()
     }
 
     /// Whether a LIVE (pending/confirmed) session already holds `user_code` (the start loop avoids a clash
@@ -128,16 +79,17 @@ impl Db {
         Ok(row.is_some())
     }
 
-    /// Insert a fresh device-auth session (cloud starts `pending`; self-host starts `confirmed` with a
-    /// server-derived device-rooted principal; a STANDUP session starts `pending` with NO workspace and no
-    /// invite — the approval supplies both). Stores ONLY the device code's sha256; the user code plaintext.
+    /// Insert a fresh device-auth session — always born `pending` (identity proof is a passcode or a
+    /// web-session approval on every posture). An ENROLL session records the REQUESTED address name
+    /// verbatim plus the resolved workspace id when the name resolved; a STANDUP/LOGIN session carries
+    /// neither. Stores ONLY the device code's sha256; the user code plaintext.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn insert_device_auth_session(
         &self,
         device_code_sha256: &[u8; 32],
         user_code: &str,
         ws: Option<&WorkspaceId>,
-        invite_sha256: Option<&[u8; 32]>,
+        requested_workspace: Option<&str>,
         device_pubkey: &[u8; 32],
         device_key_id: &str,
         machine_name: &str,
@@ -148,21 +100,20 @@ impl Db {
         interval_secs: i64,
         created_at: &str,
     ) -> Result<()> {
-        let (dc, ws_s, inv, pk) = (
+        let (dc, ws_s, pk) = (
             device_code_sha256.as_slice(),
             ws.map(WorkspaceId::as_str),
-            invite_sha256.map(<[u8; 32]>::as_slice),
             device_pubkey.as_slice(),
         );
         sqlx::query!(
             "INSERT INTO device_auth_sessions \
-               (device_code_sha256, user_code, workspace_id, invite_sha256, device_pubkey, device_key_id, \
+               (device_code_sha256, user_code, workspace_id, requested_workspace, device_pubkey, device_key_id, \
                 machine_name, intent, status, confirmed_principal, expires_at, interval_secs, last_polled_at, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, $13)",
             dc,
             user_code,
             ws_s,
-            inv,
+            requested_workspace,
             pk,
             device_key_id,
             machine_name,
@@ -186,26 +137,37 @@ impl Db {
     /// Poll a device-auth session: classify its status and either touch `last_polled_at` (pending) or issue
     /// the single-use grant (confirmed/issued). One `SERIALIZABLE` (`run_serializable!`) txn. The grant is HMAC-derived from
     /// `(device_code_sha256, ws)` so a re-poll re-derives the SAME grant (idempotent issue). An unknown
-    /// device code is the indistinguishable `NotFound`.
+    /// device code is the indistinguishable `NotFound`. `link_base` composes the granted context's
+    /// workspace ADDRESS.
     pub(crate) async fn poll_txn(
         &self,
         device_code_sha256: &[u8; 32],
         now: i64,
         created_at: &str,
         secret: &[u8; 32],
+        link_base: &str,
     ) -> Result<DeviceAuthPoll> {
         run_serializable!(self, tx, {
-            poll_run(&mut tx, device_code_sha256, now, created_at, secret).await
+            poll_run(
+                &mut tx,
+                device_code_sha256,
+                now,
+                created_at,
+                secret,
+                link_base,
+            )
+            .await
         })
     }
 }
 
 struct SessionRow {
     user_code: String,
-    /// `None` only for a not-yet-approved STANDUP session (the schema CHECK pins every confirmed/issued
-    /// session to a workspace, so the grant-issue path always sees `Some`).
+    /// `None` for a not-yet-approved STANDUP session, for a LOGIN session (workspace-less by design),
+    /// and for an ENROLL session whose requested address never resolved (the grant is issued anyway;
+    /// the redeem answers the one uniform denial).
     workspace_id: Option<String>,
-    invite_sha256: Option<Vec<u8>>,
+    intent: String,
     device_pubkey: Vec<u8>,
     device_key_id: String,
     status: String,
@@ -222,7 +184,7 @@ async fn read_session(
     let dc = device_code_sha256.as_slice();
     let row = sqlx::query!(
         r#"SELECT user_code AS "user_code!", workspace_id AS "workspace_id?",
-                  invite_sha256 AS "invite_sha256?: Vec<u8>", device_pubkey AS "device_pubkey!: Vec<u8>",
+                  intent AS "intent!", device_pubkey AS "device_pubkey!: Vec<u8>",
                   device_key_id AS "device_key_id!", status AS "status!",
                   confirmed_principal AS "confirmed_principal?", expires_at AS "expires_at!: i64",
                   interval_secs AS "interval_secs!: i64", last_polled_at AS "last_polled_at?: i64"
@@ -235,7 +197,7 @@ async fn read_session(
     Ok(row.map(|r| SessionRow {
         user_code: r.user_code,
         workspace_id: r.workspace_id,
-        invite_sha256: r.invite_sha256,
+        intent: r.intent,
         device_pubkey: r.device_pubkey,
         device_key_id: r.device_key_id,
         status: r.status,
@@ -252,6 +214,7 @@ async fn poll_run(
     now: i64,
     created_at: &str,
     secret: &[u8; 32],
+    link_base: &str,
 ) -> Result<DeviceAuthPoll> {
     let Some(session) = read_session(tx, device_code_sha256).await? else {
         return Err(AuthorityError::NotFound);
@@ -293,8 +256,16 @@ async fn poll_run(
             })
         }
         "confirmed" | "issued" => {
-            let granted =
-                issue_grant(tx, device_code_sha256, &session, now, created_at, secret).await?;
+            let granted = issue_grant(
+                tx,
+                device_code_sha256,
+                &session,
+                now,
+                created_at,
+                secret,
+                link_base,
+            )
+            .await?;
             Ok(DeviceAuthPoll::Granted(granted))
         }
         _ => Err(AuthorityError::integrity(EnrollCorrupt("session status"))),
@@ -302,11 +273,14 @@ async fn poll_run(
 }
 
 /// Issue (or re-derive) the single-use grant for a confirmed/issued session. The grant token is
-/// deterministic in `(device_code_sha256, ws)`, so a re-poll re-derives it and the `ON CONFLICT DO NOTHING` is a
-/// no-op — naturally idempotent. On the FIRST issue it binds the proven identity (principal, device)
-/// and flips the session to `issued`. (The invite's offered skills are DISCLOSURE, not grant state:
-/// the bootstrap and the verification page read them from `invite_skill` directly; the redeem mints
-/// one workspace credential regardless of skills, so the grant carries none.)
+/// deterministic in `(device_code_sha256, ws-or-empty)`, so a re-poll re-derives it and the
+/// `ON CONFLICT DO NOTHING` is a no-op — naturally idempotent. On the FIRST issue it binds the proven
+/// identity (principal, device) and flips the session to `issued`. The grant records the session's
+/// INTENT — a standup session issues an `enroll`-intent grant scoped to its created workspace, so the
+/// two redeem doors can never cross — and a workspace only when the session has one (a login grant is
+/// workspace-less by design; an enroll grant against an unresolved address is too, and the redeem
+/// answers the one uniform denial).
+#[allow(clippy::too_many_arguments)]
 async fn issue_grant(
     tx: &mut Transaction<'_, Postgres>,
     device_code_sha256: &[u8; 32],
@@ -314,49 +288,60 @@ async fn issue_grant(
     now: i64,
     created_at: &str,
     secret: &[u8; 32],
+    link_base: &str,
 ) -> Result<GrantIssued> {
-    // A confirmed/issued session always has a workspace (the schema CHECK; a standup approval sets it).
-    let ws_str = session.workspace_id.as_deref().ok_or_else(|| {
-        AuthorityError::integrity(EnrollCorrupt("confirmed session without workspace"))
-    })?;
-    let ws = WorkspaceId::parse(ws_str).map_err(AuthorityError::integrity)?;
+    let ws = session
+        .workspace_id
+        .as_deref()
+        .map(WorkspaceId::parse)
+        .transpose()
+        .map_err(AuthorityError::integrity)?;
     let principal = session.confirmed_principal.as_deref().ok_or_else(|| {
         AuthorityError::integrity(EnrollCorrupt("confirmed session without principal"))
     })?;
-    // The workspace display name rides with the grant — a standup client has no `/i/` bootstrap to learn it
-    // from ("" if the row vanished; the grant's authority fields never depend on it).
-    let workspace_display_name = read_workspace_in_tx(tx, &ws)
-        .await?
-        .map(|w| w.display_name)
-        .unwrap_or_default();
+    // The workspace context rides with the grant — the client learns what it is joining from the poll
+    // ("" / None when the grant is workspace-less; the grant's authority fields never depend on it).
+    let (workspace_display_name, workspace_address) = match &ws {
+        Some(ws) => match read_workspace_in_tx(tx, ws).await? {
+            Some(w) => (w.display_name, Some(format!("{link_base}/{}", w.name))),
+            None => (String::new(), None),
+        },
+        None => (String::new(), None),
+    };
 
-    // The grant token: derive_token(b"grant", [device_code_sha256, ws]); store only its sha256.
-    let grant_token = enroll::derive_token(
-        secret,
-        b"grant",
-        &[device_code_sha256, ws.as_str().as_bytes()],
-    );
+    // The grant's intent: a standup session's approval created its workspace, so its grant redeems at
+    // the ENROLL door; enroll/login pass through. (The CHECK on `enrollment_grants.intent` pins the set.)
+    let grant_intent = match session.intent.as_str() {
+        "standup" => "enroll",
+        other => other,
+    };
+
+    // The grant token: derive_token(b"grant", [device_code_sha256, ws-or-empty]); store only its
+    // sha256. The empty part for a workspace-less session is unambiguous under the length-prefixed
+    // framing (no workspace id is empty), and keeps the derivation exactly as before whenever a
+    // workspace is bound.
+    let ws_part: &[u8] = ws.as_ref().map_or(b"", |w| w.as_str().as_bytes());
+    let grant_token = enroll::derive_token(secret, b"grant", &[device_code_sha256, ws_part]);
     let grant_sha256 = enroll::sha256_token(&grant_token);
 
     let device_auth_id = session.user_code.clone();
     let device_key_id = session.device_key_id.clone();
     let expires_at = now.saturating_add(enroll::GRANT_TTL_MS);
 
-    let (gs, ws_s, inv, pk) = (
+    let (gs, ws_s, pk) = (
         grant_sha256.as_slice(),
-        ws.as_str(),
-        session.invite_sha256.as_deref(),
+        ws.as_ref().map(WorkspaceId::as_str),
         session.device_pubkey.as_slice(),
     );
     sqlx::query!(
         "INSERT INTO enrollment_grants \
-           (grant_sha256, workspace_id, invite_sha256, principal, device_pubkey, device_key_id, \
+           (grant_sha256, workspace_id, intent, principal, device_pubkey, device_key_id, \
             device_auth_id, expires_at, consumed_at, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9) \
          ON CONFLICT (grant_sha256) DO NOTHING",
         gs,
         ws_s,
-        inv,
+        grant_intent,
         principal,
         pk,
         device_key_id,
@@ -381,6 +366,7 @@ async fn issue_grant(
         grant_token,
         workspace_id: ws,
         workspace_display_name,
+        workspace_address,
         device_auth_id,
         device_key_id,
         expires_at,
@@ -394,9 +380,11 @@ pub(crate) struct VerificationSessionRow {
     pub(crate) intent: String,
     pub(crate) machine_name: String,
     pub(crate) device_pubkey: [u8; 32],
-    /// `None` for a not-yet-approved STANDUP session (there is no workspace to disclose yet).
+    /// `None` for a not-yet-approved STANDUP session, a LOGIN session, or an enroll session whose
+    /// requested address never resolved.
     pub(crate) workspace_id: Option<WorkspaceId>,
-    pub(crate) invite_sha256: Option<[u8; 32]>,
+    /// The address name an enroll session asked for, verbatim (charset-validated at authorize).
+    pub(crate) requested_workspace: Option<String>,
 }
 
 impl Db {
@@ -411,7 +399,7 @@ impl Db {
         let row = sqlx::query!(
             r#"SELECT intent AS "intent!", machine_name AS "machine_name!",
                       device_pubkey AS "device_pubkey!: Vec<u8>",
-                      workspace_id AS "workspace_id?", invite_sha256 AS "invite_sha256?: Vec<u8>"
+                      workspace_id AS "workspace_id?", requested_workspace AS "requested_workspace?"
                FROM device_auth_sessions
                WHERE user_code = $1 AND status IN ('pending', 'confirmed') AND expires_at >= $2
                LIMIT 1"#,
@@ -433,7 +421,7 @@ impl Db {
                     .map(WorkspaceId::parse)
                     .transpose()
                     .map_err(AuthorityError::integrity)?,
-                invite_sha256: r.invite_sha256.map(|b| blob32(&b)).transpose()?,
+                requested_workspace: r.requested_workspace,
             })),
         }
     }
@@ -460,14 +448,15 @@ async fn confirm_external_identity_run(
     principal: &Principal,
     now: i64,
 ) -> Result<ConfirmOutcome> {
-    // The live ENROLL session this user code names (pending/confirmed), non-expired. Absent ⇒ the uniform
-    // miss. The `intent = 'enroll'` guard keeps a STANDUP session out of this path entirely: a standup
-    // session is only ever advanced by the approve op (which creates the workspace it confirms into).
+    // The live ENROLL-or-LOGIN session this user code names (pending/confirmed), non-expired. Absent ⇒
+    // the uniform miss. The intent guard keeps a STANDUP session out of this path entirely: a standup
+    // session is only ever advanced by the approve op (which creates the workspace it confirms into);
+    // an enroll and a login session are confirmed the same way (the identity proof IS the flow).
     let row = sqlx::query!(
         r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>", status AS "status!",
                   confirmed_principal AS "confirmed_principal?"
            FROM device_auth_sessions
-           WHERE user_code = $1 AND intent = 'enroll'
+           WHERE user_code = $1 AND intent IN ('enroll', 'login')
              AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
         user_code,
         now,
@@ -512,8 +501,8 @@ async fn confirm_external_identity_run(
 // ── passcode: start (upsert) + complete (verify under cap), the verification-page second factor ────────
 
 impl Db {
-    /// Resolve the LIVE **enroll** session a `user_code` names (pending/confirmed), returning its
-    /// device-code sha256. `None` ⇒ no live enroll session (the uniform miss). The intent guard keeps a
+    /// Resolve the LIVE **enroll-or-login** session a `user_code` names (pending/confirmed), returning its
+    /// device-code sha256. `None` ⇒ no live such session (the uniform miss). The intent guard keeps a
     /// STANDUP session out of the passcode flow — its only identity leg is the web approve.
     pub(crate) async fn live_session_device_code(
         &self,
@@ -521,7 +510,7 @@ impl Db {
     ) -> Result<Option<[u8; 32]>> {
         let row = sqlx::query!(
             r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>" FROM device_auth_sessions
-               WHERE user_code = $1 AND intent = 'enroll' AND status IN ('pending', 'confirmed') LIMIT 1"#,
+               WHERE user_code = $1 AND intent IN ('enroll', 'login') AND status IN ('pending', 'confirmed') LIMIT 1"#,
             user_code,
         )
         .fetch_optional(self.pool())
@@ -588,15 +577,15 @@ async fn complete_passcode_run(
     code: &str,
     now: i64,
 ) -> Result<PasscodeComplete> {
-    // The live, NON-EXPIRED **enroll** session this user code names (pending/confirmed). Absent/expired ⇒
-    // the uniform miss — an expired session is the indistinguishable NotFound at every confirm entry point
-    // (matching the poll + read_verification_session), not only at poll time. The `intent = 'enroll'` guard
-    // keeps a STANDUP session out (its only identity leg is the web approve).
+    // The live, NON-EXPIRED **enroll-or-login** session this user code names (pending/confirmed).
+    // Absent/expired ⇒ the uniform miss — an expired session is the indistinguishable NotFound at every
+    // confirm entry point (matching the poll + read_verification_session), not only at poll time. The
+    // intent guard keeps a STANDUP session out (its only identity leg is the web approve).
     let row = sqlx::query!(
         r#"SELECT device_code_sha256 AS "device_code_sha256!: Vec<u8>", status AS "status!",
                   confirmed_principal AS "confirmed_principal?"
            FROM device_auth_sessions
-           WHERE user_code = $1 AND intent = 'enroll'
+           WHERE user_code = $1 AND intent IN ('enroll', 'login')
              AND status IN ('pending', 'confirmed') AND expires_at >= $2 LIMIT 1"#,
         user_code,
         now,
@@ -679,7 +668,10 @@ async fn complete_passcode_run(
 // ── redeem: the central grant-redemption + gate + register + mint transaction ──────────────────────────
 
 struct GrantRow {
-    workspace_id: WorkspaceId,
+    /// `None` for a login grant (workspace-less by design) and an enroll grant whose requested
+    /// address never resolved.
+    workspace_id: Option<WorkspaceId>,
+    intent: String,
     principal: String,
     device_pubkey: [u8; 32],
     device_key_id: String,
@@ -699,6 +691,32 @@ impl Db {
     ) -> Result<RedeemOutcome> {
         run_serializable!(self, tx, redeem_run(&mut tx, input, secret).await)
     }
+
+    /// Redeem a LOGIN grant: register this device + re-mint its workspace credential in EVERY workspace
+    /// where the proven identity holds a confirmed seat. ONE `SERIALIZABLE` (`run_serializable!`) txn.
+    /// All `Denied` checks run before any write; a `blocked` seat (revoked device, squatted key id) is
+    /// skipped without a side effect while the rest still mint. Deterministic per `(grant, workspace)`,
+    /// so a lost-ack replay re-returns identical plaintexts.
+    pub(crate) async fn redeem_login_txn(
+        &self,
+        grant_sha256: &[u8; 32],
+        device_public_key: &[u8; 32],
+        server_device_key_id: &str,
+        now: i64,
+        secret: &[u8; 32],
+    ) -> Result<LoginOutcome> {
+        run_serializable!(self, tx, {
+            login_run(
+                &mut tx,
+                grant_sha256,
+                device_public_key,
+                server_device_key_id,
+                now,
+                secret,
+            )
+            .await
+        })
+    }
 }
 
 async fn redeem_run(
@@ -715,44 +733,44 @@ async fn redeem_run(
     if input.now > grant.expires_at {
         return Ok(RedeemOutcome::Denied("grant expired"));
     }
-    // (3) The grant binds exactly this device — the presented key + its server-derived id must match.
+    // (3) Intent: this is the ENROLL door. A login grant presented here reads exactly like a
+    // membership miss — the uniform denial, never a hint that the grant is otherwise live.
+    if grant.intent != "enroll" {
+        return Ok(RedeemOutcome::Denied(enroll::ENROLL_UNAVAILABLE));
+    }
+    // (4) The grant binds exactly this device — the presented key + its server-derived id must match.
     if grant.device_pubkey != input.device_public_key
         || grant.device_key_id != input.server_device_key_id
     {
         return Ok(RedeemOutcome::Denied("device key mismatch"));
     }
 
-    // (4) THE GATE (deployment mode from the workspace row). The stored mode is parsed STRICTLY — an
-    // unknown/corrupted value is an Integrity fault (fail closed, matching start_device_auth and
-    // read_invite_bootstrap), NEVER a silent fall-through to the self-host bearer semantics: a garbage
-    // mode must not admit a device that would have had to pass the cloud roster gate.
-    let Some(workspace) = read_workspace_in_tx(tx, &grant.workspace_id).await? else {
-        return Ok(RedeemOutcome::Denied("no such workspace"));
+    // (5) THE MEMBERSHIP GATE — the roster is the lock, on EVERY deployment posture (the self-host
+    // bearer-grants-membership arm died with the invite token). ONE uniform denial covers every
+    // not-yours case: an address that never resolved (a workspace-less grant), a grant scoped to a
+    // DIFFERENT workspace than the path names, a vanished workspace row, and an identity with no seat
+    // — indistinguishable, so a redeem is no workspace-existence or roster-enumeration oracle.
+    let Some(grant_ws) = &grant.workspace_id else {
+        return Ok(RedeemOutcome::Denied(enroll::ENROLL_UNAVAILABLE));
     };
-    let deployment = DeploymentMode::parse(&workspace.deployment_mode)
-        .ok_or_else(|| AuthorityError::integrity(EnrollCorrupt("workspace deployment mode")))?;
-    let cloud_invited = match deployment {
-        DeploymentMode::Cloud => {
-            // Cloud requires a confirmed identity ALREADY on the roster (the invite carried no role).
-            match read_member_status(tx, &grant.workspace_id, &grant.principal).await? {
-                None => {
-                    return Ok(RedeemOutcome::Denied(
-                        "principal not on the workspace roster",
-                    ));
-                }
-                Some(status) => status == "invited",
-            }
-        }
-        // Self-host grants membership straight from the bearer.
-        DeploymentMode::SelfHost => false,
+    if grant_ws != input.ws {
+        return Ok(RedeemOutcome::Denied(enroll::ENROLL_UNAVAILABLE));
+    }
+    if read_workspace_in_tx(tx, grant_ws).await?.is_none() {
+        return Ok(RedeemOutcome::Denied(enroll::ENROLL_UNAVAILABLE));
+    }
+    let invited = match read_member_status(tx, grant_ws, &grant.principal).await? {
+        None => return Ok(RedeemOutcome::Denied(enroll::ENROLL_UNAVAILABLE)),
+        Some(status) => status == "invited",
     };
 
-    // (5) Anti-squat + revocation durability: a pre-existing device row must match (key, principal) exactly
-    // AND must NOT be revoked. Without the revoked check, a revoked device could re-redeem its still-live
-    // grant (a ~12-min TTL) and the mint below would re-credential the row the revoke just killed —
+    // (6) Anti-squat + revocation durability (post-membership, deliberately typed — these are not
+    // existence oracles): a pre-existing device row must match (key, principal) exactly AND must NOT
+    // be revoked. Without the revoked check, a revoked device could re-redeem its still-live grant
+    // (a ~12-min TTL) and the mint below would re-credential the row the revoke just killed —
     // undoing the kill switch within the grant window. A revoked device cannot re-enroll.
     if let Some((existing_pk, existing_principal, revoked)) =
-        read_device(tx, &grant.workspace_id, input.server_device_key_id).await?
+        read_device(tx, grant_ws, input.server_device_key_id).await?
     {
         if existing_pk != input.device_public_key || existing_principal != grant.principal {
             return Ok(RedeemOutcome::Denied(
@@ -766,11 +784,11 @@ async fn redeem_run(
 
     // ── all checks passed — WRITES only from here (so a DENIED above had no side effect) ──
     let principal = Principal::parse(&grant.principal).map_err(AuthorityError::integrity)?;
-    let ws_s = grant.workspace_id.as_str();
+    let ws_s = grant_ws.as_str();
     let prin = principal.as_str();
 
-    // (4') Membership: cloud flips an `invited` row to `confirmed`; self-host inserts a confirmed member.
-    if cloud_invited {
+    // (5') Membership: an `invited` seat flips to `confirmed` (the redeem IS the join ceremony's end).
+    if invited {
         sqlx::query!(
             "UPDATE workspace_member SET status = 'confirmed' \
              WHERE workspace_id = $1 AND principal = $2 AND status = 'invited'",
@@ -780,28 +798,15 @@ async fn redeem_run(
         .execute(&mut **tx)
         .await
         .map_err(AuthorityError::internal)?;
-    } else if deployment == DeploymentMode::SelfHost {
-        sqlx::query!(
-            "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
-             VALUES ($1, $2, 'member', 'confirmed', NULL, $3) \
-             ON CONFLICT (workspace_id, principal) DO NOTHING",
-            ws_s,
-            prin,
-            input.created_at,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
     }
 
-    // (4'' + 5') REGISTER the device WITH its one workspace credential (idempotent — step 5 proved no
+    // (6') REGISTER the device WITH its one workspace credential (idempotent — step 6 proved no
     // conflicting row). The credential is deterministic in the grant (`derive_token(b"wscred", [gs])`),
     // so a lost-ack replay re-derives the IDENTICAL value; only its sha256 is stored, ON the registry
     // row — one row, one device, one credential. A re-redeem through a FRESH grant (re-invite after a
     // member removal) derives a NEW credential, and the upsert rotates the column: the old plaintext
     // stops resolving the moment this commits. No per-skill roster rows and no per-skill tokens are
-    // written — access is the membership join from here on (the per-skill `roster` table remains only
-    // as the genesis self-seat's interim follow-state).
+    // written — access is the membership join from here on.
     let credential = enroll::derive_token(secret, b"wscred", &[gs]);
     let credential_sha = enroll::sha256_token(&credential);
     let cs = credential_sha.as_slice();
@@ -820,27 +825,140 @@ async fn redeem_run(
     .await
     .map_err(AuthorityError::internal)?;
 
-    // (6) Audit marker (idempotent — a replay re-stamps, harmless).
-    sqlx::query!(
-        "UPDATE enrollment_grants SET consumed_at = $2 WHERE grant_sha256 = $1 AND consumed_at IS NULL",
-        gs,
-        input.now,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
+    // (7) Audit marker (idempotent — a replay re-stamps, harmless).
+    consume_grant(tx, gs, input.now).await?;
 
     Ok(RedeemOutcome::Redeemed(EnrollmentRedeemed {
-        workspace_id: grant.workspace_id,
+        workspace_id: grant_ws.clone(),
         principal,
         device_key_id: input.server_device_key_id.to_owned(),
         credential,
     }))
 }
 
+/// The LOGIN door's transaction body: prove the grant, then walk the identity's confirmed seats.
+async fn login_run(
+    tx: &mut Transaction<'_, Postgres>,
+    grant_sha256: &[u8; 32],
+    device_public_key: &[u8; 32],
+    server_device_key_id: &str,
+    now: i64,
+    secret: &[u8; 32],
+) -> Result<LoginOutcome> {
+    // (1)–(4) mirror the enroll redeem: resolve → expiry → intent → binding.
+    let gs = grant_sha256.as_slice();
+    let Some(grant) = read_grant(tx, gs).await? else {
+        return Ok(LoginOutcome::Denied("no such grant"));
+    };
+    if now > grant.expires_at {
+        return Ok(LoginOutcome::Denied("grant expired"));
+    }
+    // This is the LOGIN door: an enroll grant redeems at the workspace's enroll door, never here.
+    if grant.intent != "login" {
+        return Ok(LoginOutcome::Denied("not a login grant"));
+    }
+    if grant.device_pubkey != *device_public_key || grant.device_key_id != server_device_key_id {
+        return Ok(LoginOutcome::Denied("device key mismatch"));
+    }
+
+    let principal = Principal::parse(&grant.principal).map_err(AuthorityError::integrity)?;
+    let prin = principal.as_str();
+
+    // (5) Every confirmed seat of the proven identity, with its workspace's address facts — ordered by
+    // workspace id, so a replay's list is byte-stable.
+    let seats = sqlx::query!(
+        r#"SELECT wm.workspace_id AS "workspace_id!", wm.role AS "role!",
+                  w.name AS "name!", w.display_name AS "display_name!"
+           FROM workspace_member wm
+           JOIN workspace w ON w.workspace_id = wm.workspace_id
+           WHERE wm.principal = $1 AND wm.status = 'confirmed'
+           ORDER BY wm.workspace_id"#,
+        prin,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+
+    let mut memberships = Vec::with_capacity(seats.len());
+    for seat in seats {
+        let ws = WorkspaceId::parse(&seat.workspace_id).map_err(AuthorityError::integrity)?;
+        // The SAME register the enroll redeem runs, per seat: an existing row must match this exact
+        // (key, principal) and not be revoked — else the seat comes back BLOCKED with no credential
+        // and no side effect there (the other seats still mint).
+        let blocked: Option<&'static str> = match read_device(tx, &ws, server_device_key_id).await?
+        {
+            Some((existing_pk, existing_principal, _))
+                if existing_pk != *device_public_key || existing_principal != grant.principal =>
+            {
+                Some("device key id already bound to a different key/principal")
+            }
+            Some((_, _, true)) => {
+                Some("device revoked in this workspace — enroll a fresh device or ask an owner")
+            }
+            _ => None,
+        };
+        let credential = if blocked.is_none() {
+            // Deterministic per (grant, workspace) — the login grant is ONE bearer for N workspaces,
+            // so the workspace id joins the mint (each workspace gets a DISTINCT credential) while a
+            // lost-ack replay of the same grant re-derives identical plaintexts.
+            let credential = enroll::derive_token(secret, b"wscred", &[gs, ws.as_str().as_bytes()]);
+            let credential_sha = enroll::sha256_token(&credential);
+            let (ws_s, cs, pk) = (ws.as_str(), credential_sha, device_public_key.as_slice());
+            let cs = cs.as_slice();
+            sqlx::query!(
+                "INSERT INTO device_registry (workspace_id, device_key_id, public_key, principal, revoked, credential_sha256) \
+                 VALUES ($1, $2, $3, $4, 0, $5) \
+                 ON CONFLICT (workspace_id, device_key_id) DO UPDATE SET credential_sha256 = excluded.credential_sha256",
+                ws_s,
+                server_device_key_id,
+                pk,
+                prin,
+                cs,
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthorityError::internal)?;
+            Some(credential)
+        } else {
+            None
+        };
+        memberships.push(LoginSeat {
+            workspace_id: ws,
+            name: seat.name,
+            display_name: seat.display_name,
+            role: seat.role,
+            device_key_id: server_device_key_id.to_owned(),
+            credential,
+            blocked,
+        });
+    }
+
+    // Consumption mirrors the enroll redeem exactly: an idempotent audit stamp, never a replay block —
+    // the deterministic mints make a lost-ack retry re-return the identical outcome.
+    consume_grant(tx, gs, now).await?;
+
+    Ok(LoginOutcome::Redeemed(LoginRedeemed {
+        principal,
+        memberships,
+    }))
+}
+
+/// Stamp a grant consumed (idempotent — a replay re-stamps nothing; the first consumption's time stands).
+async fn consume_grant(tx: &mut Transaction<'_, Postgres>, gs: &[u8], now: i64) -> Result<()> {
+    sqlx::query!(
+        "UPDATE enrollment_grants SET consumed_at = $2 WHERE grant_sha256 = $1 AND consumed_at IS NULL",
+        gs,
+        now,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
+}
+
 async fn read_grant(tx: &mut Transaction<'_, Postgres>, gs: &[u8]) -> Result<Option<GrantRow>> {
     let row = sqlx::query!(
-        r#"SELECT workspace_id AS "workspace_id!", principal AS "principal!",
+        r#"SELECT workspace_id AS "workspace_id?", intent AS "intent!", principal AS "principal!",
                   device_pubkey AS "device_pubkey!: Vec<u8>", device_key_id AS "device_key_id!",
                   device_auth_id AS "device_auth_id!", expires_at AS "expires_at!: i64"
            FROM enrollment_grants WHERE grant_sha256 = $1"#,
@@ -852,7 +970,13 @@ async fn read_grant(tx: &mut Transaction<'_, Postgres>, gs: &[u8]) -> Result<Opt
     match row {
         None => Ok(None),
         Some(r) => Ok(Some(GrantRow {
-            workspace_id: WorkspaceId::parse(&r.workspace_id).map_err(AuthorityError::integrity)?,
+            workspace_id: r
+                .workspace_id
+                .as_deref()
+                .map(WorkspaceId::parse)
+                .transpose()
+                .map_err(AuthorityError::integrity)?,
+            intent: r.intent,
             principal: r.principal,
             device_pubkey: blob32(&r.device_pubkey)?,
             device_key_id: r.device_key_id,
@@ -867,8 +991,8 @@ async fn read_workspace_in_tx(
 ) -> Result<Option<WorkspaceRow>> {
     let ws_s = ws.as_str();
     let row = sqlx::query!(
-        r#"SELECT display_name AS "display_name!", verified_domain AS "verified_domain?",
-                  verified_domain_status AS "verified_domain_status!", deployment_mode AS "deployment_mode!"
+        r#"SELECT name AS "name!", display_name AS "display_name!", verified_domain AS "verified_domain?",
+                  verified_domain_status AS "verified_domain_status!"
            FROM workspace WHERE workspace_id = $1"#,
         ws_s,
     )
@@ -876,10 +1000,10 @@ async fn read_workspace_in_tx(
     .await
     .map_err(AuthorityError::internal)?;
     Ok(row.map(|r| WorkspaceRow {
+        name: r.name,
         display_name: r.display_name,
         verified_domain: r.verified_domain,
         verified_domain_status: r.verified_domain_status,
-        deployment_mode: r.deployment_mode,
     }))
 }
 

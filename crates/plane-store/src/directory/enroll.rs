@@ -1,8 +1,10 @@
 //! The enrollment issuance core — the orchestration half (outside the transaction).
 //!
 //! This is where a device registers its key and redeems the bearer grant bound to it, and where the plane mints the only
-//! credentials it ever issues: **workspace-scoped** invites, enrollment grants, and the ONE workspace
-//! credential per enrolled device — **never** a user OAuth token, never a per-skill token. Every issuance / roster / device decision is made INSIDE these ops against
+//! credentials it ever issues: enrollment grants and the ONE workspace credential per enrolled device —
+//! **never** a user OAuth token, never a per-skill token. Enrollment is BY ADDRESS (the workspace's
+//! URL name): links carry nothing, the roster is the lock, and every not-yours redeem answers the one
+//! uniform [`ENROLL_UNAVAILABLE`] denial. Every issuance / roster / device decision is made INSIDE these ops against
 //! a server-trusted row; a client-asserted id is never parsed into authority. Every opaque credential is
 //! **deterministically HMAC-derived** from a `0600` enrollment secret (so a lost-ack retry re-derives the
 //! IDENTICAL credential) and stored ONLY as its sha256 (so a database read can never recover a live
@@ -39,12 +41,13 @@ pub(crate) const PASSCODE_MAX_ATTEMPTS: i64 = 5;
 
 // ── return types (domain values; B4 maps these to wire DTOs) ───────────────────────────────────────────
 
-/// The bootstrap payload an invite link resolves to (everything a device needs to begin enrolling). Carries
-/// the workspace identity, the offered skills, and the verification
-/// base — but **no bytes and no role** (the role lives server-side on the pre-seeded member rows).
+/// The bootstrap payload an `/i/` claim link resolves to (everything a device needs to begin the
+/// one-time standup). Carries the workspace-to-be's identity and the verification base — but **no
+/// bytes and no role**. (The tokened INVITE door is gone — joining is `follow <address>` — so the
+/// only `/i/` resolution left is the admin claim's.)
 #[derive(Debug, Clone)]
 pub struct InviteBootstrap {
-    /// The workspace the invite is for.
+    /// The workspace the claim is for.
     pub workspace_id: WorkspaceId,
     /// The workspace display name.
     pub display_name: String,
@@ -54,8 +57,6 @@ pub struct InviteBootstrap {
     pub verified_domain: Option<String>,
     /// The domain-verification state.
     pub verified_domain_status: String,
-    /// The skills the invite pre-offers, each with an optional display name.
-    pub skills: Vec<(SkillId, Option<String>)>,
     /// The plane's public API base URL (what the bootstrap payload declares; the client re-roots onto it).
     pub base_url: String,
     /// The base the minted `/i/` share links ride (`link_base_url` else `base_url`) — for a serving layer
@@ -104,11 +105,16 @@ pub struct DeviceAuthStart {
 pub struct GrantIssued {
     /// The SECRET grant token to redeem (the plaintext appears ONLY here; only its sha256 is stored).
     pub grant_token: String,
-    /// The workspace the grant is scoped to.
-    pub workspace_id: WorkspaceId,
+    /// The workspace the grant is scoped to. `None` for a LOGIN grant (workspace-less by design) and
+    /// for an enroll grant whose requested address never resolved (the flow runs on to the redeem's
+    /// one uniform denial — resolution is never disclosed here).
+    pub workspace_id: Option<WorkspaceId>,
     /// The workspace display name — the context a standup client lacks (it never read an `/i/` bootstrap),
-    /// surfaced with the grant so the wire can put it beside `workspace_id` ("" if the row is gone).
+    /// surfaced with the grant so the wire can put it beside `workspace_id` ("" when there is no row).
     pub workspace_display_name: String,
+    /// The workspace's full ADDRESS (`<link_base>/<name>`) — the share line's root; `None` when the
+    /// grant is workspace-less.
+    pub workspace_address: Option<String>,
     /// The non-secret device-auth id bound into the enroll frame.
     pub device_auth_id: String,
     /// The server-derived device key id.
@@ -126,6 +132,7 @@ impl std::fmt::Debug for GrantIssued {
             .field("grant_token", &"<redacted>")
             .field("workspace_id", &self.workspace_id)
             .field("workspace_display_name", &self.workspace_display_name)
+            .field("workspace_address", &self.workspace_address)
             .field("device_auth_id", &self.device_auth_id)
             .field("device_key_id", &self.device_key_id)
             .field("expires_at", &self.expires_at)
@@ -174,28 +181,28 @@ pub enum PasscodeComplete {
 }
 
 /// The verification-page disclosure for a LIVE device-auth session — what a human sees BEFORE confirming an
-/// identity (the RFC-8628 confused-deputy guard: the page shows which device + workspace + skills are being
+/// identity (the RFC-8628 confused-deputy guard: the page shows which device + workspace is being
 /// authorized, so a human approves the session they actually started, not one an attacker raced in). Carries
 /// **no secret** — no device code, no grant, no token.
 #[derive(Debug, Clone)]
 pub struct VerificationContext {
-    /// The session's intent — `enroll` (join an existing workspace) or `standup` (create one on approval).
-    /// The verification page branches its copy on this.
+    /// The session's intent — `enroll` (join a workspace named by its address), `standup` (create one
+    /// on approval), or `login` (re-mint this device's credentials). The page branches its copy on this.
     pub intent: SessionIntent,
     /// The human-readable machine name the device offered at start.
     pub machine_name: String,
     /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. NOT
     /// the `device_key_id` (no `dk_` prefix, shorter); a display aid only, never an authority input.
     pub device_fingerprint: String,
-    /// The workspace display name the device would join. A REQUIRED field kept wire-stable: a standup
-    /// session has no workspace yet, so it carries `""` (the page renders the standup copy from `intent`).
+    /// The workspace display name the device would join. A REQUIRED field kept wire-stable: an enroll
+    /// session whose address never resolved echoes the REQUESTED name verbatim (charset-validated at
+    /// authorize, so safe to render — and existence is never disclosed here); a standup or login session
+    /// has no workspace, so it carries `""` (the page renders that copy from `intent`).
     pub workspace_display_name: String,
     /// The org-domain claim (if any).
     pub verified_domain: Option<String>,
     /// The domain-verification state.
     pub verified_domain_status: String,
-    /// The skills the invite pre-offers, each with an optional display name.
-    pub offered_skills: Vec<(SkillId, Option<String>)>,
 }
 
 /// The outcome of confirming a session's external identity (the OIDC callback's in-Authority half). A single
@@ -247,14 +254,81 @@ pub enum RedeemOutcome {
     Denied(&'static str),
 }
 
-/// The deployment posture of a plane (and of each `workspace` row). It decides the **redeem gate**: a
-/// `Cloud` workspace requires a confirmed identity already on the roster (the invite carries no role); a
-/// `SelfHost` workspace grants membership straight from the bearer of a valid grant.
+/// The ONE membership-denial detail every not-yours redeem answers with — an address that never
+/// resolved, a grant redeemed against the wrong workspace, a vanished workspace row, and an identity
+/// with no seat are byte-for-byte indistinguishable, on EVERY deployment posture. Links are just
+/// addresses and the ROSTER is the lock, so a redeem must never become a workspace-existence or
+/// roster-enumeration oracle.
+pub const ENROLL_UNAVAILABLE: &str = "not available for this account — check the address; if you were invited, confirm with your inviter";
+
+/// One workspace a login touched: the seat's facts plus either the freshly re-minted credential or the
+/// static reason no credential was minted (this device is revoked there, or its key id is squatted).
+#[derive(Clone)]
+pub struct LoginSeat {
+    /// The workspace of the confirmed seat.
+    pub workspace_id: WorkspaceId,
+    /// The workspace's ADDRESS name.
+    pub name: String,
+    /// The workspace's display name.
+    pub display_name: String,
+    /// The person's role on the seat (`owner` / `reviewer` / `member`).
+    pub role: String,
+    /// The device's server-derived key id (the same id in every workspace — it is a key derivation).
+    pub device_key_id: String,
+    /// The freshly minted plaintext workspace credential — deterministic per `(grant, workspace)`, so
+    /// a lost-ack replay re-returns the identical value. `None` when `blocked` says why.
+    pub credential: Option<String>,
+    /// Why no credential was minted; `None` on success.
+    pub blocked: Option<&'static str>,
+}
+
+// `credential` is a LIVE bearer secret — redact it (the crate's redaction discipline).
+impl std::fmt::Debug for LoginSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginSeat")
+            .field("workspace_id", &self.workspace_id)
+            .field("name", &self.name)
+            .field("display_name", &self.display_name)
+            .field("role", &self.role)
+            .field("device_key_id", &self.device_key_id)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "<redacted>"),
+            )
+            .field("blocked", &self.blocked)
+            .finish()
+    }
+}
+
+/// The successful result of a login redeem — the proven identity plus one entry per confirmed seat.
+/// ZERO seats is a valid success (the identity is established; there is nothing to mint).
+#[derive(Debug, Clone)]
+pub struct LoginRedeemed {
+    /// The proven principal (canonical form).
+    pub principal: Principal,
+    /// One entry per workspace where the principal holds a confirmed seat, ordered by workspace id.
+    pub memberships: Vec<LoginSeat>,
+}
+
+/// The outcome of [`Authority::redeem_login`](crate::Authority::redeem_login).
+#[derive(Debug, Clone)]
+pub enum LoginOutcome {
+    /// The identity was proven; per-workspace credentials (or blocked markers) follow.
+    Redeemed(LoginRedeemed),
+    /// The redeem was denied (a uniform denial; the static reason is for server logs, never an oracle).
+    Denied(&'static str),
+}
+
+/// The deployment posture of a plane (and of each `workspace` row). Enrollment gates identically on
+/// BOTH postures now — a redeem requires a rostered identity, and identity proof is always a passcode
+/// or a web-session approval (the self-host bearer shortcut died with the invite token; its trust
+/// anchor was that token). The posture still decides which SURFACES exist: standup + every session
+/// leg are cloud-only, and the one-time admin claim is how self-host stands up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentMode {
-    /// The hosted plane: redeem requires a confirmed, already-rostered identity.
+    /// The hosted plane.
     Cloud,
-    /// A self-hosted plane: redeem grants membership from a valid grant (no human identity step).
+    /// A self-hosted plane (the whole device-lane loop; no web-session legs).
     SelfHost,
 }
 
@@ -279,16 +353,20 @@ impl DeploymentMode {
     }
 }
 
-/// A device-auth session's intent: `enroll` joins an existing workspace through an invite; `standup` starts
+/// A device-auth session's intent: `enroll` joins a workspace named by its ADDRESS; `standup` starts
 /// with NO workspace — a signed-in human's approval creates one and seats the session's identity as its
-/// first owner. A standup session is only ever advanced by that approval (the passcode/OIDC confirm paths
-/// refuse it), and the enrollment flows refuse to start one on a self-host plane.
+/// first owner; `login` proves the person's identity and re-mints this device's credential in every
+/// workspace where that identity holds a confirmed seat. A standup session is only ever advanced by its
+/// approval (the passcode/OIDC confirm paths refuse it) and refuses to start on a self-host plane;
+/// enroll and login run on BOTH postures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIntent {
-    /// Join an existing workspace (the invite-anchored flow).
+    /// Join an existing workspace, named by its address.
     Enroll,
     /// Create a workspace on approval (the cloud self-serve first-boot flow).
     Standup,
+    /// Prove the person's identity and re-mint this device's workspace credentials.
+    Login,
 }
 
 impl SessionIntent {
@@ -298,6 +376,7 @@ impl SessionIntent {
         match self {
             SessionIntent::Enroll => "enroll",
             SessionIntent::Standup => "standup",
+            SessionIntent::Login => "login",
         }
     }
 
@@ -307,13 +386,14 @@ impl SessionIntent {
         match s {
             "enroll" => Some(SessionIntent::Enroll),
             "standup" => Some(SessionIntent::Standup),
+            "login" => Some(SessionIntent::Login),
             _ => None,
         }
     }
 }
 
 /// The enrollment subsystem's static configuration — held on the [`Authority`](crate::Authority) so
-/// `read_invite_bootstrap` / `start_device_auth` can return the verification base
+/// `start_device_auth` / `read_claim_bootstrap` can return the verification base
 /// URL, and the offered enrollment method without re-plumbing them per call. The `secret_path` is consumed
 /// once at [`Authority::with_enrollment_config`](crate::Authority::with_enrollment_config) load time.
 #[derive(Debug, Clone)]
@@ -396,8 +476,8 @@ impl EnrollmentState {
 /// Derive a deterministic opaque credential: `base64url-unpadded(HMAC-SHA256(secret, domain ‖ each part
 /// length-prefixed))`. **Determinism is the keystone** — a lost-ack create/issue retry re-derives the
 /// IDENTICAL credential, and a consumed grant re-derives the SAME workspace credential, so redeem is
-/// naturally idempotent with no fresh mint per call. The `domain` is a fixed byte tag (`b"invite"` /
-/// `b"grant"` / `b"wscred"` / `b"door"` — none a prefix of another) that separates the credential
+/// naturally idempotent with no fresh mint per call. The `domain` is a fixed byte tag (`b"grant"` /
+/// `b"wscred"` — none a prefix of another) that separates the credential
 /// families; each `part` is framed
 /// with a `u32be` length prefix so the concatenation is unambiguous. Only `sha256(token)` is ever stored.
 pub(crate) fn derive_token(secret: &[u8; 32], domain: &[u8], parts: &[&[u8]]) -> String {
@@ -455,6 +535,9 @@ pub(crate) fn device_fingerprint(device_public_key: &[u8; 32]) -> String {
 /// [`crate::db`]). Every identity field is the SERVER's value — the rehashed grant, the re-derived device
 /// key id — never a client claim.
 pub(crate) struct RedeemInput<'a> {
+    /// The workspace the CALLER claims to be joining (the request path's). A grant scoped to a
+    /// different workspace — or to none — answers the one uniform membership denial.
+    pub ws: &'a WorkspaceId,
     /// `sha256(grant_token)` — the grant row's PK (the bearer credential's stored form).
     pub grant_sha256: [u8; 32],
     /// The raw device public key presented (must equal the grant's bound key).
@@ -463,8 +546,6 @@ pub(crate) struct RedeemInput<'a> {
     pub server_device_key_id: &'a str,
     /// The server clock (epoch-ms).
     pub now: i64,
-    /// The server-stamped creation timestamp.
-    pub created_at: &'a str,
 }
 
 /// A precondition fault: an enrollment/governance op was attempted with no enrollment config (call
@@ -528,52 +609,12 @@ pub(crate) fn parse_op_id(op_id: &str) -> Option<[u8; 16]> {
     (uuid.as_hyphenated().to_string() == op_id).then(|| uuid.into_bytes())
 }
 
-/// A stored `workspace.deployment_mode` did not parse — store corruption (a CHECK should forbid it).
-#[derive(Debug, thiserror::Error)]
-#[error("stored workspace has an invalid deployment mode")]
-struct BadStoredDeploymentMode;
-
 // ── the orchestration ops (the public Authority methods delegate to these) ─────────────────────────────
-
-/// Resolve an invite link to its bootstrap payload (the orchestration half of
-/// [`Authority::read_invite_bootstrap`]). A revoked/expired/absent invite — or a missing workspace — is the
-/// single indistinguishable `NotFound`.
-pub(crate) async fn read_invite_bootstrap(
-    authority: &Authority,
-    token: &str,
-    now: i64,
-) -> Result<InviteBootstrap> {
-    let token_sha256 = sha256_token(token);
-    let Some(invite) = authority.db().read_invite(&token_sha256).await? else {
-        return Err(AuthorityError::NotFound);
-    };
-    if invite.revoked || invite.expires_at.is_some_and(|e| now > e) {
-        return Err(AuthorityError::NotFound);
-    }
-    let Some(workspace) = authority.db().read_workspace(&invite.workspace_id).await? else {
-        return Err(AuthorityError::NotFound);
-    };
-    let deployment_mode = DeploymentMode::parse(&workspace.deployment_mode)
-        .ok_or_else(|| AuthorityError::integrity(BadStoredDeploymentMode))?;
-    let skills = authority.db().read_invite_skills(&token_sha256).await?;
-    let config = &authority.enrollment()?.config;
-    Ok(InviteBootstrap {
-        workspace_id: invite.workspace_id,
-        display_name: workspace.display_name,
-        deployment_mode,
-        verified_domain: workspace.verified_domain,
-        verified_domain_status: workspace.verified_domain_status,
-        skills,
-        base_url: config.base_url.clone(),
-        link_base: config.link_base().to_owned(),
-        enrollment_method: config.enrollment_method.clone(),
-    })
-}
 
 /// Resolve a `user_code` to its verification-page disclosure (the orchestration half of
 /// [`Authority::read_verification_context`]). A miss — an unknown code, a non-live (issued/denied/expired)
-/// session, an expired one, or a missing workspace — is the single indistinguishable `NotFound`. A pure read
-/// (no mutation, no secret), mirroring [`read_invite_bootstrap`].
+/// session, or an expired one — is the single indistinguishable `NotFound`. A pure read (no mutation,
+/// no secret).
 pub(crate) async fn read_verification_context(
     authority: &Authority,
     user_code: &str,
@@ -588,8 +629,10 @@ pub(crate) async fn read_verification_context(
     };
     let intent = SessionIntent::parse(&session.intent)
         .ok_or_else(|| AuthorityError::integrity(EnrollCorruptIntent))?;
-    // A STANDUP session has no workspace yet: the required display fields stay wire-stable ("" / empty),
-    // and the page renders the standup copy from `intent`.
+    // An enroll session against an UNRESOLVED address echoes the requested name verbatim (it was
+    // charset-validated at authorize, so it is safe to render — and whether it resolved is never
+    // disclosed here). A standup/login session has no workspace at all: the required display fields
+    // stay wire-stable ("" / empty) and the page renders that copy from `intent`.
     let (workspace_display_name, verified_domain, verified_domain_status) =
         match &session.workspace_id {
             Some(ws) => {
@@ -602,13 +645,12 @@ pub(crate) async fn read_verification_context(
                     workspace.verified_domain_status,
                 )
             }
-            None => (String::new(), None, "unverified".to_owned()),
+            None => (
+                session.requested_workspace.clone().unwrap_or_default(),
+                None,
+                "unverified".to_owned(),
+            ),
         };
-    // The offered skills are the session invite's (a self-host device-rooted session has no invite ⇒ none).
-    let offered_skills = match &session.invite_sha256 {
-        Some(invite_sha256) => authority.db().read_invite_skills(invite_sha256).await?,
-        None => Vec::new(),
-    };
     Ok(VerificationContext {
         intent,
         machine_name: session.machine_name,
@@ -616,7 +658,6 @@ pub(crate) async fn read_verification_context(
         workspace_display_name,
         verified_domain,
         verified_domain_status,
-        offered_skills,
     })
 }
 
@@ -625,41 +666,31 @@ pub(crate) async fn read_verification_context(
 #[error("stored device-auth session has an invalid intent")]
 struct EnrollCorruptIntent;
 
-/// Start a device-authorization flow (the orchestration half of [`Authority::start_device_auth`]). Resolves
-/// the invite, SERVER-derives the device key id (a client-asserted id is ignored), generates a fresh secret
-/// device code + a unique user code, and inserts the session (cloud `pending`; self-host `confirmed` with a
-/// server-derived device-rooted principal, so the first poll yields a grant with no human step).
+/// Start a device-authorization flow toward a workspace ADDRESS (the orchestration half of
+/// [`Authority::start_device_auth`]). SERVER-derives the device key id (a client-asserted id is
+/// ignored), resolves the requested name — WITHOUT disclosing whether it resolved: the session opens
+/// `pending` either way (an unknown address runs the same flow to the redeem's one uniform denial) —
+/// and inserts the session. Identity proof is ALWAYS a passcode or a web-session approval now, on
+/// every deployment posture (the self-host born-confirmed shortcut died with the invite bearer token,
+/// which was its trust anchor).
 pub(crate) async fn start_device_auth(
     authority: &Authority,
-    invite_token: &str,
+    workspace_name: &str,
     device_public_key: &[u8; 32],
     machine_name: &str,
     now: i64,
     created_at: &str,
 ) -> Result<DeviceAuthStart> {
-    let token_sha256 = sha256_token(invite_token);
-    let Some(invite) = authority.db().read_invite(&token_sha256).await? else {
-        return Err(AuthorityError::NotFound);
-    };
-    if invite.revoked || invite.expires_at.is_some_and(|e| now > e) {
-        return Err(AuthorityError::NotFound);
+    // The SYNTAX belt only (charset + length — a malformed name is a typed parse-boundary refusal the
+    // route can 400): the reserved list is a CREATION concern, and an unknown-but-well-formed name must
+    // run the flow to the uniform denial, never answer differently here.
+    if !crate::governance::workspace_name_syntax_ok(workspace_name) {
+        return Err(AuthorityError::InvalidId(
+            crate::id::IdError::DisallowedChar,
+        ));
     }
-    let Some(workspace) = authority.db().read_workspace(&invite.workspace_id).await? else {
-        return Err(AuthorityError::NotFound);
-    };
-    let deployment = DeploymentMode::parse(&workspace.deployment_mode)
-        .ok_or_else(|| AuthorityError::integrity(BadStoredDeploymentMode))?;
-
+    let resolved = authority.db().workspace_id_by_name(workspace_name).await?;
     let device_key_id = device_key_id_for(device_public_key);
-    let confirmed_principal_owned = match deployment {
-        DeploymentMode::Cloud => None,
-        DeploymentMode::SelfHost => Some(device_rooted_principal(&device_key_id)?),
-    };
-    let status = match deployment {
-        DeploymentMode::Cloud => "pending",
-        DeploymentMode::SelfHost => "confirmed",
-    };
-
     let device_code = random_device_code()?;
     let device_code_sha256 = sha256_token(&device_code);
     let user_code = unique_user_code(authority, random_user_code).await?;
@@ -670,14 +701,54 @@ pub(crate) async fn start_device_auth(
         .insert_device_auth_session(
             &device_code_sha256,
             &user_code,
-            Some(&invite.workspace_id),
-            Some(&token_sha256),
+            resolved.as_ref(),
+            Some(workspace_name),
             device_public_key,
             &device_key_id,
             machine_name,
             SessionIntent::Enroll.as_str(),
-            status,
-            confirmed_principal_owned.as_ref().map(Principal::as_str),
+            "pending",
+            None,
+            expires_at,
+            DEVICE_AUTH_INTERVAL_SECS,
+            created_at,
+        )
+        .await?;
+
+    device_auth_start(authority, device_code, user_code, expires_at)
+}
+
+/// Start a LOGIN device-authorization flow (the orchestration half of
+/// [`Authority::start_login_device_auth`]): no workspace, no requested name — the session proves the
+/// person's identity, and its grant redeems at the login door into one credential per confirmed seat.
+/// Allowed on BOTH deployment postures (unlike standup): sign-in is how a device recovers its
+/// credentials wherever the plane runs.
+pub(crate) async fn start_login_device_auth(
+    authority: &Authority,
+    device_public_key: &[u8; 32],
+    machine_name: &str,
+    now: i64,
+    created_at: &str,
+) -> Result<DeviceAuthStart> {
+    let device_key_id = device_key_id_for(device_public_key);
+    let device_code = random_device_code()?;
+    let device_code_sha256 = sha256_token(&device_code);
+    let user_code = unique_user_code(authority, random_user_code).await?;
+    let expires_at = now.saturating_add(DEVICE_AUTH_TTL_MS);
+
+    authority
+        .db()
+        .insert_device_auth_session(
+            &device_code_sha256,
+            &user_code,
+            None,
+            None,
+            device_public_key,
+            &device_key_id,
+            machine_name,
+            SessionIntent::Login.as_str(),
+            "pending",
+            None,
             expires_at,
             DEVICE_AUTH_INTERVAL_SECS,
             created_at,
@@ -768,6 +839,8 @@ async fn unique_user_code(authority: &Authority, mint: fn() -> Result<String>) -
 }
 
 /// Poll a device-authorization session (the orchestration half of [`Authority::poll_device_auth`]).
+/// A granted poll's workspace context carries the full ADDRESS (`<link_base>/<name>`), composed here
+/// from the enrollment config — the one place the link base lives.
 pub(crate) async fn poll_device_auth(
     authority: &Authority,
     device_code: &str,
@@ -775,10 +848,12 @@ pub(crate) async fn poll_device_auth(
     created_at: &str,
 ) -> Result<DeviceAuthPoll> {
     let device_code_sha256 = sha256_token(device_code);
-    let secret = authority.enrollment()?.secret.as_bytes();
+    let enrollment = authority.enrollment()?;
+    let secret = enrollment.secret.as_bytes();
+    let link_base = enrollment.config.link_base().to_owned();
     authority
         .db()
-        .poll_txn(&device_code_sha256, now, created_at, secret)
+        .poll_txn(&device_code_sha256, now, created_at, secret, &link_base)
         .await
 }
 
@@ -850,29 +925,58 @@ pub(crate) async fn confirm_external_identity(
         .await
 }
 
-/// Redeem an enrollment grant (the orchestration half of [`Authority::redeem_enrollment`]). The GRANT is
-/// the bearer credential (a deterministic HMAC secret, stored only as its sha256); the presented device
-/// key must equal the grant's bound key (the binding consistency check runs in-transaction). SERVER-derives
-/// the device key id from the presented key, then runs the one gate + register + mint transaction. Returns
-/// the ONE minted workspace credential — NEVER a user token, never a per-skill token.
+/// Redeem an enrollment grant into `ws` (the orchestration half of
+/// [`Authority::redeem_enrollment`]). The GRANT is the bearer credential (a deterministic HMAC secret,
+/// stored only as its sha256); the presented device key must equal the grant's bound key (the binding
+/// consistency check runs in-transaction). SERVER-derives the device key id from the presented key,
+/// then runs the one gate + register + mint transaction — whose membership gate is the ROSTER on every
+/// deployment posture ([`ENROLL_UNAVAILABLE`], one uniform denial). Returns the ONE minted workspace
+/// credential — NEVER a user token, never a per-skill token.
 pub(crate) async fn redeem_enrollment(
     authority: &Authority,
+    ws: &WorkspaceId,
     grant_token: &str,
     device_public_key: [u8; 32],
     now: i64,
-    created_at: &str,
 ) -> Result<RedeemOutcome> {
     let grant_sha256 = sha256_token(grant_token);
     let server_device_key_id = device_key_id_for(&device_public_key);
     let secret = authority.enrollment()?.secret.as_bytes();
     let input = RedeemInput {
+        ws,
         grant_sha256,
         device_public_key,
         server_device_key_id: &server_device_key_id,
         now,
-        created_at,
     };
     authority.db().redeem_txn(&input, secret).await
+}
+
+/// Redeem a LOGIN grant (the orchestration half of [`Authority::redeem_login`]): prove the grant's
+/// bound device key, then — in ONE transaction — register this device and re-mint its workspace
+/// credential in EVERY workspace where the proven identity holds a confirmed seat. Each credential is
+/// deterministic per `(grant, workspace)` (`derive_token(b"wscred", [grant_sha256, ws])`), so a
+/// lost-ack replay re-returns identical plaintexts; a seat where this device is revoked or its key id
+/// squatted comes back `blocked`, with no credential and no side effect there.
+pub(crate) async fn redeem_login(
+    authority: &Authority,
+    grant_token: &str,
+    device_public_key: [u8; 32],
+    now: i64,
+) -> Result<LoginOutcome> {
+    let grant_sha256 = sha256_token(grant_token);
+    let server_device_key_id = device_key_id_for(&device_public_key);
+    let secret = authority.enrollment()?.secret.as_bytes();
+    authority
+        .db()
+        .redeem_login_txn(
+            &grant_sha256,
+            &device_public_key,
+            &server_device_key_id,
+            now,
+            secret,
+        )
+        .await
 }
 
 /// Resolve a presented workspace credential to an opaque [`ReadScope`] on one of the workspace's

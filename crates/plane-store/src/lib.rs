@@ -97,26 +97,30 @@ mod tests;
 // scheduling — this library holds none, but it hands the composer the handles to schedule).
 pub(crate) use custody::{gc, lifecycle, lineage, read, restore, set_current, upload};
 pub(crate) use directory::{
-    catalog, channels, delivery, enroll, governance, session_read, session_review, session_roster,
+    catalog, channels, delivery, describe, enroll, governance, session_read, session_review,
+    session_roster,
 };
 
 pub use authority::{Authority, PoolConfig};
 pub use catalog::{LifecycleOutcome, PurgeOutcome};
 pub use channels::{
-    ChannelMembershipOutcome, CurationOutcome, ProtectKind, ProtectLevel, ProtectOutcome,
-    SubscriptionOutcome,
+    ChannelIndexEntry, ChannelMembershipOutcome, ChannelSkillRef, CurationOutcome, ProtectKind,
+    ProtectLevel, ProtectOutcome, SubscriptionOutcome,
 };
 pub use delivery::{AppliedSkill, DeliveredSkill, Delivery, DeliveryNotice};
+pub use describe::{
+    InviteOutcome, LogProposal, LogVersion, Me, ProposalIndexEntry, Reach, SkillLog,
+};
 pub use enroll::{
-    ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig,
-    EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap, PasscodeComplete,
-    PasscodeStart, RedeemOutcome, SessionIntent, VerificationContext,
+    ConfirmOutcome, DeploymentMode, DeviceAuthPoll, DeviceAuthStart, ENROLL_UNAVAILABLE,
+    EnrollmentConfig, EnrollmentDisclosure, EnrollmentRedeemed, GrantIssued, InviteBootstrap,
+    LoginOutcome, LoginRedeemed, LoginSeat, PasscodeComplete, PasscodeStart, RedeemOutcome,
+    SessionIntent, VerificationContext,
 };
 pub use error::{AuthorityError, Result};
 pub use governance::{
-    ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
-    GovernanceOutcome, GovernanceRequest, InviteCreated, MintClaimOutcome, MintedClaim, Role,
-    WorkspaceCreated,
+    ApproveStandupOutcome, CreateWorkspaceOutcome, GovernanceOp, GovernanceOutcome,
+    GovernanceRequest, MintClaimOutcome, MintedClaim, Role, WorkspaceCreated,
 };
 pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
@@ -126,9 +130,7 @@ pub use session_read::{ProposalDetailSession, SkillIndexRow};
 pub use session_review::{
     REASON_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_CODE, SESSION_REVIEW_ACTING_DENIED,
 };
-pub use session_roster::{
-    RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
-};
+pub use session_roster::{RosterSeat, RosterView, SessionInviteOutcome, SessionInviteRole};
 pub use set_current::{DeviceOp, DeviceOpAuth, SetCurrentReceipt};
 pub use upload::{CandidateUpload, UploadedFile};
 

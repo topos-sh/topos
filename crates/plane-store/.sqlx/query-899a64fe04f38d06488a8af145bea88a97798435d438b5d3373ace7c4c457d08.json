@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT skill_id AS \"skill_id!\", name AS \"name!\", status AS \"status!\",\n                      base_name AS \"base_name?\"\n               FROM catalog\n               WHERE workspace_id = $1\n                 AND (name = $2 OR (base_name = $2 AND status = 'archived'))\n               ORDER BY CASE WHEN name = $2 THEN 0 ELSE 1 END\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "skill_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "base_name?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "899a64fe04f38d06488a8af145bea88a97798435d438b5d3373ace7c4c457d08"
+}

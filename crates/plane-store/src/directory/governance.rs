@@ -14,27 +14,158 @@ use crate::enroll::{
     random_claim_token, sha256_token,
 };
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{Principal, WorkspaceId};
+
+// ── the workspace ADDRESS name (the URL slug every share link is rooted on) ────────────────────────────
+
+/// The workspace-name length cap (a DNS-label-sized slug; the schema CHECK pins the same bound).
+const WORKSPACE_NAME_MAX_LEN: usize = 63;
+
+/// Names no workspace may claim: route prefixes and product words whose capture would shadow a real
+/// surface (`topos.sh/<name>` IS the share link, so the name space and the route space are one).
+/// Enforced at the CREATION ops — the one Rust home — since every new name flows through them; the
+/// schema CHECK pins only the charset.
+const RESERVED_WORKSPACE_NAMES: &[&str] = &[
+    "about",
+    "admin",
+    "admin-api",
+    "api",
+    "assets",
+    "auth",
+    "billing",
+    "blog",
+    "callback",
+    "channels",
+    "delivery",
+    "device",
+    "devices",
+    "docs",
+    "email",
+    "enroll",
+    "everyone",
+    "exclusions",
+    "follows",
+    "health",
+    "help",
+    "i",
+    "install",
+    "invitations",
+    "invites",
+    "legal",
+    "login",
+    "logout",
+    "mail",
+    "me",
+    "new",
+    "notices",
+    "oauth",
+    "oidc",
+    "org",
+    "policy",
+    "privacy",
+    "proposals",
+    "publish",
+    "register",
+    "report",
+    "reverts",
+    "reviews",
+    "root",
+    "roster",
+    "scim",
+    "security",
+    "session",
+    "sessions",
+    "settings",
+    "share",
+    "signin",
+    "signup",
+    "skills",
+    "staff",
+    "static",
+    "status",
+    "support",
+    "terms",
+    "topos",
+    "verify",
+    "webhook",
+    "webhooks",
+    "workspace",
+    "workspaces",
+    "www",
+];
+
+/// The SYNTAX half of the name rule — charset `^[a-z0-9][a-z0-9-]*$`, ≤ 63 bytes (the schema CHECK's
+/// exact shape). Shared by the enroll-by-address authorize belt, which deliberately checks syntax ONLY:
+/// a reserved-but-well-formed name must run the flow to the uniform denial, never answer differently.
+pub(crate) fn workspace_name_syntax_ok(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= WORKSPACE_NAME_MAX_LEN
+        && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// Validate a caller-chosen workspace ADDRESS name: the charset/length syntax, the archived-rename
+/// pattern (`-archived-` is the lifecycle's namespace), the version-word shape (`v1`, `v42`, …), and
+/// the reserved route/product words. Each refusal is a short static reason the creation ops surface
+/// typed.
+pub(crate) fn validate_workspace_name(name: &str) -> std::result::Result<(), &'static str> {
+    if !workspace_name_syntax_ok(name) {
+        return Err(
+            "a workspace name is 1-63 lowercase letters, digits, or hyphens, starting with a letter or digit",
+        );
+    }
+    if name.contains("-archived-") {
+        return Err("a workspace name may not contain \"-archived-\"");
+    }
+    if name.len() >= 2 && name.starts_with('v') && name[1..].bytes().all(|b| b.is_ascii_digit()) {
+        return Err("a workspace name may not look like a version word");
+    }
+    if RESERVED_WORKSPACE_NAMES.contains(&name) {
+        return Err("this workspace name is reserved");
+    }
+    Ok(())
+}
+
+/// Slugify a display name into the address charset: lowercase, every non-alphanumeric run folded to one
+/// `-`, trimmed of leading/trailing hyphens, capped at the length bound. May come back EMPTY (an
+/// all-symbol display name) — the caller falls back to an id-derived name.
+pub(crate) fn slugify_display_name(display_name: &str) -> String {
+    let mut slug = String::with_capacity(display_name.len().min(WORKSPACE_NAME_MAX_LEN));
+    for c in display_name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if slug.len() >= WORKSPACE_NAME_MAX_LEN {
+                break;
+            }
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            if slug.len() >= WORKSPACE_NAME_MAX_LEN {
+                break;
+            }
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// The workspace's full ADDRESS — `<link_base>/<name>`, the share line's root. ONE composition, so
+/// every surface that discloses an address (genesis, the granted poll, the roster read) agrees on it.
+pub(crate) fn compose_address(link_base: &str, name: &str) -> String {
+    format!("{link_base}/{name}")
+}
 
 // ── governance op modeling ──────────────────────────────────────────────────────────────────────────────
 
 /// A typed governance op the [`Authority`](crate::Authority) carries across the call/transaction
 /// boundary; the transaction binds its full parameter set into the request identity the idempotency slot
-/// compares. `Invite` additionally carries the per-skill display `name`s (NOT bound into the identity or
-/// the deterministic invite link — only the skill ids are — so a rename never forks either).
+/// compares.
 #[derive(Debug, Clone)]
 pub enum GovernanceOp {
-    /// Invite principals at `role`, expiring `expires_at` (epoch-ms; `None` = never), pre-offering `skills`.
-    Invite {
-        /// The role the invitees are granted on the workspace roster.
-        role: Role,
-        /// The invite expiry (epoch-ms; `None` = never expires).
-        expires_at: Option<i64>,
-        /// The invited principals (the emails), bound into the preimage as a set.
-        emails: Vec<Principal>,
-        /// The pre-offered skills, each with an optional display name (the name is NOT in the preimage).
-        skills: Vec<(SkillId, Option<String>)>,
-    },
     /// Set `target`'s workspace role (owner-only).
     RosterSet {
         /// The role to set.
@@ -58,18 +189,15 @@ impl GovernanceOp {
     /// The audit verb string (`workspace_events.gov_op_type`).
     pub(crate) fn audit_verb(&self) -> &'static str {
         match self {
-            GovernanceOp::Invite { .. } => "invite",
             GovernanceOp::RosterSet { .. } => "roster_set",
             GovernanceOp::RosterRemove { .. } => "roster_remove",
             GovernanceOp::DeviceRevoke { .. } => "device_revoke",
         }
     }
 
-    /// The op's `target` for the audit row (the affected principal/device; `None` for an invite — its
-    /// targets are the multiple invited emails, recorded in `details` instead).
+    /// The op's `target` for the audit row (the affected principal/device).
     pub(crate) fn audit_target(&self) -> Option<&str> {
         match self {
-            GovernanceOp::Invite { .. } => None,
             GovernanceOp::RosterSet { target, .. } | GovernanceOp::RosterRemove { target } => {
                 Some(target.as_str())
             }
@@ -105,27 +233,6 @@ impl std::fmt::Debug for GovernanceRequest {
     }
 }
 
-/// The result of creating an invite — the shareable link plus the roster + skills it seeded. Re-derives
-/// byte-identically on an `op_id` replay (the link is deterministic; the roster/skills come from the op).
-#[derive(Debug, Clone)]
-pub struct InviteCreated {
-    /// The `/i/<token>` link to share (the plaintext token appears ONLY here — only its sha256 is stored).
-    pub link: String,
-    /// The principals UPSERTed onto the workspace roster as `invited`.
-    pub roster_added: Vec<Principal>,
-    /// The skills the invite offers, each with its optional display name.
-    pub skills: Vec<(SkillId, Option<String>)>,
-}
-
-/// The outcome of [`Authority::create_invite`](crate::Authority::create_invite).
-#[derive(Debug, Clone)]
-pub enum CreateInviteOutcome {
-    /// The invite was created (or replayed).
-    Created(InviteCreated),
-    /// The request was denied (a uniform denial; the static reason is for server logs, never an oracle).
-    Denied(&'static str),
-}
-
 /// The outcome of a governance mutation (roster set/remove, device revoke).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GovernanceOutcome {
@@ -135,12 +242,12 @@ pub enum GovernanceOutcome {
     Denied(&'static str),
 }
 
-/// A workspace-level governance role (the `workspace_member` RBAC roster — DISTINCT from the per-skill read
-/// `roster`). `owner` drives invites + roster mutations; `member`/`reviewer` cannot. The `derivation_byte`
-/// is the `u8` bound into the deterministic invite-token derivation and the request identity.
+/// A workspace-level governance role (the `workspace_member` RBAC roster). `owner` drives roster
+/// mutations; `member`/`reviewer` cannot. The `derivation_byte` is the `u8` bound into the governance
+/// request identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// Full governance authority (invite, roster, revoke).
+    /// Full governance authority (roster, revoke).
     Owner,
     /// A reviewer (review-gate authority; no governance authority in v0).
     Reviewer,
@@ -170,9 +277,8 @@ impl Role {
         }
     }
 
-    /// The `u8` bound into the deterministic invite-token derivation and the governance request
-    /// identity (owner = 1, reviewer = 2, member = 3). ONE mapping — a fork would change every derived
-    /// invite link and idempotency identity.
+    /// The `u8` bound into the governance/session request identities (owner = 1, reviewer = 2,
+    /// member = 3). ONE mapping — a fork would change every stored idempotency identity.
     #[must_use]
     pub fn derivation_byte(self) -> u8 {
         match self {
@@ -182,11 +288,6 @@ impl Role {
         }
     }
 }
-
-/// The `expires_at` value the invite-token derivation binds for "never expires" — v0 invites carry no
-/// expiry, so the mint AND the deterministic re-derivations (the genesis self-invite, the standing door)
-/// all bind this one sentinel. Changing it would change every derived invite link.
-pub(crate) const INVITE_NO_EXPIRY: u64 = 0;
 
 /// A freshly-minted one-time admin claim. The `token` is the bearer plaintext, returned ONCE (only its
 /// sha256 is stored); `Debug` REDACTS it so it can never reach a log or trace through a formatted value.
@@ -224,17 +325,19 @@ pub(crate) enum MintClaimDenied {
     WorkspaceExists,
 }
 
-/// A created (or replayed) workspace — what both create-workspace outcomes carry: the fresh id, the display
-/// name actually stored, and the owner's deterministic self-invite token (the `/i/` link tail a replay
-/// re-derives byte-identically).
+/// A created (or replayed) workspace — what both create-workspace outcomes carry: the fresh id, the
+/// stored names, and the workspace's ADDRESS (`<link_base>/<name>` — the share line; links carry
+/// nothing, the roster is the lock, so there is no invite link to mint).
 #[derive(Debug, Clone)]
 pub struct WorkspaceCreated {
     /// The fresh server-minted workspace id.
     pub workspace_id: WorkspaceId,
+    /// The workspace's ADDRESS name (the caller's validated slug, or one derived from the display name).
+    pub name: String,
     /// The stored display name (the caller's, or the server default from the owner email's local part).
     pub display_name: String,
-    /// The owner's self-invite token (compose `<base_url>/i/<token>` to show it; deterministic per request).
-    pub invite_token: String,
+    /// The workspace's full address — what the genesis surface shows as the share line's root.
+    pub address: String,
 }
 
 /// The outcome of [`Authority::create_workspace`](crate::Authority::create_workspace).
@@ -293,76 +396,6 @@ pub(crate) struct GovernanceInput<'a> {
 }
 
 // ── the orchestration ops (the public Authority methods delegate to these) ─────────────────────────────
-
-/// Create an owner-driven invite (the orchestration half of [`Authority::create_invite`]). Derives the
-/// deterministic invite token, then runs the one governance transaction (authz + store + roster + receipt).
-pub(crate) async fn create_invite(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    op_id: &str,
-    request: &GovernanceRequest,
-    created_at: &str,
-    now: i64,
-) -> Result<CreateInviteOutcome> {
-    let GovernanceOp::Invite {
-        role,
-        expires_at,
-        emails,
-        skills,
-    } = &request.op
-    else {
-        return Ok(CreateInviteOutcome::Denied("op is not an invite"));
-    };
-    let Some(op_id_bytes) = parse_op_id(op_id) else {
-        return Ok(CreateInviteOutcome::Denied("op_id is not a canonical UUID"));
-    };
-
-    // Derive the deterministic invite token (so a lost-ack retry re-derives the IDENTICAL link). Bind the
-    // op id, workspace, role byte, the sorted+deduped skill-id set, and the expiry.
-    let mut ids: Vec<&str> = skills.iter().map(|(id, _)| id.as_str()).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let joined = ids.join("\n");
-    let role_byte = [role.derivation_byte()];
-    // An absent expiry binds the shared no-expiry sentinel (`expires_to_u64(None)` in the transaction's
-    // request identity encodes the same value); 0i64 and 0u64 share the identical be-bytes.
-    let expires_be = expires_at.map_or(INVITE_NO_EXPIRY.to_be_bytes(), i64::to_be_bytes);
-    let token = authority.derive_token(
-        b"invite",
-        &[
-            op_id_bytes.as_slice(),
-            ws.as_str().as_bytes(),
-            role_byte.as_slice(),
-            joined.as_bytes(),
-            expires_be.as_slice(),
-        ],
-    )?;
-    let token_sha256 = sha256_token(&token);
-    // The share-link STRING rides the link base (a hosted web origin, when configured); the bootstrap it
-    // resolves to keeps declaring the API `base_url` — the client re-roots onto that after the fetch.
-    let link = format!("{}/i/{token}", authority.enrollment()?.config.link_base());
-
-    let input = GovernanceInput {
-        ws,
-        op_id,
-        credential_sha256: sha256_token(&request.credential),
-        request,
-        created_at,
-        now,
-    };
-    match authority
-        .db()
-        .create_invite_txn(&input, &token_sha256)
-        .await?
-    {
-        GovernanceOutcome::Ok => Ok(CreateInviteOutcome::Created(InviteCreated {
-            link,
-            roster_added: emails.clone(),
-            skills: skills.clone(),
-        })),
-        GovernanceOutcome::Denied(reason) => Ok(CreateInviteOutcome::Denied(reason)),
-    }
-}
 
 /// Run a governance roster/revoke mutation (the shared orchestration half of
 /// [`Authority::roster_set`] / [`Authority::roster_remove`] / [`Authority::revoke_device`]). Parses the op
@@ -479,12 +512,16 @@ pub(crate) async fn mint_admin_claim(
 
 /// Create a workspace for an already-verified owner email (the orchestration half of
 /// [`Authority::create_workspace`] — door 2, the web "Create workspace" page). Parses the email INSIDE the
-/// op, applies the server-side display-name default and the freemail-aware domain claim, and runs the one
-/// genesis transaction (idempotency probe → cap → seat → self-invite → request ledger).
+/// op, validates an explicitly-chosen ADDRESS name (typed refusal; `None` derives one from the display
+/// name), applies the server-side display-name default and the freemail-aware domain claim, and runs the
+/// one genesis transaction (idempotency probe → cap → name → seat → request ledger). Returns the
+/// workspace's ADDRESS — the share line; no invite link exists to mint.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_workspace(
     authority: &Authority,
     request_id: &str,
     display_name: Option<&str>,
+    name: Option<&str>,
     owner_email: &str,
     plane_mode: DeploymentMode,
     created_at: &str,
@@ -492,20 +529,28 @@ pub(crate) async fn create_workspace(
     let Ok(owner) = Principal::parse(owner_email) else {
         return Ok(CreateWorkspaceOutcome::Denied("invalid owner email"));
     };
+    // An explicit name is validated HERE (typed, pre-transaction — a violation writes nothing);
+    // availability is the transaction's to prove (the unique index is the backstop).
+    if let Some(n) = name
+        && let Err(reason) = validate_workspace_name(n)
+    {
+        return Ok(CreateWorkspaceOutcome::Denied(reason));
+    }
     let request_sha256 = topos_core::digest::sha256(request_id.as_bytes());
-    let name = resolved_display_name(display_name, owner_email);
+    let resolved_display = resolved_display_name(display_name, owner_email);
     let (domain, domain_status) = email_domain_claim(owner_email);
-    let secret = authority.enrollment()?.secret.as_bytes();
+    let link_base = authority.enrollment()?.config.link_base().to_owned();
     authority
         .db()
         .create_workspace_txn(
             &request_sha256,
-            &name,
+            &resolved_display,
+            name,
             &owner,
             plane_mode.as_str(),
             domain.as_deref(),
             domain_status,
-            secret,
+            &link_base,
             created_at,
         )
         .await
@@ -513,26 +558,35 @@ pub(crate) async fn create_workspace(
 
 /// Approve a STANDUP device-auth session with a web-verified email (the orchestration half of
 /// [`Authority::approve_standup`] — door 1's human leg). Parses the email INSIDE the op (a malformed one is
-/// the uniform miss), applies the same name default + domain claim as create-workspace, and runs the one
-/// approve transaction (session probe → cap → seat → session CAS).
+/// the uniform miss), validates an explicitly-chosen ADDRESS name exactly as create-workspace does (the
+/// web form may pass a slug; `None` derives one from the display name), and runs the one approve
+/// transaction (session probe → cap → name → seat → session CAS).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn approve_standup(
     authority: &Authority,
     user_code: &str,
     verified_email: &str,
     display_name: Option<&str>,
+    name: Option<&str>,
     plane_mode: DeploymentMode,
     now: i64,
     created_at: &str,
 ) -> Result<ApproveStandupOutcome> {
     let principal = Principal::parse(verified_email).map_err(|_| AuthorityError::NotFound)?;
-    let name = resolved_display_name(display_name, verified_email);
+    if let Some(n) = name
+        && let Err(reason) = validate_workspace_name(n)
+    {
+        return Ok(ApproveStandupOutcome::Denied(reason));
+    }
+    let resolved_display = resolved_display_name(display_name, verified_email);
     let (domain, domain_status) = email_domain_claim(verified_email);
     authority
         .db()
         .approve_standup_txn(
             user_code,
             &principal,
-            &name,
+            &resolved_display,
+            name,
             plane_mode.as_str(),
             domain.as_deref(),
             domain_status,
@@ -572,7 +626,6 @@ pub(crate) async fn read_claim_bootstrap(
         deployment_mode: config.deployment_mode,
         verified_domain: None,
         verified_domain_status: "unverified".to_owned(),
-        skills: Vec::new(),
         base_url: config.base_url.clone(),
         link_base: config.link_base().to_owned(),
         enrollment_method: "admin_claim".to_owned(),
@@ -640,7 +693,47 @@ fn email_domain_claim(owner_email: &str) -> (Option<String>, &'static str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{email_domain_claim, resolved_display_name};
+    use super::{
+        email_domain_claim, resolved_display_name, slugify_display_name, validate_workspace_name,
+    };
+
+    #[test]
+    fn workspace_name_validation_refuses_the_reserved_shapes() {
+        assert_eq!(validate_workspace_name("acme"), Ok(()));
+        assert_eq!(validate_workspace_name("acme-eng-2"), Ok(()));
+        assert_eq!(validate_workspace_name("9lives"), Ok(()));
+        // Charset/length.
+        assert!(validate_workspace_name("").is_err());
+        assert!(validate_workspace_name("Acme").is_err());
+        assert!(validate_workspace_name("-acme").is_err());
+        assert!(validate_workspace_name("ac_me").is_err());
+        assert!(validate_workspace_name(&"a".repeat(64)).is_err());
+        assert_eq!(validate_workspace_name(&"a".repeat(63)), Ok(()));
+        // The archived-rename namespace and the version-word shape.
+        assert!(validate_workspace_name("x-archived-2026").is_err());
+        assert!(validate_workspace_name("v1").is_err());
+        assert!(validate_workspace_name("v42").is_err());
+        assert_eq!(validate_workspace_name("v1x"), Ok(()));
+        // Reserved route/product words.
+        assert!(validate_workspace_name("api").is_err());
+        assert!(validate_workspace_name("topos").is_err());
+        assert!(validate_workspace_name("everyone").is_err());
+        assert!(validate_workspace_name("admin-api").is_err());
+    }
+
+    #[test]
+    fn slugify_folds_to_the_address_charset() {
+        assert_eq!(slugify_display_name("Acme"), "acme");
+        assert_eq!(slugify_display_name("Acme  Eng!"), "acme-eng");
+        assert_eq!(
+            slugify_display_name("robert's workspace"),
+            "robert-s-workspace"
+        );
+        assert_eq!(slugify_display_name("---"), "");
+        assert_eq!(slugify_display_name("日本"), "");
+        let long = slugify_display_name(&"a".repeat(100));
+        assert_eq!(long.len(), 63);
+    }
 
     #[test]
     fn display_name_defaults_to_the_email_local_part() {

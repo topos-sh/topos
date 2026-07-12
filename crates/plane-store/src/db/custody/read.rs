@@ -46,13 +46,15 @@ impl Db {
     ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
     ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
     ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
-    ///   and the bind-parameter numbering differs per call site); there are **FIVE** verbatim copies of
+    ///   and the bind-parameter numbering differs per call site); there are **SIX** verbatim copies of
     ///   `open ∧ base == current` — this witness's proposal arm, [`Self::version_readable`]'s proposal arm,
     ///   the two GC keep-checks ([`Self::claim_for_delete`] /
-    ///   [`Self::claim_stale_for_recovery`]), and the proposals listing
-    ///   ([`Self::open_proposal_rows`]) — and a dedicated equivalence test pins the three
-    ///   object-keyed copies (this arm + the two GC keep-checks) together against drift, while behavioral
-    ///   tests pin the version-read and the listing copies to the same staleness semantics. A reclaimed object
+    ///   [`Self::claim_stale_for_recovery`]), the proposals listing
+    ///   ([`Self::open_proposal_rows`]), and the delivery read's workspace-wide aggregate count
+    ///   (`db/directory/delivery.rs::count_open_proposals`) — and a dedicated equivalence test pins the
+    ///   three object-keyed copies (this arm + the two GC keep-checks) together against drift, while
+    ///   behavioral tests pin the version-read, the listing, and the aggregate copies to the same
+    ///   staleness semantics. A reclaimed object
     ///   that briefly outlives this check on a concurrent read is handled by
     ///   [`crate::custody::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
     ///

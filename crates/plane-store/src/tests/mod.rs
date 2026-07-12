@@ -557,7 +557,15 @@ async fn do_reject(
         expected: base,
     };
     fx.authority
-        .review_reject(ws, skill, commit, auth, &op_id, CREATED_AT)
+        .review_reject(
+            ws,
+            skill,
+            commit,
+            auth,
+            "needs another pass",
+            &op_id,
+            CREATED_AT,
+        )
         .await
         .unwrap()
 }
@@ -624,3 +632,6 @@ mod session_review;
 mod session_roster;
 mod set_current;
 mod standup;
+mod verb_surface_custody;
+mod verb_surface_directory;
+mod verb_surface_enroll;

@@ -32,8 +32,11 @@ pub enum DeviceOp {
     Revert,
     /// `review --approve` — promote the locked open proposal sideways.
     ReviewApprove,
-    /// `review --reject` / proposer-withdraw — the standalone status flip.
+    /// `review --reject` — the standalone status flip (with its mandatory reason).
     ReviewReject,
+    /// `review --withdraw` — the AUTHOR retracting their own open proposal (a status flip to
+    /// `closed`, no verdict notice — the author did it).
+    ReviewWithdraw,
 }
 
 /// The device-lane request as PRESENTED on the wire: the workspace credential (a LIVE bearer secret)
@@ -260,11 +263,12 @@ pub(crate) async fn revert(
     let command = device_op_command(DeviceOp::Revert);
 
     // good's tree digest (recorded on its provenance row; render needs a KNOWN digest, so it cannot
-    // discover this), SCOPED TO THIS SKILL — reverting to another skill's commit is refused here, so the
-    // forward commit can never graft a foreign tree under this skill. Absent/legacy/foreign ⇒ refused.
-    let Some(good_digest) = authority
+    // discover this) + its purge tombstone, SCOPED TO THIS SKILL — reverting to another skill's commit is
+    // refused here, so the forward commit can never graft a foreign tree under this skill.
+    // Absent/legacy/foreign ⇒ refused.
+    let Some((good_digest, good_purged_at)) = authority
         .db()
-        .skill_commit_bundle_digest(ws, skill, good)
+        .skill_commit_digest_and_purge(ws, skill, good)
         .await?
     else {
         return pretxn_fail(
@@ -323,6 +327,29 @@ pub(crate) async fn revert(
     };
     if let Some(replayed) = replayed {
         return Ok(replayed);
+    }
+
+    // THE PURGE GATE — after the replay probe (a revert that succeeded BEFORE the purge still owes
+    // its byte-identical replay), before any staging: a purged target's bytes are gone by decision
+    // (the hash stays as a who/when tombstone), so forward-promoting its tree would strand `current`
+    // over deliberately-reclaimed content. A typed refusal, on BOTH lanes (the session revert runs
+    // this same path).
+    if good_purged_at.is_some() {
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(good),
+            Some(good_digest),
+            expected,
+            TerminalOutcome::Denied,
+            detail_code_msg("TARGET_PURGED", "the target version's bytes were purged"),
+            created_at,
+        )
+        .await;
     }
 
     // The current pointer is the forward commit's first parent.
@@ -450,8 +477,9 @@ pub(crate) struct RejectInput<'a> {
     pub op: DeviceOp,
     pub op_id: &'a str,
     pub expected: Generation,
-    /// The session lane's mandatory rejection reason (`Some(trimmed non-empty)`); the device lane
-    /// carries `None` (CLI reason parity is deliberately not built).
+    /// The MANDATORY rejection reason (`Some(trimmed non-empty)` on BOTH lanes now — the entry
+    /// points refuse an empty one typed). A WITHDRAW carries `None`: its stored resolution is the
+    /// fixed `withdrawn`, and no verdict notice is written.
     pub reason: Option<&'a str>,
     pub created_at: &'a str,
 }
@@ -703,6 +731,77 @@ pub(crate) async fn review_reject(
         .await
 }
 
+/// Drive a `review --withdraw`: the AUTHOR retracting their own open proposal — a status flip to
+/// `closed` (`resolved_reason = 'withdrawn'`), moving no pointer, writing no verdict notice (the
+/// author did it). Same pre-transaction shape as [`review_reject`]; the in-transaction gate is
+/// actor == proposer (a non-author's attempt is a typed durable denial, mirroring four-eyes).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn review_withdraw(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    commit: CommitId,
+    actor: WriteActor<'_>,
+    expected: Generation,
+    op_id: &OpId,
+    created_at: &str,
+) -> Result<SetCurrentReceipt> {
+    let command = device_op_command(DeviceOp::ReviewWithdraw);
+    let Some(digest) = authority
+        .db()
+        .skill_commit_bundle_digest(ws, skill, commit)
+        .await?
+    else {
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            None,
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("no such proposal commit for this skill"),
+            created_at,
+        )
+        .await;
+    };
+    if !op_id_is_canonical(op_id.as_str()) {
+        return pretxn_fail(
+            authority,
+            &actor,
+            ws,
+            op_id.as_str(),
+            command,
+            skill,
+            Some(commit),
+            Some(digest),
+            expected,
+            TerminalOutcome::PermanentFailure,
+            detail_msg("op_id is not a canonical UUID"),
+            created_at,
+        )
+        .await;
+    }
+    authority
+        .db()
+        .review_reject_txn(RejectInput {
+            ws,
+            skill,
+            commit,
+            bundle_digest: digest,
+            actor,
+            op: DeviceOp::ReviewWithdraw,
+            op_id: op_id.as_str(),
+            expected,
+            reason: None,
+            created_at,
+        })
+        .await
+}
+
 /// Write a pre-transaction terminal outcome through the actor's lane: DURABLE for a device (the replay
 /// surface for those outcomes), SYNTHESIZED — same fields, never persisted — for a session. A
 /// web-verified email proves nothing about membership in the target workspace, so a session pre-txn
@@ -920,12 +1019,19 @@ pub(crate) fn device_op_command(op: DeviceOp) -> &'static str {
         DeviceOp::Revert => "revert",
         DeviceOp::ReviewApprove => "review-approve",
         DeviceOp::ReviewReject => "review-reject",
+        DeviceOp::ReviewWithdraw => "review-withdraw",
     }
 }
 
 /// A small JSON detail object carrying a human-readable message (the open `details` field).
 pub(crate) fn detail_msg(msg: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "message": msg }))
+}
+
+/// A detail object with a machine-branchable `code` beside the message (the session lane's
+/// `code_details` shape, on the custody path).
+pub(crate) fn detail_code_msg(code: &str, msg: &str) -> Option<serde_json::Value> {
+    Some(serde_json::json!({ "code": code, "message": msg }))
 }
 
 /// Whether an op-id string is **exactly** the canonical lowercase-hyphenated UUID form — `parse_str`

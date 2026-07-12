@@ -15,21 +15,19 @@ use crate::delivery::{AppliedSkill, Delivery};
 use crate::enroll::DeploymentMode;
 use crate::enroll::{
     ConfirmOutcome, DeviceAuthPoll, DeviceAuthStart, EnrollmentConfig, EnrollmentDisclosure,
-    EnrollmentState, InviteBootstrap, NoEnrollmentConfig, PasscodeComplete, PasscodeStart,
-    RedeemOutcome, VerificationContext,
+    EnrollmentState, InviteBootstrap, LoginOutcome, NoEnrollmentConfig, PasscodeComplete,
+    PasscodeStart, RedeemOutcome, VerificationContext,
 };
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
-    ApproveStandupOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, GovernanceOp,
-    GovernanceOutcome, GovernanceRequest, MintClaimOutcome,
+    ApproveStandupOutcome, CreateWorkspaceOutcome, GovernanceOp, GovernanceOutcome,
+    GovernanceRequest, MintClaimOutcome,
 };
 use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 use crate::session_read::SkillIndexRow;
-use crate::session_roster::{
-    RosterView, SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
-};
+use crate::session_roster::{RosterView, SessionInviteOutcome, SessionInviteRole};
 use crate::set_current::{DeviceOpAuth, SetCurrentReceipt};
 use crate::upload::CandidateUpload;
 
@@ -654,10 +652,11 @@ impl Authority {
         .await
     }
 
-    /// **Reject** (or proposer-**withdraw**) an open proposal — flip it to `rejected`, moving no pointer and
-    /// signing nothing, after which the gated root stops matching and ordinary GC reclaims its unique bytes.
-    /// One path serves reviewer-reject and proposer-withdraw (`resolved_by` records who); rejecting an
-    /// already-rejected proposal is an idempotent no-op, an accepted one a typed failure.
+    /// **Reject** an open proposal — flip it to `rejected` with a MANDATORY non-empty `reason`
+    /// (recorded on the row + carried on the author's verdict notice, exactly like the session
+    /// lane's), moving no pointer and signing nothing, after which the gated root stops matching and
+    /// ordinary GC reclaims its unique bytes. Rejecting an already-rejected proposal is an idempotent
+    /// no-op, an accepted one a typed failure.
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a store fault.
@@ -668,6 +667,7 @@ impl Authority {
         skill: &SkillId,
         commit: CommitId,
         auth: DeviceOpAuth,
+        reason: &str,
         op_id: &OpId,
         created_at: &str,
     ) -> Result<SetCurrentReceipt> {
@@ -690,6 +690,28 @@ impl Authority {
             )
             .await;
         }
+        // The reason belt — SYNTHESIZED, never persisted: the reason is not part of the receipt's
+        // bound identity, so a durable denial here would replay against the same op_id's CORRECTED
+        // retry. The session lane refuses identically (same code, same spelling).
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Ok(SetCurrentReceipt {
+                op_id: op_id.as_str().to_owned(),
+                command: crate::set_current::device_op_command(device.op).to_owned(),
+                skill_id: skill.as_str().to_owned(),
+                version_id: Some(commit),
+                bundle_digest: None,
+                expected: device.expected,
+                outcome: topos_types::TerminalOutcome::Denied,
+                current: None,
+                record: None,
+                created_at: created_at.to_owned(),
+                details: crate::set_current::detail_code_msg(
+                    crate::session_review::REASON_REQUIRED_CODE,
+                    "a rejection requires a non-empty reason",
+                ),
+            });
+        }
         crate::set_current::review_reject(
             self,
             ws,
@@ -700,7 +722,59 @@ impl Authority {
                 device_key_id: &device.device_key_id,
             },
             device.expected,
-            None,
+            Some(reason),
+            op_id,
+            created_at,
+        )
+        .await
+    }
+
+    /// **Withdraw** an open proposal — the AUTHOR retracting their own draft: a status flip to
+    /// `closed` (`resolved_reason = 'withdrawn'`), moving no pointer, writing NO verdict notice (the
+    /// author did it). The gate is actor == proposer, in-transaction: anyone else's attempt is a
+    /// typed durable denial (the four-eyes style). Withdrawing one's own already-withdrawn proposal
+    /// replays idempotently.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] on a store fault.
+    pub async fn review_withdraw(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+        auth: DeviceOpAuth,
+        op_id: &OpId,
+        created_at: &str,
+    ) -> Result<SetCurrentReceipt> {
+        let device = match self
+            .resolve_device_op(ws, skill, op_id, &auth, created_at)
+            .await?
+        {
+            Ok(device) => device,
+            Err(receipt) => return Ok(receipt),
+        };
+        if !matches!(device.op, crate::set_current::DeviceOp::ReviewWithdraw) {
+            return crate::set_current::reject_op_mismatch(
+                self,
+                ws,
+                skill,
+                op_id,
+                &device,
+                created_at,
+                "a withdraw must arrive as ReviewWithdraw",
+            )
+            .await;
+        }
+        crate::set_current::review_withdraw(
+            self,
+            ws,
+            skill,
+            commit,
+            crate::actor::WriteActor::Device {
+                credential_sha256: device.credential_sha256,
+                device_key_id: &device.device_key_id,
+            },
+            device.expected,
             op_id,
             created_at,
         )
@@ -860,39 +934,9 @@ impl Authority {
 
     // ── enrollment + governance issuance (every op decided in-Authority; requires with_enrollment_config) ──
 
-    /// Create an owner-driven **invite** — mint the opaque `/i/<token>` link, store it (hash-only), seed the
-    /// invited members at `role` (`status = 'invited'`), and record the governance receipt. The acting
-    /// device credential is authenticated by registry lookup in-transaction and its principal's OWNER role
-    /// enforced there. `op_id`-idempotent: a retry with the matching bound identity re-derives the
-    /// IDENTICAL link and replays the receipt; a different request under the same op id is a denied
-    /// key-reuse. The role + skills come from `request.op` (a `GovernanceOp::Invite`).
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
-    pub async fn create_invite(
-        &self,
-        ws: &WorkspaceId,
-        op_id: &str,
-        request: GovernanceRequest,
-        created_at: &str,
-        now: i64,
-    ) -> Result<CreateInviteOutcome> {
-        crate::governance::create_invite(self, ws, op_id, &request, created_at, now).await
-    }
-
-    /// Resolve an invite link to its **bootstrap payload** — the workspace identity, the offered skills,
-    /// and the API base to enroll against (no bytes, no role). A revoked/expired/absent invite is the
-    /// single indistinguishable [`AuthorityError::NotFound`].
-    ///
-    /// # Errors
-    /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
-    pub async fn read_invite_bootstrap(&self, token: &str, now: i64) -> Result<InviteBootstrap> {
-        crate::enroll::read_invite_bootstrap(self, token, now).await
-    }
-
     /// Resolve a device-auth `user_code` to its **verification-page disclosure** — the machine name + device
-    /// fingerprint, the workspace identity, and the offered skills a human reviews before confirming (the
-    /// RFC-8628 confused-deputy guard). Carries no secret. A miss / non-live / expired session — or an unknown
+    /// fingerprint and the workspace identity a human reviews before confirming (the RFC-8628
+    /// confused-deputy guard). Carries no secret. A miss / non-live / expired session — or an unknown
     /// code — is the single indistinguishable [`AuthorityError::NotFound`].
     ///
     /// # Errors
@@ -922,16 +966,19 @@ impl Authority {
         crate::enroll::confirm_external_identity(self, user_code, verified_email, now).await
     }
 
-    /// Start a **device-authorization** flow against an invite (RFC-8628-shaped). The device key id is
-    /// SERVER-derived from `device_public_key` (a client-asserted id is ignored). Returns the secret device
-    /// code, the user code, and the verification URI. Cloud sessions await a human identity step; self-host
-    /// sessions are born confirmed (a device-rooted principal), so the first poll yields a grant.
+    /// Start a **device-authorization** flow toward a workspace ADDRESS (RFC-8628-shaped). The device
+    /// key id is SERVER-derived from `device_public_key` (a client-asserted id is ignored). Returns
+    /// the secret device code, the user code, and the verification URI. The session opens `pending`
+    /// on EVERY deployment posture (identity proof is always a passcode or a web approval), and
+    /// whether the name resolved is never disclosed here — an unknown address runs the same flow to
+    /// the redeem's one uniform denial.
     ///
     /// # Errors
-    /// [`AuthorityError::NotFound`] on a dead/unknown invite; [`AuthorityError::Internal`] on a fault.
+    /// [`AuthorityError::InvalidId`] on a malformed name (the syntax belt — a typed 400, never an
+    /// existence answer); [`AuthorityError::Internal`] on a fault.
     pub async fn start_device_auth(
         &self,
-        invite_token: &str,
+        workspace_name: &str,
         device_public_key: &[u8; 32],
         machine_name: &str,
         now: i64,
@@ -939,7 +986,31 @@ impl Authority {
     ) -> Result<DeviceAuthStart> {
         crate::enroll::start_device_auth(
             self,
-            invite_token,
+            workspace_name,
+            device_public_key,
+            machine_name,
+            now,
+            created_at,
+        )
+        .await
+    }
+
+    /// Start a **LOGIN** device-authorization flow — no workspace, no address: the session proves the
+    /// person's identity, and its grant redeems at [`redeem_login`](Self::redeem_login) into one
+    /// re-minted credential per confirmed seat. Allowed on BOTH deployment postures (sign-in is how a
+    /// device recovers its credentials wherever the plane runs).
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn start_login_device_auth(
+        &self,
+        device_public_key: &[u8; 32],
+        machine_name: &str,
+        now: i64,
+        created_at: &str,
+    ) -> Result<DeviceAuthStart> {
+        crate::enroll::start_login_device_auth(
+            self,
             device_public_key,
             machine_name,
             now,
@@ -1020,10 +1091,12 @@ impl Authority {
         crate::enroll::complete_passcode(self, user_code, email, code, now).await
     }
 
-    /// **Redeem** an enrollment grant — THE central op. The GRANT is the bearer credential (a
-    /// deterministic HMAC secret, stored only as its sha256). In one transaction: re-derive the device key
-    /// id, check the grant binds exactly this presented device key, apply the membership gate (cloud requires
-    /// a confirmed identity; self-host grants membership), and register the device WITH its ONE minted
+    /// **Redeem** an enrollment grant into `ws` — THE central op. The GRANT is the bearer credential
+    /// (a deterministic HMAC secret, stored only as its sha256). In one transaction: re-derive the
+    /// device key id, check the grant binds exactly this presented device key, apply THE MEMBERSHIP
+    /// GATE — the roster is the lock, on EVERY deployment posture: an address that never resolved, a
+    /// wrong-workspace redeem, a vanished workspace, and an off-roster identity all answer the ONE
+    /// uniform denial — flip an invited seat to confirmed, and register the device WITH its ONE minted
     /// **workspace credential** (`derive_token(b"wscred", …)`, stored only as its sha256 on the registry
     /// row). **Returns no user token, ever; no per-skill token, ever.** Naturally idempotent — a replay
     /// re-derives the identical workspace credential.
@@ -1032,13 +1105,30 @@ impl Authority {
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
     pub async fn redeem_enrollment(
         &self,
+        ws: &WorkspaceId,
         grant_token: &str,
         device_public_key: [u8; 32],
         now: i64,
-        created_at: &str,
     ) -> Result<RedeemOutcome> {
-        crate::enroll::redeem_enrollment(self, grant_token, device_public_key, now, created_at)
-            .await
+        crate::enroll::redeem_enrollment(self, ws, grant_token, device_public_key, now).await
+    }
+
+    /// **Redeem a LOGIN grant** — prove the grant's bound device key, then register this device and
+    /// re-mint its workspace credential in EVERY workspace where the proven identity holds a confirmed
+    /// seat, in ONE transaction. Each credential is deterministic per `(grant, workspace)`, so a
+    /// lost-ack replay re-returns identical plaintexts; a seat where this device is revoked (or its
+    /// key id squatted) comes back `blocked` with no credential and no side effect there. ZERO seats
+    /// is a valid success — the identity is established, nothing mints.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
+    pub async fn redeem_login(
+        &self,
+        grant_token: &str,
+        device_public_key: [u8; 32],
+        now: i64,
+    ) -> Result<LoginOutcome> {
+        crate::enroll::redeem_login(self, grant_token, device_public_key, now).await
     }
 
     /// **Admin claim** (the one-time first-boot bearer: self-host standup + the cloud break-glass) —
@@ -1097,9 +1187,12 @@ impl Authority {
 
     /// **Create a workspace** for an already-verified owner email (the self-serve door a composing web
     /// surface drives; the caller MUST have proven the email). ONE transaction: the `request_id` idempotency
-    /// probe (same request + same owner replays the SAME workspace and self-invite link; a different owner
-    /// is denied), the per-identity creation cap, a fresh server-minted `w_…` id, the workspace + confirmed
-    /// owner seat (with the freemail-aware domain claim), and the owner's deterministic self-invite.
+    /// probe (same request + same owner replays the SAME workspace and the SAME address; a different owner
+    /// is denied), the per-identity creation cap, a fresh server-minted `w_…` id, the ADDRESS name
+    /// (`name = Some` is validated + must be free — both refusals typed; `None` derives a slug from the
+    /// display name, deduped, falling back to an id-derived name), and the workspace + confirmed
+    /// owner seat (with the freemail-aware domain claim). Returns the workspace ADDRESS — the share
+    /// line; there is no invite link (the roster is the lock).
     /// `display_name = None` takes the server default (the email's local part + "'s workspace").
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
@@ -1111,6 +1204,7 @@ impl Authority {
         &self,
         request_id: &str,
         display_name: Option<&str>,
+        name: Option<&str>,
         owner_email: &str,
         plane_mode: DeploymentMode,
         created_at: &str,
@@ -1119,6 +1213,7 @@ impl Authority {
             self,
             request_id,
             display_name,
+            name,
             owner_email,
             plane_mode,
             created_at,
@@ -1129,7 +1224,8 @@ impl Authority {
     /// **Approve a standup session** with a web-verified email (the human leg of the un-enrolled publish
     /// door; the caller MUST have proven the email). ONE transaction: resolve the live standup session by
     /// `user_code`, run the same creation body as [`create_workspace`](Self::create_workspace) (cap → fresh
-    /// id → seat), and CAS the session pending→confirmed with the fresh workspace — the session CAS is the
+    /// id → address name → seat; `name` follows the same Some-validated / None-derived rule), and CAS the
+    /// session pending→confirmed with the fresh workspace — the session CAS is the
     /// idempotency (a same-email re-click is `AlreadyApproved`; a different email, an unknown/expired code,
     /// or an enroll-intent session is the single indistinguishable [`AuthorityError::NotFound`]).
     ///
@@ -1137,11 +1233,13 @@ impl Authority {
     ///
     /// # Errors
     /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
+    #[allow(clippy::too_many_arguments)]
     pub async fn approve_standup(
         &self,
         user_code: &str,
         verified_email: &str,
         display_name: Option<&str>,
+        name: Option<&str>,
         plane_mode: DeploymentMode,
         now: i64,
         created_at: &str,
@@ -1151,6 +1249,7 @@ impl Authority {
             user_code,
             verified_email,
             display_name,
+            name,
             plane_mode,
             now,
             created_at,
@@ -1162,14 +1261,15 @@ impl Authority {
     /// leg (the composing WEB layer proves the acting email; this op never does). ONE transaction: the
     /// `request_id` idempotency slot (the same `workspace_events` slot the device lane uses, under a fresh
     /// session-tagged identity — a cross-leg id collision always fails closed), the in-transaction acting
-    /// gate (the acting email must hold a CONFIRMED **owner** seat — one uniform denial otherwise), the
-    /// standing-door ensure (lazily minted for door-less workspaces), and the invited seats seeded at
-    /// `role` through the shared never-demote row-writer. Returns the standing door token (compose
-    /// `<link_base>/i/<token>`); an owner-role request is unrepresentable in [`SessionInviteRole`].
+    /// gate (the acting email must hold a CONFIRMED **owner** seat — one uniform denial otherwise), and
+    /// the invited seats seeded at `role` through the shared never-demote row-writer. An invitation is a
+    /// ROSTER WRITE and nothing more: what comes back is the workspace ADDRESS (joining is
+    /// `follow <address>` + proof of the invited email); an owner-role request is unrepresentable in
+    /// [`SessionInviteRole`].
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); `plane_mode` is the plane's own posture,
     /// threaded by the composing caller — never a request field. ALL session roster ops are uniformly
-    /// denied on a self-host plane (self-host membership stays the device invite chain).
+    /// denied on a self-host plane (self-host joining stays the device lane).
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
@@ -1236,42 +1336,10 @@ impl Authority {
         .await
     }
 
-    /// **Rotate the standing workspace door from a verified owner session** — "reset link". Revokes the
-    /// current door family (the epoch door AND the create-page genesis self-invite, whichever stand),
-    /// bumps the workspace's `link_epoch`, and mints the new deterministic door. Blocks FUTURE redemption
-    /// only: an already-exchanged credential (or a device-auth session already past its entry gate) is
-    /// never severed, and invite links minted on the device leg are deliberately untouched.
-    ///
-    /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if no enrollment config is set; a database fault.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn rotate_join_link_session(
-        &self,
-        ws: &WorkspaceId,
-        request_id: &str,
-        acting_email: &str,
-        plane_mode: DeploymentMode,
-        created_at: &str,
-        now: i64,
-    ) -> Result<SessionRotateOutcome> {
-        crate::session_roster::rotate_join_link_session(
-            self,
-            ws,
-            request_id,
-            acting_email,
-            plane_mode,
-            created_at,
-            now,
-        )
-        .await
-    }
-
     /// **Read the workspace roster for a verified session** — a pure privileged read (no receipt): every
-    /// seat (email, role, invited/confirmed status, added-at) for any CONFIRMED member; the standing door
-    /// token included ONLY when the acting email holds a confirmed **owner** seat (`None` also when no
-    /// door stands yet). Every miss — a self-host plane, an absent workspace, a non-member — is the single
+    /// seat (email, role, invited/confirmed status, added-at) for any CONFIRMED member, plus the
+    /// workspace ADDRESS (member-visible — it is a name, not a door; joining still gates on the
+    /// roster). Every miss — a self-host plane, an absent workspace, a non-member — is the single
     /// indistinguishable [`AuthorityError::NotFound`].
     ///
     /// # Errors
@@ -1882,16 +1950,6 @@ impl Authority {
             .ok_or_else(|| AuthorityError::internal(NoEnrollmentConfig))
     }
 
-    /// Derive a deterministic opaque credential under the enrollment secret (the one credential mint). A
-    /// thin wrapper over [`crate::enroll::derive_token`] that supplies the configured secret.
-    ///
-    /// # Errors
-    /// [`AuthorityError::Internal`] if no enrollment config is set.
-    pub(crate) fn derive_token(&self, domain: &[u8], parts: &[&[u8]]) -> Result<String> {
-        let secret = self.enrollment()?.secret.as_bytes();
-        Ok(crate::enroll::derive_token(secret, domain, parts))
-    }
-
     /// The per-workspace git-store directory — one component under the confined root. `WorkspaceId` is
     /// a validated path-safe id (no separators, no `..`), so this can never escape `git_root`.
     /// `pub(crate)` so a blocking-pool closure (which cannot capture `&Authority` — `spawn_blocking`
@@ -1935,6 +1993,126 @@ impl Authority {
     /// bare hash. Infallible: the store creates its directories lazily on the first `put`.
     pub(crate) fn large_store(&self, ws: &WorkspaceId) -> LocalLargeStore {
         LocalLargeStore::new(self.large_root.join(ws.as_str()))
+    }
+}
+
+impl Authority {
+    // ── the verb-surface describe reads + the two member-lane guarded writes ─────────────────────────
+    //
+    // What the two-phase verbs render their "before" from: the workspace channels index, the caller's
+    // own membership, the review inbox, a skill's log, and a skill's reach — plus the notices-ack
+    // read-state write and the roster invite. Every op is device-lane authenticated (Bearer workspace
+    // credential) and front-doored by the ONE membership predicate; every pre-gate miss is the uniform
+    // [`AuthorityError::NotFound`]. The reads mint nothing durable; the two writes route through their
+    // guarded `topos_*` SQL functions (the contract the web tier calls too).
+
+    /// **The channels index** (`channel` bare read): every channel of the workspace — `everyone`
+    /// included, name-sorted — with the caller's membership, the member count (roster-derived for the
+    /// builtin, else the `channel_members` count), and the name-sorted skill references it holds.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss (unknown/revoked credential, non-member);
+    /// [`AuthorityError::Integrity`] on a corrupt stored row; [`AuthorityError::Internal`] on a fault.
+    pub async fn channels_index(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+    ) -> Result<Vec<crate::channels::ChannelIndexEntry>> {
+        crate::channels::channels_index(self, ws, credential).await
+    }
+
+    /// **The caller's own membership** (`me`) — the workspace identity + its share address, the
+    /// caller's confirmed seat (role + inviter), and the invite policy.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault (incl.
+    /// no enrollment config, from which the share-link base is read).
+    pub async fn membership_describe(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+    ) -> Result<crate::describe::Me> {
+        crate::describe::membership_describe(self, ws, credential).await
+    }
+
+    /// **The review inbox** (`review` bare read): every OPEN proposal in the workspace, with the
+    /// proposed version's commit message (best-effort) and a derived `stale` flag.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Integrity`] on a corrupt
+    /// stored row; [`AuthorityError::Internal`] on a fault.
+    pub async fn proposals_index(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+    ) -> Result<Vec<crate::describe::ProposalIndexEntry>> {
+        crate::describe::proposals_index(self, ws, credential).await
+    }
+
+    /// **A skill's log** (`log <skill>`): its version history (newest-first where walkable, then the
+    /// unordered provenance tail with purge tombstones) + its proposals (any status). Resolves the
+    /// name, then an archived successor's freed base name, then a bare skill id.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Integrity`] on a corrupt
+    /// stored row; [`AuthorityError::Internal`] on a fault.
+    pub async fn skill_log(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        skill: &str,
+    ) -> Result<crate::describe::SkillLog> {
+        crate::describe::skill_log(self, ws, credential, skill).await
+    }
+
+    /// **A skill's reach** (`reach <skill>` / the publish audience): the confirmed members entitled to
+    /// it + their non-revoked devices — how far a publish would actually travel.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss (incl. an unknown skill name);
+    /// [`AuthorityError::Integrity`] on a corrupt stored row; [`AuthorityError::Internal`] on a fault.
+    pub async fn reach(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        skill_name: &str,
+    ) -> Result<crate::describe::Reach> {
+        crate::describe::reach(self, ws, credential, skill_name).await
+    }
+
+    /// **Ack notices** — mark the caller's own notices read by id (the delivery feed carries them
+    /// unacked; an interactive session acks after narrating). Idempotent; only the person's own
+    /// unacked rows move.
+    ///
+    /// # Errors
+    /// [`AuthorityError::NotFound`] on the uniform miss; [`AuthorityError::Internal`] on a fault.
+    pub async fn ack_notices(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        ids: &[String],
+        now: i64,
+    ) -> Result<()> {
+        crate::describe::ack_notices(self, ws, credential, ids, now).await
+    }
+
+    /// **Invite** — seat one or more emails as invited members (optionally pre-placing them into
+    /// channels), through the guarded roster write. Member-level unless the workspace restricts
+    /// inviting to owners; an invalid email is a typed argument error, an unknown channel is refused
+    /// with nothing written (resolve-all-or-apply-none), an existing seat is never demoted.
+    ///
+    /// # Errors
+    /// [`AuthorityError::InvalidId`] on a malformed email; [`AuthorityError::NotFound`] on the uniform
+    /// miss; [`AuthorityError::Internal`] on a fault.
+    pub async fn invite(
+        &self,
+        ws: &WorkspaceId,
+        credential: &str,
+        emails: &[String],
+        channels: &[String],
+        created_at: &str,
+    ) -> Result<crate::describe::InviteOutcome> {
+        crate::describe::invite(self, ws, credential, emails, channels, created_at).await
     }
 }
 

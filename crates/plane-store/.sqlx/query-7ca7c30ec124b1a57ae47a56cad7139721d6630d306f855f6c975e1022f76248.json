@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO enrollment_grants (grant_sha256, workspace_id, intent, principal, device_pubkey, device_key_id, device_auth_id, expires_at, consumed_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9) ON CONFLICT (grant_sha256) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ca7c30ec124b1a57ae47a56cad7139721d6630d306f855f6c975e1022f76248"
+}

@@ -5,6 +5,7 @@
 pub(crate) mod catalog;
 pub(crate) mod channels;
 pub(crate) mod delivery;
+pub(crate) mod describe;
 pub(crate) mod enroll;
 pub(crate) mod governance;
 pub(crate) mod session_read;

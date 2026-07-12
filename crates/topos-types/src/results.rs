@@ -457,11 +457,11 @@ pub struct PublishData {
     /// (no pointer moved yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<Generation>,
-    /// A shareable `/i/<token>` invite pre-offering this skill — present ONLY on a genesis publish where the
-    /// publisher could mint it (an owner); `None` on an ordinary publish or a denied/failed mint. The pointer
-    /// move is the real outcome; the link is a convenience (the `invite` verb mints one independently).
+    /// The paste-able share line for the shipped skill (`<workspace address>/skills/<name>`) — present
+    /// when the plane disclosed the workspace address. The pointer move is the real outcome; the line is
+    /// what a human pastes in chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invite_link: Option<String>,
+    pub share_line: Option<String>,
     /// Present when this publish is WAITING on the workspace-standup sign-in (the un-enrolled first publish
     /// on a hosted plane): a human opens `verification_uri_complete` and approves; the agent then re-runs
     /// the SAME publish command (the `ENROLL_RESUME` next-action carries the argv).
@@ -540,6 +540,9 @@ pub enum PublishPendingStatus {
 pub struct StandupReceipt {
     /// The stood-up workspace's display name (chosen at the sign-in approval).
     pub workspace_display_name: String,
+    /// The stood-up workspace's ADDRESS (the share link — printed once at genesis, pasted anywhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack
     /// tripwire: a principal you don't recognize means someone else approved (and owns) this workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,7 +605,8 @@ pub struct ReviewData {
     pub current_generation: Option<Generation>,
 }
 
-/// A review verdict. **INFERRED.**
+/// A review verdict — `approve` promotes, `reject` carries a reason back, `withdraw` is the author
+/// retracting their own open proposal. **INFERRED.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -612,24 +616,7 @@ pub struct ReviewData {
 pub enum ReviewDecision {
     Approve,
     Reject,
-}
-
-/// `invite` (mint an `/i/` link + optionally seed the roster). A link never carries a role and never
-/// enrolls on its own. **INFERRED.** Also the `POST /v1/invites` success `data` shape (the OpenAPI body),
-/// hence the `utoipa::ToSchema` derive alongside `schemars`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct InviteData {
-    /// `/i/<token>`.
-    pub invite_link: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roster_added: Vec<String>,
-    /// The skills a redeemer joins + follows (empty = a membership-only door).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
+    Withdraw,
 }
 
 #[cfg(test)]

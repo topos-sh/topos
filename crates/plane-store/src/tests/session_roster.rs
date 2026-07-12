@@ -1,27 +1,29 @@
-//! The web-session roster leg — invite / remove / rotate-the-standing-door / read-roster.
+//! The web-session roster leg — invite / remove / read-roster.
 //!
 //! The release-blocker witnesses for the session-authorized membership ops: the confirmed-owner
 //! acting gate (one uniform denial for member / reviewer / invited / absent — and only a confirmed
 //! member's denial is ever recorded), role-on-the-seat seeding, the self-host uniform denial, the
 //! `request_id` replay/divergence discipline (including the cross-leg id collision with a
-//! device-lane op), the last-owner lockout + instant revoke on remove, the standing-door family
-//! (genesis continuity, lazy epoch mint, rotation that blocks future redemption only), and the
-//! `web_session` receipt method + acting-principal audit trail.
+//! device-lane op), the last-owner lockout + instant revoke on remove, and the `web_session`
+//! receipt method + acting-principal audit trail. An invitation is a ROSTER WRITE now — what the
+//! ops disclose is the workspace ADDRESS (a name, not a door), and joining is the address flow
+//! gated on the invited seat.
 
-use super::enrollment_governance::{device_pub, make_invite, op_id, redeem, seat_owner};
+use super::enrollment_governance::{
+    addr, device_pub, flow_to_grant, op_id, redeem, seat_owner, sign_governance,
+};
 use super::*;
 
-use crate::enroll::sha256_token;
 use crate::{
-    DeviceAuthPoll, GovernanceOutcome, GrantIssued, PasscodeComplete, RedeemOutcome,
-    SessionInviteOutcome, SessionInviteRole, SessionRotateOutcome,
+    GovernanceOp, GovernanceOutcome, RedeemOutcome, Role, SessionInviteOutcome, SessionInviteRole,
 };
 
 const NOW: i64 = 1_000;
 const T0: &str = "t0";
 const CLOUD: DeploymentMode = DeploymentMode::Cloud;
 
-/// Session-invite `emails` at `role` from `acting`, panicking on a denial.
+/// Session-invite `emails` at `role` from `acting`, panicking on a denial. Returns the disclosed
+/// `(address, seated)`.
 async fn invite_ok(
     a: &Authority,
     w: &WorkspaceId,
@@ -36,10 +38,7 @@ async fn invite_ok(
         .await
         .unwrap()
     {
-        SessionInviteOutcome::Invited {
-            invite_token,
-            seated,
-        } => (invite_token, seated),
+        SessionInviteOutcome::Invited { address, seated } => (address, seated),
         SessionInviteOutcome::Denied(reason) => panic!("invite denied: {reason}"),
     }
 }
@@ -66,38 +65,6 @@ async fn events_of(pool: &PgPool, ws: &str) -> Vec<(String, String, String, Stri
     .fetch_all(pool)
     .await
     .unwrap()
-}
-
-/// Drive a CLOUD device flow through `invite_token` to a grant, confirming as `confirm_as`.
-async fn flow_to_grant(
-    a: &Authority,
-    invite_token: &str,
-    device_seed: &[u8; 32],
-    confirm_as: &str,
-) -> GrantIssued {
-    let dpub = device_pub(device_seed);
-    let start = a
-        .start_device_auth(invite_token, &dpub, "laptop", NOW, T0)
-        .await
-        .unwrap();
-    let pc = a
-        .start_passcode(&start.user_code, confirm_as, NOW, T0)
-        .await
-        .unwrap();
-    assert_eq!(
-        a.complete_passcode(&start.user_code, confirm_as, &pc.passcode, NOW)
-            .await
-            .unwrap(),
-        PasscodeComplete::Confirmed
-    );
-    match a
-        .poll_device_auth(&start.device_code, NOW, T0)
-        .await
-        .unwrap()
-    {
-        DeviceAuthPoll::Granted(g) => g,
-        other => panic!("expected Granted, got {other:?}"),
-    }
 }
 
 // ── the acting gate ─────────────────────────────────────────────────────────────────────────────
@@ -160,25 +127,17 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
         let GovernanceOutcome::Denied(rem_reason) = rem else {
             panic!("{acting} must be denied");
         };
-        let rot = a
-            .rotate_join_link_session(&w, &op_id(300 + n), acting, CLOUD, T0, NOW)
-            .await
-            .unwrap();
-        let SessionRotateOutcome::Denied(rot_reason) = rot else {
-            panic!("{acting} must be denied");
-        };
         // ONE uniform string across every non-owner acting shape and every op.
         assert_eq!(inv_reason, rem_reason);
-        assert_eq!(rem_reason, rot_reason);
     }
-    // Nothing was seated, nothing rotated.
+    // Nothing was seated.
     assert!(seat_of(&pool, "w_gate", "x@acme.com").await.is_none());
 
-    // Only the CONFIRMED members' denials were recorded (member + reviewer, 3 ops each); the
+    // Only the CONFIRMED members' denials were recorded (member + reviewer, 2 ops each); the
     // invited seat and the stranger recorded NOTHING — a stranger cannot grow the ledger or squat
     // an op-id slot.
     let events = events_of(&pool, "w_gate").await;
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 4);
     for (_op, actor, _verb, outcome, method) in &events {
         assert!(
             actor == "member@acme.com" || actor == "rev@acme.com",
@@ -188,9 +147,10 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
         assert_eq!(method, "web_session");
     }
 
-    // The read: a confirmed member sees seats but NO door link; invited/absent are the uniform miss.
+    // The read: a confirmed member sees the seats AND the address (member-visible — it is a name,
+    // not a door); invited/absent are the uniform miss.
     let view = a.read_roster(&w, "member@acme.com", CLOUD).await.unwrap();
-    assert!(view.invite_token.is_none());
+    assert_eq!(view.address, format!("https://plane.test/{}", addr(&w)));
     assert_eq!(view.seats.len(), 4);
     assert!(matches!(
         a.read_roster(&w, "invited@acme.com", CLOUD).await,
@@ -200,11 +160,8 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
         a.read_roster(&w, "stranger@evil.com", CLOUD).await,
         Err(AuthorityError::NotFound)
     ));
-    // The owner sees the seats; there is no door yet (a seeded workspace has no genesis row and no
-    // session op has minted one), so the link is honestly None.
     let owner_view = a.read_roster(&w, owner.as_str(), CLOUD).await.unwrap();
     assert_eq!(owner_view.seats.len(), 4);
-    assert!(owner_view.invite_token.is_none());
 }
 
 // ── roles on the seat ───────────────────────────────────────────────────────────────────────────
@@ -261,10 +218,58 @@ async fn invite_seeds_the_requested_role_and_never_demotes_a_confirmed_seat(pool
     assert_eq!(SessionInviteRole::parse("owner"), None);
 }
 
+/// The role comes from the SEAT, not any link: a reviewer invitee redeems through the ADDRESS into a
+/// confirmed reviewer, and a verified-but-unrostered stranger dies at the roster gate.
+#[sqlx::test]
+async fn invited_seats_redeem_through_the_address_with_their_seeded_role(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "sr-seat-role").await;
+    let a = &fx.authority;
+    let w = ws("w_sever");
+    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
+
+    let (address, _n) = invite_ok(
+        a,
+        &w,
+        &op_id(1),
+        owner.as_str(),
+        &["alice@acme.com"],
+        SessionInviteRole::Reviewer,
+    )
+    .await;
+    assert_eq!(address, format!("https://plane.test/{}", addr(&w)));
+
+    let alice_seed = [21u8; 32];
+    let alice_grant = flow_to_grant(a, &addr(&w), &alice_seed, "alice@acme.com").await;
+    let RedeemOutcome::Redeemed(alice_red) =
+        redeem(a, &w, &alice_grant, device_pub(&alice_seed)).await
+    else {
+        panic!("alice redeem");
+    };
+    assert_eq!(alice_red.principal.as_str(), "alice@acme.com");
+    assert_eq!(
+        seat_of(&pool, "w_sever", "alice@acme.com").await,
+        Some(("reviewer".to_owned(), "confirmed".to_owned()))
+    );
+    assert!(
+        a.resolve_read_scope("w_sever", "s_deploy", &alice_red.credential)
+            .await
+            .is_ok()
+    );
+
+    // A STRANGER with the address + a verified non-rostered email dies at the roster gate: the
+    // address is public-shaped, the ROSTER is the lock.
+    let eve_seed = [24u8; 32];
+    let eve_grant = flow_to_grant(a, &addr(&w), &eve_seed, "eve@evil.com").await;
+    assert!(matches!(
+        redeem(a, &w, &eve_grant, device_pub(&eve_seed)).await,
+        RedeemOutcome::Denied(_)
+    ));
+}
+
 // ── posture ─────────────────────────────────────────────────────────────────────────────────────
 
 #[sqlx::test]
-async fn all_four_session_ops_deny_on_self_host(pool: PgPool) {
+async fn all_session_roster_ops_deny_on_self_host(pool: PgPool) {
     let fx = Fixture::new(pool, "sr-selfhost").await;
     let a = &fx.authority;
     let w = ws("w_sh");
@@ -291,12 +296,6 @@ async fn all_four_session_ops_deny_on_self_host(pool: PgPool) {
             .await
             .unwrap(),
         GovernanceOutcome::Denied(_)
-    ));
-    assert!(matches!(
-        a.rotate_join_link_session(&w, &op_id(3), owner.as_str(), sh, T0, NOW)
-            .await
-            .unwrap(),
-        SessionRotateOutcome::Denied(_)
     ));
     assert!(matches!(
         a.read_roster(&w, owner.as_str(), sh).await,
@@ -333,7 +332,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     // Same request id + same payload ⇒ the byte-identical outcome (email order/duplication is
     // canonicalized away, so a resent form replays instead of key-reusing).
     let rid = op_id(10);
-    let (token_a, seated_a) = invite_ok(
+    let (addr_a, seated_a) = invite_ok(
         a,
         &w,
         &rid,
@@ -342,7 +341,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
         SessionInviteRole::Member,
     )
     .await;
-    let (token_b, seated_b) = invite_ok(
+    let (addr_b, seated_b) = invite_ok(
         a,
         &w,
         &rid,
@@ -351,7 +350,7 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
         SessionInviteRole::Member,
     )
     .await;
-    assert_eq!(token_a, token_b);
+    assert_eq!(addr_a, addr_b);
     assert_eq!(seated_a, 2);
     assert_eq!(seated_b, 2);
 
@@ -380,18 +379,26 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     ));
 
     // CROSS-LEG: a device-lane governance op's op_id can never replay as a session op (the
-    // session preimage tag differs from the kernel frame), and fails closed as a key reuse.
+    // session preimage tag differs from the governance frame), and fails closed as a key reuse.
     let device_op = op_id(11);
-    make_invite(
-        a,
-        &w,
+    a.db()
+        .seed_workspace_member(&w, &prin("carol@acme.com"), "member", "confirmed")
+        .await
+        .unwrap();
+    let signed = sign_governance(
         &owner_seed,
-        &owner_dk,
+        w.as_str(),
         &device_op,
-        "carol@acme.com",
-        "s_deploy",
-    )
-    .await;
+        &owner_dk,
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("carol@acme.com"),
+        },
+    );
+    assert_eq!(
+        a.roster_set(&w, &device_op, signed, T0, NOW).await.unwrap(),
+        GovernanceOutcome::Ok
+    );
     assert!(matches!(
         a.roster_remove_session(
             &w,
@@ -406,42 +413,13 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
         .unwrap(),
         GovernanceOutcome::Denied("op id reused with a different request")
     ));
-
-    // Rotate replays EPOCH-PINNED: the first rotation's id keeps re-deriving ITS door even after
-    // a second rotation has revoked it (byte-identical lost-ack semantics).
-    let rot1 = op_id(12);
-    let SessionRotateOutcome::Rotated { invite_token: t1 } = a
-        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0, NOW)
-        .await
-        .unwrap()
-    else {
-        panic!("rotate 1");
-    };
-    let SessionRotateOutcome::Rotated { invite_token: t2 } = a
-        .rotate_join_link_session(&w, &op_id(13), owner.as_str(), CLOUD, T0, NOW)
-        .await
-        .unwrap()
-    else {
-        panic!("rotate 2");
-    };
-    assert_ne!(t1, t2);
-    let SessionRotateOutcome::Rotated {
-        invite_token: t1_replay,
-    } = a
-        .rotate_join_link_session(&w, &rot1, owner.as_str(), CLOUD, T0, NOW)
-        .await
-        .unwrap()
-    else {
-        panic!("rotate 1 replay");
-    };
-    assert_eq!(t1, t1_replay);
 }
 
 #[sqlx::test]
 async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPool) {
     // The session-leg request identity is computed over the FOLDED principals — `Principal::parse`
     // folds the acting owner and every invited email BEFORE `session_request_sha256` — so a retry
-    // that re-cases both replays the byte-identical outcome (same door, same seated count), never
+    // that re-cases both replays the byte-identical outcome (same address, same seated count), never
     // the key-reuse/divergent-payload denial.
     let fx = Fixture::new(pool, "sr-recase").await;
     let a = &fx.authority;
@@ -449,7 +427,7 @@ async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPoo
     let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
 
     let rid = op_id(30);
-    let (token_a, seated_a) = invite_ok(
+    let (addr_a, seated_a) = invite_ok(
         a,
         &w,
         &rid,
@@ -459,7 +437,7 @@ async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPoo
     )
     .await;
     // The SAME request id, acting owner AND email re-cased: the identical replay.
-    let (token_b, seated_b) = invite_ok(
+    let (addr_b, seated_b) = invite_ok(
         a,
         &w,
         &rid,
@@ -469,8 +447,8 @@ async fn a_re_cased_retry_of_the_same_request_id_replays_identically(pool: PgPoo
     )
     .await;
     assert_eq!(
-        token_a, token_b,
-        "the re-cased retry must replay the SAME standing door"
+        addr_a, addr_b,
+        "the re-cased retry must replay the SAME address"
     );
     assert_eq!((seated_a, seated_b), (1, 1));
 }
@@ -523,7 +501,7 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
         GovernanceOutcome::Denied("would remove the last owner")
     ));
 
-    // Removing alice severs the seat AND her per-skill roster row in ONE transaction.
+    // Removing alice severs the seat in ONE transaction.
     assert!(matches!(
         a.roster_remove_session(
             &w,
@@ -540,8 +518,8 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
     ));
     assert!(seat_of(&pool, "w_rm", "alice@acme.com").await.is_none());
     // Her reads are instantly revoked: the member row is gone, so although her device credential still
-    // resolves (the device is not revoked) the confirmed-member gate now denies (the read_token table is
-    // gone — membership IS the entitlement).
+    // resolves (the device is not revoked) the confirmed-member gate now denies — membership IS the
+    // entitlement.
     assert!(matches!(
         a.resolve_read_scope("w_rm", "s_deploy", &cred(&w, "dk_alice"))
             .await,
@@ -568,7 +546,7 @@ async fn mixed_case_invite_variants_dedupe_to_one_canonical_seat(pool: PgPool) {
 
     // ONE call carrying two casings of one mailbox: the parse fold makes them ONE principal, so
     // exactly one seat lands, stored canonical.
-    let (_door, seated) = invite_ok(
+    let (_addr, seated) = invite_ok(
         a,
         &w,
         &op_id(1),
@@ -611,7 +589,7 @@ async fn mixed_case_acting_owner_passes_the_gate(pool: PgPool) {
 
     // The web session's email arrives cased however the IdP rendered it; the gate folds, so the
     // canonical owner seat authorizes the op instead of denying the owner their own workspace.
-    let (_door, seated) = invite_ok(
+    let (_addr, seated) = invite_ok(
         a,
         &w,
         &op_id(1),
@@ -651,9 +629,9 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
         SessionInviteRole::Member,
     )
     .await;
-    // Bob has a device with an applied fleet-state row (device × skill) — the per-skill `roster` table
-    // is gone; removal no longer deletes rows, it writes the FINAL DETACH RECORD on the person's fleet
-    // rows. Register the device under the CANONICAL principal, then stage a live (detached = 0) row.
+    // Bob has a device with an applied fleet-state row (device × skill) — removal writes the FINAL
+    // DETACH RECORD on the person's fleet rows. Register the device under the CANONICAL principal,
+    // then stage a live (detached = 0) row.
     //
     // The detach is EVENT-EXACT: it freezes exactly what the removal cost this person, so the skill
     // must actually be ENTITLED (catalog row + a delivering source) before the removal — a fleet row
@@ -729,190 +707,6 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
     assert_eq!(device_rows, 1, "the device row survives the member removal");
 }
 
-// ── the standing door family ────────────────────────────────────────────────────────────────────
-
-#[sqlx::test]
-async fn genesis_door_is_the_standing_door_until_rotation_revokes_it(pool: PgPool) {
-    let fx = Fixture::new(pool, "sr-genesis").await;
-    let a = &fx.authority;
-
-    // Born through the create page: the genesis self-invite IS the door.
-    let created = match a
-        .create_workspace("req-genesis-door", None, "owner@acme.com", CLOUD, T0)
-        .await
-        .unwrap()
-    {
-        crate::CreateWorkspaceOutcome::Created(c) => c,
-        other => panic!("create: {other:?}"),
-    };
-    let w = created.workspace_id.clone();
-
-    // The session invite returns THE SAME link the create hand-off showed (one door, genuinely).
-    let (door, _seated) = invite_ok(
-        a,
-        &w,
-        &op_id(1),
-        "owner@acme.com",
-        &["alice@acme.com"],
-        SessionInviteRole::Member,
-    )
-    .await;
-    assert_eq!(door, created.invite_token);
-
-    // The owner's roster read shows it; the bootstrap resolves it (the "Add my device" path).
-    let view = a.read_roster(&w, "owner@acme.com", CLOUD).await.unwrap();
-    assert_eq!(view.invite_token.as_deref(), Some(door.as_str()));
-    assert!(a.read_invite_bootstrap(&door, NOW).await.is_ok());
-
-    // Rotation revokes the WHOLE standing family (the genesis door included) and mints the next.
-    let SessionRotateOutcome::Rotated {
-        invite_token: new_door,
-    } = a
-        .rotate_join_link_session(&w, &op_id(2), "owner@acme.com", CLOUD, T0, NOW)
-        .await
-        .unwrap()
-    else {
-        panic!("rotate");
-    };
-    assert_ne!(new_door, door);
-    assert!(matches!(
-        a.read_invite_bootstrap(&door, NOW).await,
-        Err(AuthorityError::NotFound)
-    ));
-    assert!(a.read_invite_bootstrap(&new_door, NOW).await.is_ok());
-    let view = a.read_roster(&w, "owner@acme.com", CLOUD).await.unwrap();
-    assert_eq!(view.invite_token.as_deref(), Some(new_door.as_str()));
-}
-
-#[sqlx::test]
-async fn a_door_less_workspace_mints_its_epoch_door_lazily(pool: PgPool) {
-    let fx = Fixture::new(pool.clone(), "sr-lazy").await;
-    let a = &fx.authority;
-    let w = ws("w_lazy");
-    // Seeded (standup/claim-born shape): no genesis_requests row, no invites row.
-    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
-    let view = a.read_roster(&w, owner.as_str(), CLOUD).await.unwrap();
-    assert!(view.invite_token.is_none());
-
-    let (door, _seated) = invite_ok(
-        a,
-        &w,
-        &op_id(1),
-        owner.as_str(),
-        &["alice@acme.com"],
-        SessionInviteRole::Member,
-    )
-    .await;
-    assert!(a.read_invite_bootstrap(&door, NOW).await.is_ok());
-    let view = a.read_roster(&w, owner.as_str(), CLOUD).await.unwrap();
-    assert_eq!(view.invite_token.as_deref(), Some(door.as_str()));
-    // The row was minted under the invites kill-switch discipline (sha-only storage).
-    let n = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM invites WHERE workspace_id = $1 AND revoked = 0",
-    )
-    .bind("w_lazy")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(n, 1);
-    let _ = sha256_token(&door); // (the plaintext exists only in the outcome)
-}
-
-#[sqlx::test]
-async fn rotation_blocks_future_redemption_only(pool: PgPool) {
-    let fx = Fixture::new(pool.clone(), "sr-rotate-sever").await;
-    let a = &fx.authority;
-    let w = ws("w_sever");
-    let (_seed, owner, _dk) = seat_owner(a, &w, "cloud").await;
-
-    // Invite alice (reviewer) + bob (member); alice fully enrolls through the door BEFORE the
-    // rotation; bob only holds an ISSUED GRANT (his device-auth session already passed the entry
-    // gate) when the rotation lands.
-    let (door, _n) = invite_ok(
-        a,
-        &w,
-        &op_id(1),
-        owner.as_str(),
-        &["alice@acme.com"],
-        SessionInviteRole::Reviewer,
-    )
-    .await;
-    invite_ok(
-        a,
-        &w,
-        &op_id(2),
-        owner.as_str(),
-        &["bob@acme.com"],
-        SessionInviteRole::Member,
-    )
-    .await;
-
-    let alice_seed = [21u8; 32];
-    let alice_grant = flow_to_grant(a, &door, &alice_seed, "alice@acme.com").await;
-    let RedeemOutcome::Redeemed(alice_red) =
-        redeem(a, &alice_grant, &alice_seed, device_pub(&alice_seed)).await
-    else {
-        panic!("alice redeem");
-    };
-    assert_eq!(alice_red.principal.as_str(), "alice@acme.com");
-    // The role came from the SEAT, not the link: alice is a reviewer, now confirmed.
-    assert_eq!(
-        seat_of(&pool, "w_sever", "alice@acme.com").await,
-        Some(("reviewer".to_owned(), "confirmed".to_owned()))
-    );
-
-    let bob_seed = [22u8; 32];
-    let bob_grant = flow_to_grant(a, &door, &bob_seed, "bob@acme.com").await;
-
-    // Rotate. The old door's ENTRY gates go dark…
-    let SessionRotateOutcome::Rotated {
-        invite_token: new_door,
-    } = a
-        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0, NOW)
-        .await
-        .unwrap()
-    else {
-        panic!("rotate");
-    };
-    assert!(matches!(
-        a.read_invite_bootstrap(&door, NOW).await,
-        Err(AuthorityError::NotFound)
-    ));
-    assert!(matches!(
-        a.start_device_auth(&door, &device_pub(&[23u8; 32]), "late", NOW, T0)
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
-
-    // …but nothing already exchanged is severed: alice's membership + credential stand, and
-    // bob's ALREADY-ISSUED grant completes (his session passed the entry gate pre-rotation; the
-    // roster gate — not the link — is the security boundary).
-    assert_eq!(
-        seat_of(&pool, "w_sever", "alice@acme.com").await,
-        Some(("reviewer".to_owned(), "confirmed".to_owned()))
-    );
-    assert!(
-        a.resolve_read_scope("w_sever", "s_deploy", &alice_red.credential)
-            .await
-            .is_ok(),
-        "alice's minted credential still resolves — rotation touched neither her seat nor her device"
-    );
-    let RedeemOutcome::Redeemed(bob_red) =
-        redeem(a, &bob_grant, &bob_seed, device_pub(&bob_seed)).await
-    else {
-        panic!("bob redeem must complete — his grant was exchanged before the rotation");
-    };
-    assert_eq!(bob_red.principal.as_str(), "bob@acme.com");
-
-    // A STRANGER with the new door + a verified non-rostered email dies at the roster gate.
-    let eve_seed = [24u8; 32];
-    let eve_grant = flow_to_grant(a, &new_door, &eve_seed, "eve@evil.com").await;
-    assert!(matches!(
-        redeem(a, &eve_grant, &eve_seed, device_pub(&eve_seed)).await,
-        RedeemOutcome::Denied(_)
-    ));
-}
-
 // ── receipts ────────────────────────────────────────────────────────────────────────────────────
 
 #[sqlx::test]
@@ -942,27 +736,28 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
     )
     .await
     .unwrap();
-    let SessionRotateOutcome::Rotated { .. } = a
-        .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0, NOW)
+    // A DEVICE-credential op beside them, for the discriminant contrast.
+    a.db()
+        .seed_workspace_member(&w, &prin("carol@acme.com"), "member", "confirmed")
         .await
-        .unwrap()
-    else {
-        panic!("rotate");
-    };
-    // A DEVICE-signed op beside them, for the discriminant contrast.
-    make_invite(
-        a,
-        &w,
+        .unwrap();
+    let signed = sign_governance(
         &owner_seed,
-        &owner_dk,
+        w.as_str(),
         &op_id(4),
-        "carol@acme.com",
-        "s_deploy",
-    )
-    .await;
+        &owner_dk,
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("carol@acme.com"),
+        },
+    );
+    assert_eq!(
+        a.roster_set(&w, &op_id(4), signed, T0, NOW).await.unwrap(),
+        GovernanceOutcome::Ok
+    );
 
     let events = events_of(&pool, "w_rcpt").await;
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     let by_op: std::collections::HashMap<_, _> = events
         .iter()
         .map(|(op, actor, verb, outcome, method)| {
@@ -992,16 +787,6 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
         ),
         (owner.as_str(), "roster_remove", "OK", "web_session")
     );
-    let (actor, verb, outcome, method) = &by_op[&op_id(3)];
-    assert_eq!(
-        (
-            actor.as_str(),
-            verb.as_str(),
-            outcome.as_str(),
-            method.as_str()
-        ),
-        (owner.as_str(), "link_rotate", "OK", "web_session")
-    );
     // The device leg names the acting DEVICE KEY and the 'device' method.
     let (actor, verb, outcome, method) = &by_op[&op_id(4)];
     assert_eq!(
@@ -1011,20 +796,8 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
             outcome.as_str(),
             method.as_str()
         ),
-        (owner_dk.as_str(), "invite", "OK", "device")
+        (owner_dk.as_str(), "roster_set", "OK", "device")
     );
-
-    // The standing door link never lands in a receipt: no details value contains a token-bearing
-    // `/i/` link or a raw token (the details carry counts + the door MARKER only).
-    let details: Vec<Option<String>> =
-        sqlx::query_scalar("SELECT details FROM workspace_events WHERE workspace_id = $1")
-            .bind("w_rcpt")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    for d in details.into_iter().flatten() {
-        assert!(!d.contains("/i/"), "a receipt leaked a link: {d}");
-    }
 }
 
 // ── concurrency (the session leg is a distinct code path; race it on its own) ─────────────────────
@@ -1064,10 +837,7 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
         ),
     );
     let tok = |o: SessionInviteOutcome| match o {
-        SessionInviteOutcome::Invited {
-            invite_token,
-            seated,
-        } => (invite_token, seated),
+        SessionInviteOutcome::Invited { address, seated } => (address, seated),
         SessionInviteOutcome::Denied(r) => panic!("raced invite denied: {r}"),
     };
     let (ta, sa) = tok(ra.unwrap());
@@ -1144,52 +914,19 @@ async fn a_session_request_id_slot_is_closed_to_a_later_device_op(pool: PgPool) 
         SessionInviteRole::Member,
     )
     .await;
-    // A device-lane invite reusing the session's request_id as its op_id is denied key-reuse.
-    let signed = super::enrollment_governance::sign_governance(
+    // A device-lane roster op reusing the session's request_id as its op_id is denied key-reuse.
+    let signed = sign_governance(
         &owner_seed,
         w.as_str(),
         &shared,
         &owner_dk,
-        crate::GovernanceOp::Invite {
-            role: crate::Role::Member,
-            expires_at: None,
-            emails: vec![prin("carol@acme.com")],
-            skills: vec![],
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("alice@acme.com"),
         },
     );
     assert!(matches!(
-        a.create_invite(&w, &shared, signed, T0, NOW).await.unwrap(),
-        crate::CreateInviteOutcome::Denied("op id reused with a different request")
+        a.roster_set(&w, &shared, signed, T0, NOW).await.unwrap(),
+        GovernanceOutcome::Denied("op id reused with a different request")
     ));
-}
-
-// ── credential redaction (the standing door is a live join credential) ────────────────────────────
-
-#[test]
-fn token_carrying_outcomes_redact_the_door_in_debug() {
-    let invited = SessionInviteOutcome::Invited {
-        invite_token: "SECRETdoortoken".to_owned(),
-        seated: 2,
-    };
-    let rotated = SessionRotateOutcome::Rotated {
-        invite_token: "SECRETdoortoken".to_owned(),
-    };
-    let view = crate::RosterView {
-        seats: vec![],
-        invite_token: Some("SECRETdoortoken".to_owned()),
-    };
-    for rendered in [
-        format!("{invited:?}"),
-        format!("{rotated:?}"),
-        format!("{view:?}"),
-    ] {
-        assert!(
-            !rendered.contains("SECRETdoortoken"),
-            "Debug leaked the door: {rendered}"
-        );
-        assert!(
-            rendered.contains("redacted"),
-            "Debug should mark the redaction: {rendered}"
-        );
-    }
 }

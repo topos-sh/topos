@@ -65,6 +65,54 @@ impl Db {
         Ok(tx)
     }
 
+    /// The workspace's staleness window (ms) — the ONE home (`topos_staleness_window`, which COALESCEs
+    /// a missing policy row to the default), read on the delivery snapshot so the fleet page and the
+    /// client hook can never fork the clock. Rides the caller's snapshot transaction (one round trip).
+    pub(crate) async fn staleness_window(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        ws: &WorkspaceId,
+    ) -> Result<u64> {
+        let window = sqlx::query_scalar!(
+            r#"SELECT topos_staleness_window($1) AS "window!: i64""#,
+            ws.as_str(),
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
+        u64::try_from(window).map_err(AuthorityError::integrity)
+    }
+
+    /// COUNT of the OPEN, non-stale proposals across the entitled skill ids — the delivery read's
+    /// review-inbox gauge, folded to ONE aggregate (the former per-skill `open_proposal_rows` loop was
+    /// the currency hot path's N+1). Shares the `open ∧ base == current` staleness predicate VERBATIM
+    /// with the object/version read arms, the two GC keep-checks, and the proposals listing
+    /// ([`crate::db::Db::open_proposal_rows`]) — this aggregate is a further verbatim copy of that
+    /// literal (skill-SET-keyed rather than per-skill: `p.skill_id = ANY($2)`), so a staled proposal
+    /// drops out of the count exactly as it drops out of read + retention. An empty entitled set makes
+    /// `ANY('{}')` match nothing ⇒ 0. Deliberately a pool read (the gauge is not a snapshot-consistent
+    /// signal).
+    pub(crate) async fn count_open_proposals(
+        &self,
+        ws: &WorkspaceId,
+        skill_ids: &[String],
+    ) -> Result<u64> {
+        let n = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+               FROM proposals p
+               JOIN current c ON c.workspace_id = p.workspace_id AND c.skill_id = p.skill_id
+               WHERE p.workspace_id = $1 AND p.status = 'open'
+                 AND c.epoch = p.base_epoch AND c.seq = p.base_seq
+                 AND p.skill_id = ANY($2)"#,
+            ws.as_str(),
+            skill_ids,
+        )
+        .fetch_one(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        u64::try_from(n).map_err(AuthorityError::integrity)
+    }
+
     /// The entitled set for `(principal, device)` — read over the ONE entitlement function.
     /// The caller's membership gate has already run (the function's own membership join is
     /// defense-in-depth, not the front door).

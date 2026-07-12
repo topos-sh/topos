@@ -10,6 +10,9 @@ pub(crate) mod channels;
 // The delivery + fleet SQL (the entitlement read + the applied-state report).
 pub(crate) mod delivery;
 
+// The describe SQL (membership / proposals-index / skill-log / reach reads + notices-ack / invite writes).
+pub(crate) mod describe;
+
 pub(crate) mod enroll;
 pub(crate) mod governance;
 

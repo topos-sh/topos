@@ -1,5 +1,5 @@
 //! The per-skill advisory DISPLAY NAME — the author's skill-folder name the plane records on the
-//! `current` pointer (UNSIGNED, last-writer-wins), serves on the bootstrap offer and the session-read
+//! catalog row (UNSIGNED, last-writer-wins), serves on the session-read
 //! skill index, and NEVER lets touch the byte-exact digest or a version id. A revert / a name-less publish
 //! keeps the existing name (COALESCE, not a clobber to NULL).
 
@@ -141,50 +141,6 @@ async fn the_name_never_enters_the_version_id_or_the_digest(pool: PgPool) {
     // Identical bytes ⇒ identical id + digest, regardless of the (unsigned) display name.
     assert_eq!(named.version_id, anon.version_id);
     assert_eq!(named.bundle_digest, anon.bundle_digest);
-}
-
-/// The bootstrap offer serves the skill's LIVE `current.display_name` (last-writer-wins), falling back to
-/// the name carried on the invite when the skill has no published `current` yet.
-#[sqlx::test]
-async fn the_bootstrap_offer_reflects_the_live_display_name(pool: PgPool) {
-    let fx = Fixture::new(pool, "dn-offer").await;
-    let a = &fx.authority;
-    let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = super::enrollment_governance::seat_owner(a, &w, "cloud").await;
-    let token = super::enrollment_governance::make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &super::enrollment_governance::op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
-
-    // Before any publish: the offer falls back to the invite's carried name.
-    let boot0 = a.read_invite_bootstrap(&token, NOW).await.unwrap();
-    assert_eq!(boot0.skills.len(), 1);
-    assert_eq!(boot0.skills[0].0.as_str(), "s_deploy");
-    assert_eq!(boot0.skills[0].1.as_deref(), Some("Deploy"));
-
-    // Publish the skill's genesis WITH a live folder name — the offer now reflects it.
-    let s = skill("s_deploy");
-    let key = dev_key(82);
-    register(&fx, &w, &s, "dk", &key, "p_author").await;
-    publish_named(
-        &fx,
-        &key,
-        &w,
-        &s,
-        "82000000-0000-4000-8000-000000000001",
-        vec![file("SKILL.md", b"ship it")],
-        Some("Deploy Live"),
-    )
-    .await;
-
-    let boot1 = a.read_invite_bootstrap(&token, NOW).await.unwrap();
-    assert_eq!(boot1.skills[0].1.as_deref(), Some("Deploy Live"));
 }
 
 /// Last-writer-wins AMONG writers that express a name: a name-less pointer move (a revert would be the same

@@ -76,6 +76,10 @@ pub struct Delivery {
     /// OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge; the
     /// inbox detail is a separate surface).
     pub proposals_awaiting: u64,
+    /// The workspace's staleness window in milliseconds — the ONE clock the fleet page and the
+    /// client's currency hook both read (`topos_staleness_window`; a missing policy row COALESCEs to
+    /// the default), so a device knows how long its last apply stays "current".
+    pub staleness_window_ms: u64,
 }
 
 /// One applied-state report row: what this device holds for a skill after its reconcile.
@@ -101,8 +105,10 @@ pub(crate) async fn delivery(
     }
     // ONE snapshot for the three semantic reads: a subscription change landing between the entitled
     // read and the detached read could leave a skill in NEITHER list, which the client reads as an
-    // upstream withdrawal — cleaning agent dirs for a skill the person still subscribes to.
+    // upstream withdrawal — cleaning agent dirs for a skill the person still subscribes to. The
+    // staleness window rides the same snapshot (one extra round trip, no serialization surface).
     let mut tx = authority.db().begin_delivery_snapshot().await?;
+    let staleness_window_ms = authority.db().staleness_window(&mut tx, ws).await?;
     let entitled = authority
         .db()
         .entitled_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
@@ -122,40 +128,42 @@ pub(crate) async fn delivery(
     // The snapshot has served its purpose; the read minted nothing durable, so the commit only
     // releases it (a rollback would be equally correct).
     tx.commit().await.map_err(AuthorityError::internal)?;
-    // The open-proposal count delegates per entitled skill to the SAME listing statement every
-    // other surface uses (count == list by construction; the staleness predicate keeps its one
-    // home) — the same deliberate O(skills) fan-out as the catalog index. Deliberately OUTSIDE the
-    // snapshot: it is a disclosure gauge, not a semantic signal the client acts on with bytes.
-    let mut proposals_awaiting: u64 = 0;
-    let mut skills = Vec::with_capacity(entitled.len());
-    for row in entitled {
-        let EntitledDbRow {
-            skill_id,
-            name,
-            display_name,
-            protection,
-            commit,
-            generation,
-            updated_at,
-            bundle_digest,
-            via_channels,
-            direct,
-        } = row;
-        let sid = SkillId::parse(&skill_id).map_err(AuthorityError::integrity)?;
-        proposals_awaiting += authority.db().open_proposal_rows(ws, &sid).await?.len() as u64;
-        skills.push(DeliveredSkill {
-            skill_id,
-            name,
-            display_name,
-            protection,
-            version_id: commit,
-            generation,
-            updated_at,
-            bundle_digest,
-            via_channels,
-            direct,
-        });
-    }
+    // The open-proposal count folds to ONE aggregate over the entitled skill ids — the delivery hot
+    // path fired the former per-skill `open_proposal_rows` loop once per entitled skill (the N+1).
+    // Deliberately OUTSIDE the snapshot: a disclosure gauge, not a semantic signal the client acts on
+    // with bytes. The aggregate shares the `open ∧ base == current` staleness predicate verbatim (a
+    // further tracked copy — see `Db::count_open_proposals`).
+    let skill_ids: Vec<String> = entitled.iter().map(|r| r.skill_id.clone()).collect();
+    let proposals_awaiting = authority.db().count_open_proposals(ws, &skill_ids).await?;
+    let skills = entitled
+        .into_iter()
+        .map(|row| {
+            let EntitledDbRow {
+                skill_id,
+                name,
+                display_name,
+                protection,
+                commit,
+                generation,
+                updated_at,
+                bundle_digest,
+                via_channels,
+                direct,
+            } = row;
+            DeliveredSkill {
+                skill_id,
+                name,
+                display_name,
+                protection,
+                version_id: commit,
+                generation,
+                updated_at,
+                bundle_digest,
+                via_channels,
+                direct,
+            }
+        })
+        .collect();
     let notices = notice_rows
         .into_iter()
         .map(
@@ -190,6 +198,7 @@ pub(crate) async fn delivery(
         excluded,
         notices,
         proposals_awaiting,
+        staleness_window_ms,
     })
 }
 

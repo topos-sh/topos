@@ -339,6 +339,12 @@ pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
                     // same convergence the idempotency slots get, instead of a spurious 500.
                     | "catalog_pkey"
                     | "catalog_by_name"
+                    // The workspace ADDRESS-name index two concurrent geneses can race: both derive
+                    // (or ask for) one name, both probe it free, and the loser's workspace INSERT
+                    // aborts here. Retrying re-runs the name resolution against the winner's
+                    // committed row — a derived name dedupes to `-2`, an explicit one answers the
+                    // typed "already taken" — the same convergence the catalog registration gets.
+                    | "workspace_by_name"
             )
         ),
         _ => false,
@@ -489,6 +495,27 @@ mod retry_classification_tests {
         assert!(
             is_serialization_failure_sqlx(&dup),
             "a 23505 on genesis_requests_pkey must be retryable"
+        );
+
+        // workspace_by_name → the ADDRESS-name index: two racing geneses deriving one name both probe
+        // it free; the loser's retry re-resolves (a derived name dedupes, an explicit one answers the
+        // typed refusal), so it is retryable.
+        let named = "INSERT INTO workspace (workspace_id, name, display_name, verified_domain_status, deployment_mode, created_at) \
+            VALUES ('w_n1', 'acme', 'Acme', 'unverified', 'cloud', 'seed')";
+        sqlx::query(named)
+            .execute(&pool)
+            .await
+            .expect("first named workspace insert");
+        let dup = sqlx::query(
+            "INSERT INTO workspace (workspace_id, name, display_name, verified_domain_status, deployment_mode, created_at) \
+             VALUES ('w_n2', 'acme', 'Acme Too', 'unverified', 'cloud', 'seed')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("a duplicate workspace name must raise a unique violation");
+        assert!(
+            is_serialization_failure_sqlx(&dup),
+            "a 23505 on workspace_by_name must be retryable (the retry re-resolves the name)"
         );
 
         // skill_follows_pkey → an ordinary unique violation the runner must NOT retry (a person's own

@@ -84,7 +84,8 @@ fn member_scope(ws: &WorkspaceId, skill: &str, acting: Principal) -> Result<Read
 /// The workspace catalog: every skill holding a `current` row, each with its open-proposal count. The
 /// count delegates per skill to the SAME `open_proposal_rows` statement the proposals listing serves, so
 /// `count == list.len()` by construction and the staleness predicate keeps its one listing home (a
-/// deliberate O(skills) fan-out on a cold route; a joined count would be a sixth predicate copy).
+/// deliberate O(skills) fan-out on a cold route; the HOT delivery path pays the joined-count copy
+/// instead — `db/directory/delivery.rs::count_open_proposals`, tracked in the predicate census).
 pub(crate) async fn list_skills_session(
     authority: &Authority,
     ws: &WorkspaceId,

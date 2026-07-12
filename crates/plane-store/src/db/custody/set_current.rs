@@ -27,8 +27,9 @@ use crate::actor::{
 };
 use crate::custody::set_current::{DeviceOp, PromoteInput, RejectInput, SetCurrentReceipt};
 use crate::db::custody::proposals::{
-    ProposalStatus, insert_approval, insert_proposal, insert_proposal_object, proposal_id_exists,
-    proposal_proposer, read_open_proposal, resolve_proposal, set_proposal_status,
+    ProposalStatus, close_superseded_proposals, insert_approval, insert_proposal,
+    insert_proposal_object, proposal_id_exists, proposal_proposer, read_open_proposal,
+    resolve_proposal, set_proposal_status,
 };
 use crate::db::custody::receipts::{
     BoundIdentity, Replay, StoredReceipt, conflict, denied, denied_code, denied_preauth,
@@ -91,6 +92,38 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         match row.and_then(|r| r.bundle_digest) {
             Some(bytes) => Ok(Some(blob32(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// [`Self::skill_commit_bundle_digest`] plus the version's PURGE tombstone (`purged_at`) — the
+    /// revert path's read: a purged target must be refused BEFORE any staging (its bytes are gone by
+    /// decision; the hash stays only as a who/when tombstone). Same skill scoping, same `None` rule.
+    pub(crate) async fn skill_commit_digest_and_purge(
+        &self,
+        ws: &WorkspaceId,
+        skill: &SkillId,
+        commit: CommitId,
+    ) -> Result<Option<([u8; 32], Option<i64>)>> {
+        let ws_s = ws.as_str();
+        let skill_s = skill.as_str();
+        let cid = commit.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT bundle_digest AS "bundle_digest?: Vec<u8>", purged_at AS "purged_at?: i64"
+               FROM skill_commit
+               WHERE workspace_id = $1 AND skill_id = $2 AND commit_id = $3"#,
+            ws_s,
+            skill_s,
+            cid,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        match row {
+            Some(r) => match r.bundle_digest {
+                Some(bytes) => Ok(Some((blob32(&bytes)?, r.purged_at))),
+                None => Ok(None),
+            },
             None => Ok(None),
         }
     }
@@ -594,7 +627,9 @@ async fn run(
             )
             .await
         }
-        DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
+        DeviceOp::ReviewReject | DeviceOp::ReviewWithdraw => {
+            Err(AuthorityError::internal(RejectNotPromotable))
+        }
     }
 }
 
@@ -684,6 +719,20 @@ async fn propose_arm(
     if proposal_id_exists(tx, input.ws, input.op_id).await? {
         return permanent(tx, input, bound, "op id already names a proposal").await;
     }
+    // SUPERSEDE: a fresh proposal from this author replaces their earlier drafts on the same skill —
+    // every OTHER open proposal by the SAME proposer closes (`resolved_reason = 'superseded'`), so
+    // review sees the author's one live candidate, never a trail of stale ones. Only rows whose
+    // commit DIFFERS from the candidate close (the idempotent same-(candidate, base) re-propose must
+    // keep converging on its existing open row), and no notice is written — the author did it.
+    close_superseded_proposals(
+        tx,
+        input.ws,
+        input.skill,
+        proposer,
+        input.candidate_commit,
+        input.created_at,
+    )
+    .await?;
     // Provenance first (the `proposals.commit_id` foreign key targets `skill_commit`).
     insert_skill_commit(
         tx,
@@ -904,23 +953,68 @@ async fn reject_run(
         }
     };
 
-    // (3) Resolve + classify the proposal (under the write lock). One reject path serves reviewer-reject and
-    // proposer-withdraw; `resolved_by` records the acting principal either way.
-    match resolve_proposal(tx, r.ws, r.skill, r.commit, r.expected).await? {
-        Some((id, ProposalStatus::Open)) => {
+    // (3) Resolve + classify the proposal (under the write lock), then branch on the VERDICT the op
+    // names: a REJECT is a reviewer's refusal (mandatory reason, author notified); a WITHDRAW is the
+    // AUTHOR retracting their own draft (actor must equal the proposer; closed as `withdrawn`, no
+    // notice — the author did it).
+    let resolved = resolve_proposal(tx, r.ws, r.skill, r.commit, r.expected).await?;
+    if matches!(r.op, DeviceOp::ReviewWithdraw) {
+        return match resolved {
+            Some(p) if p.status == ProposalStatus::Open => {
+                // The author-only gate — a typed DURABLE denial (mirroring four-eyes: a confirmed
+                // member is entitled to a recorded, replayable answer).
+                let author = proposal_proposer(tx, r.ws, &p.id).await?;
+                if author.as_ref().map(Principal::as_str) != Some(acting.as_str()) {
+                    return reject_denied(tx, r, "only the proposer may withdraw their proposal")
+                        .await;
+                }
+                set_proposal_status(
+                    tx,
+                    r.ws,
+                    &p.id,
+                    ProposalStatus::Closed,
+                    &acting,
+                    Some("withdrawn"),
+                    r.created_at,
+                )
+                .await?;
+                reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_WITHDRAWN").await
+            }
+            // Idempotent: a lost-ack retry under a NEW op_id of a withdraw THIS actor already made.
+            Some(p)
+                if p.status == ProposalStatus::Closed
+                    && p.resolved_reason.as_deref() == Some("withdrawn")
+                    && p.resolved_by.as_deref() == Some(acting.as_str()) =>
+            {
+                reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_ALREADY_WITHDRAWN").await
+            }
+            // Any other resolution already told this proposal's story — a late withdraw must not
+            // overwrite it.
+            Some(p) if p.status == ProposalStatus::Accepted => {
+                reject_denied(tx, r, "the proposal is already accepted").await
+            }
+            Some(p) if p.status == ProposalStatus::Rejected => {
+                reject_denied(tx, r, "the proposal is already rejected").await
+            }
+            Some(_) => reject_denied(tx, r, "the proposal is already closed").await,
+            None => reject_denied(tx, r, "no open proposal for this candidate and base").await,
+        };
+    }
+    match resolved {
+        Some(p) if p.status == ProposalStatus::Open => {
             set_proposal_status(
                 tx,
                 r.ws,
-                &id,
+                &p.id,
                 ProposalStatus::Rejected,
                 &acting,
                 r.reason,
                 r.created_at,
             )
             .await?;
-            // The author's verdict notice, committed with the verdict — skipped for a withdraw
-            // (the proposer rejecting their own proposal already knows).
-            if let Some(author) = proposal_proposer(tx, r.ws, &id).await?
+            // The author's verdict notice — carrying the reject's reason — committed with the
+            // verdict; skipped when the proposer rejects their own proposal (they already know).
+            if let Some(author) = proposal_proposer(tx, r.ws, &p.id).await?
                 && author.as_str() != acting.as_str()
             {
                 witness
@@ -940,23 +1034,17 @@ async fn reject_run(
             reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_REJECTED").await
         }
         // Idempotent: a lost-ack retry under a NEW op_id (the original op_id replays at step 1) — already done.
-        Some((_, ProposalStatus::Rejected)) => {
+        Some(p) if p.status == ProposalStatus::Rejected => {
             reject_terminal(tx, r, TerminalOutcome::Ok, "PROPOSAL_ALREADY_REJECTED").await
         }
-        // An accepted proposal is terminal the other way; absent means there is nothing to reject.
-        Some((_, ProposalStatus::Accepted)) => {
+        // An accepted proposal is terminal the other way.
+        Some(p) if p.status == ProposalStatus::Accepted => {
             reject_denied(tx, r, "the proposal is already accepted").await
         }
-        // Circumstantially closed (the skill archived / a version purged) — already resolved, with
-        // its own recorded reason; a late reject must not overwrite that story.
-        Some((_, ProposalStatus::Closed)) => {
-            reject_denied(
-                tx,
-                r,
-                "the proposal was closed when its skill left circulation",
-            )
-            .await
-        }
+        // Circumstantially closed (the skill archived / a version purged / the author superseded or
+        // withdrew it) — already resolved, with its own recorded reason; a late reject must not
+        // overwrite that story.
+        Some(_) => reject_denied(tx, r, "the proposal was closed when it left review").await,
         None => reject_denied(tx, r, "no open proposal for this candidate and base").await,
     }
 }

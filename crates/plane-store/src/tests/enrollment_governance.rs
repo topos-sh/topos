@@ -1,10 +1,17 @@
-//! Split from the former monolithic `tests.rs` (behavior-preserving).
+//! Enrollment by ADDRESS + the governance role matrix.
+//!
+//! The invite-token door is gone: a device authorizes toward a workspace's address NAME, a human
+//! proves an identity (passcode / external confirm), and the redeem gates on the ROSTER — the one
+//! uniform membership denial for every not-yours case, on every deployment posture. These tests
+//! drive that flow end-to-end plus the device-credential governance ops (roster set/remove, revoke)
+//! and their audit/idempotency discipline. The login door's suite lives in `verb_surface_enroll`.
+
 use super::*;
 
 use crate::enroll::device_key_id_for;
 use crate::{
-    ConfirmOutcome, CreateInviteOutcome, CreateWorkspaceOutcome, DeviceAuthPoll, GovernanceOp,
-    GovernanceOutcome, GovernanceRequest, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
+    ConfirmOutcome, CreateWorkspaceOutcome, DeviceAuthPoll, GovernanceOp, GovernanceOutcome,
+    GovernanceRequest, GrantIssued, PasscodeComplete, RedeemOutcome, Role,
 };
 
 const NOW: i64 = 1_000;
@@ -20,9 +27,10 @@ pub(super) fn device_pub(seed: &[u8; 32]) -> [u8; 32] {
     *seed
 }
 
-/// Pull the opaque token out of a `/i/<token>` link.
-fn token_of(link: &str) -> String {
-    link.rsplit('/').next().expect("a link tail").to_owned()
+/// The seeded workspace's ADDRESS name (`seed_workspace` derives it from the workspace id: `w_acme`
+/// slugifies to `w-acme`).
+pub(super) fn addr(w: &WorkspaceId) -> String {
+    crate::governance::slugify_display_name(w.as_str())
 }
 
 /// Build a governance request as an owner's device presents it — the acting device's workspace
@@ -30,7 +38,7 @@ fn token_of(link: &str) -> String {
 /// `device_key_id`) and authenticates by that lookup; nothing signs. The credential is derived from
 /// `(ws, device_key_id)` so it matches whatever `seat_owner`/`seed_device` seeded the acting device with.
 /// (`_owner_seed`, `_op_id` are vestigial now that nothing signs — kept so the call sites stay stable;
-/// `op_id` rides the outer `create_invite`/`roster_*`/`revoke_device` call, never the request body.)
+/// `op_id` rides the outer `roster_*`/`revoke_device` call, never the request body.)
 pub(super) fn sign_governance(
     _owner_seed: &[u8; 32],
     ws: &str,
@@ -70,45 +78,27 @@ pub(super) async fn seat_owner(
     (owner_seed, owner, owner_dk)
 }
 
-/// Owner-create an invite offering `skill` to `invitee`; return its opaque token.
-pub(super) async fn make_invite(
-    a: &Authority,
-    w: &WorkspaceId,
-    owner_seed: &[u8; 32],
-    owner_dk: &str,
-    op: &str,
-    invitee: &str,
-    skill_name: &str,
-) -> String {
-    let signed = sign_governance(
-        owner_seed,
-        w.as_str(),
-        op,
-        owner_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin(invitee)],
-            skills: vec![(skill(skill_name), Some("Deploy".to_owned()))],
-        },
-    );
-    match a.create_invite(w, op, signed, "t0", NOW).await.unwrap() {
-        CreateInviteOutcome::Created(c) => token_of(&c.link),
-        other => panic!("expected Created, got {other:?}"),
-    }
+/// Seat an INVITED member (the invitation IS a roster row now — the CLI/web invite ops write exactly
+/// this shape; the redeem's membership gate flips it to `confirmed`).
+pub(super) async fn seat_invited(a: &Authority, w: &WorkspaceId, email: &str) {
+    a.db()
+        .seed_workspace_member(w, &prin(email), "member", "invited")
+        .await
+        .unwrap();
 }
 
-/// Drive a CLOUD device flow to a grant: start → poll(Pending) → passcode → poll(Granted). `confirm_as`
-/// is the email proven on the verification page (the grant's principal).
-async fn cloud_flow_to_grant(
+/// Drive a device flow BY ADDRESS to a grant: start → poll(Pending) → passcode → poll(Granted).
+/// `confirm_as` is the email proven on the verification page (the grant's principal). Sessions are
+/// born pending on EVERY posture now, so this one shape serves cloud and self-host alike.
+pub(super) async fn flow_to_grant(
     a: &Authority,
-    invite_token: &str,
+    workspace_name: &str,
     device_seed: &[u8; 32],
     confirm_as: &str,
 ) -> GrantIssued {
     let dpub = device_pub(device_seed);
     let start = a
-        .start_device_auth(invite_token, &dpub, "laptop", NOW, "t0")
+        .start_device_auth(workspace_name, &dpub, "laptop", NOW, "t0")
         .await
         .unwrap();
     assert!(matches!(
@@ -137,45 +127,36 @@ async fn cloud_flow_to_grant(
     }
 }
 
-/// Redeem a grant with the (honest) enrolling device. The grant IS the bearer credential; the server
-/// checks the redeem body's `device_public_key` matches the grant's bound key (a binding check, not a
-/// possession proof). `_device_seed` is vestigial now that nothing signs — kept so call sites stay stable.
+/// Redeem a grant into `w` with the (honest) enrolling device. The grant IS the bearer credential; the
+/// server checks the redeem body's `device_public_key` matches the grant's bound key (a binding check,
+/// not a possession proof).
 pub(super) async fn redeem(
     a: &Authority,
+    w: &WorkspaceId,
     grant: &GrantIssued,
-    _device_seed: &[u8; 32],
     dpub: [u8; 32],
 ) -> RedeemOutcome {
-    a.redeem_enrollment(&grant.grant_token, dpub, NOW, "t0")
+    a.redeem_enrollment(w, &grant.grant_token, dpub, NOW)
         .await
         .unwrap()
 }
 
 #[sqlx::test]
-async fn verification_context_discloses_the_session_device_and_offered_skills(pool: PgPool) {
+async fn verification_context_discloses_the_session_device_and_workspace(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-verify-ctx").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
 
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     let start = a
-        .start_device_auth(&invite, &dpub, "alice-laptop", NOW, "t0")
+        .start_device_auth(&addr(&w), &dpub, "alice-laptop", NOW, "t0")
         .await
         .unwrap();
 
-    // The verification page discloses the device + workspace + offered skills — no secret.
+    // The verification page discloses the device + the RESOLVED workspace's display name — no secret.
     let ctx = a
         .read_verification_context(&start.user_code, NOW)
         .await
@@ -183,13 +164,30 @@ async fn verification_context_discloses_the_session_device_and_offered_skills(po
     assert_eq!(ctx.machine_name, "alice-laptop");
     assert_eq!(ctx.workspace_display_name, "Acme");
     assert_eq!(ctx.verified_domain_status, "verified");
-    assert_eq!(ctx.offered_skills.len(), 1);
-    assert_eq!(ctx.offered_skills[0].0.as_str(), "s_deploy");
-    assert_eq!(ctx.offered_skills[0].1.as_deref(), Some("Deploy"));
     // The fingerprint is the leading 16 hex of sha256(device pubkey) — no secret, no `dk_` prefix.
     let expected_fp = &digest::to_hex(&digest::sha256(&dpub))[..16];
     assert_eq!(ctx.device_fingerprint, expected_fp);
     assert!(!ctx.device_fingerprint.starts_with("dk_"));
+
+    // An UNRESOLVED address echoes the REQUESTED name verbatim (charset-validated at authorize) — the
+    // page renders the same copy whether or not the name exists, so authorize discloses nothing.
+    let ghost = a
+        .start_device_auth("no-such-team", &dpub, "laptop", NOW, "t0")
+        .await
+        .unwrap();
+    let ctx = a
+        .read_verification_context(&ghost.user_code, NOW)
+        .await
+        .unwrap();
+    assert_eq!(ctx.workspace_display_name, "no-such-team");
+    assert_eq!(ctx.verified_domain_status, "unverified");
+
+    // A malformed name is the typed parse-boundary refusal (never an existence answer).
+    assert!(matches!(
+        a.start_device_auth("Not A Name!", &dpub, "laptop", NOW, "t0")
+            .await,
+        Err(AuthorityError::InvalidId(_))
+    ));
 
     // An unknown user code is the single indistinguishable NotFound.
     assert!(matches!(
@@ -203,25 +201,16 @@ async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(
     let fx = Fixture::new(pool, "enr-oidc-confirm").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
 
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     let start = a
-        .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
+        .start_device_auth(&addr(&w), &dpub, "laptop", NOW, "t0")
         .await
         .unwrap();
-    // A cloud session starts pending → a poll is Pending until an identity is confirmed.
+    // A session starts pending → a poll is Pending until an identity is confirmed.
     assert!(matches!(
         a.poll_device_auth(&start.device_code, NOW, "t0")
             .await
@@ -246,7 +235,7 @@ async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(
         DeviceAuthPoll::Granted(g) => g,
         other => panic!("expected Granted, got {other:?}"),
     };
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("expected a redeem");
     };
     assert_eq!(r.principal.as_str(), "alice@acme.com");
@@ -260,28 +249,28 @@ async fn confirm_external_identity_confirms_the_session_so_the_next_poll_grants(
 }
 
 #[sqlx::test]
-async fn cloud_device_flow_to_redeem_mints_a_resolvable_credential(pool: PgPool) {
-    let fx = Fixture::new(pool, "enr-happy").await;
+async fn enroll_by_address_mints_a_credential_and_flips_the_invited_seat(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "enr-happy").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _owner, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
 
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
     assert_eq!(grant.device_key_id, device_key_id_for(&dpub)); // server-derived
+    // The granted context carries the resolved workspace + its ADDRESS (the share line's root).
+    assert_eq!(
+        grant.workspace_id.as_ref().map(|w| w.as_str()),
+        Some("w_acme")
+    );
+    assert_eq!(
+        grant.workspace_address.as_deref(),
+        Some("https://plane.test/w-acme")
+    );
 
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("expected a redeem");
     };
     assert_eq!(r.principal.as_str(), "alice@acme.com");
@@ -295,6 +284,15 @@ async fn cloud_device_flow_to_redeem_mints_a_resolvable_credential(pool: PgPool)
         .unwrap();
     assert_eq!(scope.ws().as_str(), "w_acme");
     assert_eq!(scope.skill().as_str(), "s_deploy");
+    // The invited seat flipped to confirmed — the redeem IS the join ceremony's end.
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM workspace_member WHERE workspace_id = $1 AND principal = 'alice@acme.com'",
+    )
+    .bind(w.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "confirmed");
 }
 
 #[sqlx::test]
@@ -302,19 +300,10 @@ async fn a_leaked_grant_redeemed_by_a_different_device_is_denied(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-leak").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
 
     // An attacker who stole the grant token but presents a DIFFERENT device key cannot redeem it: the
     // server checks the redeem body's device_public_key against the grant's bound key (the binding check
@@ -322,7 +311,7 @@ async fn a_leaked_grant_redeemed_by_a_different_device_is_denied(pool: PgPool) {
     let attacker_seed = [99u8; 32];
     let attacker_pub = device_pub(&attacker_seed);
     let out = a
-        .redeem_enrollment(&grant.grant_token, attacker_pub, NOW, "t0")
+        .redeem_enrollment(&w, &grant.grant_token, attacker_pub, NOW)
         .await
         .unwrap();
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
@@ -333,25 +322,16 @@ async fn redeem_replay_re_derives_the_identical_credential(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-replay").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
 
-    let RedeemOutcome::Redeemed(r1) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r1) = redeem(a, &w, &grant, dpub).await else {
         panic!("first redeem");
     };
-    let RedeemOutcome::Redeemed(r2) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r2) = redeem(a, &w, &grant, dpub).await else {
         panic!("replay redeem");
     };
     // Deterministic: the replay re-derives the IDENTICAL workspace credential (derived per grant, so a
@@ -367,113 +347,22 @@ async fn redeem_replay_re_derives_the_identical_credential(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn redeem_fails_closed_on_a_corrupt_stored_deployment_mode(pool: PgPool) {
-    // The deployment mode decides the redeem GATE (cloud requires a rostered identity; self-host admits
-    // the bearer). A corrupted/unknown stored mode must be an Integrity fault — never a fall-through to
-    // the permissive self-host bearer semantics. The schema CHECK normally forbids such a row, so the
-    // test drops it to simulate exactly the corruption (a bad restore, a slipped migration) the strict
-    // parse is the defense against — matching start_device_auth/read_invite_bootstrap, which already
-    // fail closed on it.
-    let fx = Fixture::new(pool.clone(), "enr-mode-closed").await;
-    let a = &fx.authority;
-    let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
-    let device_seed = [23u8; 32];
-    let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
-
-    // Corrupt the stored mode AFTER the grant was issued, so the redeem is the first read of it.
-    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_deployment_mode_check")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE workspace SET deployment_mode = 'banana' WHERE workspace_id = $1")
-        .bind(w.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let err = a
-        .redeem_enrollment(&grant.grant_token, dpub, NOW, "t0")
-        .await
-        .expect_err("a garbage stored mode must fail the redeem closed");
-    assert!(
-        matches!(err, AuthorityError::Integrity(_)),
-        "an Integrity fault, never a bearer admission: {err:?}"
-    );
-    // Nothing was admitted: no device row, no read token, no self-host membership for alice.
-    let devices = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM device_registry WHERE workspace_id = $1 AND device_key_id = $2",
-    )
-    .bind(w.as_str())
-    .bind(&grant.device_key_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(devices, 0, "the failed redeem registered nothing");
-}
-
-#[sqlx::test]
-async fn cloud_redeem_of_a_non_rostered_principal_is_denied(pool: PgPool) {
-    let fx = Fixture::new(pool, "enr-gate").await;
-    let a = &fx.authority;
-    let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    // The invite seeds ALICE onto the roster…
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
-    let device_seed = [11u8; 32];
-    let dpub = device_pub(&device_seed);
-    // …but the device proves BOB (not on the roster) on the verification page.
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "bob@acme.com").await;
-    let out = redeem(a, &grant, &device_seed, dpub).await;
-    assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
-}
-
-#[sqlx::test]
-async fn mixed_case_confirmed_principal_redeems_into_a_lowercase_invite_seat(pool: PgPool) {
-    // THE BUG the canonical fold kills: the invite seats `alice@acme.com`, but the human proves the
+async fn mixed_case_confirmed_principal_redeems_into_a_lowercase_invited_seat(pool: PgPool) {
+    // THE BUG the canonical fold kills: the invitation seats `alice@acme.com`, but the human proves the
     // MIXED-CASE `Alice@Acme.COM` on the verification page (an OIDC provider's casing, or just what
     // she typed). Pre-fix the byte-exact roster gate saw two identities — "invited but can't join".
     // The parse-boundary fold makes them ONE: the redeem succeeds and flips the SAME seat row.
     let fx = Fixture::new(pool.clone(), "enr-fold-redeem").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
 
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     // The confirm path receives the provider's casing verbatim; the op folds it internally.
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "Alice@Acme.COM").await;
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "Alice@Acme.COM").await;
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("a mixed-case-confirmed principal must redeem into its lowercase seat");
     };
     assert_eq!(r.principal.as_str(), "alice@acme.com");
@@ -492,119 +381,17 @@ async fn mixed_case_confirmed_principal_redeems_into_a_lowercase_invite_seat(poo
 }
 
 #[sqlx::test]
-async fn a_mixed_case_invite_seats_the_canonical_row_and_a_lowercase_confirm_redeems_into_it(
-    pool: PgPool,
-) {
-    // The reverse direction: the OWNER types the mixed case. `make_invite` parses the email at the
-    // op edge (`prin` folds) so the request carries the FOLDED set — exactly what the fixed CLI sends —
-    // the seat is born canonical, and a lowercase-proven identity lands in it.
-    let fx = Fixture::new(pool.clone(), "enr-fold-invite").await;
-    let a = &fx.authority;
-    let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "Alice@Acme.COM",
-        "s_deploy",
-    )
-    .await;
-
-    // Born canonical: the stored seat carries the folded bytes, at `invited`.
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT principal, status FROM workspace_member WHERE workspace_id = $1 AND role = 'member'",
-    )
-    .bind(w.as_str())
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        rows,
-        vec![("alice@acme.com".to_owned(), "invited".to_owned())]
-    );
-
-    let device_seed = [11u8; 32];
-    let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
-        panic!("a lowercase-confirmed principal must redeem into the folded seat");
-    };
-    assert_eq!(r.principal.as_str(), "alice@acme.com");
-}
-
-#[sqlx::test]
-async fn self_host_redeem_grants_membership_without_smtp(pool: PgPool) {
-    let fx = Fixture::new(pool, "enr-selfhost").await;
-    let a = &fx.authority;
-    let w = ws("w_local");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "self_host").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "owner@acme.com",
-        "s_deploy",
-    )
-    .await;
-
-    let device_seed = [11u8; 32];
-    let dpub = device_pub(&device_seed);
-    // Self-host: the session is born confirmed (device-rooted principal); the first poll yields a grant.
-    let start = a
-        .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
-        .await
-        .unwrap();
-    let grant = match a
-        .poll_device_auth(&start.device_code, NOW, "t0")
-        .await
-        .unwrap()
-    {
-        DeviceAuthPoll::Granted(g) => g,
-        other => panic!("expected Granted (no human step), got {other:?}"),
-    };
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
-        panic!("self-host redeem");
-    };
-    assert!(
-        r.principal.as_str().starts_with("dev."),
-        "device-rooted principal"
-    );
-    // Self-host granted the device-rooted principal membership, so its minted credential resolves a read
-    // scope (the read gate — a confirmed member — is satisfied by the same redeem).
-    assert!(!r.credential.is_empty());
-    assert!(
-        a.resolve_read_scope("w_local", "s_deploy", &r.credential)
-            .await
-            .is_ok()
-    );
-}
-
-#[sqlx::test]
 async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-revoke").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     let alice_dk = device_key_id_for(&dpub);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("redeem");
     };
     let alice_cred = r.credential.clone();
@@ -640,10 +427,7 @@ async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
     // The revoked device cannot RE-REDEEM its still-live grant to un-revoke itself (the kill switch is
     // durable, not undone within the grant TTL).
     assert!(
-        matches!(
-            redeem(a, &grant, &device_seed, dpub).await,
-            RedeemOutcome::Denied(_)
-        ),
+        matches!(redeem(a, &w, &grant, dpub).await, RedeemOutcome::Denied(_)),
         "a revoked device's re-redeem must be denied"
     );
     assert!(
@@ -676,19 +460,14 @@ async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
         w.as_str(),
         &op_id(4),
         &owner_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("carol@acme.com")],
-            skills: vec![],
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("alice@acme.com"),
         },
     );
-    let out = a
-        .create_invite(&w, &op_id(4), after, "t0", NOW)
-        .await
-        .unwrap();
+    let out = a.roster_set(&w, &op_id(4), after, "t0", NOW).await.unwrap();
     assert!(
-        matches!(out, CreateInviteOutcome::Denied(_)),
+        matches!(out, GovernanceOutcome::Denied(_)),
         "revoked device refused: {out:?}"
     );
 }
@@ -699,20 +478,11 @@ async fn roster_remove_revokes_the_members_reads(pool: PgPool) {
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [13u8; 32];
     let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("redeem");
     };
     let alice_cred = r.credential.clone();
@@ -859,19 +629,17 @@ async fn a_members_governance_op_is_denied(pool: PgPool) {
         w.as_str(),
         &op_id(9),
         &member_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("x@acme.com")],
-            skills: vec![],
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("x@acme.com"),
         },
     );
     let out = a
-        .create_invite(&w, &op_id(9), signed, "t0", NOW)
+        .roster_set(&w, &op_id(9), signed, "t0", NOW)
         .await
         .unwrap();
     assert!(
-        matches!(out, CreateInviteOutcome::Denied(_)),
+        matches!(out, GovernanceOutcome::Denied(_)),
         "member denied: {out:?}"
     );
 }
@@ -892,137 +660,90 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
         w.as_str(),
         &op_id(7),
         "dk_attacker_unregistered",
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("x@acme.com")],
-            skills: vec![],
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("x@acme.com"),
         },
     );
     assert!(
         matches!(
-            a.create_invite(&w, &op_id(7), forged, "t0", NOW)
+            a.roster_set(&w, &op_id(7), forged, "t0", NOW)
                 .await
                 .unwrap(),
-            CreateInviteOutcome::Denied(_)
+            GovernanceOutcome::Denied(_)
         ),
         "an unknown device is denied (pre-authentication)"
     );
 
     // The SAME op_id, now from the LEGIT owner, SUCCEEDS — the pre-authentication failure wrote no durable
     // workspace_events row, so it neither forged an audit entry nor squatted the op_id as an idempotency block.
+    a.db()
+        .seed_workspace_member(&w, &prin("y@acme.com"), "member", "confirmed")
+        .await
+        .unwrap();
     let legit = sign_governance(
         &owner_seed,
         w.as_str(),
         &op_id(7),
         &owner_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("y@acme.com")],
-            skills: vec![],
+        GovernanceOp::RosterSet {
+            role: Role::Reviewer,
+            target: prin("y@acme.com"),
         },
     );
     assert!(
         matches!(
-            a.create_invite(&w, &op_id(7), legit, "t0", NOW)
-                .await
-                .unwrap(),
-            CreateInviteOutcome::Created(_)
+            a.roster_set(&w, &op_id(7), legit, "t0", NOW).await.unwrap(),
+            GovernanceOutcome::Ok
         ),
         "the legit owner's op with the same op_id is not blocked by a forged pre-auth row"
     );
 }
 
 #[sqlx::test]
-async fn create_invite_is_op_id_idempotent_with_an_identical_link(pool: PgPool) {
-    let fx = Fixture::new(pool, "enr-idem").await;
+async fn a_governance_op_is_op_id_idempotent_and_key_reuse_is_denied(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "enr-opid").await;
     let a = &fx.authority;
     let w = ws("w_acme");
     let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
+    a.db()
+        .seed_workspace_member(&w, &prin("alice@acme.com"), "member", "confirmed")
+        .await
+        .unwrap();
     let op = op_id(6);
-    let mk = || {
+    let mk = |target: &str| {
         sign_governance(
             &owner_seed,
             w.as_str(),
             &op,
             &owner_dk,
-            GovernanceOp::Invite {
-                role: Role::Member,
-                expires_at: None,
-                emails: vec![prin("alice@acme.com")],
-                skills: vec![(skill("s_deploy"), None)],
+            GovernanceOp::RosterSet {
+                role: Role::Reviewer,
+                target: prin(target),
             },
         )
     };
-    let CreateInviteOutcome::Created(c1) = a.create_invite(&w, &op, mk(), "t0", NOW).await.unwrap()
-    else {
-        panic!("first create");
-    };
-    let CreateInviteOutcome::Created(c2) = a.create_invite(&w, &op, mk(), "t0", NOW).await.unwrap()
-    else {
-        panic!("replay create");
-    };
+    // First apply, then the IDENTICAL retry replays Ok (the idempotency slot).
     assert_eq!(
-        c1.link, c2.link,
-        "the deterministic link replays identically"
-    );
-}
-
-/// Governance op-id key-reuse: the audit/idempotency slot belongs to the FIRST request under an op id.
-/// A same-op_id retry whose request payload DIVERGES (a different invitee) is a denied key-reuse, never a
-/// second apply. The request identity is now a server-side canonical encoding of the request fields (the
-/// signed frame is gone) — so this is behaviorally identical to the pre-de-crypto identity from the
-/// test's view. (A same-op_id retry with the IDENTICAL request replays; that is pinned by
-/// `create_invite_is_op_id_idempotent_with_an_identical_link`.)
-#[sqlx::test]
-async fn create_invite_op_id_reuse_with_a_divergent_request_is_denied(pool: PgPool) {
-    let fx = Fixture::new(pool.clone(), "enr-opid-reuse").await;
-    let a = &fx.authority;
-    let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let op = op_id(6);
-
-    // First: op id X invites alice → Created.
-    let first = sign_governance(
-        &owner_seed,
-        w.as_str(),
-        &op,
-        &owner_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("alice@acme.com")],
-            skills: vec![(skill("s_deploy"), None)],
-        },
-    );
-    assert!(matches!(
-        a.create_invite(&w, &op, first, "t0", NOW).await.unwrap(),
-        CreateInviteOutcome::Created(_)
-    ));
-
-    // The SAME op id X with a DIVERGENT request (a different invitee) is a denied key-reuse — the slot
-    // belongs to the first request, and nothing is re-applied.
-    let divergent = sign_governance(
-        &owner_seed,
-        w.as_str(),
-        &op,
-        &owner_dk,
-        GovernanceOp::Invite {
-            role: Role::Member,
-            expires_at: None,
-            emails: vec![prin("carol@acme.com")],
-            skills: vec![(skill("s_deploy"), None)],
-        },
-    );
-    assert!(matches!(
-        a.create_invite(&w, &op, divergent, "t0", NOW)
+        a.roster_set(&w, &op, mk("alice@acme.com"), "t0", NOW)
             .await
             .unwrap(),
-        CreateInviteOutcome::Denied(_)
+        GovernanceOutcome::Ok
+    );
+    assert_eq!(
+        a.roster_set(&w, &op, mk("alice@acme.com"), "t0", NOW)
+            .await
+            .unwrap(),
+        GovernanceOutcome::Ok
+    );
+    // The SAME op id with a DIVERGENT request (a different target) is a denied key-reuse — the slot
+    // belongs to the first request, and nothing is re-applied.
+    assert!(matches!(
+        a.roster_set(&w, &op, mk("carol@acme.com"), "t0", NOW)
+            .await
+            .unwrap(),
+        GovernanceOutcome::Denied(_)
     ));
-
-    // carol was never seated — the denied key-reuse applied nothing.
     let carol = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM workspace_member WHERE workspace_id = $1 AND principal = 'carol@acme.com'",
     )
@@ -1038,21 +759,12 @@ async fn passcode_locks_after_the_attempt_cap(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-brute").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     let start = a
-        .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
+        .start_device_auth(&addr(&w), &dpub, "laptop", NOW, "t0")
         .await
         .unwrap();
     let pc = a
@@ -1086,24 +798,15 @@ async fn a_confirmed_same_principal_passcode_replay_stays_confirmed(pool: PgPool
     // First-writer-wins replay: once a session is confirmed for a principal, a SAME-principal retry or
     // refresh replays Confirmed BEFORE any passcode-row consultation — the row's later fate (expired,
     // deleted) must never turn a lost-ack retry into a WrongCode/Expired failure.
-    let fx = Fixture::new(pool.clone(), "enr-replay").await;
+    let fx = Fixture::new(pool.clone(), "enr-pcreplay").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
     let start = a
-        .start_device_auth(&invite, &dpub, "laptop", NOW, "t0")
+        .start_device_auth(&addr(&w), &dpub, "laptop", NOW, "t0")
         .await
         .unwrap();
     let pc = a
@@ -1153,23 +856,14 @@ async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
     let fx = Fixture::new(pool, "enr-dk").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [11u8; 32];
     let dpub = device_pub(&device_seed);
-    let grant = cloud_flow_to_grant(a, &invite, &device_seed, "alice@acme.com").await;
+    let grant = flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com").await;
     // The id the server bound is purely a function of the public key.
     assert_eq!(grant.device_key_id, device_key_id_for(&dpub));
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("redeem");
     };
     assert_eq!(r.device_key_id, device_key_id_for(&dpub));
@@ -1178,7 +872,7 @@ async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
     let other_seed = [55u8; 32];
     let other_pub = device_pub(&other_seed);
     let out = a
-        .redeem_enrollment(&grant.grant_token, other_pub, NOW, "t0")
+        .redeem_enrollment(&w, &grant.grant_token, other_pub, NOW)
         .await
         .unwrap();
     assert!(matches!(out, RedeemOutcome::Denied(_)), "got {out:?}");
@@ -1187,7 +881,7 @@ async fn device_key_id_is_server_derived_not_client_asserted(pool: PgPool) {
 #[sqlx::test]
 async fn admin_claim_stands_up_a_workspace_and_replays_only_for_the_same_device(pool: PgPool) {
     // A SELF-HOST plane: the claim seats a device-rooted owner and the workspace takes the PLANE's mode.
-    let fx = Fixture::with_mode(pool, "enr-admin", DeploymentMode::SelfHost).await;
+    let fx = Fixture::with_mode(pool.clone(), "enr-admin", DeploymentMode::SelfHost).await;
     let a = &fx.authority;
     let w = ws("w_local");
     a.db().seed_admin_claim(&w, "claim-secret").await.unwrap();
@@ -1203,8 +897,16 @@ async fn admin_claim_stands_up_a_workspace_and_replays_only_for_the_same_device(
     };
     assert_eq!(r.workspace_id.as_str(), "w_local");
     assert!(r.principal.as_str().starts_with("dev."));
-    let created = a.db().read_workspace(&w).await.unwrap().expect("workspace");
-    assert_eq!(created.deployment_mode, "self_host");
+    // The seated workspace took the PLANE's mode and an ADDRESS name derived from its display name
+    // (the claim seeded none, so the display defaults to the id and the slug follows it).
+    let (mode, name): (String, String) =
+        sqlx::query_as("SELECT deployment_mode, name FROM workspace WHERE workspace_id = $1")
+            .bind(w.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(mode, "self_host");
+    assert_eq!(name, "w-local");
 
     // The SAME device's replay (a lost-200 retry) deterministically re-returns Redeemed.
     let RedeemOutcome::Redeemed(replay) = a
@@ -1239,6 +941,7 @@ async fn the_workspace_creation_cap_folds_case_variants_into_one_identity(pool: 
             .create_workspace(
                 &format!("req-{n}"),
                 None,
+                None,
                 "robert@x.io",
                 DeploymentMode::Cloud,
                 "t0",
@@ -1251,9 +954,16 @@ async fn the_workspace_creation_cap_folds_case_variants_into_one_identity(pool: 
         );
     }
     assert!(matches!(
-        a.create_workspace("req-3", None, "Robert@X.io", DeploymentMode::Cloud, "t0")
-            .await
-            .unwrap(),
+        a.create_workspace(
+            "req-3",
+            None,
+            None,
+            "Robert@X.io",
+            DeploymentMode::Cloud,
+            "t0"
+        )
+        .await
+        .unwrap(),
         CreateWorkspaceOutcome::Denied("workspace creation limit reached")
     ));
 }

@@ -2,13 +2,14 @@
 //!
 //! Door 1 (`standup`): an un-enrolled device starts a workspace-less session; a web-verified email's
 //! approval CREATES the workspace, and the ordinary poll → redeem → genesis-publish chain follows. Door 2
-//! (`create_workspace`): a verified email creates the workspace directly and gets a self-invite link.
+//! (`create_workspace`): a verified email creates the workspace directly and gets its ADDRESS (the share
+//! line — links carry nothing, the roster is the lock).
 //! The claim (`mint_admin_claim` → `admin_claim`) is the operator/bearer door. These tests are the
 //! server-side release-blocker witnesses: one-owner-per-genesis, first-writer-wins approvals, the
 //! consumed-replay lost-200 recovery, the per-owner cap, cross-door token separation, and the intent
 //! guards that keep the enroll identity legs off standup sessions.
 
-use super::enrollment_governance::{device_pub, make_invite, op_id, redeem, seat_owner};
+use super::enrollment_governance::{addr, device_pub, redeem, seat_invited, seat_owner};
 use super::*;
 
 use crate::enroll::device_key_id_for;
@@ -79,7 +80,17 @@ async fn claim_mint_redeem_names_from_the_row_and_replays_only_same_device(pool:
     assert_eq!(r.principal.as_str(), "owner@acme.com");
     let created = a.db().read_workspace(&w).await.unwrap().expect("workspace");
     assert_eq!(created.display_name, "Real Name");
-    assert_eq!(created.deployment_mode, "cloud");
+    // The seated mode is THE PLANE'S (raw read — the pool read no longer carries it), and the
+    // ADDRESS slug derives from the row's display name.
+    let mode = sqlx::query_scalar::<_, String>(
+        "SELECT deployment_mode FROM workspace WHERE workspace_id = $1",
+    )
+    .bind(w.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mode, "cloud");
+    assert_eq!(created.name, "real-name");
     assert_eq!(owner_rows(&pool, "w_break_glass").await, 1);
 
     // SAME-DEVICE consumed replay (lost-200 recovery) deterministically re-returns Redeemed…
@@ -175,8 +186,14 @@ async fn a_self_host_claim_seats_a_device_rooted_owner(pool: PgPool) {
         format!("dev.{}", device_key_id_for(&dpub)),
         "the seated owner is the device-rooted principal"
     );
-    let row = a.db().read_workspace(&w).await.unwrap().expect("workspace");
-    assert_eq!(row.deployment_mode, "self_host");
+    let mode = sqlx::query_scalar::<_, String>(
+        "SELECT deployment_mode FROM workspace WHERE workspace_id = $1",
+    )
+    .bind(w.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mode, "self_host");
     assert_eq!(owner_rows(&pool, "w_home").await, 1);
 }
 
@@ -268,16 +285,17 @@ async fn racing_double_redeem_seats_exactly_one_owner(pool: PgPool) {
     );
 }
 
-// ── door 2: create_workspace (idempotency, cap, self-invite, domain claim) ─────────────────────────────
+// ── door 2: create_workspace (idempotency, cap, the address, domain claim) ─────────────────────────────
 
 #[sqlx::test]
-async fn create_workspace_seats_workspace_owner_and_self_invite_in_one_txn(pool: PgPool) {
+async fn create_workspace_seats_workspace_and_owner_and_returns_the_address(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "st-create").await;
     let a = &fx.authority;
     let out = a
         .create_workspace(
             "req-1",
             Some("Acme"),
+            None,
             "robert@acme.com",
             DeploymentMode::Cloud,
             T0,
@@ -289,6 +307,9 @@ async fn create_workspace_seats_workspace_owner_and_self_invite_in_one_txn(pool:
     };
     assert!(c.workspace_id.as_str().starts_with("w_"));
     assert_eq!(c.display_name, "Acme");
+    // The ADDRESS derives from the display name and rides the public link base — the share line.
+    assert_eq!(c.name, "acme");
+    assert_eq!(c.address, "https://plane.test/acme");
 
     // The workspace row: the plane's mode + the freemail-aware domain claim (a corporate domain the owner
     // proved an address on ⇒ recorded verified).
@@ -298,27 +319,28 @@ async fn create_workspace_seats_workspace_owner_and_self_invite_in_one_txn(pool:
         .await
         .unwrap()
         .expect("workspace row");
-    assert_eq!(row.deployment_mode, "cloud");
+    assert_eq!(row.name, "acme");
     assert_eq!(row.verified_domain.as_deref(), Some("acme.com"));
     assert_eq!(row.verified_domain_status, "verified");
     assert_eq!(owner_rows(&pool, c.workspace_id.as_str()).await, 1);
 
-    // The self-invite resolves as a REAL invite bootstrap (owner email seeded; no skills), so the printed
-    // `topos follow <link>` works — and the owner row it UPSERTs never demoted the confirmed owner.
-    let boot = a.read_invite_bootstrap(&c.invite_token, NOW).await.unwrap();
-    assert_eq!(boot.workspace_id.as_str(), c.workspace_id.as_str());
-    assert!(boot.skills.is_empty());
-    assert_eq!(owner_rows(&pool, c.workspace_id.as_str()).await, 1);
-
     // A freemail owner gets NO domain claim + the server-side default name.
     let CreateWorkspaceOutcome::Created(f) = a
-        .create_workspace("req-2", None, "bob@gmail.com", DeploymentMode::Cloud, T0)
+        .create_workspace(
+            "req-2",
+            None,
+            None,
+            "bob@gmail.com",
+            DeploymentMode::Cloud,
+            T0,
+        )
         .await
         .unwrap()
     else {
         panic!("freemail create");
     };
     assert_eq!(f.display_name, "bob's workspace");
+    assert_eq!(f.name, "bob-s-workspace");
     let row = a
         .db()
         .read_workspace(&f.workspace_id)
@@ -337,6 +359,7 @@ async fn create_workspace_replays_for_the_same_owner_and_denies_another(pool: Pg
         .create_workspace(
             "req-x",
             Some("Acme"),
+            None,
             "robert@acme.com",
             DeploymentMode::Cloud,
             T0,
@@ -346,11 +369,12 @@ async fn create_workspace_replays_for_the_same_owner_and_denies_another(pool: Pg
     else {
         panic!("create");
     };
-    // The SAME request by the SAME owner replays the SAME workspace AND the SAME self-invite link.
+    // The SAME request by the SAME owner replays the SAME workspace AND the SAME address.
     let CreateWorkspaceOutcome::Replayed(again) = a
         .create_workspace(
             "req-x",
             Some("Acme"),
+            None,
             "robert@acme.com",
             DeploymentMode::Cloud,
             T0,
@@ -361,12 +385,19 @@ async fn create_workspace_replays_for_the_same_owner_and_denies_another(pool: Pg
         panic!("replay");
     };
     assert_eq!(again.workspace_id.as_str(), first.workspace_id.as_str());
-    assert_eq!(again.invite_token, first.invite_token);
+    assert_eq!(again.address, first.address);
     // The SAME request under a DIFFERENT owner is denied — the slot belongs to the original.
     assert!(matches!(
-        a.create_workspace("req-x", None, "mallory@evil.com", DeploymentMode::Cloud, T0)
-            .await
-            .unwrap(),
+        a.create_workspace(
+            "req-x",
+            None,
+            None,
+            "mallory@evil.com",
+            DeploymentMode::Cloud,
+            T0
+        )
+        .await
+        .unwrap(),
         CreateWorkspaceOutcome::Denied("request id already used")
     ));
 }
@@ -379,6 +410,7 @@ async fn the_workspace_creation_cap_denies_the_fourth(pool: PgPool) {
         let out = a
             .create_workspace(
                 &format!("req-{n}"),
+                None,
                 None,
                 "serial@founder.com",
                 DeploymentMode::Cloud,
@@ -395,6 +427,7 @@ async fn the_workspace_creation_cap_denies_the_fourth(pool: PgPool) {
     assert!(matches!(
         a.create_workspace(
             "req-3",
+            None,
             None,
             "serial@founder.com",
             DeploymentMode::Cloud,
@@ -414,6 +447,7 @@ async fn the_workspace_creation_cap_denies_the_fourth(pool: PgPool) {
         a.approve_standup(
             &start.user_code,
             "serial@founder.com",
+            None,
             None,
             DeploymentMode::Cloud,
             NOW,
@@ -438,6 +472,7 @@ async fn racing_creates_at_the_cap_boundary_never_overshoot_it(pool: PgPool) {
             a.create_workspace(
                 &format!("seed-{n}"),
                 None,
+                None,
                 "serial@founder.com",
                 DeploymentMode::Cloud,
                 T0
@@ -451,12 +486,14 @@ async fn racing_creates_at_the_cap_boundary_never_overshoot_it(pool: PgPool) {
         a.create_workspace(
             "race-a",
             None,
+            None,
             "serial@founder.com",
             DeploymentMode::Cloud,
             T0
         ),
         a.create_workspace(
             "race-b",
+            None,
             None,
             "serial@founder.com",
             DeploymentMode::Cloud,
@@ -504,6 +541,7 @@ async fn a_cloud_claim_shares_the_workspace_creation_cap(pool: PgPool) {
         assert!(matches!(
             a.create_workspace(
                 &format!("req-{n}"),
+                None,
                 None,
                 "serial@founder.com",
                 DeploymentMode::Cloud,
@@ -569,6 +607,7 @@ async fn a_consumed_cloud_claim_replays_redeemed_even_at_cap(pool: PgPool) {
         assert!(matches!(
             a.create_workspace(
                 &format!("req-{n}"),
+                None,
                 None,
                 "serial@founder.com",
                 DeploymentMode::Cloud,
@@ -648,13 +687,13 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
     assert_eq!(ctx.intent, SessionIntent::Standup);
     assert_eq!(ctx.machine_name, "founder-laptop");
     assert_eq!(ctx.workspace_display_name, "");
-    assert!(ctx.offered_skills.is_empty());
 
     // Approving an UNKNOWN code is the uniform miss (guessing is the entropy's job; probing learns nothing).
     assert!(matches!(
         a.approve_standup(
             "XXXX-XXXX-XXXX-XXXX",
             "founder@acme.com",
+            None,
             None,
             DeploymentMode::Cloud,
             NOW,
@@ -673,6 +712,7 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
             &start.user_code,
             "founder@acme.com",
             Some("Acme"),
+            None,
             DeploymentMode::Cloud,
             NOW,
             T0,
@@ -688,7 +728,7 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
     // A same-email RE-CLICK is AlreadyApproved (idempotent); a DIFFERENT email is the uniform miss
     // (first-writer-wins — the approval is never re-bound).
     assert!(matches!(
-        a.approve_standup(&start.user_code, "founder@acme.com", None, DeploymentMode::Cloud, NOW, T0)
+        a.approve_standup(&start.user_code, "founder@acme.com", None, None, DeploymentMode::Cloud, NOW, T0)
             .await
             .unwrap(),
         ApproveStandupOutcome::AlreadyApproved { workspace_id } if workspace_id.as_str() == w.as_str()
@@ -697,6 +737,7 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
         a.approve_standup(
             &start.user_code,
             "mallory@evil.com",
+            None,
             None,
             DeploymentMode::Cloud,
             NOW,
@@ -716,12 +757,21 @@ async fn standup_flow_end_to_end_through_the_genesis_publish_gate(pool: PgPool) 
         DeviceAuthPoll::Granted(g) => g,
         other => panic!("expected Granted, got {other:?}"),
     };
-    assert_eq!(grant.workspace_id.as_str(), w.as_str());
+    assert_eq!(
+        grant.workspace_id.as_ref().map(|g| g.as_str()),
+        Some(w.as_str())
+    );
     assert_eq!(grant.workspace_display_name, "Acme");
+    // The granted context carries the workspace's full ADDRESS (server-built on the link base, from
+    // the display-name-derived slug).
+    assert_eq!(
+        grant.workspace_address.as_deref(),
+        Some("https://plane.test/acme")
+    );
 
     // REDEEM: admits the owner (seated `confirmed` — the cloud gate admits any rostered status) and
     // registers the device, minting its ONE workspace credential (deterministic per grant).
-    let out = redeem(a, &grant, &device_seed, dpub).await;
+    let out = redeem(a, &w, &grant, dpub).await;
     let RedeemOutcome::Redeemed(r) = out else {
         panic!("redeem: {out:?}");
     };
@@ -800,19 +850,10 @@ async fn approve_standup_refuses_an_enroll_session(pool: PgPool) {
     let fx = Fixture::new(pool, "st-approve-enroll").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let start = a
-        .start_device_auth(&invite, &device_pub(&[43u8; 32]), "laptop", NOW, T0)
+        .start_device_auth(&addr(&w), &device_pub(&[43u8; 32]), "laptop", NOW, T0)
         .await
         .unwrap();
     assert!(
@@ -825,11 +866,12 @@ async fn approve_standup_refuses_an_enroll_session(pool: PgPool) {
         start.user_code
     );
     // Approving an ENROLL session through the standup door is the uniform miss — it must never CREATE a
-    // workspace for a session that already has one.
+    // workspace for a session that already targets one.
     assert!(matches!(
         a.approve_standup(
             &start.user_code,
             "alice@acme.com",
+            None,
             None,
             DeploymentMode::Cloud,
             NOW,
@@ -845,21 +887,12 @@ async fn enroll_confirms_are_first_writer_wins(pool: PgPool) {
     let fx = Fixture::new(pool, "st-fww").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
     let device_seed = [44u8; 32];
     let dpub = device_pub(&device_seed);
     let start = a
-        .start_device_auth(&invite, &dpub, "laptop", NOW, T0)
+        .start_device_auth(&addr(&w), &dpub, "laptop", NOW, T0)
         .await
         .unwrap();
 
@@ -891,7 +924,7 @@ async fn enroll_confirms_are_first_writer_wins(pool: PgPool) {
         DeviceAuthPoll::Granted(g) => g,
         other => panic!("expected Granted, got {other:?}"),
     };
-    let RedeemOutcome::Redeemed(r) = redeem(a, &grant, &device_seed, dpub).await else {
+    let RedeemOutcome::Redeemed(r) = redeem(a, &w, &grant, dpub).await else {
         panic!("redeem");
     };
     assert_eq!(r.principal.as_str(), "alice@acme.com");
@@ -914,23 +947,19 @@ async fn claim_bootstrap_serves_until_consumed_and_never_crosses_doors(pool: PgP
     )
     .await;
 
-    // The claim bootstrap serves the claim's OWN disclosure: its name, no skills, the admin_claim method.
+    // The claim bootstrap serves the claim's OWN disclosure: its name + the admin_claim method.
     let boot = a.read_claim_bootstrap(&token, NOW).await.unwrap();
     assert_eq!(boot.workspace_id.as_str(), "w_boot");
     assert_eq!(boot.display_name, "Boot Co");
     assert_eq!(boot.enrollment_method, "admin_claim");
-    assert!(boot.skills.is_empty());
 
-    // A claim token can NEVER resolve as an invite (disjoint tables), nor start a device-auth.
-    assert!(matches!(
-        a.read_invite_bootstrap(&token, NOW).await,
-        Err(AuthorityError::NotFound)
-    ));
-    assert!(matches!(
+    // A claim token can never start a device-auth: it is not a workspace address (the syntax belt
+    // refuses its charset before any lookup could run).
+    assert!(
         a.start_device_auth(&token, &device_pub(&[45u8; 32]), "laptop", NOW, T0)
-            .await,
-        Err(AuthorityError::NotFound)
-    ));
+            .await
+            .is_err()
+    );
 
     // Expired ⇒ the uniform miss; consumed ⇒ the uniform miss.
     assert!(matches!(
@@ -949,24 +978,20 @@ async fn claim_bootstrap_serves_until_consumed_and_never_crosses_doors(pool: PgP
 }
 
 #[sqlx::test]
-async fn an_invite_token_never_redeems_as_a_claim(pool: PgPool) {
-    let fx = Fixture::new(pool, "st-cross-invite").await;
+async fn an_enrollment_grant_never_redeems_as_a_claim(pool: PgPool) {
+    let fx = Fixture::new(pool, "st-cross-grant").await;
     let a = &fx.authority;
     let w = ws("w_acme");
-    let (owner_seed, _o, owner_dk) = seat_owner(a, &w, "cloud").await;
-    let invite = make_invite(
-        a,
-        &w,
-        &owner_seed,
-        &owner_dk,
-        &op_id(1),
-        "alice@acme.com",
-        "s_deploy",
-    )
-    .await;
-    // The other cross-redeem direction: an invite token presented to the claim door is the uniform denial.
+    seat_owner(a, &w, "cloud").await;
+    seat_invited(a, &w, "alice@acme.com").await;
+    let device_seed = [47u8; 32];
+    let grant =
+        super::enrollment_governance::flow_to_grant(a, &addr(&w), &device_seed, "alice@acme.com")
+            .await;
+    // The other cross-redeem direction: an enrollment GRANT presented to the claim door is the
+    // uniform denial (disjoint tables — a token never crosses doors).
     assert!(matches!(
-        a.admin_claim(&invite, device_pub(&[47u8; 32]), NOW, T0)
+        a.admin_claim(&grant.grant_token, device_pub(&device_seed), NOW, T0)
             .await
             .unwrap(),
         RedeemOutcome::Denied(_)

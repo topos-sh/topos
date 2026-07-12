@@ -1,11 +1,11 @@
-//! The governance + admin-claim SQL — the raw-`sqlx` half (owner-driven create-invite, the roster/revoke
-//! mutations, and the self-host first-boot admin claim).
+//! The governance + admin-claim SQL — the raw-`sqlx` half (the roster/revoke mutations, the genesis
+//! doors, and the self-host first-boot admin claim).
 //!
 //! Split from [`super::enroll`] (the enrollment issuance SQL) so the role-gated governance surface — the
 //! part with the owner-role matrix, the last-owner-lockout guard, and the `workspace_events` audit +
 //! idempotency discipline — reads on its own. Mirrors [`crate::governance`] exactly as `enroll` mirrors
 //! [`crate::enroll`]: the `SERIALIZABLE` (`run_serializable!`) governance/claim transactions live here, the
-//! orchestration hands in server-trusted values (the parsed op id, the derived invite-token sha256) and gets
+//! orchestration hands in server-trusted values (the parsed op id, the validated address name) and gets
 //! back domain outcomes. No `sqlx` type crosses the module boundary; every row is `workspace_id`-scoped; the
 //! shared 32-byte-blob / device-row helpers stay in ONE home ([`super::enroll`]).
 
@@ -19,9 +19,10 @@ use crate::enroll::{self, DeploymentMode, EnrollmentRedeemed, RedeemOutcome};
 use crate::error::{AuthorityError, Result};
 use crate::governance::{
     ApproveStandupOutcome, ClaimBootstrapRow, CreateWorkspaceOutcome, GovernanceInput,
-    GovernanceOp, GovernanceOutcome, MintClaimDenied, Role, WorkspaceCreated,
+    GovernanceOp, GovernanceOutcome, MintClaimDenied, Role, WorkspaceCreated, compose_address,
+    slugify_display_name, validate_workspace_name,
 };
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{Principal, WorkspaceId};
 
 // ── governance: create-invite + roster/revoke mutations (device-credential, in-txn authorized) ─────────
 
@@ -51,11 +52,8 @@ const GOVERNANCE_TAG: &[u8] = b"TOPOS_DEVICE_GOVERNANCE_V1";
 /// The governance request identity: sha256 over [`GOVERNANCE_TAG`] + u64-be length-prefixed parts of the
 /// FULL request — workspace, op id, the acting device's RESOLVED key id (the device's stable name,
 /// never the presented credential: a credential rotates on re-enrollment, and a lost-ack retry across
-/// that rotation must still byte-match its own slot), the op's kind byte, and every parameter
-/// (list parameters ride as their count then per-element parts). The `emails`/`skills` lists are SETS —
-/// canonicalized here (sorted + deduped) so the identity is order-independent, matching the seating
-/// effect (order-independent UPSERTs): a lost-ack retry that reorders the list replays rather than
-/// tripping the key-reuse guard. The `workspace_events` idempotency slot binds it: a same-op_id retry
+/// that rotation must still byte-match its own slot), the op's kind byte, and every parameter.
+/// The `workspace_events` idempotency slot binds it: a same-op_id retry
 /// must byte-match to replay; any divergent payload is a denied key-reuse. Deterministic, built from
 /// server-trusted values.
 fn governance_request_sha256(input: &GovernanceInput<'_>, acting_device_key_id: &str) -> [u8; 32] {
@@ -63,33 +61,14 @@ fn governance_request_sha256(input: &GovernanceInput<'_>, acting_device_key_id: 
         buf.extend_from_slice(&(part.len() as u64).to_be_bytes());
         buf.extend_from_slice(part);
     }
-    /// Canonicalize a set-valued parameter: sorted + deduped, so its bytes are order-independent.
-    fn put_set(buf: &mut Vec<u8>, mut parts: Vec<&str>) {
-        parts.sort_unstable();
-        parts.dedup();
-        put(buf, &(parts.len() as u64).to_be_bytes());
-        for part in parts {
-            put(buf, part.as_bytes());
-        }
-    }
     let mut buf = Vec::new();
     buf.extend_from_slice(GOVERNANCE_TAG);
     put(&mut buf, input.ws.as_str().as_bytes());
     put(&mut buf, input.op_id.as_bytes());
     put(&mut buf, acting_device_key_id.as_bytes());
+    // The kind bytes keep their historical values (the invite op that held byte 1 is gone; re-numbering
+    // would fork every stored idempotency identity).
     match &input.request.op {
-        GovernanceOp::Invite {
-            role,
-            expires_at,
-            emails,
-            skills,
-        } => {
-            put(&mut buf, &[1, role.derivation_byte()]);
-            put(&mut buf, &expires_to_u64(*expires_at).to_be_bytes());
-            // Display names are advisory (never identity): only the skill ids bind.
-            put_set(&mut buf, emails.iter().map(Principal::as_str).collect());
-            put_set(&mut buf, skills.iter().map(|(id, _)| id.as_str()).collect());
-        }
         GovernanceOp::RosterSet { role, target } => {
             put(&mut buf, &[2, role.derivation_byte()]);
             put(&mut buf, target.as_str().as_bytes());
@@ -163,23 +142,8 @@ async fn govern_preamble(
 }
 
 impl Db {
-    /// `create_invite`: the owner-driven invite mint. One `SERIALIZABLE` (`run_serializable!`) txn: governance authz (owner-only) →
-    /// store the (orchestration-derived) invite + its skills → UPSERT the invited members → record the audit
-    /// receipt. `invite_token_sha256` is the deterministic token's sha256 (the plaintext never reaches here).
-    pub(crate) async fn create_invite_txn(
-        &self,
-        input: &GovernanceInput<'_>,
-        invite_token_sha256: &[u8; 32],
-    ) -> Result<GovernanceOutcome> {
-        run_serializable!(
-            self,
-            tx,
-            create_invite_run(&mut tx, input, invite_token_sha256).await
-        )
-    }
-
     /// A governance roster/revoke mutation (owner-only roster set/remove with the last-owner-lockout guard;
-    /// owner-or-self device revoke that flips `revoked` AND purges the device's read tokens). One
+    /// owner-or-self device revoke that flips `revoked`). One
     /// `SERIALIZABLE` (`run_serializable!`) txn per mutation.
     pub(crate) async fn governance_mutation_txn(
         &self,
@@ -189,107 +153,26 @@ impl Db {
     }
 }
 
-async fn create_invite_run(
-    tx: &mut Transaction<'_, Postgres>,
-    input: &GovernanceInput<'_>,
-    invite_token_sha256: &[u8; 32],
-) -> Result<GovernanceOutcome> {
-    let GovernanceOp::Invite {
-        role,
-        expires_at,
-        emails,
-        skills,
-    } = &input.request.op
-    else {
-        return Ok(GovernanceOutcome::Denied("op is not an invite"));
-    };
-    let actor = match govern_preamble(tx, input).await? {
-        Preamble::Replay(out) => return Ok(out),
-        // A PRE-AUTHENTICATION failure (an unknown or revoked acting device) is NOT
-        // attributable to any verified actor, so it must NOT write a durable workspace_events row: recording it
-        // would let an UNAUTHENTICATED network client forge audit entries (attacker-chosen actor/target for an
-        // arbitrary workspace) and grow storage without bound. The authenticated-but-unauthorized denials below
-        // (the role / last-owner guards, reached via Proceed) ARE recorded — they name a verified device.
-        Preamble::Fail(reason) => return Ok(GovernanceOutcome::Denied(reason)),
-        Preamble::Proceed(s) => s,
-    };
-    // Owner-only.
-    if actor.role != Role::Owner {
-        record_event(tx, input, &actor, "DENIED", None).await?;
-        return Ok(GovernanceOutcome::Denied("invite requires the owner role"));
-    }
-
-    mint_invite_row(
-        tx,
-        input.ws,
-        invite_token_sha256,
-        *expires_at,
-        actor.principal.as_str(),
-        *role,
-        emails,
-        skills,
-        input.created_at,
-    )
-    .await?;
-    let details = serde_json::json!({ "emails": emails.len(), "skills": skills.len() }).to_string();
-    record_event(tx, input, &actor, "OK", Some(&details)).await?;
-    Ok(GovernanceOutcome::Ok)
-}
-
-/// The credential-free invite ROW-WRITER: store the (hash-only) invite + its offered skills and UPSERT the
-/// invited members. Shared by the owner-driven [`create_invite_run`] (which authorizes FIRST — its
-/// in-transaction device-credential + owner-role check runs before this writer), the create-workspace
-/// genesis (which mints the owner's self-invite inside the same transaction that seats that owner — no
-/// acting device is presented; the caller's own gate is the authorization), and the web-session roster ops in
-/// [`super::session_roster`] (same rule: the session acting gate is the authorization). Idempotent per row.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn mint_invite_row(
+/// The credential-free invited-seat ROW-WRITER: UPSERT the invited members, NEVER demoting an
+/// already-CONFIRMED one — keep both their status AND their role. An invitation is an ADD; re-inviting a
+/// member who already joined must not re-role them — and in particular must not silently demote the last
+/// owner to a member (which would orphan the workspace, the exact case roster_set guards with
+/// would_orphan_owner). Only a NEW/still-invited row takes the invitation's role. Shared by the
+/// web-session roster leg in [`super::session_roster`] (the session acting gate is the authorization —
+/// this writer authorizes nothing); the device lane's member-level invitation is the guarded
+/// `topos_invite` SQL function, which enforces its own policy. Idempotent per row.
+pub(super) async fn seat_invited_members(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    invite_token_sha256: &[u8; 32],
-    expires_at: Option<i64>,
-    created_by: &str,
-    role: Role,
     emails: &[Principal],
-    skills: &[(SkillId, Option<String>)],
+    role: Role,
+    invited_by: &str,
     created_at: &str,
 ) -> Result<()> {
     let ws_s = ws.as_str();
-    let tok = invite_token_sha256.as_slice();
-    sqlx::query!(
-        "INSERT INTO invites (token_sha256, workspace_id, expires_at, created_by, revoked, created_at) \
-         VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT (token_sha256) DO NOTHING",
-        tok,
-        ws_s,
-        expires_at,
-        created_by,
-        created_at,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    for (skill, name) in skills {
-        let sk = skill.as_str();
-        sqlx::query!(
-            "INSERT INTO invite_skill (token_sha256, skill_id, name) VALUES ($1, $2, $3) \
-             ON CONFLICT (token_sha256, skill_id) DO UPDATE SET name = excluded.name",
-            tok,
-            sk,
-            name.as_deref(),
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
-    }
     let role_s = role.as_str();
     for email in emails {
         let em = email.as_str();
-        // UPSERT the invited member, but NEVER downgrade an already-CONFIRMED one: keep both their status AND
-        // their role. An invite is an ADD; re-inviting a member who already joined must not re-role them — and
-        // in particular must not silently demote the last owner to a member (which would orphan the workspace,
-        // the exact case roster_set guards with would_orphan_owner). Only a NEW/still-invited row takes the
-        // invite's role. (The genesis self-invite leans on exactly this: the owner is seated `confirmed`
-        // first, so its own invite row never demotes it.)
         sqlx::query!(
             "INSERT INTO workspace_member (workspace_id, principal, role, status, invited_by, added_at) \
              VALUES ($1, $2, $3, 'invited', $4, $5) \
@@ -300,7 +183,7 @@ pub(super) async fn mint_invite_row(
             ws_s,
             em,
             role_s,
-            created_by,
+            invited_by,
             created_at,
         )
         .execute(&mut **tx)
@@ -317,7 +200,7 @@ async fn governance_mutation_run(
     let actor = match govern_preamble(tx, input).await? {
         Preamble::Replay(out) => return Ok(out),
         // Pre-authentication failure (an unknown or revoked acting device): NOT attributable to a
-        // verified actor, so record NOTHING (see create_invite_run) — an unauthenticated request can't forge
+        // verified actor, so record NOTHING — an unauthenticated request can't forge
         // an audit row. Post-auth denials below (role / last-owner) are recorded against the verified device.
         Preamble::Fail(reason) => return Ok(GovernanceOutcome::Denied(reason)),
         Preamble::Proceed(s) => s,
@@ -414,7 +297,6 @@ async fn governance_mutation_run(
                 GovernanceOutcome::Ok
             }
         }
-        GovernanceOp::Invite { .. } => GovernanceOutcome::Denied("invite is not a roster mutation"),
     };
 
     let outcome_s = if matches!(outcome, GovernanceOutcome::Ok) {
@@ -472,11 +354,13 @@ enum GenesisSeat {
 /// the caller's transaction. The `ON CONFLICT DO NOTHING … RETURNING` probe is the atomic created-or-exists
 /// witness (0 rows ⇒ Exists); a true concurrent race pair serializes under `SERIALIZABLE` (the loser
 /// retries and reads the winner's committed row ⇒ Exists). The deployment mode is a PARAMETER threaded from
-/// the plane's own config by every caller — never from a request.
+/// the plane's own config by every caller — never from a request; `name` is the resolved ADDRESS slug
+/// (validated or derived by [`resolve_available_name`] in this same transaction).
 #[allow(clippy::too_many_arguments)]
 async fn seat_workspace_and_owner(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
+    name: &str,
     display_name: &str,
     deployment_mode: &str,
     verified_domain: Option<&str>,
@@ -486,11 +370,12 @@ async fn seat_workspace_and_owner(
 ) -> Result<GenesisSeat> {
     let (ws_s, prin) = (ws.as_str(), owner.as_str());
     let created = sqlx::query!(
-        r#"INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
+        r#"INSERT INTO workspace (workspace_id, name, display_name, verified_domain, verified_domain_status, deployment_mode, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (workspace_id) DO NOTHING
            RETURNING workspace_id AS "workspace_id!""#,
         ws_s,
+        name,
         display_name,
         verified_domain,
         verified_domain_status,
@@ -568,26 +453,91 @@ fn fresh_workspace_id() -> Result<WorkspaceId> {
 #[error("workspace genesis fault: {0}")]
 struct GenesisFault(&'static str);
 
+/// Whether any workspace already holds this ADDRESS name (an in-transaction probe; the unique index is
+/// the structural backstop — a racing pair converges through the runner's retry).
+async fn workspace_name_taken(tx: &mut Transaction<'_, Postgres>, name: &str) -> Result<bool> {
+    let row = sqlx::query!(
+        r#"SELECT 1::int8 AS "one!: i64" FROM workspace WHERE name = $1"#,
+        name,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(row.is_some())
+}
+
+/// The stable id-derived fallback name: `ws-` + the first 8 hex of sha256(workspace id) — for a display
+/// name that slugifies to nothing usable, or a slug whose dedupe space is exhausted. Deterministic per
+/// workspace, and effectively collision-free (the id is fresh CSPRNG output).
+fn fallback_workspace_name(ws: &WorkspaceId) -> String {
+    let hex = topos_core::digest::to_hex(&digest::sha256(ws.as_str().as_bytes()));
+    format!("ws-{}", &hex[..8])
+}
+
+/// Resolve the ADDRESS name a genesis stores, IN the creating transaction: an EXPLICIT name must be
+/// free (its syntax/reserved validation already ran, but re-runs here as the belt) — taken is the typed
+/// refusal; an ABSENT one derives from the display name — slugify, then dedupe with `-2`…`-9`, then the
+/// id-derived fallback (never a refusal: a derived name always lands). ONE resolution shared by
+/// create-workspace, the standup approve, and the admin-claim redeem.
+async fn resolve_available_name(
+    tx: &mut Transaction<'_, Postgres>,
+    explicit: Option<&str>,
+    display_name: &str,
+    ws: &WorkspaceId,
+) -> Result<std::result::Result<String, &'static str>> {
+    if let Some(name) = explicit {
+        if let Err(reason) = validate_workspace_name(name) {
+            return Ok(Err(reason));
+        }
+        if workspace_name_taken(tx, name).await? {
+            return Ok(Err("workspace name already taken"));
+        }
+        return Ok(Ok(name.to_owned()));
+    }
+    let slug = slugify_display_name(display_name);
+    if validate_workspace_name(&slug).is_ok() {
+        if !workspace_name_taken(tx, &slug).await? {
+            return Ok(Ok(slug));
+        }
+        for n in 2..=9 {
+            // Cap the deduped candidate at the schema bound (mirroring the backfill's shape).
+            let candidate = format!("{}-{n}", &slug[..slug.len().min(60)]);
+            if !workspace_name_taken(tx, &candidate).await? {
+                return Ok(Ok(candidate));
+            }
+        }
+    }
+    Ok(Ok(fallback_workspace_name(ws)))
+}
+
 /// The shared genesis body both self-serve doors run AFTER their own idempotency/identity checks: the
-/// per-owner cap, then mint-a-fresh-id + seat (bounded re-mint on the ~impossible collision). Returns the
-/// typed denial (`Err` inner) without writing anything.
+/// per-owner cap, then mint-a-fresh-id + resolve-the-name + seat (bounded re-mint on the ~impossible id
+/// collision). Returns the typed denial (`Err` inner) without writing anything; success carries the
+/// seated `(workspace id, address name)`.
+#[allow(clippy::too_many_arguments)]
 async fn genesis_create(
     tx: &mut Transaction<'_, Postgres>,
     owner: &Principal,
     display_name: &str,
+    explicit_name: Option<&str>,
     deployment_mode: &str,
     verified_domain: Option<&str>,
     verified_domain_status: &str,
     created_at: &str,
-) -> Result<std::result::Result<WorkspaceId, &'static str>> {
+) -> Result<std::result::Result<(WorkspaceId, String), &'static str>> {
     if owned_workspace_count(tx, owner).await? >= MAX_OWNED_WORKSPACES {
         return Ok(Err("workspace creation limit reached"));
     }
     for _ in 0..8 {
         let ws = fresh_workspace_id()?;
+        let name = match resolve_available_name(tx, explicit_name, display_name, &ws).await? {
+            Ok(name) => name,
+            Err(reason) => return Ok(Err(reason)),
+        };
         match seat_workspace_and_owner(
             tx,
             &ws,
+            &name,
             display_name,
             deployment_mode,
             verified_domain,
@@ -597,7 +547,7 @@ async fn genesis_create(
         )
         .await?
         {
-            GenesisSeat::Created => return Ok(Ok(ws)),
+            GenesisSeat::Created => return Ok(Ok((ws, name))),
             GenesisSeat::Exists => continue,
         }
     }
@@ -739,18 +689,20 @@ impl Db {
     }
 
     /// Create a workspace for an already-verified owner email (door 2): the genesis-requests idempotency
-    /// probe, the per-owner cap, the fresh-id seat, the deterministic self-invite, and the request ledger —
-    /// ONE `SERIALIZABLE` (`run_serializable!`) txn.
+    /// probe, the per-owner cap, the fresh-id + address-name seat, and the request ledger —
+    /// ONE `SERIALIZABLE` (`run_serializable!`) txn. `explicit_name` is the caller's validated slug
+    /// (`None` derives one from the display name); `link_base` composes the returned address.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_workspace_txn(
         &self,
         request_sha256: &[u8; 32],
         display_name: &str,
+        explicit_name: Option<&str>,
         owner: &Principal,
         plane_mode: &str,
         verified_domain: Option<&str>,
         verified_domain_status: &str,
-        secret: &[u8; 32],
+        link_base: &str,
         created_at: &str,
     ) -> Result<CreateWorkspaceOutcome> {
         run_serializable!(self, tx, {
@@ -758,11 +710,12 @@ impl Db {
                 &mut tx,
                 request_sha256,
                 display_name,
+                explicit_name,
                 owner,
                 plane_mode,
                 verified_domain,
                 verified_domain_status,
-                secret,
+                link_base,
                 created_at,
             )
             .await
@@ -779,6 +732,7 @@ impl Db {
         user_code: &str,
         email: &Principal,
         display_name: &str,
+        explicit_name: Option<&str>,
         plane_mode: &str,
         verified_domain: Option<&str>,
         verified_domain_status: &str,
@@ -791,6 +745,7 @@ impl Db {
                 user_code,
                 email,
                 display_name,
+                explicit_name,
                 plane_mode,
                 verified_domain,
                 verified_domain_status,
@@ -912,12 +867,19 @@ async fn admin_claim_run(
     }
 
     // (5) Seat the workspace + first owner. The display name comes from the CLAIM ROW (the request's is
-    // disclosure-only); the deployment mode is THE PLANE'S (a cloud plane's break-glass claim stands up a
-    // cloud-mode workspace — never self_host on a cloud plane). Exists ⇒ denied, the claim NOT consumed.
+    // disclosure-only) and the ADDRESS slug derives from it through the one shared resolution; the
+    // deployment mode is THE PLANE'S (a cloud plane's break-glass claim stands up a cloud-mode
+    // workspace — never self_host on a cloud plane). Exists ⇒ denied, the claim NOT consumed.
     let display_name = claim.display_name.as_deref().unwrap_or(ws.as_str());
+    let name = match resolve_available_name(tx, None, display_name, &ws).await? {
+        Ok(name) => name,
+        // Unreachable for a derived name (the fallback always lands) — fail closed if it ever isn't.
+        Err(reason) => return Ok(RedeemOutcome::Denied(reason)),
+    };
     match seat_workspace_and_owner(
         tx,
         &ws,
+        &name,
         display_name,
         plane_mode,
         None,
@@ -975,17 +937,18 @@ async fn create_workspace_run(
     tx: &mut Transaction<'_, Postgres>,
     request_sha256: &[u8; 32],
     display_name: &str,
+    explicit_name: Option<&str>,
     owner: &Principal,
     plane_mode: &str,
     verified_domain: Option<&str>,
     verified_domain_status: &str,
-    secret: &[u8; 32],
+    link_base: &str,
     created_at: &str,
 ) -> Result<CreateWorkspaceOutcome> {
     let req = request_sha256.as_slice();
     // (1) The idempotency probe: a replay of the SAME request by the SAME owner returns the workspace it
-    // already created (re-deriving the identical self-invite token); the same request id under a DIFFERENT
-    // owner is denied — the slot belongs to the original.
+    // already created (re-reading its stored name, so the SAME address); the same request id under a
+    // DIFFERENT owner is denied — the slot belongs to the original.
     let prior = sqlx::query!(
         r#"SELECT owner_principal AS "owner_principal!", workspace_id AS "workspace_id!"
            FROM genesis_requests WHERE request_sha256 = $1"#,
@@ -1001,7 +964,7 @@ async fn create_workspace_run(
         let ws = WorkspaceId::parse(&prior.workspace_id).map_err(AuthorityError::integrity)?;
         let ws_s = ws.as_str();
         let row = sqlx::query!(
-            r#"SELECT display_name AS "display_name!" FROM workspace WHERE workspace_id = $1"#,
+            r#"SELECT name AS "name!", display_name AS "display_name!" FROM workspace WHERE workspace_id = $1"#,
             ws_s,
         )
         .fetch_optional(&mut **tx)
@@ -1012,19 +975,22 @@ async fn create_workspace_run(
                 "genesis_requests names a missing workspace",
             )));
         };
-        let invite_token = self_invite_token(secret, request_sha256, &ws);
+        let address = compose_address(link_base, &row.name);
         return Ok(CreateWorkspaceOutcome::Replayed(WorkspaceCreated {
             workspace_id: ws,
+            name: row.name,
             display_name: row.display_name,
-            invite_token,
+            address,
         }));
     }
 
-    // (2) The shared genesis body (cap → fresh-id seat).
-    let ws = match genesis_create(
+    // (2) The shared genesis body (cap → fresh-id + address-name seat). The address IS the share line —
+    // no invite link is minted; the roster is the lock.
+    let (ws, name) = match genesis_create(
         tx,
         owner,
         display_name,
+        explicit_name,
         plane_mode,
         verified_domain,
         verified_domain_status,
@@ -1032,29 +998,11 @@ async fn create_workspace_run(
     )
     .await?
     {
-        Ok(ws) => ws,
+        Ok(created) => created,
         Err(reason) => return Ok(CreateWorkspaceOutcome::Denied(reason)),
     };
 
-    // (3) The owner's SELF-INVITE — the paste-to-agent link the web shows. Deterministic in the request, so
-    // a replay re-derives the SAME link; member role (the owner row is already seated `confirmed`, and the
-    // row-writer never demotes it); no skills; no expiry.
-    let invite_token = self_invite_token(secret, request_sha256, &ws);
-    let invite_sha256 = enroll::sha256_token(&invite_token);
-    mint_invite_row(
-        tx,
-        &ws,
-        &invite_sha256,
-        None,
-        owner.as_str(),
-        Role::Member,
-        std::slice::from_ref(owner),
-        &[],
-        created_at,
-    )
-    .await?;
-
-    // (4) The request ledger — a plain INSERT: `genesis_requests_pkey` is in the runner's CONVERGENT 23505
+    // (3) The request ledger — a plain INSERT: `genesis_requests_pkey` is in the runner's CONVERGENT 23505
     // set, so a concurrent same-request racer aborts, retries, and replays the winner's workspace.
     let ws_s = ws.as_str();
     let prin = owner.as_str();
@@ -1077,36 +1025,13 @@ async fn create_workspace_run(
     .fetch_one(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
+    let address = compose_address(link_base, &name);
     Ok(CreateWorkspaceOutcome::Created(WorkspaceCreated {
         workspace_id: ws,
+        name,
         display_name: row.display_name,
-        invite_token,
+        address,
     }))
-}
-
-/// The deterministic self-invite token for a created workspace: the create-invite derivation shape with the
-/// REQUEST identity (its sha256) in the op-id slot — so a lost-ack replay re-derives the identical link.
-/// Binds the member role byte, an empty skill set, and the no-expiry sentinel, exactly as an owner-driven
-/// invite with those parameters would. Shared with [`super::session_roster`]'s door resolution (a
-/// create-page-born workspace's standing door IS this token until the first rotation revokes it).
-pub(super) fn self_invite_token(
-    secret: &[u8; 32],
-    request_sha256: &[u8; 32],
-    ws: &WorkspaceId,
-) -> String {
-    let role_byte = [Role::Member.derivation_byte()];
-    let expires_be = crate::governance::INVITE_NO_EXPIRY.to_be_bytes();
-    enroll::derive_token(
-        secret,
-        b"invite",
-        &[
-            request_sha256.as_slice(),
-            ws.as_str().as_bytes(),
-            role_byte.as_slice(),
-            b"",
-            expires_be.as_slice(),
-        ],
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,6 +1040,7 @@ async fn approve_standup_run(
     user_code: &str,
     email: &Principal,
     display_name: &str,
+    explicit_name: Option<&str>,
     plane_mode: &str,
     verified_domain: Option<&str>,
     verified_domain_status: &str,
@@ -1155,12 +1081,13 @@ async fn approve_standup_run(
         return Err(AuthorityError::NotFound);
     }
 
-    // (4) The shared genesis body (cap → fresh-id seat) for the signed-in owner. A cap denial propagates
-    // typed to the approving web page.
-    let ws = match genesis_create(
+    // (4) The shared genesis body (cap → fresh-id + address-name seat) for the signed-in owner. A cap
+    // or name denial propagates typed to the approving web page.
+    let (ws, _name) = match genesis_create(
         tx,
         email,
         display_name,
+        explicit_name,
         plane_mode,
         verified_domain,
         verified_domain_status,
@@ -1168,7 +1095,7 @@ async fn approve_standup_run(
     )
     .await?
     {
-        Ok(ws) => ws,
+        Ok(created) => created,
         Err(reason) => return Ok(ApproveStandupOutcome::Denied(reason)),
     };
 
@@ -1339,9 +1266,4 @@ async fn record_event(
         },
     )
     .await
-}
-
-/// `expires_at` (epoch-ms; `None` = never) → the `u64` the governance frame binds (`None`/negative → 0).
-fn expires_to_u64(expires_at: Option<i64>) -> u64 {
-    u64::try_from(expires_at.unwrap_or(0)).unwrap_or(0)
 }

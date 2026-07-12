@@ -103,9 +103,48 @@ impl ProtectLevel {
     }
 }
 
+/// One channel of the workspace, as [`channels_index`] returns it: identity + mode + whether the
+/// caller belongs, the member count, and the skill references it holds (both name-sorted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelIndexEntry {
+    /// The channel's user-facing name (`everyone` for the structural builtin).
+    pub name: String,
+    /// `"open"` / `"curated"` — the mode the curation gate reads.
+    pub mode: String,
+    /// The structural `everyone` (roster-derived membership; unjoinable/unleavable).
+    pub builtin: bool,
+    /// Whether the caller belongs (always true for `builtin`, else a `channel_members` row exists).
+    pub member: bool,
+    /// The member count: the confirmed-roster size for `builtin`, else the `channel_members` count.
+    pub member_count: u64,
+    /// The skill references the channel holds, name-sorted.
+    pub skills: Vec<ChannelSkillRef>,
+}
+
+/// One skill reference held by a channel — the immutable custody id + the current catalog name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSkillRef {
+    pub skill_id: String,
+    pub name: String,
+}
+
+/// The channels index (`channel` bare read): every channel of the workspace — `everyone` included,
+/// name-sorted — with the caller's membership, the member count, and the name-sorted skill
+/// references. Device-lane authenticated + front-doored by the ONE membership predicate; a miss is
+/// the uniform [`AuthorityError::NotFound`].
+pub(crate) async fn channels_index(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    credential: &str,
+) -> Result<Vec<ChannelIndexEntry>> {
+    let identity = device_member(authority, ws, credential).await?;
+    authority.db().channels_index(ws, &identity.principal).await
+}
+
 /// The shared device-lane front door: credential sha256 → non-revoked registry row → CONFIRMED
-/// membership. Every miss is the caller's uniform `NotFound`.
-async fn device_member(
+/// membership. Every miss is the caller's uniform `NotFound`. `pub(crate)` so the sibling `describe`
+/// ops share the one front door rather than re-deriving it.
+pub(crate) async fn device_member(
     authority: &Authority,
     ws: &WorkspaceId,
     credential: &str,

@@ -205,8 +205,12 @@ pub struct ReviewRequest {
     /// The proposal being reviewed, named by its candidate commit id (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub proposal: String,
-    /// The verdict — `approve` (promote) or `reject`.
+    /// The verdict — `approve` (promote), `reject` (with its reason), or `withdraw` (the author
+    /// retracting their own open proposal).
     pub decision: ReviewDecision,
+    /// The reject's reason, carried back to the author (REQUIRED on `reject`; absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// One file of a version's metadata on the wire — its path, mode, and content id (`object_id`), mirroring
@@ -458,6 +462,9 @@ pub struct WireDelivery {
     pub notices: Vec<WireNotice>,
     /// The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).
     pub proposals_awaiting: u64,
+    /// The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the
+    /// client's hook warning both read: a device whose last report is older than this is stale.
+    pub staleness_window_ms: u64,
 }
 
 /// One applied-state row a device reports: the skill and the version it currently holds after its
@@ -501,9 +508,10 @@ pub struct WireAppliedReport {
 // the grant's bound key — a binding check, not a possession proof. Field names are snake_case as written.
 // =================================================================================================
 
-/// A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace through
-/// an invite; `standup` starts with NO workspace (a signed-in human's approval creates one and seats the
-/// approver as its first owner).
+/// A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace named
+/// by its ADDRESS; `standup` starts with NO workspace (a signed-in human's approval creates one and seats
+/// the approver as its first owner); `login` proves the person's identity and re-mints this device's
+/// workspace credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -511,27 +519,33 @@ pub struct WireAppliedReport {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SessionIntent {
-    /// Join an existing workspace (the invite-anchored flow — the default when the field is absent).
+    /// Join an existing workspace, named by its address (the default when a `workspace` is present).
     Enroll,
     /// Create a workspace on approval (the hosted self-serve first-boot flow).
     Standup,
+    /// Prove the person's identity and re-mint this device's credential in every workspace where that
+    /// identity holds a confirmed seat (sign-in + the one credential-recovery action).
+    Login,
 }
 
-/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With an `invite_token`
-/// (the default `enroll` intent) the device enrolls against that invite; with `intent = "standup"` — or no
-/// invite token at all — it starts a STANDUP session (no workspace yet; hosted planes only). The server
-/// SERVER-derives the device key id from `device_public_key` (a client-asserted id is never trusted).
+/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With a `workspace`
+/// (the address name; the default `enroll` intent) the device enrolls toward that workspace; with
+/// `intent = "standup"` — or neither field — it starts a STANDUP session (no workspace yet; hosted
+/// planes only); with `intent = "login"` it starts a workspace-less LOGIN session whose grant redeems
+/// at `POST /v1/login`. The server SERVER-derives the device key id from `device_public_key` (a
+/// client-asserted id is never trusted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthorizeRequest {
-    /// The opaque `/i/<token>` invite token the device enrolls against. Absent ⇒ a standup start (no invite
-    /// exists before the workspace does).
+    /// The workspace ADDRESS name an enroll session targets (`topos.sh/<name>` minus the origin).
+    /// Whether the name exists is never disclosed on this route: an unknown name runs the same flow to
+    /// the same uniform denial a not-yours workspace gets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invite_token: Option<String>,
-    /// The session intent. Absent defaults to `enroll` when an invite token is present, `standup` otherwise.
+    pub workspace: Option<String>,
+    /// The session intent. Absent defaults to `enroll` when a workspace is named, `standup` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<SessionIntent>,
     /// The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from
@@ -613,6 +627,10 @@ pub struct DeviceTokenWorkspace {
     pub workspace_id: String,
     /// The workspace display name (a disclosure aid; `""` if the plane no longer has one).
     pub display_name: String,
+    /// The workspace's full ADDRESS (server-built on the public link base) — the share line's root;
+    /// absent when the plane predates addresses or the grant is workspace-less.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
@@ -836,42 +854,39 @@ pub enum WorkspaceRole {
     Member,
 }
 
-/// One skill an invite pre-offers, with an optional display name (the name is NOT part of the invite's
-/// identity — only the skill id is — so a rename never forks the deterministic invite link).
+/// `POST /v1/workspaces/{ws}/invitations` body — invitation as a ROSTER WRITE: seat each email as an
+/// invited member (recording who invited whom) and optionally pre-place the person into channels.
+/// There is no invite link and no role field — every CLI invitee starts as a member (roles are raised
+/// later, on the web), and joining is `follow <address>` plus proof of the invited email. Member-level
+/// unless the workspace's invite policy restricts inviting to owners.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct InviteSkill {
-    /// The offered skill id.
-    pub skill_id: String,
-    /// An optional display name to carry on the invite.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+pub struct InvitationRequest {
+    /// The emails to seat as invited members (folded to the canonical lowercase form server-side).
+    pub emails: Vec<String>,
+    /// Channel names to pre-place each invitee into (re-inviting restores placements; the structural
+    /// `everyone` needs no placement and is accepted as a no-op).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
 }
 
-/// `POST /v1/invites` body — mint an `/i/<token>` invite link, seeding the invited emails onto the roster
-/// (omitted `role` defaults to `member`). Returns [`InviteData`](crate::results::InviteData) on success.
+/// `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace
+/// ADDRESS (the whole invitation besides the roster rows themselves).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct InviteRequest {
-    /// The target workspace id (scopes the op to one workspace).
-    pub workspace_id: String,
-    /// The client-minted UUIDv4 idempotency key (a retry replays the deterministic link + receipt).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
-    pub op_id: String,
-    /// The emails to invite (seeded onto the roster as `invited`).
-    pub emails: Vec<String>,
-    /// The role the invitees are granted — omitted defaults to `member` (the client signs the same byte).
-    #[serde(default)]
-    pub role: Option<WorkspaceRole>,
-    /// The skills the invite pre-offers (each with an optional display name).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<InviteSkill>,
+pub struct InvitationData {
+    /// The workspace address (the share link — it carries nothing; the roster is the lock).
+    pub address: String,
+    /// The emails now seated as invited members (canonical form).
+    pub invited: Vec<String>,
+    /// Whether invitation mail was sent server-side (`true` only when the server can send mail).
+    pub mailed: bool,
 }
 
 /// `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
@@ -937,6 +952,314 @@ pub struct DeviceRevokeRequest {
 pub struct PolicyReviewRequiredRequest {
     /// The desired policy value: `true` gates any direct publish behind a reviewer's approval.
     pub review_required: bool,
+}
+
+// =================================================================================================
+// The adopted verb surface — subscription / curation / protection / notices / invitation wire
+// bodies, the login redeem, and the member-scoped describe reads the two-phase verbs run.
+// =================================================================================================
+
+/// `POST /v1/login` body — redeem a LOGIN grant: prove the device key the grant is bound to and
+/// receive one workspace credential per confirmed seat. The grant is the bearer credential; the
+/// device public key is a binding check (nothing signs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct LoginRedeemRequest {
+    /// The opaque grant from the login device flow (the bearer credential for this one exchange).
+    pub grant: String,
+    /// The device's raw 32-byte public key, base64url-unpadded — must equal the grant's bound key.
+    pub device_public_key: String,
+}
+
+/// One workspace a login re-minted (or could not re-mint) a credential for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct LoginMembership {
+    /// The workspace id.
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub name: String,
+    /// The workspace's display name.
+    pub display_name: String,
+    /// The person's role on the seat (`owner` / `reviewer` / `member`).
+    pub role: String,
+    /// The device's non-secret key id in this workspace (server-derived).
+    pub device_key_id: String,
+    /// The freshly minted plaintext workspace credential — absent when the mint was refused (see
+    /// `blocked`). Returned ONCE; the server stores only its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    /// Why no credential was minted (e.g. this device is revoked in that workspace); absent on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
+}
+
+/// `POST /v1/login` success `data` — the proven identity + one entry per confirmed seat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct LoginData {
+    /// The proven principal (canonical form).
+    pub principal: String,
+    /// One entry per workspace where the principal holds a confirmed seat (possibly empty).
+    pub memberships: Vec<LoginMembership>,
+}
+
+/// `PUT /v1/workspaces/{ws}/skills/{skill}/protection` and
+/// `PUT /v1/workspaces/{ws}/channels/{ch}/protection` body — the safety knob. Levels are per kind:
+/// `reviewed`/`open` for a skill bundle, `curated`/`open` for a channel. Tightening takes reviewer+;
+/// loosening back to `open` takes an owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ProtectionSetRequest {
+    /// The target level (`open`, `reviewed` for skills, `curated` for channels).
+    pub level: String,
+}
+
+/// `POST /v1/workspaces/{ws}/notices/ack` body — acknowledge notices by id (person-scoped read-state;
+/// the silent hook fetches without acking, an interactive narration acks what it narrated).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct NoticeAckRequest {
+    /// The notice ids to mark read (only the caller's own unacked rows move; unknown ids are ignored).
+    pub ids: Vec<String>,
+}
+
+/// The MACHINE face of the constant protocol card — what an `Accept: application/json` GET of any
+/// resource address returns, identical for every path (no content, no existence signal): just enough
+/// for a client to re-root onto the API and run `follow`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireProtocolCard {
+    /// Always `1` for this contract version (the schema pins it `const`).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    pub schema_version: u32,
+    /// The constant discriminant a client dispatches on (`"topos-protocol-card"`).
+    pub card: String,
+    /// The API base URL the client re-roots onto (the origin serving `/v1`).
+    pub api_base_url: String,
+}
+
+/// `GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,
+/// who added you, and the workspace's address block. Member-scoped (the uniform not-found otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireMe {
+    /// The workspace id.
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub name: String,
+    /// The workspace's display name.
+    pub display_name: String,
+    /// The workspace's full address (the share link — server-built on the public link base).
+    pub address: String,
+    /// The caller's principal (canonical form).
+    pub principal: String,
+    /// The caller's role (`owner` / `reviewer` / `member`).
+    pub role: String,
+    /// Who invited this principal (absent for a genesis owner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invited_by: Option<String>,
+    /// The workspace's invite policy (`members` or `owners`).
+    pub invite_policy: String,
+}
+
+/// One skill reference inside a channel entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireChannelSkill {
+    /// The referenced skill id.
+    pub skill_id: String,
+    /// The skill's catalog name.
+    pub name: String,
+}
+
+/// One channel in the workspace's channel index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireChannelEntry {
+    /// The channel's name.
+    pub name: String,
+    /// The channel's mode (`open` or `curated`).
+    pub mode: String,
+    /// Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left).
+    pub builtin: bool,
+    /// Whether the CALLER is a member (always `true` on `everyone`).
+    pub member: bool,
+    /// How many people the channel reaches (confirmed roster size for `everyone`).
+    pub member_count: u64,
+    /// The skills the channel references.
+    pub skills: Vec<WireChannelSkill>,
+}
+
+/// `GET /v1/workspaces/{ws}/channels` response — the workspace's channels with the caller's own
+/// membership marked. Member-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireChannelIndex {
+    /// The channels (the structural `everyone` always present).
+    pub channels: Vec<WireChannelEntry>,
+}
+
+/// One open proposal in the workspace's review inbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireProposalEntry {
+    /// The skill the proposal targets.
+    pub skill_id: String,
+    /// The skill's catalog name.
+    pub skill_name: String,
+    /// The proposed version's commit id (64-char lowercase hex) — the review target handle.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The base version the proposal was built on (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub base_version_id: String,
+    /// The author's principal.
+    pub proposer: String,
+    /// The author's message (the proposed version's commit message) — what a reviewer reads FIRST.
+    pub message: String,
+    /// When the proposal was opened (the server-stamped string).
+    pub created_at: String,
+    /// Whether `current` has moved since the proposal's base (a stale proposal needs a re-propose).
+    pub stale: bool,
+}
+
+/// `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message
+/// first. The caller splits inbox (others') from outbox (own) by `proposer`. Member-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireProposalIndex {
+    /// The open proposals (possibly empty).
+    pub proposals: Vec<WireProposalEntry>,
+}
+
+/// One version in a skill's history. A PURGED version stays listed — who purged it and when — with its
+/// bytes gone (author/message may be absent once the underlying objects are reclaimed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireLogVersion {
+    /// The version's commit id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The version author, when the commit object is still readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// The version message, when the commit object is still readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Whether this version is the skill's `current`.
+    pub current: bool,
+    /// When the version's bytes were purged (epoch milliseconds) — the tombstone half.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purged_at: Option<i64>,
+    /// Who purged the version's bytes — the tombstone half.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purged_by: Option<String>,
+}
+
+/// One proposal event in a skill's history (open, and every resolution).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireLogProposal {
+    /// The proposed version's commit id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// The author's principal.
+    pub proposer: String,
+    /// The proposal's status (`open` / `accepted` / `rejected` / `closed`).
+    pub status: String,
+    /// Who resolved it, when resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    /// The resolution reason (a reject's rationale; a closure's cause), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_reason: Option<String>,
+    /// When it was resolved (server-stamped string), when resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    /// When the proposal was opened (server-stamped string).
+    pub created_at: String,
+}
+
+/// `GET /v1/workspaces/{ws}/skills/{skill}/log` response — the skill's version history (purge
+/// tombstones included) and its proposal events. An ARCHIVED skill stays addressable here; asking by a
+/// freed base name answers the archived successor as a hint. Member-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireSkillLog {
+    /// The skill id.
+    pub skill_id: String,
+    /// The skill's current catalog name (the archived spelling once archived).
+    pub name: String,
+    /// The skill's lifecycle status (`active` / `archived` / `deleted`).
+    pub status: String,
+    /// The pre-archive name, when archived (what the skill was called before the rename freed it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_name: Option<String>,
+    /// The versions, newest first where orderable (the ancestry walk stops at reclaimed history;
+    /// tombstoned leftovers follow unordered).
+    pub versions: Vec<WireLogVersion>,
+    /// The proposal events, newest first.
+    pub proposals: Vec<WireLogProposal>,
+}
+
+/// `GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill
+/// reaches (the describe number behind `publish` and `protect`). Member-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireReach {
+    /// How many people are entitled to the skill.
+    pub persons: u64,
+    /// How many registered, non-revoked devices those people hold here.
+    pub devices: u64,
 }
 
 #[cfg(test)]

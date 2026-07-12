@@ -271,13 +271,17 @@ impl Db {
         deployment_mode: &str,
     ) -> Result<()> {
         let ws_s = ws.as_str();
+        // The ADDRESS name derives from the WORKSPACE ID (unique per seeded row, so two seeded
+        // workspaces sharing a display name never collide on the name index): `w_acme` -> `w-acme`.
+        let name = crate::governance::slugify_display_name(ws_s);
         sqlx::query!(
-            "INSERT INTO workspace (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) \
-             VALUES ($1, $2, NULL, $3, $4, 'seed') \
+            "INSERT INTO workspace (workspace_id, name, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) \
+             VALUES ($1, $2, $3, NULL, $4, $5, 'seed') \
              ON CONFLICT (workspace_id) DO UPDATE SET \
                display_name = excluded.display_name, verified_domain_status = excluded.verified_domain_status, \
                deployment_mode = excluded.deployment_mode",
             ws_s,
+            name,
             display_name,
             verified_domain_status,
             deployment_mode,

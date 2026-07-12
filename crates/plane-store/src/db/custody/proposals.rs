@@ -420,9 +420,20 @@ pub(super) async fn read_open_proposal(
     }
 }
 
+/// A resolved proposal row, as the reject/withdraw classification consumes it: the row id + status,
+/// plus the resolution facts a WITHDRAW's idempotency probe reads (was this already withdrawn, and by
+/// whom).
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedProposal {
+    pub(crate) id: String,
+    pub(crate) status: ProposalStatus,
+    pub(crate) resolved_by: Option<String>,
+    pub(crate) resolved_reason: Option<String>,
+}
+
 /// Resolve the proposal of `(ws, skill, commit, base)` and LOCK the resolved row (`SELECT … FOR UPDATE`),
 /// preferring `open`, then `accepted`, then `rejected` — so the reject/withdraw path can classify its
-/// target: reject an `open` one, refuse an `accepted` one, treat an already-`rejected` one as an idempotent
+/// target: resolve an `open` one, refuse an `accepted` one, treat an already-`rejected` one as an idempotent
 /// no-op. The `FOR UPDATE` serializes a concurrent approve-vs-reject on the same row (reject never touches
 /// `current`, so it cannot rely on the pointer CAS); the SERIALIZABLE runner covers the phantom case. `None`
 /// ⇒ no proposal of this candidate+base ever existed (nothing to reject). (Once a candidate is accepted,
@@ -434,14 +445,16 @@ pub(super) async fn resolve_proposal(
     skill: &SkillId,
     commit: CommitId,
     base: Generation,
-) -> Result<Option<(String, ProposalStatus)>> {
+) -> Result<Option<ResolvedProposal>> {
     let ws_s = ws.as_str();
     let skill_s = skill.as_str();
     let cid = commit.0.as_slice();
     let base_epoch = u64_to_i64(base.epoch)?;
     let base_seq = u64_to_i64(base.seq)?;
     let row = sqlx::query!(
-        r#"SELECT id AS "id!", status AS "status!" FROM proposals
+        r#"SELECT id AS "id!", status AS "status!", resolved_by AS "resolved_by?",
+                  resolved_reason AS "resolved_reason?"
+           FROM proposals
            WHERE workspace_id = $1 AND skill_id = $2 AND commit_id = $3
              AND base_epoch = $4 AND base_seq = $5
            ORDER BY (status = 'open') DESC, (status = 'accepted') DESC LIMIT 1
@@ -457,8 +470,47 @@ pub(super) async fn resolve_proposal(
     .map_err(AuthorityError::internal)?;
     match row {
         None => Ok(None),
-        Some(r) => Ok(Some((r.id, parse_status(&r.status)?))),
+        Some(r) => Ok(Some(ResolvedProposal {
+            id: r.id,
+            status: parse_status(&r.status)?,
+            resolved_by: r.resolved_by,
+            resolved_reason: r.resolved_reason,
+        })),
     }
+}
+
+/// SUPERSEDE the author's other drafts: close every OPEN proposal on `(ws, skill)` by `proposer` whose
+/// candidate DIFFERS from `keep_commit` (`status = 'closed'`, `resolved_by` = the proposer,
+/// `resolved_reason = 'superseded'`). Run by the propose arm before it opens the fresh row; the closed
+/// rows drop out of the `open ∧ base == current` keep/read predicate, so their unique bytes reclaim on
+/// the next GC pass. No notice — the author did it.
+pub(super) async fn close_superseded_proposals(
+    tx: &mut Transaction<'_, Postgres>,
+    ws: &WorkspaceId,
+    skill: &SkillId,
+    proposer: &Principal,
+    keep_commit: CommitId,
+    resolved_at: &str,
+) -> Result<()> {
+    let ws_s = ws.as_str();
+    let skill_s = skill.as_str();
+    let prop = proposer.as_str();
+    let keep = keep_commit.0.as_slice();
+    sqlx::query!(
+        "UPDATE proposals \
+         SET status = 'closed', resolved_by = $3, resolved_reason = 'superseded', resolved_at = $5 \
+         WHERE workspace_id = $1 AND skill_id = $2 AND proposer = $3 AND status = 'open' \
+           AND commit_id <> $4",
+        ws_s,
+        skill_s,
+        prop,
+        keep,
+        resolved_at,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
 }
 
 /// The proposal's author (for the verdict notice), by row id. `None` if the row vanished (it never

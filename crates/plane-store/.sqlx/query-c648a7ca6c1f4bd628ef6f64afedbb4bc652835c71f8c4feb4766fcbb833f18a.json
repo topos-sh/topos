@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_code AS \"user_code!\", workspace_id AS \"workspace_id?\",\n                  invite_sha256 AS \"invite_sha256?: Vec<u8>\", device_pubkey AS \"device_pubkey!: Vec<u8>\",\n                  device_key_id AS \"device_key_id!\", status AS \"status!\",\n                  confirmed_principal AS \"confirmed_principal?\", expires_at AS \"expires_at!: i64\",\n                  interval_secs AS \"interval_secs!: i64\", last_polled_at AS \"last_polled_at?: i64\"\n           FROM device_auth_sessions WHERE device_code_sha256 = $1",
+  "query": "SELECT user_code AS \"user_code!\", workspace_id AS \"workspace_id?\",\n                  intent AS \"intent!\", device_pubkey AS \"device_pubkey!: Vec<u8>\",\n                  device_key_id AS \"device_key_id!\", status AS \"status!\",\n                  confirmed_principal AS \"confirmed_principal?\", expires_at AS \"expires_at!: i64\",\n                  interval_secs AS \"interval_secs!: i64\", last_polled_at AS \"last_polled_at?: i64\"\n           FROM device_auth_sessions WHERE device_code_sha256 = $1",
   "describe": {
     "columns": [
       {
@@ -15,8 +15,8 @@
       },
       {
         "ordinal": 2,
-        "name": "invite_sha256?: Vec<u8>",
-        "type_info": "Bytea"
+        "name": "intent!",
+        "type_info": "Text"
       },
       {
         "ordinal": 3,
@@ -62,7 +62,7 @@
     "nullable": [
       false,
       true,
-      true,
+      false,
       false,
       false,
       false,
@@ -72,5 +72,5 @@
       true
     ]
   },
-  "hash": "6c457ad994bf0c543d8f996dabca2380201a1b327375ba243b614a76765a783b"
+  "hash": "c648a7ca6c1f4bd628ef6f64afedbb4bc652835c71f8c4feb4766fcbb833f18a"
 }

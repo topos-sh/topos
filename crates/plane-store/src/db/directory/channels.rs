@@ -11,8 +11,8 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::channels::{
-    ChannelMembershipOutcome, CurationOutcome, ProtectKind, ProtectLevel, ProtectOutcome,
-    SubscriptionOutcome,
+    ChannelIndexEntry, ChannelMembershipOutcome, ChannelSkillRef, CurationOutcome, ProtectKind,
+    ProtectLevel, ProtectOutcome, SubscriptionOutcome,
 };
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
@@ -270,6 +270,80 @@ impl Db {
                 other => return Err(unexpected("topos_protect", other)),
             })
         })
+    }
+
+    /// The workspace's channels index: every channel — `everyone` included, name-sorted — with the
+    /// caller's membership, its member count (roster-derived for the builtin, else the
+    /// `channel_members` count), and its name-sorted skill references. Two pool reads assembled in
+    /// Rust: the skill references grouped by channel, then the channels with `member`/`member_count`
+    /// computed per row. The caller's membership gate has already run (a pure read; no transaction).
+    pub(crate) async fn channels_index(
+        &self,
+        ws: &WorkspaceId,
+        principal: &Principal,
+    ) -> Result<Vec<ChannelIndexEntry>> {
+        let (ws_s, prin) = (ws.as_str(), principal.as_str());
+        // Skill references first, name-sorted through the catalog, then grouped by channel.
+        let skill_rows = sqlx::query!(
+            r#"SELECT cs.channel_id AS "channel_id!", cs.skill_id AS "skill_id!", cat.name AS "name!"
+               FROM channel_skills cs
+               JOIN catalog cat ON cat.workspace_id = cs.workspace_id AND cat.skill_id = cs.skill_id
+               WHERE cs.workspace_id = $1
+               ORDER BY cat.name"#,
+            ws_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        let mut by_channel: std::collections::HashMap<String, Vec<ChannelSkillRef>> =
+            std::collections::HashMap::new();
+        for r in skill_rows {
+            by_channel
+                .entry(r.channel_id)
+                .or_default()
+                .push(ChannelSkillRef {
+                    skill_id: r.skill_id,
+                    name: r.name,
+                });
+        }
+        // The channels, with membership + count computed per row (builtin ⇒ roster-derived, so the
+        // structural `everyone` needs no `channel_members` rows).
+        let rows = sqlx::query!(
+            r#"SELECT ch.channel_id AS "channel_id!", ch.name AS "name!", ch.mode AS "mode!",
+                      ch.builtin AS "builtin!: i64",
+                      (CASE WHEN ch.builtin = 1 THEN 1
+                            WHEN EXISTS (SELECT 1 FROM channel_members cm
+                                         WHERE cm.workspace_id = ch.workspace_id
+                                           AND cm.channel_id = ch.channel_id AND cm.principal = $2)
+                            THEN 1 ELSE 0 END)::int8 AS "member!: i64",
+                      (CASE WHEN ch.builtin = 1
+                            THEN (SELECT COUNT(*) FROM workspace_member m
+                                  WHERE m.workspace_id = ch.workspace_id AND m.status = 'confirmed')
+                            ELSE (SELECT COUNT(*) FROM channel_members cm
+                                  WHERE cm.workspace_id = ch.workspace_id AND cm.channel_id = ch.channel_id)
+                            END) AS "member_count!: i64"
+               FROM channels ch
+               WHERE ch.workspace_id = $1
+               ORDER BY ch.name"#,
+            ws_s,
+            prin,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(ChannelIndexEntry {
+                    skills: by_channel.remove(&r.channel_id).unwrap_or_default(),
+                    name: r.name,
+                    mode: r.mode,
+                    builtin: r.builtin != 0,
+                    member: r.member != 0,
+                    member_count: u64::try_from(r.member_count)
+                        .map_err(AuthorityError::integrity)?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -536,7 +610,9 @@ fn map_curation(code: &str, function: &'static str) -> Result<CurationOutcome> {
     })
 }
 
-fn unexpected(function: &'static str, outcome: &str) -> AuthorityError {
+/// `pub(super)` so the sibling `describe` db twin maps its own guarded-function outcomes through the
+/// SAME internal-fault helper (one out-of-contract-outcome vocabulary for every `topos_*` call).
+pub(super) fn unexpected(function: &'static str, outcome: &str) -> AuthorityError {
     AuthorityError::internal(UnexpectedPolicyOutcome {
         function,
         outcome: outcome.to_owned(),

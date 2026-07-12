@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workspace (workspace_id, name, display_name, verified_domain, verified_domain_status, deployment_mode, created_at) VALUES ($1, $2, $3, NULL, $4, $5, 'seed') ON CONFLICT (workspace_id) DO UPDATE SET display_name = excluded.display_name, verified_domain_status = excluded.verified_domain_status, deployment_mode = excluded.deployment_mode",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c1c776ebfe389bb40bd9e7db0ae6617ecdb66a0baa6b74c06ef93cfc04bdaeba"
+}

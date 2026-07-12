@@ -2,22 +2,25 @@
 //!
 //! The hosted cloud's "manage the team in settings" surface: a composing plane whose WEB layer has
 //! verified a session email calls these PRIVILEGED lib-level ops (there is no OSS HTTP route) to
-//! invite members, remove them, and show/rotate the ONE standing workspace door link. Split from
+//! invite members, remove them, and read the roster. Split from
 //! [`crate::governance`] the way that module split from [`crate::enroll`]: this file models the
 //! session ops and does the work OUTSIDE the one write transaction (posture gate, request-id parse,
 //! email parse, the deterministic request identity); the raw SQL — and the `SERIALIZABLE`
 //! (`run_serializable!`) transactions — live in [`crate::db`].
 //!
+//! An invitation is a ROSTER WRITE and nothing more: the tokened invite link (and its standing-door
+//! rotation) is gone — the workspace ADDRESS is what these ops disclose, and it is just a name (links
+//! carry nothing; the roster is the lock, so the address is safe to show any confirmed member).
+//!
 //! The trust shape mirrors [`Authority::create_workspace`](crate::Authority::create_workspace), not
-//! the device-signed governance ops: there is no signature to verify — the composing caller's own
+//! the device governance ops: there is no signature to verify — the composing caller's own
 //! session verification is the authentication, and the ACTING GATE (the acting email must hold a
 //! confirmed **owner** seat, checked in-transaction) is the authorization. Every mutation is
 //! `request_id`-idempotent through the same `workspace_events` slot the device lane uses, with a
 //! FRESH domain-tagged request identity (the kernel governance preimage needs a signature frame no
 //! session op has), so a device op id and a session request id can never replay each other — a
-//! cross-leg id collision always fails closed as a key reuse. All four ops (the read included) are
-//! uniformly denied on a self-host plane: self-host membership stays the device invite
-//! chain.
+//! cross-leg id collision always fails closed as a key reuse. All ops (the read included) are
+//! uniformly denied on a self-host plane: self-host joining stays the device lane.
 
 use crate::authority::Authority;
 use crate::enroll::{DeploymentMode, parse_op_id};
@@ -40,7 +43,7 @@ const MAX_SESSION_INVITE_EMAILS: usize = 20;
 pub(crate) const SESSION_ACTING_DENIED: &str = "session roster ops require a confirmed owner";
 
 /// The role a session invite may seat — owner is unrepresentable by construction (an owner-role
-/// grant stays the device invite chain).
+/// grant stays a web roster-set ceremony, never an invitation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionInviteRole {
     /// An ordinary member.
@@ -70,58 +73,20 @@ impl SessionInviteRole {
     }
 }
 
-/// The outcome of [`Authority::invite_members_session`]. `Debug` REDACTS `invite_token` — the
-/// standing door is a live workspace-wide join credential (like a magic link), so it must never
-/// reach a log or trace through a formatted value (the crate convention `MintedClaim` set).
-#[derive(Clone)]
+/// The outcome of [`Authority::invite_members_session`]. The disclosed `address` is just the
+/// workspace's name under the public link base — a plain fact, not a credential (the roster is the
+/// lock), so nothing here needs redaction.
+#[derive(Debug, Clone)]
 pub enum SessionInviteOutcome {
-    /// The seats are seeded and the standing door stands (or the identical request replayed).
+    /// The seats are seeded (or the identical request replayed).
     Invited {
-        /// The standing workspace door token (compose `<link_base>/i/<token>` to show it).
-        invite_token: String,
+        /// The workspace ADDRESS the invitees join at (`follow <address>` + proof of the invited email).
+        address: String,
         /// How many distinct addresses were seated.
         seated: usize,
     },
     /// The request was denied (a uniform denial; the static reason is for server logs).
     Denied(&'static str),
-}
-
-impl std::fmt::Debug for SessionInviteOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SessionInviteOutcome::Invited { seated, .. } => f
-                .debug_struct("Invited")
-                .field("invite_token", &"<redacted>")
-                .field("seated", seated)
-                .finish(),
-            SessionInviteOutcome::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
-        }
-    }
-}
-
-/// The outcome of [`Authority::rotate_join_link_session`]. `Debug` REDACTS the new door token (see
-/// [`SessionInviteOutcome`]).
-#[derive(Clone)]
-pub enum SessionRotateOutcome {
-    /// The door rotated: the prior door family is revoked and this token is the new standing door.
-    Rotated {
-        /// The NEW standing door token (a replay re-derives the epoch it originally minted).
-        invite_token: String,
-    },
-    /// The request was denied (a uniform denial; the static reason is for server logs).
-    Denied(&'static str),
-}
-
-impl std::fmt::Debug for SessionRotateOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SessionRotateOutcome::Rotated { .. } => f
-                .debug_struct("Rotated")
-                .field("invite_token", &"<redacted>")
-                .finish(),
-            SessionRotateOutcome::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
-        }
-    }
 }
 
 /// One workspace seat, as the roster read discloses it.
@@ -137,27 +102,14 @@ pub struct RosterSeat {
     pub added_at: String,
 }
 
-/// The roster read's disclosure: every seat, plus — for a confirmed OWNER caller only — the
-/// standing door token (`None` also when no door exists yet, e.g. a standup-born workspace before
-/// its first session invite or rotation). `Debug` REDACTS the token (see [`SessionInviteOutcome`]).
-#[derive(Clone)]
+/// The roster read's disclosure: every seat, plus the workspace ADDRESS — member-visible (it is a
+/// name, not a door; joining still gates on the roster).
+#[derive(Debug, Clone)]
 pub struct RosterView {
     /// The workspace's seats (invited and confirmed), ordered by `added_at` then email.
     pub seats: Vec<RosterSeat>,
-    /// The standing door token — disclosed ONLY to a confirmed owner, and only if a door stands.
-    pub invite_token: Option<String>,
-}
-
-impl std::fmt::Debug for RosterView {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RosterView")
-            .field("seats", &self.seats)
-            .field(
-                "invite_token",
-                &self.invite_token.as_ref().map(|_| "<redacted>"),
-            )
-            .finish()
-    }
+    /// The workspace's full address (`<link_base>/<name>`).
+    pub address: String,
 }
 
 /// The server-trusted inputs to a session-leg transaction.
@@ -210,7 +162,8 @@ fn session_request_sha256(
 /// Invite members from a verified owner session (the orchestration half of
 /// [`Authority::invite_members_session`]). Parses everything INSIDE the op, dedupes the invited
 /// set (the deterministic payload identity), and runs the one transaction (replay → acting gate →
-/// ensure-the-door → seat → receipt).
+/// seat → receipt). What comes back is the workspace ADDRESS, not a link: the seats are the
+/// invitation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn invite_members_session(
     authority: &Authority,
@@ -264,7 +217,7 @@ pub(crate) async fn invite_members_session(
         &acting,
         &[role_byte.as_slice(), joined.as_bytes()],
     );
-    let secret = authority.enrollment()?.secret.as_bytes();
+    let link_base = authority.enrollment()?.config.link_base().to_owned();
     let input = SessionInput {
         ws,
         request_id,
@@ -275,14 +228,13 @@ pub(crate) async fn invite_members_session(
     };
     authority
         .db()
-        .session_invite_txn(&input, &invited, role, secret)
+        .session_invite_txn(&input, &invited, role, &link_base)
         .await
 }
 
 /// Remove a member from a verified owner session (the orchestration half of
 /// [`Authority::roster_remove_session`]). Reuses the device lane's last-owner-lockout guard and
-/// its exact instant-revoke transaction shape (membership + per-skill roster + read tokens dropped
-/// in one txn).
+/// its exact instant-revoke transaction shape (the lapse-detach reconcile + the seat drop in one txn).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn roster_remove_session(
     authority: &Authority,
@@ -323,50 +275,11 @@ pub(crate) async fn roster_remove_session(
     authority.db().session_remove_txn(&input, &target).await
 }
 
-/// Rotate the standing workspace door from a verified owner session (the orchestration half of
-/// [`Authority::rotate_join_link_session`]). Revokes the current door family (the epoch door and
-/// the genesis self-invite, whichever stand), bumps the epoch, and mints the new door — blocking
-/// FUTURE redemption only (an already-exchanged credential is never severed).
-pub(crate) async fn rotate_join_link_session(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    request_id: &str,
-    acting_email: &str,
-    plane_mode: DeploymentMode,
-    created_at: &str,
-    now: i64,
-) -> Result<SessionRotateOutcome> {
-    if plane_mode == DeploymentMode::SelfHost {
-        return Ok(SessionRotateOutcome::Denied(
-            "session roster ops are cloud-only",
-        ));
-    }
-    if parse_op_id(request_id).is_none() {
-        return Ok(SessionRotateOutcome::Denied(
-            "request_id is not a canonical UUID",
-        ));
-    }
-    let Ok(acting) = Principal::parse(acting_email) else {
-        return Ok(SessionRotateOutcome::Denied("invalid acting email"));
-    };
-    let request_sha256 = session_request_sha256("link_rotate", ws, &acting, &[]);
-    let secret = authority.enrollment()?.secret.as_bytes();
-    let input = SessionInput {
-        ws,
-        request_id,
-        request_sha256,
-        acting: &acting,
-        created_at,
-        now,
-    };
-    authority.db().session_rotate_txn(&input, secret).await
-}
-
 /// Read the workspace roster for a verified session (the orchestration half of
 /// [`Authority::read_roster`]). A pure read — no receipt, no idempotency slot. Every miss (a
 /// self-host plane, an absent workspace, an acting email that is not a confirmed member) is the
-/// single indistinguishable [`AuthorityError::NotFound`]; the standing door token is disclosed
-/// ONLY to a confirmed owner.
+/// single indistinguishable [`AuthorityError::NotFound`]; the workspace ADDRESS is disclosed to any
+/// confirmed member (it is a name, not a door).
 pub(crate) async fn read_roster(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -377,8 +290,11 @@ pub(crate) async fn read_roster(
         return Err(AuthorityError::NotFound);
     }
     let acting = Principal::parse(acting_email).map_err(|_| AuthorityError::NotFound)?;
-    let secret = authority.enrollment()?.secret.as_bytes();
-    authority.db().read_roster_view(ws, &acting, secret).await
+    let link_base = authority.enrollment()?.config.link_base().to_owned();
+    authority
+        .db()
+        .read_roster_view(ws, &acting, &link_base)
+        .await
 }
 
 #[cfg(test)]
