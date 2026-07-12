@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_skill_state (workspace_id, device_key_id, skill_id, applied_commit, reported_at) SELECT $1, $2, r.skill_id, r.applied_commit, $3 FROM UNNEST($5::TEXT[], $6::BYTEA[]) AS r(skill_id, applied_commit) JOIN topos_entitled_skills($1, $4, $2) e ON e.skill_id = r.skill_id ON CONFLICT (workspace_id, device_key_id, skill_id) DO UPDATE SET applied_commit = excluded.applied_commit, reported_at = excluded.reported_at, detached = 0, detached_at = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "TextArray",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dff0d2a43b3f918471f2327722fb9dbdb1d1d0bf6fbc1d3e6a5c6496a08e35b4"
+}

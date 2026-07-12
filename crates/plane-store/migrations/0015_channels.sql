@@ -919,9 +919,14 @@ FROM (
            ROW_NUMBER() OVER (PARTITION BY cur.workspace_id, candidate ORDER BY cur.skill_id) AS rn
     FROM current cur
     CROSS JOIN LATERAL (
+        -- Fold to the charset, then CAP the base at 64 (the runtime mint's birth limit) so neither
+        -- a long display name nor a `-N` dedupe suffix can overflow `catalog.name`'s 200-char CHECK
+        -- and fail the migration. `btrim` runs again after the cap: truncation can leave a trailing
+        -- hyphen, which the charset CHECK's `^[a-z0-9]` … rule would otherwise reject.
         SELECT COALESCE(
-            NULLIF(btrim(regexp_replace(lower(COALESCE(cur.display_name, '')), '[^a-z0-9-]+', '-', 'g'), '-'), ''),
-            NULLIF(btrim(replace(cur.skill_id, '_', '-'), '-'), ''),
+            NULLIF(btrim(left(btrim(regexp_replace(lower(COALESCE(cur.display_name, '')),
+                                                   '[^a-z0-9-]+', '-', 'g'), '-'), 64), '-'), ''),
+            NULLIF(btrim(left(btrim(replace(cur.skill_id, '_', '-'), '-'), 64), '-'), ''),
             'skill'
         ) AS candidate
     ) names

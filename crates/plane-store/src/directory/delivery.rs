@@ -207,6 +207,12 @@ pub(crate) async fn report_applied(
         .collect();
     authority
         .db()
-        .report_applied_txn(ws, &identity.device_key_id, &pairs, now)
+        .report_applied_txn(
+            ws,
+            &identity.principal,
+            &identity.device_key_id,
+            &pairs,
+            now,
+        )
         .await
 }

@@ -202,14 +202,17 @@ impl Db {
     /// the device's `last_report_at` (the dashboard's staleness clock). Rows for skill ids the
     /// catalog does not know are dropped (a report is client-asserted data).
     ///
-    /// A REPORTED skill REVIVES its row (`detached = 0`): the client only ever reports what the
-    /// delivery DELIVERED to it and it actually holds, so a report proves the subscription is live
-    /// again — that is what heals a fleet row a lapse froze before a curator re-placed the skill.
-    /// A frozen (detached) row the client no longer reports is never touched: it stays as the final
-    /// "last known state" the fleet page names as its blind spot.
+    /// Every reported skill is re-checked against the SERVER's entitlement predicate — a report is
+    /// client-asserted data, and the plane records only what it actually delivers to this (person,
+    /// device). An ENTITLED reported skill revives its row (`detached = 0`), which is what heals a
+    /// fleet row a lapse froze before a curator re-placed the skill; a DETACHED skill is by
+    /// definition not entitled, so no client can revive a detach record the plane is deliberately
+    /// holding, and a frozen row stays as the final "last known state" the fleet page names as its
+    /// blind spot.
     pub(crate) async fn report_applied_txn(
         &self,
         ws: &WorkspaceId,
+        principal: &Principal,
         device_key_id: &str,
         applied: &[(SkillId, CommitId)],
         now: i64,
@@ -228,17 +231,24 @@ impl Db {
             .execute(&mut *tx)
             .await
             .map_err(AuthorityError::internal)?;
+            // The report is CLIENT-ASSERTED data, so the server decides what may be recorded: only
+            // skills the delivery predicate ACTUALLY DELIVERS to this (person, device) survive the
+            // join. That is what makes the `detached = 0` revive safe — a detached skill is by
+            // definition NOT entitled (the detachment stands until an entitlement heals it), so no
+            // client can revive a detach record the plane is deliberately holding, nor record a
+            // skill it was never entitled to.
             sqlx::query!(
                 "INSERT INTO device_skill_state (workspace_id, device_key_id, skill_id, applied_commit, reported_at) \
                  SELECT $1, $2, r.skill_id, r.applied_commit, $3 \
-                 FROM UNNEST($4::TEXT[], $5::BYTEA[]) AS r(skill_id, applied_commit) \
-                 JOIN catalog cat ON cat.workspace_id = $1 AND cat.skill_id = r.skill_id \
+                 FROM UNNEST($5::TEXT[], $6::BYTEA[]) AS r(skill_id, applied_commit) \
+                 JOIN topos_entitled_skills($1, $4, $2) e ON e.skill_id = r.skill_id \
                  ON CONFLICT (workspace_id, device_key_id, skill_id) DO UPDATE \
                    SET applied_commit = excluded.applied_commit, reported_at = excluded.reported_at, \
                        detached = 0, detached_at = NULL",
                 ws_s,
                 device_key_id,
                 now,
+                principal.as_str(),
                 &skill_ids,
                 &commits,
             )

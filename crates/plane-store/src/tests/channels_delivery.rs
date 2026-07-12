@@ -1183,6 +1183,53 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
     .unwrap()
     .get("last_report_at");
     assert_eq!(lr, Some(later));
+
+    // A LYING CLIENT changes nothing. The report is client-asserted data, so the plane re-checks
+    // every named skill against its OWN entitlement predicate: re-reporting the DETACHED skill B
+    // cannot revive the detach record the plane is deliberately holding (B is not entitled — that
+    // is what "detached" means), and a skill the device was never entitled to cannot be conjured
+    // into the fleet at all. Without the server-side filter a buggy or hostile client could erase
+    // its own blind-spot row and fake fleet coverage.
+    let sc = skill("s_ghost");
+    fx.authority
+        .db()
+        .seed_catalog(&w, &sc, "ghost")
+        .await
+        .unwrap();
+    fx.authority
+        .report_applied(
+            &w,
+            &bob,
+            &[
+                AppliedSkill {
+                    skill_id: sa.clone(),
+                    version_id: va2,
+                },
+                // detached — the plane holds the freeze
+                AppliedSkill {
+                    skill_id: sb.clone(),
+                    version_id: vb,
+                },
+                // never entitled — no channel delivers it, no follow names it
+                AppliedSkill {
+                    skill_id: sc.clone(),
+                    version_id: va2,
+                },
+            ],
+            later + 5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        dss(&pool, "w_acme", "dk_bob", "s_beacon").await,
+        Some((1, Some(NOW))),
+        "a client cannot revive its own detach record by re-reporting the skill"
+    );
+    assert_eq!(
+        dss(&pool, "w_acme", "dk_bob", "s_ghost").await,
+        None,
+        "a client cannot record a skill it was never entitled to"
+    );
 }
 
 /// The channel audit log is TRIGGER-emitted on every curation / membership / existence write, each
