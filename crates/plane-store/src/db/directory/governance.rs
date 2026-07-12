@@ -515,10 +515,14 @@ async fn seat_workspace_and_owner(
     .map_err(AuthorityError::internal)?;
     // Every workspace is born with the structural `everyone` channel (idempotent; the genesis
     // publish converges on the same function for fixture-seeded workspaces).
-    sqlx::query!(r#"SELECT topos_ensure_everyone($1, $2) AS "ok""#, ws_s, created_at)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(AuthorityError::internal)?;
+    sqlx::query!(
+        r#"SELECT topos_ensure_everyone($1, $2) AS "ok""#,
+        ws_s,
+        created_at
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
     Ok(GenesisSeat::Created)
 }
 

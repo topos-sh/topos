@@ -151,8 +151,18 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, auth, display_name, None, created_at, now)
-            .await
+        self.publish(
+            ws,
+            skill,
+            op_id,
+            candidate,
+            auth,
+            display_name,
+            None,
+            created_at,
+            now,
+        )
+        .await
     }
 
     /// Drive a REAL one-parent forward [`publish`](Self::publish) on top of `parent` (mirrors
@@ -202,8 +212,10 @@ impl Authority {
             author: author.to_owned(),
             message: message.to_owned(),
         };
-        self.publish(ws, skill, op_id, candidate, auth, None, None, created_at, now)
-            .await
+        self.publish(
+            ws, skill, op_id, candidate, auth, None, None, created_at, now,
+        )
+        .await
     }
 
     /// Overwrite the skill's stored `current` record with arbitrary bytes — drives the corrupt-stored-blob

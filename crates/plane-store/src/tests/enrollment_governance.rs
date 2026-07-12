@@ -626,7 +626,9 @@ async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
         },
     );
     assert_eq!(
-        a.revoke_device(&w, &op_id(2), revoke, "t0", NOW).await.unwrap(),
+        a.revoke_device(&w, &op_id(2), revoke, "t0", NOW)
+            .await
+            .unwrap(),
         GovernanceOutcome::Ok
     );
     assert!(matches!(
@@ -681,7 +683,10 @@ async fn revoke_device_stops_reads_and_refuses_later_device_ops(pool: PgPool) {
             skills: vec![],
         },
     );
-    let out = a.create_invite(&w, &op_id(4), after, "t0", NOW).await.unwrap();
+    let out = a
+        .create_invite(&w, &op_id(4), after, "t0", NOW)
+        .await
+        .unwrap();
     assert!(
         matches!(out, CreateInviteOutcome::Denied(_)),
         "revoked device refused: {out:?}"
@@ -729,7 +734,9 @@ async fn roster_remove_revokes_the_members_reads(pool: PgPool) {
         },
     );
     assert_eq!(
-        a.roster_remove(&w, &op_id(2), remove, "t0", NOW).await.unwrap(),
+        a.roster_remove(&w, &op_id(2), remove, "t0", NOW)
+            .await
+            .unwrap(),
         GovernanceOutcome::Ok
     );
 
@@ -859,7 +866,10 @@ async fn a_members_governance_op_is_denied(pool: PgPool) {
             skills: vec![],
         },
     );
-    let out = a.create_invite(&w, &op_id(9), signed, "t0", NOW).await.unwrap();
+    let out = a
+        .create_invite(&w, &op_id(9), signed, "t0", NOW)
+        .await
+        .unwrap();
     assert!(
         matches!(out, CreateInviteOutcome::Denied(_)),
         "member denied: {out:?}"
@@ -891,7 +901,9 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
     );
     assert!(
         matches!(
-            a.create_invite(&w, &op_id(7), forged, "t0", NOW).await.unwrap(),
+            a.create_invite(&w, &op_id(7), forged, "t0", NOW)
+                .await
+                .unwrap(),
             CreateInviteOutcome::Denied(_)
         ),
         "an unknown device is denied (pre-authentication)"
@@ -913,7 +925,9 @@ async fn an_unauthenticated_governance_op_records_no_audit_row_and_cannot_squat_
     );
     assert!(
         matches!(
-            a.create_invite(&w, &op_id(7), legit, "t0", NOW).await.unwrap(),
+            a.create_invite(&w, &op_id(7), legit, "t0", NOW)
+                .await
+                .unwrap(),
             CreateInviteOutcome::Created(_)
         ),
         "the legit owner's op with the same op_id is not blocked by a forged pre-auth row"
@@ -1002,7 +1016,9 @@ async fn create_invite_op_id_reuse_with_a_divergent_request_is_denied(pool: PgPo
         },
     );
     assert!(matches!(
-        a.create_invite(&w, &op, divergent, "t0", NOW).await.unwrap(),
+        a.create_invite(&w, &op, divergent, "t0", NOW)
+            .await
+            .unwrap(),
         CreateInviteOutcome::Denied(_)
     ));
 

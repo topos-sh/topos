@@ -19,7 +19,7 @@ use topos_types::{
 };
 
 use super::witness::{
-    AccessWitness, ActorRole, GenesisRegistration, PlacementDecision, SessionWriteGate, SkillGate,
+    AccessWitness, GenesisRegistration, PlacementDecision, SessionWriteGate, SkillGate,
 };
 use crate::actor::{
     REVIEWER_ROLE_REQUIRED_CODE, REVIEWER_ROLE_REQUIRED_MSG, SESSION_REVIEW_ACTING_DENIED,
@@ -583,7 +583,16 @@ async fn run(
         }
         DeviceOp::PublishPropose => propose_arm(tx, input, &bound, &acting, details).await,
         DeviceOp::ReviewApprove => {
-            approve_arm(tx, input, new_gen, &bound, gate.reviewed(), &acting, witness).await
+            approve_arm(
+                tx,
+                input,
+                new_gen,
+                &bound,
+                gate.reviewed(),
+                &acting,
+                witness,
+            )
+            .await
         }
         DeviceOp::ReviewReject => Err(AuthorityError::internal(RejectNotPromotable)),
     }
@@ -916,7 +925,14 @@ async fn reject_run(
             {
                 witness
                     .notify_verdict(
-                        tx, r.ws, r.skill, r.commit, &author, "rejected", r.reason, &acting,
+                        tx,
+                        r.ws,
+                        r.skill,
+                        r.commit,
+                        &author,
+                        "rejected",
+                        r.reason,
+                        &acting,
                         r.created_at,
                     )
                     .await?;
@@ -934,7 +950,12 @@ async fn reject_run(
         // Circumstantially closed (the skill archived / a version purged) — already resolved, with
         // its own recorded reason; a late reject must not overwrite that story.
         Some((_, ProposalStatus::Closed)) => {
-            reject_denied(tx, r, "the proposal was closed when its skill left circulation").await
+            reject_denied(
+                tx,
+                r,
+                "the proposal was closed when its skill left circulation",
+            )
+            .await
         }
         None => reject_denied(tx, r, "no open proposal for this candidate and base").await,
     }

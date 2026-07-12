@@ -893,7 +893,9 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             )
         }
         PullAction::Withdrawn => (
-            String::from("withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally"),
+            String::from(
+                "withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally",
+            ),
             Vec::new(),
         ),
         PullAction::Detached => (

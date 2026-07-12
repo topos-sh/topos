@@ -6,7 +6,7 @@
 //! reads it. The report write is a snapshot upsert that NEVER touches a detach record (the frozen
 //! "last applied" the fleet page shows).
 
-use sqlx::{Acquire, Postgres};
+use sqlx::Postgres;
 
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
@@ -52,9 +52,7 @@ impl Db {
     /// "delivered nowhere, detached nowhere" as an UPSTREAM withdrawal — cleaning agent dirs for a
     /// skill the person still subscribes to. `REPEATABLE READ` is exactly the guarantee needed (the
     /// read mints nothing durable, so no serialization retry is required).
-    pub(crate) async fn begin_delivery_snapshot(
-        &self,
-    ) -> Result<sqlx::Transaction<'_, Postgres>> {
+    pub(crate) async fn begin_delivery_snapshot(&self) -> Result<sqlx::Transaction<'_, Postgres>> {
         let mut tx = self
             .pool()
             .begin()
@@ -101,8 +99,7 @@ impl Db {
                     protection: r.protection,
                     commit: blob32(&r.commit_id)?,
                     generation: Generation {
-                        epoch: u64::try_from(r.epoch)
-                            .map_err(AuthorityError::integrity)?,
+                        epoch: u64::try_from(r.epoch).map_err(AuthorityError::integrity)?,
                         seq: u64::try_from(r.seq).map_err(AuthorityError::integrity)?,
                     },
                     updated_at: r.updated_at,

@@ -278,9 +278,10 @@ async fn revert_advances_seq_and_a_stale_publish_conflicts(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let stale =
+        crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(stale.outcome, TerminalOutcome::Conflict);
     assert_eq!(stale.current, Some(gn(1, 3)));
 }
@@ -351,9 +352,10 @@ async fn restore_aba_matching_seq_bumped_epoch_conflicts(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let stale = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let stale =
+        crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(stale.outcome, TerminalOutcome::Conflict);
     assert_eq!(stale.current, Some(gn(2, 2)));
 }
@@ -399,9 +401,10 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
         gn(1, 1),
     )
     .await;
-    let first = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let first =
+        crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(first.current, Some(gn(1, 2)));
     let ck = fx
         .authority
@@ -426,9 +429,10 @@ async fn lost_ack_retry_replays_the_identical_receipt(pool: PgPool) {
 
     // Retry op K (its ack was lost): the replay returns the ORIGINAL receipt byte-for-byte (the (1,2)
     // record), even though current is now (1,3).
-    let retry = crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let retry =
+        crate::set_current::publish(&fx.authority, &w, &s, &sk, &dk, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(retry, first);
     assert_eq!(retry.current, Some(gn(1, 2)));
 }
@@ -474,9 +478,10 @@ async fn a_revoke_before_promotion_blocks_the_move(pool: PgPool) {
     )
     .await;
     fx.authority.db().revoke_device(&w, "dk_a").await.unwrap();
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let r =
+        crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     // The pointer did NOT move.
     assert_eq!(
@@ -591,9 +596,10 @@ async fn first_parent_mismatch_is_denied_even_when_the_cas_matches(pool: PgPool)
         gn(1, 2),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let r =
+        crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     assert_eq!(
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
@@ -668,9 +674,10 @@ async fn a_two_parent_merge_is_denied(pool: PgPool) {
         gn(1, 2),
     )
     .await;
-    let r = crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let r =
+        crate::set_current::publish(&fx.authority, &w, &s, &ss, &ds, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
 }
 
@@ -1198,9 +1205,10 @@ async fn a_conflict_releases_the_lease_so_abandoned_objects_are_reclaimable(pool
             .unwrap()
             .is_ok()
     );
-    let rb = crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, None, None, CREATED_AT, NOW)
-        .await
-        .unwrap();
+    let rb =
+        crate::set_current::publish(&fx.authority, &w, &s, &sb, &db, None, None, CREATED_AT, NOW)
+            .await
+            .unwrap();
     assert_eq!(rb.outcome, TerminalOutcome::Conflict);
 
     // B's unique object is present but now unrooted (no edge, lease released) → a GC pass reclaims it.

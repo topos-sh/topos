@@ -77,7 +77,10 @@ async fn the_policy_route_toggles_review_required_observably(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "a protocol outcome is always a 200");
     let env = envelope(&bytes);
     // The downgraded publish is a SUCCESSFUL proposal (NEEDS_REVIEW maps to `ok` in the wire).
-    assert!(env.ok, "a downgraded publish is a successful proposal: {env:?}");
+    assert!(
+        env.ok,
+        "a downgraded publish is a successful proposal: {env:?}"
+    );
     let receipt = env.receipt.expect("a downgraded receipt");
     assert_eq!(receipt.outcome, TerminalOutcome::NeedsReview);
     assert_eq!(

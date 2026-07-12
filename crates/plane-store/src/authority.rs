@@ -1201,11 +1201,11 @@ impl Authority {
 
     /// **Remove a member from a verified owner session.** Same acting gate + idempotency shape as
     /// [`invite_members_session`](Self::invite_members_session); reuses the device lane's
-    /// last-owner-lockout guard and its exact removal transaction (the `workspace_member` seat dropped
-    /// + the lapse-detach reconcile writing the person's final per-device detach records, in one txn —
-    /// every read/write gate joins the seat, so removal severs access the instant it commits; the
-    /// device's credential row stays, gating nothing without a seat, and re-adding the member
-    /// re-enables the same devices).
+    /// last-owner-lockout guard and its exact removal transaction: the lapse-detach reconcile runs
+    /// first (the entitlement union is membership-gated, so it must read while the seat still
+    /// stands), then the `workspace_member` seat is dropped — every read/write gate joins that seat,
+    /// so removal severs access the instant it commits, while the device's credential row stays
+    /// (gating nothing without a seat; re-adding the member re-enables the same devices).
     /// Removing a merely-invited seat un-invites it; removing an absent principal is an idempotent `Ok`.
     ///
     /// This is a PRIVILEGED lib-level op (no OSS HTTP route); uniformly denied on self-host.

@@ -17,8 +17,8 @@ mod common;
 
 use common::{NOW, Seeded};
 use plane_store::{
-    Authority, CandidateUpload, CommitId, DeploymentMode, FileMode, GovernanceOp, GovernanceRequest,
-    OpId, Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, CandidateUpload, CommitId, DeploymentMode, FileMode, GovernanceOp,
+    GovernanceRequest, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
 };
 use topos::test_support::{ContributeHarness, PublishResult, ReconcileHarness};
 use topos_types::Generation;
@@ -90,7 +90,11 @@ async fn genesis(
         )
         .await
         .expect("genesis publish");
-    assert_eq!(receipt.outcome, topos_types::TerminalOutcome::Ok, "genesis lands");
+    assert_eq!(
+        receipt.outcome,
+        topos_types::TerminalOutcome::Ok,
+        "genesis lands"
+    );
     receipt.version_id.expect("genesis version id")
 }
 
@@ -107,26 +111,17 @@ async fn exists(pool: &sqlx::PgPool, sql: &str, binds: &[&str]) -> bool {
     }
     q.fetch_optional(pool).await.unwrap().is_some()
 }
-
-/// Install a delivered-but-never-held skill and surface its first-receive OFFER, returning the sweep
-/// that discloses it.
-///
-/// **This pins a KNOWN PRODUCTION DEFECT the rig faithfully reproduces** (the client's real wiring, not
-/// a harness artifact — reported, deliberately NOT worked around here): the `UreqPlane` transport's
-/// per-skill credential map is built from the **pre-reconcile** follow-state (`enroll::skill_creds`
-/// over `follows.json`), so on the sweep that FIRST discovers a brand-new arrival the offer's
-/// disclosure fetch (`sync_engine` fetches the version to bind its `bundle_digest`) has no credential
-/// for that skill id and 404s — surfacing a `PLANE_ERROR … not served` warning instead of an offer.
-/// The follow entry AND the first-receive baseline still land, so the NEXT sweep (whose transport is
-/// rebuilt over the now-populated `follows.json`) discloses the offer cleanly. TWO sweeps is therefore
-/// what ships today; this helper asserts exactly that, and nothing more.
+/// ONE sweep is all a brand-new arrival takes: the reconcile binds the skill to its workspace
+/// credential before any fetch (the `follows.json`-derived per-skill map cannot yet name a skill
+/// this device has never held), so the first sweep installs the baseline AND discloses the offer.
+/// A second sweep would be a no-op — the kernel's I-TOFU consent holds the bytes behind one accept.
 fn install_then_offer(rig: &ReconcileHarness) -> (topos_types::results::PullData, Vec<String>) {
-    let (_first, first_warnings) = rig.reconcile();
+    let (data, warnings) = rig.reconcile();
     assert!(
-        first_warnings.iter().all(|w| w.contains("not served")),
-        "the ONLY first-sweep warning may be the known new-arrival credential gap: {first_warnings:?}"
+        warnings.is_empty(),
+        "a new arrival must install cleanly on its FIRST sweep — no credential gap: {warnings:?}"
     );
-    rig.reconcile()
+    (data, warnings)
 }
 
 // ── 1. genesis → everyone → a fresh member installs it as a first-receive offer ──────────────────────
@@ -165,8 +160,14 @@ fn genesis_delivers_via_everyone_and_a_fresh_member_installs_then_accepts() {
         .find(|s| s.action == PullAction::Offered)
         .expect("a first-receive offer row");
     assert!(offer.offer.is_some(), "the offer re-discloses the version");
-    assert!(!rig.placement_exists("s_deploy"), "offered, not yet materialized");
-    assert_eq!(rig.follows(), vec![("s_deploy".to_owned(), WS.to_owned(), true)]);
+    assert!(
+        !rig.placement_exists("s_deploy"),
+        "offered, not yet materialized"
+    );
+    assert_eq!(
+        rig.follows(),
+        vec![("s_deploy".to_owned(), WS.to_owned(), true)]
+    );
 
     // The explicit accept lands the bytes byte-exact (incl. the executable bit).
     let _ = rig.accept("deploy");
@@ -186,10 +187,37 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
     let files2 = files.clone();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
         // B is born in `ops` only; the follower joins ops.
-        genesis(a, "s_beacon", OWNER_CRED, "c0000000-0000-4000-8000-000000000002", files2, "Beacon", Some("ops")).await;
+        genesis(
+            a,
+            "s_beacon",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000002",
+            files2,
+            "Beacon",
+            Some("ops"),
+        )
+        .await;
         a.channel_join(&ws(), FOL_CRED, "ops", AT).await.unwrap();
     });
 
@@ -197,7 +225,10 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
     rig.enroll_member(&plane.base_url, WS, FOL_CRED);
     let _ = rig.reconcile();
     let _ = rig.accept("beacon");
-    assert_eq!(rig.placement_files("s_beacon"), common::expected_placement(&files));
+    assert_eq!(
+        rig.placement_files("s_beacon"),
+        common::expected_placement(&files)
+    );
 
     // A LOCAL draft ahead of current (so the withdrawal must snapshot it), then upstream drops B.
     rig.edit_placement("s_beacon", &[("SKILL.md", false, b"# beacon DRAFT\n")]);
@@ -205,7 +236,9 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
         let a: &Authority = &plane.authority;
         // Remove B from ops — it is now referenced by NO channel.
         assert_eq!(
-            a.channel_unplace(&ws(), OWNER_CRED, "ops", "beacon", AT).await.unwrap(),
+            a.channel_unplace(&ws(), OWNER_CRED, "ops", "beacon", AT)
+                .await
+                .unwrap(),
             plane_store::CurationOutcome::Removed
         );
     });
@@ -213,19 +246,67 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
     let (data, warnings) = rig.reconcile();
     assert!(warnings.is_empty(), "clean reconcile: {warnings:?}");
     assert!(
-        data.skills.iter().any(|s| s.action == PullAction::Withdrawn),
+        data.skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
         "upstream withdrawal is classified Withdrawn: {:?}",
         data.skills
     );
-    assert!(!rig.placement_exists("s_beacon"), "the agent dir is cleaned on withdrawal");
+    assert!(
+        !rig.placement_exists("s_beacon"),
+        "the agent dir is cleaned on withdrawal"
+    );
     assert!(
         rig.store_version_count("s_beacon") >= 2,
         "the sidecar retains the fetched version AND the snapshotted draft"
     );
+    // A withdrawal is a DELIVERY change, not a SUBSCRIPTION change: the follow entry stays LIVE, so a
+    // curator re-placing the skill re-installs it clean on the very next reconcile. (Contrast the
+    // person-scoped Detached path in the sibling scenario, where the placement survives instead.)
     assert_eq!(
         rig.follows(),
-        vec![("s_beacon".to_owned(), WS.to_owned(), false)],
-        "the entry is frozen (following = false), the bytes are yours"
+        vec![("s_beacon".to_owned(), WS.to_owned(), true)],
+        "the subscription survives an upstream withdrawal"
+    );
+
+    // …and because the subscription survived, a curator RE-PLACING the skill puts it straight back
+    // into the person's delivered set (the server-side half of the self-heal).
+    plane.rt.block_on(async {
+        let a: &Authority = &plane.authority;
+        a.channel_place(&ws(), OWNER_CRED, "ops", "beacon", AT)
+            .await
+            .unwrap();
+        let d = a.delivery(&ws(), FOL_CRED).await.unwrap();
+        assert!(
+            d.skills.iter().any(|s| s.skill_id == "s_beacon"),
+            "a re-placed skill is delivered again — no detachment stranded the subscription"
+        );
+        assert!(
+            !d.detached.contains(&"s_beacon".to_owned()),
+            "an UPSTREAM withdrawal never wrote a person-scoped detachment"
+        );
+    });
+
+    // …and the CLIENT completes the round trip: the withdrawal reset the sync state to the
+    // never-received sentinel, so the re-delivered skill is a fresh first-receive — offered (I-TOFU),
+    // then accepted, and the bytes are back on disk byte-exact. Without that reset the skill would
+    // read as "already current" against an absent placement and never come back.
+    let (data, warnings) = rig.reconcile();
+    assert!(warnings.is_empty(), "clean re-arrival: {warnings:?}");
+    assert!(
+        data.skills.iter().any(|s| s.action == PullAction::Offered),
+        "a re-placed skill re-arrives as a disclosed first-receive offer: {:?}",
+        data.skills
+    );
+    let _ = rig.accept("beacon");
+    assert!(
+        rig.placement_exists("s_beacon"),
+        "accepting the re-arrival restores the agent dir"
+    );
+    assert_eq!(
+        rig.placement_files("s_beacon"),
+        common::expected_placement(&files),
+        "the restored bytes are byte-exact — the pristine team version, the draft still in the store"
     );
 }
 
@@ -238,11 +319,40 @@ fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
     let files2 = files.clone();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
         // B in ops AND eng; the follower joins both.
-        genesis(a, "s_beacon", OWNER_CRED, "c0000000-0000-4000-8000-000000000003", files2, "Beacon", Some("ops")).await;
-        a.channel_place(&ws(), OWNER_CRED, "eng", "beacon", AT).await.unwrap();
+        genesis(
+            a,
+            "s_beacon",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000003",
+            files2,
+            "Beacon",
+            Some("ops"),
+        )
+        .await;
+        a.channel_place(&ws(), OWNER_CRED, "eng", "beacon", AT)
+            .await
+            .unwrap();
         a.channel_join(&ws(), FOL_CRED, "ops", AT).await.unwrap();
         a.channel_join(&ws(), FOL_CRED, "eng", AT).await.unwrap();
     });
@@ -251,7 +361,10 @@ fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
     rig.enroll_member(&plane.base_url, WS, FOL_CRED);
     let (data, _) = install_then_offer(&rig);
     assert_eq!(
-        data.skills.iter().filter(|s| s.action == PullAction::Offered).count(),
+        data.skills
+            .iter()
+            .filter(|s| s.action == PullAction::Offered)
+            .count(),
         1,
         "two channels deliver ONE offer row: {:?}",
         data.skills
@@ -262,7 +375,10 @@ fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
         "exactly one follows entry"
     );
     let _ = rig.accept("beacon");
-    assert_eq!(rig.placement_files("s_beacon"), common::expected_placement(&files));
+    assert_eq!(
+        rig.placement_files("s_beacon"),
+        common::expected_placement(&files)
+    );
 }
 
 // ── 4. leaving a channel freezes nothing while another still references it; unfollow detaches ──────────
@@ -274,11 +390,40 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
     let files2 = files.clone();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
         // B in everyone AND ops; the follower joins ops.
-        genesis(a, "s_beacon", OWNER_CRED, "c0000000-0000-4000-8000-000000000004", files2, "Beacon", None).await;
-        a.channel_place(&ws(), OWNER_CRED, "ops", "beacon", AT).await.unwrap();
+        genesis(
+            a,
+            "s_beacon",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000004",
+            files2,
+            "Beacon",
+            None,
+        )
+        .await;
+        a.channel_place(&ws(), OWNER_CRED, "ops", "beacon", AT)
+            .await
+            .unwrap();
         a.channel_join(&ws(), FOL_CRED, "ops", AT).await.unwrap();
     });
 
@@ -291,14 +436,22 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
     // Leave ops — everyone still references B, so it stays LIVE (not withdrawn).
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        a.channel_leave(&ws(), FOL_CRED, "ops", NOW, AT).await.unwrap();
+        a.channel_leave(&ws(), FOL_CRED, "ops", NOW, AT)
+            .await
+            .unwrap();
         // The server still delivers B (via everyone).
         let d = a.delivery(&ws(), FOL_CRED).await.unwrap();
-        assert!(d.skills.iter().any(|s| s.skill_id == "s_beacon"), "everyone keeps it live");
+        assert!(
+            d.skills.iter().any(|s| s.skill_id == "s_beacon"),
+            "everyone keeps it live"
+        );
     });
     let (data, _) = rig.reconcile();
     assert!(
-        !data.skills.iter().any(|s| s.action == PullAction::Withdrawn),
+        !data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
         "a still-referenced skill is never withdrawn on a channel leave"
     );
     assert!(rig.placement_exists("s_beacon"), "the placement is intact");
@@ -306,7 +459,9 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
     // Now UNFOLLOW B (person-scoped) — the reconcile FREEZES it in place (Detached), bytes intact.
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        a.unfollow_skill(&ws(), FOL_CRED, "beacon", NOW, AT).await.unwrap();
+        a.unfollow_skill(&ws(), FOL_CRED, "beacon", NOW, AT)
+            .await
+            .unwrap();
     });
     let (data, _) = rig.reconcile();
     assert!(
@@ -314,7 +469,10 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
         "an unfollow is classified Detached: {:?}",
         data.skills
     );
-    assert!(rig.placement_exists("s_beacon"), "a detach freezes in place — the bytes stay");
+    assert!(
+        rig.placement_exists("s_beacon"),
+        "a detach freezes in place — the bytes stay"
+    );
 }
 
 // ── 5. exclusion round-trip (the remove verb's local half + the server exclusion) ─────────────────────
@@ -326,9 +484,36 @@ fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
     let files2 = files.clone();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
-        genesis(a, "s_deploy", OWNER_CRED, "c0000000-0000-4000-8000-000000000005", files2, "Deploy", None).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
+        genesis(
+            a,
+            "s_deploy",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000005",
+            files2,
+            "Deploy",
+            None,
+        )
+        .await;
     });
 
     let rig = ReconcileHarness::new("chn-s5");
@@ -340,27 +525,47 @@ fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
     // The `remove` verb's halves: the server device-exclusion + the LOCAL freeze (following=false +
     // placement removed) BEFORE the next sync — so the reconcile finds an already-frozen entry.
     plane.rt.block_on(async {
-        plane.authority.exclude_device(&ws(), FOL_CRED, "deploy", AT).await.unwrap();
+        plane
+            .authority
+            .exclude_device(&ws(), FOL_CRED, "deploy", AT)
+            .await
+            .unwrap();
     });
     rig.simulate_local_remove("s_deploy");
     let (data, warnings) = rig.reconcile();
-    assert!(warnings.is_empty(), "no ACCESS_GONE — the workspace is still reachable: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "no ACCESS_GONE — the workspace is still reachable: {warnings:?}"
+    );
     assert!(
         !data.skills.iter().any(|s| s.action == PullAction::Offered),
         "a locally-frozen + server-excluded skill is NOT re-installed"
     );
-    assert!(!rig.placement_exists("s_deploy"), "the removal stays clean (no resurrection)");
+    assert!(
+        !rig.placement_exists("s_deploy"),
+        "the removal stays clean (no resurrection)"
+    );
 
     // A `follow` lifts the exclusion server-side + resumes the local subscription → the skill RETURNS.
     plane.rt.block_on(async {
-        plane.authority.follow_skill(&ws(), FOL_CRED, "deploy", AT).await.unwrap();
+        plane
+            .authority
+            .follow_skill(&ws(), FOL_CRED, "deploy", AT)
+            .await
+            .unwrap();
         // The server delivers it again (the exclusion is lifted).
         let d = plane.authority.delivery(&ws(), FOL_CRED).await.unwrap();
-        assert!(d.skills.iter().any(|s| s.skill_id == "s_deploy"), "exclusion lifted server-side");
+        assert!(
+            d.skills.iter().any(|s| s.skill_id == "s_deploy"),
+            "exclusion lifted server-side"
+        );
     });
     rig.resume_local_following("s_deploy");
     let (_data, warnings) = rig.reconcile();
-    assert!(warnings.is_empty(), "the resume reconciles cleanly: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "the resume reconciles cleanly: {warnings:?}"
+    );
     assert_eq!(
         rig.follows(),
         vec![("s_deploy".to_owned(), WS.to_owned(), true)],
@@ -378,10 +583,46 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
         // The author is a MEMBER (so a direct publish downgrades under review-required); a reviewer + a follower.
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "member", OWNER_CRED).await;
-        common::seed_member(a, &ws(), REV_DKID, &REV_PUBKEY, REVIEWER, "reviewer", REV_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
-        genesis(a, "s_deploy", OWNER_CRED, "c0000000-0000-4000-8000-000000000006", v1_seed, "Deploy", None).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "member",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            REV_DKID,
+            &REV_PUBKEY,
+            REVIEWER,
+            "reviewer",
+            REV_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
+        genesis(
+            a,
+            "s_deploy",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000006",
+            v1_seed,
+            "Deploy",
+            None,
+        )
+        .await;
         a.set_review_required(&ws(), true).await.unwrap();
     });
 
@@ -393,12 +634,25 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
 
     // The member-author publishes v2 through the REAL client — the server DOWNGRADES it to a proposal.
     let mut author = ContributeHarness::new("chn-s6-author");
-    author.enroll(&plane.base_url, WS, "s_deploy", OWNER_CRED, true, &[("SKILL.md", false, b"placeholder\n")]);
+    author.enroll(
+        &plane.base_url,
+        WS,
+        "s_deploy",
+        OWNER_CRED,
+        true,
+        &[("SKILL.md", false, b"placeholder\n")],
+    );
     author.pull(); // land v1
-    let v2: &[(&str, bool, &[u8])] = &[("SKILL.md", false, b"# deploy v2\n"), ("run.sh", true, b"#!/bin/sh\necho v2\n")];
+    let v2: &[(&str, bool, &[u8])] = &[
+        ("SKILL.md", false, b"# deploy v2\n"),
+        ("run.sh", true, b"#!/bin/sh\necho v2\n"),
+    ];
     author.edit_placement(v2);
     let digest = author.draft_digest();
-    match author.publish(false, &format!("s_deploy@{digest}")).unwrap() {
+    match author
+        .publish(false, &format!("s_deploy@{digest}"))
+        .unwrap()
+    {
         PublishResult::Proposed(_) => {}
         other => panic!("a member's direct publish on a reviewed bundle must downgrade: {other:?}"),
     }
@@ -416,7 +670,10 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
         .await
         .unwrap();
         let candidate = CommitId(cand.try_into().expect("32-byte commit"));
-        let expected = Generation { epoch: base_epoch as u64, seq: base_seq as u64 };
+        let expected = Generation {
+            epoch: base_epoch as u64,
+            seq: base_seq as u64,
+        };
         let r = a
             .review_approve_session(
                 &ws(),
@@ -431,7 +688,11 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
             )
             .await
             .unwrap();
-        assert_eq!(r.outcome, topos_types::TerminalOutcome::Ok, "the reviewer's approve lands v2");
+        assert_eq!(
+            r.outcome,
+            topos_types::TerminalOutcome::Ok,
+            "the reviewer's approve lands v2"
+        );
 
         // The author gets a verdict NOTICE (the approve emitted it to the proposer).
         let d = a.delivery(&ws(), OWNER_CRED).await.unwrap();
@@ -460,9 +721,36 @@ fn the_reconcile_reports_applied_state_to_the_fleet() {
     let files2 = files.clone();
     let v1 = plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
-        genesis(a, "s_deploy", OWNER_CRED, "c0000000-0000-4000-8000-000000000007", files2, "Deploy", None).await
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
+        genesis(
+            a,
+            "s_deploy",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000007",
+            files2,
+            "Deploy",
+            None,
+        )
+        .await
     });
 
     let rig = ReconcileHarness::new("chn-s7");
@@ -507,9 +795,36 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
     let files = deploy_files();
     let v1 = plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
-        genesis(a, "s_deploy", OWNER_CRED, "c0000000-0000-4000-8000-000000000008", files.clone(), "Deploy", None).await
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
+        genesis(
+            a,
+            "s_deploy",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-000000000008",
+            files.clone(),
+            "Deploy",
+            None,
+        )
+        .await
     });
 
     let rig = ReconcileHarness::new("chn-s8");
@@ -522,7 +837,11 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
         let a: &Authority = &plane.authority;
         // The FOLLOWER opens a real proposal (so the archive closes it + notifies them).
         let cand = CandidateUpload {
-            files: vec![UploadedFile { path: "SKILL.md".to_owned(), mode: FileMode::Regular, bytes: b"# proposed\n".to_vec() }],
+            files: vec![UploadedFile {
+                path: "SKILL.md".to_owned(),
+                mode: FileMode::Regular,
+                bytes: b"# proposed\n".to_vec(),
+            }],
             parents: vec![v1],
             author: "d_seed".to_owned(),
             message: "topos publish".to_owned(),
@@ -533,7 +852,11 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
                 &SkillId::parse("s_deploy").unwrap(),
                 &OpId::parse("88888888-0000-4000-8000-000000000001").unwrap(),
                 cand,
-                plane_store::DeviceOpAuth { credential: FOL_CRED.to_owned(), op: plane_store::DeviceOp::PublishPropose, expected: Generation { epoch: 1, seq: 1 } },
+                plane_store::DeviceOpAuth {
+                    credential: FOL_CRED.to_owned(),
+                    op: plane_store::DeviceOp::PublishPropose,
+                    expected: Generation { epoch: 1, seq: 1 },
+                },
                 None,
                 None,
                 AT,
@@ -545,12 +868,19 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
 
         // The owner archives it.
         assert!(matches!(
-            a.archive_skill_session(&ws(), OWNER, "deploy", DeploymentMode::Cloud, AT, NOW).await.unwrap(),
+            a.archive_skill_session(&ws(), OWNER, "deploy", DeploymentMode::Cloud, AT, NOW)
+                .await
+                .unwrap(),
             plane_store::LifecycleOutcome::Archived { .. }
         ));
         // The base name is freed (the catalog row is renamed away).
         assert!(
-            !exists(&plane.pool, "SELECT 1 FROM catalog WHERE workspace_id = $1 AND name = 'deploy'", &[WS]).await,
+            !exists(
+                &plane.pool,
+                "SELECT 1 FROM catalog WHERE workspace_id = $1 AND name = 'deploy'",
+                &[WS]
+            )
+            .await,
             "the base name is freed"
         );
     });
@@ -559,12 +889,20 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
     let (data, warnings) = rig.reconcile();
     assert!(warnings.is_empty(), "clean reconcile: {warnings:?}");
     assert!(
-        data.skills.iter().any(|s| s.action == PullAction::Withdrawn),
+        data.skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
         "the archived skill is withdrawn: {:?}",
         data.skills
     );
-    assert!(!rig.placement_exists("s_deploy"), "the agent dir is cleaned");
-    assert!(rig.store_version_count("s_deploy") >= 1, "the sidecar retains the bytes");
+    assert!(
+        !rig.placement_exists("s_deploy"),
+        "the agent dir is cleaned"
+    );
+    assert!(
+        rig.store_version_count("s_deploy") >= 1,
+        "the sidecar retains the bytes"
+    );
 
     plane.rt.block_on(async {
         // The FOLLOWER (the proposer) has a proposal_closed notice.
@@ -585,22 +923,56 @@ fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
     // v1 = {shared, secret}; v2 = {shared (unchanged), other}. v1 is purged.
     let shared: &[u8] = b"shared-content";
     let v2_files = vec![
-        UploadedFile { path: "shared.txt".to_owned(), mode: FileMode::Regular, bytes: shared.to_vec() },
-        UploadedFile { path: "other.txt".to_owned(), mode: FileMode::Regular, bytes: b"v2-new".to_vec() },
+        UploadedFile {
+            path: "shared.txt".to_owned(),
+            mode: FileMode::Regular,
+            bytes: shared.to_vec(),
+        },
+        UploadedFile {
+            path: "other.txt".to_owned(),
+            mode: FileMode::Regular,
+            bytes: b"v2-new".to_vec(),
+        },
     ];
     let v2_expected = v2_files.clone();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
         let v1 = genesis(
             a,
             "s_deploy",
             OWNER_CRED,
             "c0000000-0000-4000-8000-000000000009",
             vec![
-                UploadedFile { path: "shared.txt".to_owned(), mode: FileMode::Regular, bytes: shared.to_vec() },
-                UploadedFile { path: "secret.txt".to_owned(), mode: FileMode::Regular, bytes: b"v1-secret".to_vec() },
+                UploadedFile {
+                    path: "shared.txt".to_owned(),
+                    mode: FileMode::Regular,
+                    bytes: shared.to_vec(),
+                },
+                UploadedFile {
+                    path: "secret.txt".to_owned(),
+                    mode: FileMode::Regular,
+                    bytes: b"v1-secret".to_vec(),
+                },
             ],
             "Deploy",
             None,
@@ -623,7 +995,9 @@ fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
         .unwrap();
         // Purge the v1 ancestor (its bytes drop out of history; v2 stays current).
         assert_eq!(
-            a.purge_version_session(&ws(), OWNER, "deploy", v1, DeploymentMode::Cloud, AT, NOW).await.unwrap(),
+            a.purge_version_session(&ws(), OWNER, "deploy", v1, DeploymentMode::Cloud, AT, NOW)
+                .await
+                .unwrap(),
             plane_store::PurgeOutcome::Purged
         );
         a.run_gc(&ws(), NOW + 1_000_000).await.unwrap();
@@ -653,9 +1027,36 @@ fn a_removed_member_freezes_in_place_and_re_adding_resumes() {
     let files = deploy_files();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
-        common::seed_member(a, &ws(), OWNER_DKID, &OWNER_PUBKEY, OWNER, "owner", OWNER_CRED).await;
-        common::seed_member(a, &ws(), FOL_DKID, &FOL_PUBKEY, FOLLOWER, "member", FOL_CRED).await;
-        genesis(a, "s_deploy", OWNER_CRED, "c0000000-0000-4000-8000-00000000000a", files.clone(), "Deploy", None).await;
+        common::seed_member(
+            a,
+            &ws(),
+            OWNER_DKID,
+            &OWNER_PUBKEY,
+            OWNER,
+            "owner",
+            OWNER_CRED,
+        )
+        .await;
+        common::seed_member(
+            a,
+            &ws(),
+            FOL_DKID,
+            &FOL_PUBKEY,
+            FOLLOWER,
+            "member",
+            FOL_CRED,
+        )
+        .await;
+        genesis(
+            a,
+            "s_deploy",
+            OWNER_CRED,
+            "c0000000-0000-4000-8000-00000000000a",
+            files.clone(),
+            "Deploy",
+            None,
+        )
+        .await;
     });
 
     let rig = ReconcileHarness::new("chn-s10");
@@ -673,7 +1074,9 @@ fn a_removed_member_freezes_in_place_and_re_adding_resumes() {
                 "aaaa0000-0000-4000-8000-00000000000a",
                 GovernanceRequest {
                     credential: OWNER_CRED.to_owned(),
-                    op: GovernanceOp::RosterRemove { target: Principal::parse(FOLLOWER).unwrap() },
+                    op: GovernanceOp::RosterRemove {
+                        target: Principal::parse(FOLLOWER).unwrap(),
+                    },
                 },
                 AT,
                 NOW,
@@ -689,17 +1092,31 @@ fn a_removed_member_freezes_in_place_and_re_adding_resumes() {
         warnings.iter().any(|w| w.contains("ACCESS_GONE")),
         "a removed member's whole-workspace 404 is ACCESS_GONE: {warnings:?}"
     );
-    assert!(rig.placement_exists("s_deploy"), "the bytes stay — removal is never a clean");
+    assert!(
+        rig.placement_exists("s_deploy"),
+        "the bytes stay — removal is never a clean"
+    );
 
     // Re-adding the member re-enables the same device: the reconcile resumes.
     plane.rt.block_on(async {
         plane
             .authority
-            .seed_workspace_member(&ws(), &Principal::parse(FOLLOWER).unwrap(), "member", "confirmed")
+            .seed_workspace_member(
+                &ws(),
+                &Principal::parse(FOLLOWER).unwrap(),
+                "member",
+                "confirmed",
+            )
             .await
             .unwrap();
     });
     let (_data, warnings) = rig.reconcile();
-    assert!(warnings.is_empty(), "re-adding restores access: {warnings:?}");
-    assert!(rig.placement_exists("s_deploy"), "the placement is intact through the round-trip");
+    assert!(
+        warnings.is_empty(),
+        "re-adding restores access: {warnings:?}"
+    );
+    assert!(
+        rig.placement_exists("s_deploy"),
+        "the placement is intact through the round-trip"
+    );
 }

@@ -46,7 +46,17 @@ async fn gpub(
         expected: gn(0, 0),
     };
     fx.authority
-        .publish(w, s, &op(op_id), genesis(files), auth, Some(display_name), channel, CREATED_AT, NOW)
+        .publish(
+            w,
+            s,
+            &op(op_id),
+            genesis(files),
+            auth,
+            Some(display_name),
+            channel,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap()
 }
@@ -95,13 +105,36 @@ async fn a_per_skill_reviewed_pin_beats_an_open_workspace_default(pool: PgPool) 
     seat(&fx, &w, "dk_rev", 11, REV, "reviewer").await;
     seat(&fx, &w, "dk_mem", 12, BOB, "member").await;
     // Workspace default is OPEN (review-required never turned on).
-    let g = gpub(&fx, &w, &s, "dk_mem", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy", None).await;
-    let c0 = fx.authority.db().read_current_commit(&w, &s).await.unwrap().unwrap();
+    let g = gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_mem",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+        None,
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
 
     // A reviewer pins THIS bundle reviewed (tightening takes reviewer+).
     assert_eq!(
         fx.authority
-            .protect(&w, &cred(&w, "dk_rev"), ProtectKind::Skill, "deploy", ProtectLevel::Protected, CREATED_AT)
+            .protect(
+                &w,
+                &cred(&w, "dk_rev"),
+                ProtectKind::Skill,
+                "deploy",
+                ProtectLevel::Protected,
+                CREATED_AT
+            )
             .await
             .unwrap(),
         ProtectOutcome::Set
@@ -114,7 +147,11 @@ async fn a_per_skill_reviewed_pin_beats_an_open_workspace_default(pool: PgPool) 
             &s,
             &op("aaaaaaaa-0000-4000-8000-000000000002"),
             child(c0, vec![file("f", b"v1")]),
-            DeviceOpAuth { credential: cred(&w, "dk_mem"), op: DeviceOp::PublishDirect, expected: g.current.unwrap() },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_mem"),
+                op: DeviceOp::PublishDirect,
+                expected: g.current.unwrap(),
+            },
             None,
             None,
             CREATED_AT,
@@ -124,7 +161,10 @@ async fn a_per_skill_reviewed_pin_beats_an_open_workspace_default(pool: PgPool) 
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::NeedsReview);
     assert_eq!(
-        r.details.as_ref().and_then(|d| d.get("downgraded")).and_then(serde_json::Value::as_bool),
+        r.details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
         Some(true)
     );
     // The pointer is frozen at the genesis.
@@ -144,37 +184,91 @@ async fn protect_skill_role_matrix_tighten_reviewer_loosen_owner(pool: PgPool) {
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
     seat(&fx, &w, "dk_rev", 12, REV, "reviewer").await;
     seat(&fx, &w, "dk_mem", 13, BOB, "member").await;
-    gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy", None).await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+        None,
+    )
+    .await;
 
     let protect = async |cred_dk: &str, level: ProtectLevel| {
         fx.authority
-            .protect(&w, &cred(&w, cred_dk), ProtectKind::Skill, "deploy", level, CREATED_AT)
+            .protect(
+                &w,
+                &cred(&w, cred_dk),
+                ProtectKind::Skill,
+                "deploy",
+                level,
+                CREATED_AT,
+            )
             .await
             .unwrap()
     };
     // Tighten: a member is refused; a reviewer lands.
-    assert_eq!(protect("dk_mem", ProtectLevel::Protected).await, ProtectOutcome::ReviewerRoleRequired);
-    assert_eq!(protect("dk_rev", ProtectLevel::Protected).await, ProtectOutcome::Set);
+    assert_eq!(
+        protect("dk_mem", ProtectLevel::Protected).await,
+        ProtectOutcome::ReviewerRoleRequired
+    );
+    assert_eq!(
+        protect("dk_rev", ProtectLevel::Protected).await,
+        ProtectOutcome::Set
+    );
     // Loosen: a reviewer is refused; the owner lands.
-    assert_eq!(protect("dk_rev", ProtectLevel::Open).await, ProtectOutcome::OwnerRoleRequired);
-    assert_eq!(protect("dk_owner", ProtectLevel::Open).await, ProtectOutcome::Set);
+    assert_eq!(
+        protect("dk_rev", ProtectLevel::Open).await,
+        ProtectOutcome::OwnerRoleRequired
+    );
+    assert_eq!(
+        protect("dk_owner", ProtectLevel::Open).await,
+        ProtectOutcome::Set
+    );
 }
 
 /// A pending proposal SURVIVES a loosening of its skill's protection (it still awaits its verdict),
 /// and once the bundle is loosened to `open` the four-eyes rule no longer bites — so the ORIGINAL
 /// proposer can now self-approve their own open proposal and land it.
 #[sqlx::test]
-async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_approve(pool: PgPool) {
+async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_approve(
+    pool: PgPool,
+) {
     let fx = Fixture::new(pool.clone(), "chp-survive-loosen").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
     seat(&fx, &w, "dk_mem", 12, BOB, "member").await;
-    let g = gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy", None).await;
-    let c0 = fx.authority.db().read_current_commit(&w, &s).await.unwrap().unwrap();
+    let g = gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+        None,
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
 
     // Pin the bundle reviewed (an owner tightens), then the member opens a proposal on it.
     fx.authority
-        .protect(&w, &cred(&w, "dk_owner"), ProtectKind::Skill, "deploy", ProtectLevel::Protected, CREATED_AT)
+        .protect(
+            &w,
+            &cred(&w, "dk_owner"),
+            ProtectKind::Skill,
+            "deploy",
+            ProtectLevel::Protected,
+            CREATED_AT,
+        )
         .await
         .unwrap();
     let key = dev_key(12);
@@ -194,7 +288,14 @@ async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_
 
     // The owner LOOSENS the bundle back to open — the pending proposal is untouched (still open).
     fx.authority
-        .protect(&w, &cred(&w, "dk_owner"), ProtectKind::Skill, "deploy", ProtectLevel::Open, CREATED_AT)
+        .protect(
+            &w,
+            &cred(&w, "dk_owner"),
+            ProtectKind::Skill,
+            "deploy",
+            ProtectLevel::Open,
+            CREATED_AT,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -216,13 +317,21 @@ async fn a_pending_proposal_survives_a_loosening_and_the_proposer_can_then_self_
         g.current.unwrap(),
     )
     .await;
-    assert_eq!(ar.outcome, TerminalOutcome::Ok, "self-approve lands once the bundle is open");
+    assert_eq!(
+        ar.outcome,
+        TerminalOutcome::Ok,
+        "self-approve lands once the bundle is open"
+    );
     assert_eq!(
         fx.authority.db().read_current_commit(&w, &s).await.unwrap(),
         Some(cprop),
         "the pointer moved to the approved candidate"
     );
-    assert_eq!(open_proposals(&pool, "w_acme", "s_deploy").await, 0, "the proposal is resolved");
+    assert_eq!(
+        open_proposals(&pool, "w_acme", "s_deploy").await,
+        0,
+        "the proposal is resolved"
+    );
 }
 
 /// `publish --to <channel>` on a reviewed bundle by a member: the VERSION downgrades to a proposal,
@@ -235,12 +344,42 @@ async fn publish_to_on_a_reviewed_bundle_downgrades_the_version_but_still_places
     let (w, sa, sb) = (ws("w_acme"), skill("s_deploy"), skill("s_other"));
     seat(&fx, &w, "dk_mem", 11, BOB, "member").await;
     // A: born in everyone. B: born in `ops`, which pre-creates the channel so A's later --to is a Placed.
-    let g = gpub(&fx, &w, &sa, "dk_mem", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy", None).await;
-    gpub(&fx, &w, &sb, "dk_mem", "bbbbbbbb-0000-4000-8000-000000000001", vec![file("f", b"other")], "Other", Some("ops")).await;
-    let c0 = fx.authority.db().read_current_commit(&w, &sa).await.unwrap().unwrap();
+    let g = gpub(
+        &fx,
+        &w,
+        &sa,
+        "dk_mem",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+        None,
+    )
+    .await;
+    gpub(
+        &fx,
+        &w,
+        &sb,
+        "dk_mem",
+        "bbbbbbbb-0000-4000-8000-000000000001",
+        vec![file("f", b"other")],
+        "Other",
+        Some("ops"),
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &sa)
+        .await
+        .unwrap()
+        .unwrap();
     // Turn the workspace review-required ON (A now downgrades a member's direct publish).
     fx.authority.set_review_required(&w, true).await.unwrap();
-    assert_eq!(channel_places(&pool, "w_acme", "ops", "s_deploy").await, 0, "A not in ops yet");
+    assert_eq!(
+        channel_places(&pool, "w_acme", "ops", "s_deploy").await,
+        0,
+        "A not in ops yet"
+    );
 
     let r = fx
         .authority
@@ -249,7 +388,11 @@ async fn publish_to_on_a_reviewed_bundle_downgrades_the_version_but_still_places
             &sa,
             &op("aaaaaaaa-0000-4000-8000-000000000002"),
             child(c0, vec![file("f", b"v1")]),
-            DeviceOpAuth { credential: cred(&w, "dk_mem"), op: DeviceOp::PublishDirect, expected: g.current.unwrap() },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_mem"),
+                op: DeviceOp::PublishDirect,
+                expected: g.current.unwrap(),
+            },
             None,
             Some("ops"),
             CREATED_AT,
@@ -261,11 +404,18 @@ async fn publish_to_on_a_reviewed_bundle_downgrades_the_version_but_still_places
     // The version DOWNGRADED (NEEDS_REVIEW, pointer frozen)…
     assert_eq!(r.outcome, TerminalOutcome::NeedsReview);
     assert_eq!(
-        r.details.as_ref().and_then(|d| d.get("downgraded")).and_then(serde_json::Value::as_bool),
+        r.details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
         Some(true)
     );
     assert_eq!(
-        fx.authority.db().read_current_commit(&w, &sa).await.unwrap(),
+        fx.authority
+            .db()
+            .read_current_commit(&w, &sa)
+            .await
+            .unwrap(),
         Some(c0),
         "the pointer is frozen at the pre-publish version"
     );

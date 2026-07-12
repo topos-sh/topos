@@ -242,7 +242,14 @@ pub(crate) async fn protect(
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .protect_txn(ws, kind, target_name, level, &identity.principal, created_at)
+        .protect_txn(
+            ws,
+            kind,
+            target_name,
+            level,
+            &identity.principal,
+            created_at,
+        )
         .await
 }
 

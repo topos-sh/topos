@@ -22,8 +22,8 @@ use topos_types::requests::{
     ProposeRequest, PublishRequest, RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest,
     RosterRemoveRequest, RosterSetRequest, SessionIntent, VerificationContextResponse,
     WireAppliedReport, WireAppliedSkill, WireCandidate, WireDelivery, WireDeliverySkill, WireFile,
-    WireFileMode, WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex, WireSkillIndexEntry,
-    WireVersionFile, WireVersionMeta, WireVia, WorkspaceRole,
+    WireFileMode, WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex,
+    WireSkillIndexEntry, WireVersionFile, WireVersionMeta, WireVia, WorkspaceRole,
 };
 use topos_types::results::{
     InviteData, ProposeData, PublishData, RevertData, ReviewData, ReviewDecision,

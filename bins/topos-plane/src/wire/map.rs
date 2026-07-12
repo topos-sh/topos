@@ -18,8 +18,8 @@ use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
     PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse, SessionIntent,
     VerificationContextResponse, WireAppliedReport, WireCandidate, WireDelivery, WireDeliverySkill,
-    WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex, WireSkillIndexEntry, WireVia,
-    WireVersionFile, WireVersionMeta,
+    WireNotice, WireOpenProposal, WireProposalList, WireSkillIndex, WireSkillIndexEntry,
+    WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::InviteData;
 use topos_types::{

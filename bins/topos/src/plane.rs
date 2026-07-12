@@ -197,6 +197,15 @@ pub(crate) trait DeliverySource {
         workspace_id: &str,
         applied: &[(String, [u8; 32])],
     ) -> Result<(), PlaneError>;
+
+    /// Bind a DELIVERED skill to its workspace credential on the READ transport. The per-skill
+    /// credential map is derived from `follows.json`, which by definition does not yet name a
+    /// brand-new arrival — so without this, the arrival's very first version fetch would answer
+    /// "not served" and cost a spurious error plus a session's delay. The workspace credential
+    /// already authenticates every skill in its workspace (membership IS the authorization), so
+    /// binding is a lookup, never a new secret. Default: a no-op (the fixture transports carry
+    /// their creds up front).
+    fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 }
 
 // ---------------------------------------------------------------------------------------------

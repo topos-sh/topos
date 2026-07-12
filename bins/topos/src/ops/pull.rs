@@ -38,6 +38,11 @@ use crate::{doc, sidecar};
 
 use super::sync_engine::{self, WorkState};
 
+/// The never-received sentinel the first-receive baseline carries (and an upstream withdrawal
+/// restores, so a later re-delivery installs afresh instead of reading as already-current).
+const ZERO_GEN: topos_types::Generation = topos_types::Generation { epoch: 0, seq: 0 };
+const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// What a `pull` invocation targets.
 #[derive(Debug)]
 pub(crate) enum PullScope {
@@ -236,6 +241,11 @@ pub(crate) fn pull_reconcile(
         let mut delivered_ids: HashSet<&str> = HashSet::with_capacity(snapshot.skills.len());
         for ds in &snapshot.skills {
             delivered_ids.insert(ds.skill_id.as_str());
+            // Teach the READ transport this skill's credential before anything fetches its bytes.
+            // The per-skill credential map is derived from `follows.json`, which cannot yet name a
+            // brand-new arrival — without this, the arrival's first version fetch answers
+            // "not served" and the offer is lost for a session.
+            delivery.bind_skill(&ws, &ds.skill_id);
             let entry = followed.iter().find(|(id, _)| *id == ds.skill_id);
             let row = match entry {
                 // An entry the LOCAL `unfollow` verb paused, which the plane still delivers: respect
@@ -259,10 +269,9 @@ pub(crate) fn pull_reconcile(
 
         // The undelivered remainder: who acted decides the on-disk consequence.
         let detached: HashSet<&str> = snapshot.detached.iter().map(String::as_str).collect();
-        for (skill_id, follow) in followed
-            .iter()
-            .filter(|(id, f)| f.workspace_id == ws && f.following && !delivered_ids.contains(id.as_str()))
-        {
+        for (skill_id, follow) in followed.iter().filter(|(id, f)| {
+            f.workspace_id == ws && f.following && !delivered_ids.contains(id.as_str())
+        }) {
             let _ = follow;
             let sid = match SkillId::parse(skill_id) {
                 Ok(sid) => sid,
@@ -330,14 +339,24 @@ fn sync_delivered(
         ..follow.clone()
     };
     let rec = delivered_record(ws, ds);
-    sync_engine::sync_one_with(ctx, &sid, &follow, sync_engine::Invocation::Sweep, Some(&rec))
+    sync_engine::sync_one_with(
+        ctx,
+        &sid,
+        &follow,
+        sync_engine::Invocation::Sweep,
+        Some(&rec),
+    )
 }
 
 /// A brand-new delivered skill this device has never held: record the follow entry (person-scoped
 /// truth lives on the plane; the local entry is install-state), lay the first-receive baseline
 /// under the skill's CATALOG name, and run the engine — whose kernel consent OFFERS the first
 /// bytes (I-TOFU), never silently lands them.
-fn install_new_arrival(ctx: &Ctx<'_>, ws: &str, ds: &DeliverySkill) -> Result<PullSkill, ClientError> {
+fn install_new_arrival(
+    ctx: &Ctx<'_>,
+    ws: &str,
+    ds: &DeliverySkill,
+) -> Result<PullSkill, ClientError> {
     let sid = SkillId::parse(&ds.skill_id)?;
     // The BASELINE FIRST, the follow entry second — the same ordering `follow`'s promote uses. A
     // crash between them leaves a baseline with no entry, which the NEXT reconcile treats as a
@@ -363,7 +382,13 @@ fn install_new_arrival(ctx: &Ctx<'_>, ws: &str, ds: &DeliverySkill) -> Result<Pu
         following: true,
     };
     let rec = delivered_record(ws, ds);
-    sync_engine::sync_one_with(ctx, &sid, &follow, sync_engine::Invocation::Sweep, Some(&rec))
+    sync_engine::sync_one_with(
+        ctx,
+        &sid,
+        &follow,
+        sync_engine::Invocation::Sweep,
+        Some(&rec),
+    )
 }
 
 /// The wire pointer record a delivery row resolves to — the engine's sync target (scope-checked
@@ -443,10 +468,29 @@ fn withdraw_upstream(ctx: &Ctx<'_>, sid: &SkillId) -> Result<PullSkill, ClientEr
             }
         }
     }
-    // NOTE: no follow-state flip. The entry stays live: the sidecar keeps the bytes + the draft, the
-    // placements are gone (so `compute_work` sees ABSENT), and if upstream ever delivers the skill
-    // again — a curator re-places it, an owner unarchives it — the very next reconcile installs it
-    // clean. A withdrawal is not a subscription change; it is a delivery change.
+    // NOTE: no follow-state flip. The entry stays LIVE (a withdrawal is a delivery change, not a
+    // subscription change): the sidecar keeps every byte + any draft, and the sync state is reset to
+    // the NEVER-RECEIVED baseline — the same all-zero sentinel `follow` lays. That reset is what
+    // makes a later re-delivery (a curator re-places the skill, an owner unarchives it) reinstall:
+    // without it, `applied == observed` and an absent placement read as "already current", and the
+    // skill would never come back. Re-arrival then passes the kernel's I-TOFU first-receive consent
+    // — an offer, disclosed, exactly as the original arrival was.
+    if let Some(prior) = sync.as_ref() {
+        let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+        doc::write_doc(
+            ctx.fs,
+            &sp.sync,
+            &SyncState {
+                schema_version: prior.schema_version,
+                observed: ZERO_GEN,
+                observed_version_id: ZERO_HEX.to_owned(),
+                applied: ZERO_GEN,
+                base_commit: ZERO_HEX.to_owned(),
+                work_hash: ZERO_HEX.to_owned(),
+                held: false,
+            },
+        )?;
+    }
     Ok(undelivered_row(sid, sync.as_ref(), PullAction::Withdrawn))
 }
 

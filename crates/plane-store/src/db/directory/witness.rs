@@ -13,8 +13,8 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::db::custody::witness::{
-    AccessWitness, ActorRole, DeviceIdentity, GenesisRegistration, PlacementDecision, SessionWriteGate,
-    SkillGate,
+    AccessWitness, ActorRole, DeviceIdentity, GenesisRegistration, PlacementDecision,
+    SessionWriteGate, SkillGate,
 };
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
@@ -158,15 +158,25 @@ impl AccessWitness for Db {
             set_catalog_display_name(&mut **tx, ws, skill, dn).await?;
         }
         // Every workspace is born with `everyone`; converge here for fixture-seeded workspaces too.
-        sqlx::query!("SELECT topos_ensure_everyone($1, $2) AS \"ok\"", ws_s, created_at)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(AuthorityError::internal)?;
+        sqlx::query!(
+            "SELECT topos_ensure_everyone($1, $2) AS \"ok\"",
+            ws_s,
+            created_at
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AuthorityError::internal)?;
         // The placement: the requested `--to` channel, else the `everyone` default (a brand-new
         // skill must land SOMEWHERE discoverable — that is the whole "nobody knows it's there" fix).
-        let placement =
-            place_via_function(tx, ws, skill, to_channel.unwrap_or("everyone"), author, created_at)
-                .await?;
+        let placement = place_via_function(
+            tx,
+            ws,
+            skill,
+            to_channel.unwrap_or("everyone"),
+            author,
+            created_at,
+        )
+        .await?;
         // The author's self-follow: an author follows what they create (a DIRECT follow — it
         // survives any channel dropping the skill).
         let followed = sqlx::query!(
@@ -543,7 +553,9 @@ struct UnknownCatalogStatus(String);
 struct UnknownRole(String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("guarded policy function {function} answered {outcome:?} where the transaction's gates make that unreachable")]
+#[error(
+    "guarded policy function {function} answered {outcome:?} where the transaction's gates make that unreachable"
+)]
 struct PolicyFunctionInvariant {
     function: &'static str,
     outcome: String,
@@ -557,8 +569,14 @@ mod tests {
     fn mint_catalog_name_folds_display_names_and_falls_back_to_the_skill_id() {
         let sid = SkillId::parse("topos_0af3c9d2").unwrap();
         // Display names fold to the agent-skills charset (lowercase letters, digits, hyphens).
-        assert_eq!(mint_catalog_name(Some("Deploy Guide"), &sid), "deploy-guide");
-        assert_eq!(mint_catalog_name(Some("deploy_guide"), &sid), "deploy-guide");
+        assert_eq!(
+            mint_catalog_name(Some("Deploy Guide"), &sid),
+            "deploy-guide"
+        );
+        assert_eq!(
+            mint_catalog_name(Some("deploy_guide"), &sid),
+            "deploy-guide"
+        );
         assert_eq!(mint_catalog_name(Some("deploy"), &sid), "deploy");
         // Punctuation collapses to single hyphens; leading/trailing hyphens are trimmed.
         assert_eq!(mint_catalog_name(Some("--A  (b)!C--"), &sid), "a-b-c");

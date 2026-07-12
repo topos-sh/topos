@@ -1837,8 +1837,8 @@ impl ReconcileHarness {
     #[must_use]
     pub fn reconcile(&self) -> (PullData, Vec<String>) {
         let (plane, follow) = self.transport();
-        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
-            .expect("device id");
+        let device_id =
+            crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
         let ctx = Ctx {
             fs: &self.fs,
             ids: &self.ids,
@@ -1862,8 +1862,8 @@ impl ReconcileHarness {
     #[must_use]
     pub fn accept(&self, name: &str) -> PullData {
         let (plane, follow) = self.transport();
-        let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
-            .expect("device id");
+        let device_id =
+            crate::identity::load_or_create_device_id(&self.fs, &self.layout()).expect("device id");
         let ctx = Ctx {
             fs: &self.fs,
             ids: &self.ids,

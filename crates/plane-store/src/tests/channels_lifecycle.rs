@@ -11,20 +11,13 @@ use super::*;
 
 use crate::catalog::{LifecycleOutcome, PurgeOutcome};
 use crate::channels::SubscriptionOutcome;
-use crate::delivery::{Delivery, DeliveredSkill};
+use crate::delivery::{DeliveredSkill, Delivery};
 
 const ALICE: &str = "alice@acme.com";
 const BOB: &str = "bob@acme.com";
 
 /// Seat a person's device + workspace_member seat.
-async fn seat(
-    fx: &Fixture,
-    w: &WorkspaceId,
-    dkid: &str,
-    seed: u8,
-    principal: &str,
-    role: &str,
-) {
+async fn seat(fx: &Fixture, w: &WorkspaceId, dkid: &str, seed: u8, principal: &str, role: &str) {
     let p = prin(principal);
     fx.authority
         .db()
@@ -54,7 +47,17 @@ async fn gpub(
         expected: gn(0, 0),
     };
     fx.authority
-        .publish(w, s, &op(op_id), genesis(files), auth, Some(display_name), None, CREATED_AT, NOW)
+        .publish(
+            w,
+            s,
+            &op(op_id),
+            genesis(files),
+            auth,
+            Some(display_name),
+            None,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap()
 }
@@ -111,13 +114,18 @@ async fn placements(pool: &PgPool, w: &str, skill_id: &str) -> i64 {
 /// `skill_commit.purged_at`/`purged_by` for a version (raw `sqlx`).
 async fn purge_stamp(pool: &PgPool, w: &str, commit: &[u8]) -> (Option<i64>, Option<String>) {
     use sqlx::Row as _;
-    let r = sqlx::query("SELECT purged_at, purged_by FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2")
-        .bind(w)
-        .bind(commit)
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    (r.get::<Option<i64>, _>("purged_at"), r.get::<Option<String>, _>("purged_by"))
+    let r = sqlx::query(
+        "SELECT purged_at, purged_by FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2",
+    )
+    .bind(w)
+    .bind(commit)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (
+        r.get::<Option<i64>, _>("purged_at"),
+        r.get::<Option<String>, _>("purged_by"),
+    )
 }
 
 /// A fake candidate commit id (for seeding a proposal row against a real base).
@@ -136,14 +144,30 @@ async fn child_pub(
     parent: CommitId,
     files: Vec<UploadedFile>,
 ) -> crate::SetCurrentReceipt {
-    let expected = fx.authority.db().read_current_generation(w, s).await.unwrap().unwrap();
+    let expected = fx
+        .authority
+        .db()
+        .read_current_generation(w, s)
+        .await
+        .unwrap()
+        .unwrap();
     let auth = DeviceOpAuth {
         credential: cred(w, dkid),
         op: DeviceOp::PublishDirect,
         expected,
     };
     fx.authority
-        .publish(w, s, &op(op_id), child(parent, files), auth, None, None, CREATED_AT, NOW)
+        .publish(
+            w,
+            s,
+            &op(op_id),
+            child(parent, files),
+            auth,
+            None,
+            None,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap()
 }
@@ -195,7 +219,10 @@ async fn owner_archive_renames_frees_the_name_closes_proposals_and_notifies(pool
     let LifecycleOutcome::Archived { archived_name } = out else {
         panic!("expected Archived, got {out:?}");
     };
-    assert_eq!(archived_name, "deploy-archived-2026-06-28", "renamed with the date label");
+    assert_eq!(
+        archived_name, "deploy-archived-2026-06-28",
+        "renamed with the date label"
+    );
     assert_eq!(
         catalog(&pool, "w_acme", "s_deploy").await,
         Some(("archived".to_owned(), archived_name.clone())),
@@ -215,11 +242,17 @@ async fn owner_archive_renames_frees_the_name_closes_proposals_and_notifies(pool
     )
     .await;
     assert!(g2.is_ok(), "a fresh identity claims the freed base name");
-    assert_eq!(catalog(&pool, "w_acme", "s_deploy2").await.unwrap().1, "deploy");
+    assert_eq!(
+        catalog(&pool, "w_acme", "s_deploy2").await.unwrap().1,
+        "deploy"
+    );
 
     // The OLD skill is out of delivery; the NEW one is in (via everyone).
     let d = deliver(&fx, &w, "dk_bob").await;
-    assert!(find(&d, "s_deploy").is_none(), "the archived skill is out of delivery");
+    assert!(
+        find(&d, "s_deploy").is_none(),
+        "the archived skill is out of delivery"
+    );
     assert!(find(&d, "s_deploy2").is_some(), "the fresh skill delivers");
 
     // The proposal is CLOSED (not rejected) with the circumstantial reason, and bob has a notice.
@@ -228,7 +261,9 @@ async fn owner_archive_renames_frees_the_name_closes_proposals_and_notifies(pool
         Some(("closed".to_owned(), Some("skill archived".to_owned())))
     );
     assert!(
-        d.notices.iter().any(|n| n.kind == "proposal_closed" && n.outcome.as_deref() == Some("closed")),
+        d.notices
+            .iter()
+            .any(|n| n.kind == "proposal_closed" && n.outcome.as_deref() == Some("closed")),
         "the proposer gets a proposal_closed notice: {:?}",
         d.notices
     );
@@ -243,13 +278,31 @@ async fn same_day_archive_repeats_get_a_numeric_suffix(pool: PgPool) {
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
 
     // skill 1 "deploy" → archived at the date.
-    gpub(&fx, &w, &skill("s_one"), "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"1")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_one"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"1")],
+        "Deploy",
+    )
+    .await;
     fx.authority
         .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     // skill 2 claims the freed "deploy", then archives SAME day → the "-2" suffix.
-    gpub(&fx, &w, &skill("s_two"), "dk_owner", "aaaaaaaa-0000-4000-8000-000000000002", vec![file("f", b"2")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_two"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000002",
+        vec![file("f", b"2")],
+        "Deploy",
+    )
+    .await;
     let out = fx
         .authority
         .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
@@ -274,7 +327,16 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
     seat(&fx, &w, "dk_mem", 12, BOB, "member").await;
-    gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
 
     // A confirmed non-owner member gets the typed role refusal.
     assert_eq!(
@@ -294,7 +356,14 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
     // A self-host plane denies the whole session op uniformly.
     assert!(matches!(
         fx.authority
-            .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::SelfHost, CREATED_AT, NOW)
+            .archive_skill_session(
+                &w,
+                ALICE,
+                "deploy",
+                DeploymentMode::SelfHost,
+                CREATED_AT,
+                NOW
+            )
             .await,
         Err(AuthorityError::NotFound)
     ));
@@ -308,7 +377,14 @@ async fn archive_refusals_non_owner_not_active_unknown_and_self_host(pool: PgPoo
     ));
     assert_eq!(
         fx.authority
-            .archive_skill_session(&w, ALICE, "deploy-archived-2026-06-28", DeploymentMode::Cloud, CREATED_AT, NOW)
+            .archive_skill_session(
+                &w,
+                ALICE,
+                "deploy-archived-2026-06-28",
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         LifecycleOutcome::NotActive
@@ -326,7 +402,16 @@ async fn unarchive_restores_the_name_and_the_author_self_follow_survives(pool: P
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await; // ALICE authors it
     seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
-    gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
     // Both receive it before the archive (ALICE direct+everyone, bob everyone).
     assert!(find(&deliver(&fx, &w, "dk_owner").await, "s_deploy").is_some());
     assert!(find(&deliver(&fx, &w, "dk_bob").await, "s_deploy").is_some());
@@ -337,13 +422,27 @@ async fn unarchive_restores_the_name_and_the_author_self_follow_survives(pool: P
         .unwrap();
     let out = fx
         .authority
-        .unarchive_skill_session(&w, ALICE, "deploy-archived-2026-06-28", DeploymentMode::Cloud)
+        .unarchive_skill_session(
+            &w,
+            ALICE,
+            "deploy-archived-2026-06-28",
+            DeploymentMode::Cloud,
+        )
         .await
         .unwrap();
-    assert_eq!(out, LifecycleOutcome::Unarchived { name: "deploy".to_owned() });
+    assert_eq!(
+        out,
+        LifecycleOutcome::Unarchived {
+            name: "deploy".to_owned()
+        }
+    );
 
     // Placements were NOT restored.
-    assert_eq!(placements(&pool, "w_acme", "s_deploy").await, 0, "curation is not restored");
+    assert_eq!(
+        placements(&pool, "w_acme", "s_deploy").await,
+        0,
+        "curation is not restored"
+    );
     // The author gets it back via the surviving self-follow; the non-author member does not.
     let da = deliver(&fx, &w, "dk_owner").await;
     let ds = find(&da, "s_deploy").expect("the author's self-follow survives");
@@ -362,17 +461,40 @@ async fn unarchive_refuses_when_the_base_name_was_reused(pool: PgPool) {
     let fx = Fixture::new(pool, "chl-unarchive-taken").await;
     let w = ws("w_acme");
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
-    gpub(&fx, &w, &skill("s_old"), "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"old")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_old"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"old")],
+        "Deploy",
+    )
+    .await;
     fx.authority
         .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
         .unwrap();
     // A fresh identity claims "deploy".
-    gpub(&fx, &w, &skill("s_new"), "dk_owner", "aaaaaaaa-0000-4000-8000-000000000002", vec![file("f", b"new")], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_new"),
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000002",
+        vec![file("f", b"new")],
+        "Deploy",
+    )
+    .await;
     // Unarchiving the OLD skill now collides on the base name.
     assert_eq!(
         fx.authority
-            .unarchive_skill_session(&w, ALICE, "deploy-archived-2026-06-28", DeploymentMode::Cloud)
+            .unarchive_skill_session(
+                &w,
+                ALICE,
+                "deploy-archived-2026-06-28",
+                DeploymentMode::Cloud
+            )
             .await
             .unwrap(),
         LifecycleOutcome::NameTaken
@@ -390,11 +512,23 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
     let body: &[u8] = b"delete-me-bytes";
-    gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("SKILL.md", body)], "Deploy").await;
+    gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", body)],
+        "Deploy",
+    )
+    .await;
     let obj = object_id(body);
     // The object is readable while the skill lives.
     assert!(
-        fx.authority.read_object(&prin(ALICE), &w, &s, obj).await.is_ok(),
+        fx.authority
+            .read_object(&prin(ALICE), &w, &s, obj)
+            .await
+            .is_ok(),
         "readable before delete"
     );
 
@@ -413,7 +547,13 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
         .unwrap();
     assert_eq!(
         fx.authority
-            .delete_skill_session(&w, ALICE, "deploy-archived-2026-06-28", DeploymentMode::Cloud, NOW)
+            .delete_skill_session(
+                &w,
+                ALICE,
+                "deploy-archived-2026-06-28",
+                DeploymentMode::Cloud,
+                NOW
+            )
             .await
             .unwrap(),
         LifecycleOutcome::Deleted
@@ -425,7 +565,12 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
         "deleted"
     );
     assert!(
-        fx.authority.db().read_current_commit(&w, &s).await.unwrap().is_none(),
+        fx.authority
+            .db()
+            .read_current_commit(&w, &s)
+            .await
+            .unwrap()
+            .is_none(),
         "the current pointer is dropped"
     );
     // The object is un-rooted (read_object → NotFound) and the GC reclaims it.
@@ -434,7 +579,10 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
         Err(AuthorityError::NotFound)
     ));
     let reclaimed = fx.authority.run_gc(&w, NOW + 1_000_000).await.unwrap();
-    assert!(reclaimed >= 1, "the deleted skill's bytes are reclaimed: {reclaimed}");
+    assert!(
+        reclaimed >= 1,
+        "the deleted skill's bytes are reclaimed: {reclaimed}"
+    );
 
     // A publish onto the deleted skill id is DENIED "deleted".
     let r = fx
@@ -444,7 +592,11 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
             &s,
             &op("aaaaaaaa-0000-4000-8000-000000000009"),
             genesis(vec![file("SKILL.md", b"resurrect")]),
-            DeviceOpAuth { credential: cred(&w, "dk_owner"), op: DeviceOp::PublishDirect, expected: gn(0, 0) },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_owner"),
+                op: DeviceOp::PublishDirect,
+                expected: gn(0, 0),
+            },
             Some("Deploy"),
             None,
             CREATED_AT,
@@ -454,7 +606,10 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     assert_eq!(
-        r.details.as_ref().and_then(|d| d.get("message")).and_then(serde_json::Value::as_str),
+        r.details
+            .as_ref()
+            .and_then(|d| d.get("message"))
+            .and_then(serde_json::Value::as_str),
         Some("the skill is deleted"),
     );
 }
@@ -467,8 +622,23 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner").await;
     seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
-    let g = gpub(&fx, &w, &s, "dk_owner", "aaaaaaaa-0000-4000-8000-000000000001", vec![file("f", b"v0")], "Deploy").await;
-    let c0 = fx.authority.db().read_current_commit(&w, &s).await.unwrap().unwrap();
+    let g = gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_owner",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("f", b"v0")],
+        "Deploy",
+    )
+    .await;
+    let c0 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
     fx.authority
         .archive_skill_session(&w, ALICE, "deploy", DeploymentMode::Cloud, CREATED_AT, NOW)
         .await
@@ -482,7 +652,11 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
             &s,
             &op("aaaaaaaa-0000-4000-8000-000000000002"),
             child(c0, vec![file("f", b"v1")]),
-            DeviceOpAuth { credential: cred(&w, "dk_owner"), op: DeviceOp::PublishDirect, expected: g.current.unwrap() },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_owner"),
+                op: DeviceOp::PublishDirect,
+                expected: g.current.unwrap(),
+            },
             None,
             None,
             CREATED_AT,
@@ -492,13 +666,21 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
         .unwrap();
     assert_eq!(r.outcome, TerminalOutcome::Denied);
     assert_eq!(
-        r.details.as_ref().and_then(|d| d.get("message")).and_then(serde_json::Value::as_str),
+        r.details
+            .as_ref()
+            .and_then(|d| d.get("message"))
+            .and_then(serde_json::Value::as_str),
         Some("the skill is archived"),
     );
     // A follow of the archived name is SkillNotActive.
     assert_eq!(
         fx.authority
-            .follow_skill(&w, &cred(&w, "dk_bob"), "deploy-archived-2026-06-28", CREATED_AT)
+            .follow_skill(
+                &w,
+                &cred(&w, "dk_bob"),
+                "deploy-archived-2026-06-28",
+                CREATED_AT
+            )
             .await
             .unwrap(),
         SubscriptionOutcome::SkillNotActive
@@ -531,7 +713,13 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
         "Deploy",
     )
     .await;
-    let c1 = fx.authority.db().read_current_commit(&w, &s).await.unwrap().unwrap();
+    let c1 = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &s)
+        .await
+        .unwrap()
+        .unwrap();
     let v2 = child_pub(
         &fx,
         &w,
@@ -567,7 +755,15 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
     // Purging the CURRENT version is refused.
     assert_eq!(
         fx.authority
-            .purge_version_session(&w, ALICE, "deploy", v2_commit, DeploymentMode::Cloud, CREATED_AT, NOW)
+            .purge_version_session(
+                &w,
+                ALICE,
+                "deploy",
+                v2_commit,
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         PurgeOutcome::IsCurrent
@@ -575,7 +771,15 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
     // Purge v1: un-rooted + tombstoned.
     assert_eq!(
         fx.authority
-            .purge_version_session(&w, ALICE, "deploy", v1_commit, DeploymentMode::Cloud, CREATED_AT, NOW)
+            .purge_version_session(
+                &w,
+                ALICE,
+                "deploy",
+                v1_commit,
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         PurgeOutcome::Purged
@@ -588,20 +792,31 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
     fx.authority.run_gc(&w, NOW + 1_000_000).await.unwrap();
     assert!(
         matches!(
-            fx.authority.read_object(&prin(ALICE), &w, &s, obj_secret).await,
+            fx.authority
+                .read_object(&prin(ALICE), &w, &s, obj_secret)
+                .await,
             Err(AuthorityError::NotFound)
         ),
         "v1's unique blob is unreadable after the purge + GC"
     );
     assert_eq!(
-        fx.authority.read_object(&prin(ALICE), &w, &s, obj_shared).await.unwrap(),
+        fx.authority
+            .read_object(&prin(ALICE), &w, &s, obj_shared)
+            .await
+            .unwrap(),
         shared.to_vec(),
         "the shared blob stays readable via v2"
     );
     // v1's version-metadata read is now the uniform NotFound (un-rooted ⇒ not reachable).
     assert!(matches!(
         fx.authority
-            .read_version_metadata_session(&w, "deploy", &digest::to_hex(&v1_commit.0), ALICE, DeploymentMode::Cloud)
+            .read_version_metadata_session(
+                &w,
+                "deploy",
+                &digest::to_hex(&v1_commit.0),
+                ALICE,
+                DeploymentMode::Cloud
+            )
             .await,
         Err(AuthorityError::NotFound)
     ));
@@ -609,7 +824,10 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
     // The dependent proposal is closed with the circumstantial reason + a notice to bob.
     assert_eq!(
         proposal(&pool, "w_acme", "0f0f0f0f-0000-4000-8000-000000000002").await,
-        Some(("closed".to_owned(), Some("a version it rests on was purged".to_owned())))
+        Some((
+            "closed".to_owned(),
+            Some("a version it rests on was purged".to_owned())
+        ))
     );
     assert!(
         deliver(&fx, &w, "dk_bob")
@@ -623,7 +841,15 @@ async fn purge_un_roots_one_version_reclaims_its_unique_bytes_and_closes_depende
     // A re-purge is idempotent information.
     assert_eq!(
         fx.authority
-            .purge_version_session(&w, ALICE, "deploy", v1_commit, DeploymentMode::Cloud, CREATED_AT, NOW)
+            .purge_version_session(
+                &w,
+                ALICE,
+                "deploy",
+                v1_commit,
+                DeploymentMode::Cloud,
+                CREATED_AT,
+                NOW
+            )
             .await
             .unwrap(),
         PurgeOutcome::AlreadyPurged
@@ -662,7 +888,13 @@ async fn a_member_revert_on_a_reviewed_bundle_downgrades_but_a_reviewer_lands(po
             )
             .await;
             genesis.insert(s.as_str().to_owned(), g.version_id.unwrap());
-            let c1 = fx.authority.db().read_current_commit(&w, s).await.unwrap().unwrap();
+            let c1 = fx
+                .authority
+                .db()
+                .read_current_commit(&w, s)
+                .await
+                .unwrap()
+                .unwrap();
             child_pub(
                 &fx,
                 &w,
@@ -680,14 +912,24 @@ async fn a_member_revert_on_a_reviewed_bundle_downgrades_but_a_reviewer_lands(po
     fx.authority.set_review_required(&w, true).await.unwrap();
 
     // A member's revert on skill A DOWNGRADES to a proposal (pointer unmoved at v2).
-    let a_current = fx.authority.db().read_current_generation(&w, &sa).await.unwrap().unwrap();
+    let a_current = fx
+        .authority
+        .db()
+        .read_current_generation(&w, &sa)
+        .await
+        .unwrap()
+        .unwrap();
     let mr = fx
         .authority
         .revert(
             &w,
             &sa,
             a_genesis,
-            DeviceOpAuth { credential: cred(&w, "dk_mem"), op: DeviceOp::Revert, expected: a_current },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_mem"),
+                op: DeviceOp::Revert,
+                expected: a_current,
+            },
             "d_test",
             "topos revert",
             &op("a0000000-0000-4000-8000-0000000000aa"),
@@ -698,25 +940,42 @@ async fn a_member_revert_on_a_reviewed_bundle_downgrades_but_a_reviewer_lands(po
         .unwrap();
     assert_eq!(mr.outcome, TerminalOutcome::NeedsReview);
     assert_eq!(
-        mr.details.as_ref().and_then(|d| d.get("downgraded")).and_then(serde_json::Value::as_bool),
+        mr.details
+            .as_ref()
+            .and_then(|d| d.get("downgraded"))
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "a member's revert downgrades to a proposal"
     );
     assert_eq!(
-        fx.authority.db().read_current_generation(&w, &sa).await.unwrap(),
+        fx.authority
+            .db()
+            .read_current_generation(&w, &sa)
+            .await
+            .unwrap(),
         Some(a_current),
         "the pointer is frozen"
     );
 
     // A reviewer's revert on skill B LANDS (the pointer advances).
-    let b_current = fx.authority.db().read_current_generation(&w, &sb).await.unwrap().unwrap();
+    let b_current = fx
+        .authority
+        .db()
+        .read_current_generation(&w, &sb)
+        .await
+        .unwrap()
+        .unwrap();
     let rr = fx
         .authority
         .revert(
             &w,
             &sb,
             b_genesis,
-            DeviceOpAuth { credential: cred(&w, "dk_rev"), op: DeviceOp::Revert, expected: b_current },
+            DeviceOpAuth {
+                credential: cred(&w, "dk_rev"),
+                op: DeviceOp::Revert,
+                expected: b_current,
+            },
             "d_test",
             "topos revert",
             &op("b0000000-0000-4000-8000-0000000000bb"),
@@ -727,7 +986,13 @@ async fn a_member_revert_on_a_reviewed_bundle_downgrades_but_a_reviewer_lands(po
         .unwrap();
     assert_eq!(rr.outcome, TerminalOutcome::Ok, "a reviewer's revert lands");
     assert!(
-        fx.authority.db().read_current_generation(&w, &sb).await.unwrap().unwrap().seq
+        fx.authority
+            .db()
+            .read_current_generation(&w, &sb)
+            .await
+            .unwrap()
+            .unwrap()
+            .seq
             > b_current.seq,
         "the pointer advanced"
     );

@@ -92,14 +92,30 @@ async fn child_pub(
     parent: CommitId,
     files: Vec<UploadedFile>,
 ) -> crate::SetCurrentReceipt {
-    let expected = fx.authority.db().read_current_generation(w, s).await.unwrap().unwrap();
+    let expected = fx
+        .authority
+        .db()
+        .read_current_generation(w, s)
+        .await
+        .unwrap()
+        .unwrap();
     let auth = DeviceOpAuth {
         credential: cred(w, dkid),
         op: DeviceOp::PublishDirect,
         expected,
     };
     fx.authority
-        .publish(w, s, &op(op_id), child(parent, files), auth, None, None, CREATED_AT, NOW)
+        .publish(
+            w,
+            s,
+            &op(op_id),
+            child(parent, files),
+            auth,
+            None,
+            None,
+            CREATED_AT,
+            NOW,
+        )
         .await
         .unwrap()
 }
@@ -118,7 +134,12 @@ async fn dss(pool: &PgPool, w: &str, dkid: &str, skill_id: &str) -> Option<(i64,
     .fetch_optional(pool)
     .await
     .unwrap()
-    .map(|r| (r.get::<i64, _>("detached"), r.get::<Option<i64>, _>("detached_at")))
+    .map(|r| {
+        (
+            r.get::<i64, _>("detached"),
+            r.get::<Option<i64>, _>("detached_at"),
+        )
+    })
 }
 
 /// The `channel_events` audit rows `(event, actor, skill_id, principal)` for one channel, in order.
@@ -194,11 +215,18 @@ async fn everyone_delivers_a_genesis_publish_to_every_member(pool: PgPool) {
     .await;
     assert!(r.is_ok());
 
-    let d = fx.authority.delivery(&w, &cred(&w, "dk_bob")).await.unwrap();
+    let d = fx
+        .authority
+        .delivery(&w, &cred(&w, "dk_bob"))
+        .await
+        .unwrap();
     let ds = find(&d, "s_deploy").expect("bob is delivered the everyone skill");
     assert_eq!(ds.name, "deploy", "the catalog name folds the display name");
     assert_eq!(ds.via_channels, vec!["everyone".to_owned()]);
-    assert!(!ds.direct, "bob receives it via the channel, not a direct follow");
+    assert!(
+        !ds.direct,
+        "bob receives it via the channel, not a direct follow"
+    );
     assert_eq!(ds.protection, "open", "no review-required default ⇒ open");
     assert_eq!(ds.generation, gn(1, 1));
     // The delivery carries the consent facts the follower re-verifies against.
@@ -240,7 +268,16 @@ async fn non_member_invited_revoked_and_unknown_credential_all_read_notfound(poo
         .await
         .unwrap();
     // An INVITED (unconfirmed) member's device.
-    seat(&fx, &w, "dk_invited", 21, "invited@acme.com", "member", "invited").await;
+    seat(
+        &fx,
+        &w,
+        "dk_invited",
+        21,
+        "invited@acme.com",
+        "member",
+        "invited",
+    )
+    .await;
     // A REVOKED device bound to a confirmed member.
     seat(&fx, &w, "dk_bob", 22, BOB, "member", "confirmed").await;
     fx.authority.db().revoke_device(&w, "dk_bob").await.unwrap();
@@ -317,7 +354,10 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
         ChannelMembershipOutcome::Joined
     );
     let d = delivery(&fx, &w).await;
-    assert_eq!(find(&d, "s_beacon").unwrap().via_channels, vec!["ops".to_owned()]);
+    assert_eq!(
+        find(&d, "s_beacon").unwrap().via_channels,
+        vec!["ops".to_owned()]
+    );
 
     // Reference counting: re-place B in `everyone` too. Leaving ops now leaves it delivered (everyone
     // still references it).
@@ -333,7 +373,9 @@ async fn channel_scoping_join_leave_and_reference_counting(pool: PgPool) {
         ChannelMembershipOutcome::Left
     );
     assert_eq!(
-        find(&delivery(&fx, &w).await, "s_beacon").unwrap().via_channels,
+        find(&delivery(&fx, &w).await, "s_beacon")
+            .unwrap()
+            .via_channels,
         vec!["everyone".to_owned()],
         "still delivered via everyone after leaving ops (reference counted)"
     );
@@ -383,11 +425,21 @@ async fn two_channels_deliver_one_row_with_sorted_via(pool: PgPool) {
         .await
         .unwrap();
     let bob = cred(&w, "dk_bob");
-    fx.authority.channel_join(&w, &bob, "ops", CREATED_AT).await.unwrap();
-    fx.authority.channel_join(&w, &bob, "eng", CREATED_AT).await.unwrap();
+    fx.authority
+        .channel_join(&w, &bob, "ops", CREATED_AT)
+        .await
+        .unwrap();
+    fx.authority
+        .channel_join(&w, &bob, "eng", CREATED_AT)
+        .await
+        .unwrap();
 
     let d = delivery(&fx, &w).await;
-    let beacons: Vec<_> = d.skills.iter().filter(|s| s.skill_id == "s_beacon").collect();
+    let beacons: Vec<_> = d
+        .skills
+        .iter()
+        .filter(|s| s.skill_id == "s_beacon")
+        .collect();
     assert_eq!(beacons.len(), 1, "one skill, one row (deduped)");
     assert_eq!(
         beacons[0].via_channels,
@@ -472,7 +524,10 @@ async fn unfollow_masks_everything_and_follow_reattaches(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(dss(&pool, "w_acme", "dk_bob", "s_deploy").await, Some((0, None)));
+    assert_eq!(
+        dss(&pool, "w_acme", "dk_bob", "s_deploy").await,
+        Some((0, None))
+    );
 
     // Unfollow → withheld everywhere, listed detached, the fleet row frozen.
     assert_eq!(
@@ -484,7 +539,10 @@ async fn unfollow_masks_everything_and_follow_reattaches(pool: PgPool) {
     );
     let d = delivery(&fx, &w).await;
     assert!(find(&d, "s_deploy").is_none(), "unfollow withholds it");
-    assert!(d.detached.contains(&"s_deploy".to_owned()), "listed in detached");
+    assert!(
+        d.detached.contains(&"s_deploy".to_owned()),
+        "listed in detached"
+    );
     assert_eq!(
         dss(&pool, "w_acme", "dk_bob", "s_deploy").await,
         Some((1, Some(NOW))),
@@ -500,9 +558,15 @@ async fn unfollow_masks_everything_and_follow_reattaches(pool: PgPool) {
         SubscriptionOutcome::Followed
     );
     let d = delivery(&fx, &w).await;
-    assert!(find(&d, "s_deploy").is_some(), "re-attached, delivered again");
+    assert!(
+        find(&d, "s_deploy").is_some(),
+        "re-attached, delivered again"
+    );
     assert!(d.detached.is_empty(), "detached cleared");
-    assert_eq!(dss(&pool, "w_acme", "dk_bob", "s_deploy").await, Some((0, None)));
+    assert_eq!(
+        dss(&pool, "w_acme", "dk_bob", "s_deploy").await,
+        Some((0, None))
+    );
 }
 
 /// A device exclusion is DEVICE-scoped: `exclude_device` withholds the skill from THAT device only
@@ -517,7 +581,14 @@ async fn a_device_exclusion_is_device_scoped_and_follow_lifts_it(pool: PgPool) {
     seat(&fx, &w, "dk_bob1", 12, BOB, "member", "confirmed").await;
     fx.authority
         .db()
-        .seed_device(&w, "dk_bob2", &dev_key(13), &prin(BOB), false, &cred(&w, "dk_bob2"))
+        .seed_device(
+            &w,
+            "dk_bob2",
+            &dev_key(13),
+            &prin(BOB),
+            false,
+            &cred(&w, "dk_bob2"),
+        )
         .await
         .unwrap();
     let r = gpub(
@@ -559,8 +630,15 @@ async fn a_device_exclusion_is_device_scoped_and_follow_lifts_it(pool: PgPool) {
         !d1.detached.contains(&"s_deploy".to_owned()),
         "an exclusion is device-scoped, never a person-level detach"
     );
-    let d2 = fx.authority.delivery(&w, &cred(&w, "dk_bob2")).await.unwrap();
-    assert!(find(&d2, "s_deploy").is_some(), "the other device still receives it");
+    let d2 = fx
+        .authority
+        .delivery(&w, &cred(&w, "dk_bob2"))
+        .await
+        .unwrap();
+    assert!(
+        find(&d2, "s_deploy").is_some(),
+        "the other device still receives it"
+    );
 
     // follow on the excluded device lifts the exclusion.
     fx.authority
@@ -568,7 +646,10 @@ async fn a_device_exclusion_is_device_scoped_and_follow_lifts_it(pool: PgPool) {
         .await
         .unwrap();
     let d1 = fx.authority.delivery(&w, &bob1).await.unwrap();
-    assert!(find(&d1, "s_deploy").is_some(), "follow lifts the exclusion");
+    assert!(
+        find(&d1, "s_deploy").is_some(),
+        "follow lifts the exclusion"
+    );
 }
 
 /// A skill with a catalog row but no `current` pointer is never delivered — the entitlement read
@@ -593,10 +674,20 @@ async fn a_current_less_skill_is_never_delivered(pool: PgPool) {
     )
     .await;
     // A catalog entry with NO current pointer, placed into the (now-existing) builtin everyone.
-    fx.authority.db().seed_catalog(&w, &s, "draftonly").await.unwrap();
+    fx.authority
+        .db()
+        .seed_catalog(&w, &s, "draftonly")
+        .await
+        .unwrap();
     assert_eq!(
         fx.authority
-            .channel_place(&w, &cred(&w, "dk_alice"), "everyone", "draftonly", CREATED_AT)
+            .channel_place(
+                &w,
+                &cred(&w, "dk_alice"),
+                "everyone",
+                "draftonly",
+                CREATED_AT
+            )
             .await
             .unwrap(),
         CurationOutcome::Placed
@@ -781,10 +872,11 @@ async fn the_everyone_channel_is_structural(pool: PgPool) {
     );
 
     // A raw DELETE / rename of the builtin row is refused by the trigger guards.
-    let del = sqlx::query("DELETE FROM channels WHERE workspace_id = $1 AND channel_id = 'everyone'")
-        .bind("w_acme")
-        .execute(&pool)
-        .await;
+    let del =
+        sqlx::query("DELETE FROM channels WHERE workspace_id = $1 AND channel_id = 'everyone'")
+            .bind("w_acme")
+            .execute(&pool)
+            .await;
     assert!(del.is_err(), "the everyone row cannot be deleted");
     let ren = sqlx::query(
         "UPDATE channels SET name = 'all' WHERE workspace_id = $1 AND channel_id = 'everyone'",
@@ -810,13 +902,14 @@ async fn the_everyone_channel_is_structural(pool: PgPool) {
         ProtectOutcome::Set
     );
     use sqlx::Row as _;
-    let mode: String =
-        sqlx::query("SELECT mode FROM channels WHERE workspace_id = $1 AND channel_id = 'everyone'")
-            .bind("w_acme")
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            .get("mode");
+    let mode: String = sqlx::query(
+        "SELECT mode FROM channels WHERE workspace_id = $1 AND channel_id = 'everyone'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("mode");
     assert_eq!(mode, "curated", "the builtin channel's mode is mutable");
 }
 
@@ -829,7 +922,16 @@ async fn a_curated_channel_gates_curation_and_loosening_by_role(pool: PgPool) {
     let fx = Fixture::new(pool, "chd-curated").await;
     let (w, s) = (ws("w_acme"), skill("s_deploy"));
     seat(&fx, &w, "dk_owner", 11, ALICE, "owner", "confirmed").await;
-    seat(&fx, &w, "dk_rev", 12, "rev@acme.com", "reviewer", "confirmed").await;
+    seat(
+        &fx,
+        &w,
+        "dk_rev",
+        12,
+        "rev@acme.com",
+        "reviewer",
+        "confirmed",
+    )
+    .await;
     seat(&fx, &w, "dk_mem", 13, BOB, "member", "confirmed").await;
     gpub(
         &fx,
@@ -847,7 +949,14 @@ async fn a_curated_channel_gates_curation_and_loosening_by_role(pool: PgPool) {
     // A reviewer marks ops curated.
     assert_eq!(
         fx.authority
-            .protect(&w, &rev, ProtectKind::Channel, "ops", ProtectLevel::Protected, CREATED_AT)
+            .protect(
+                &w,
+                &rev,
+                ProtectKind::Channel,
+                "ops",
+                ProtectLevel::Protected,
+                CREATED_AT
+            )
             .await
             .unwrap(),
         ProtectOutcome::Set
@@ -870,14 +979,28 @@ async fn a_curated_channel_gates_curation_and_loosening_by_role(pool: PgPool) {
     // Loosening ops back to open is an OWNER act — a reviewer is refused, the owner lands.
     assert_eq!(
         fx.authority
-            .protect(&w, &rev, ProtectKind::Channel, "ops", ProtectLevel::Open, CREATED_AT)
+            .protect(
+                &w,
+                &rev,
+                ProtectKind::Channel,
+                "ops",
+                ProtectLevel::Open,
+                CREATED_AT
+            )
             .await
             .unwrap(),
         ProtectOutcome::OwnerRoleRequired
     );
     assert_eq!(
         fx.authority
-            .protect(&w, &cred(&w, "dk_owner"), ProtectKind::Channel, "ops", ProtectLevel::Open, CREATED_AT)
+            .protect(
+                &w,
+                &cred(&w, "dk_owner"),
+                ProtectKind::Channel,
+                "ops",
+                ProtectLevel::Open,
+                CREATED_AT
+            )
             .await
             .unwrap(),
         ProtectOutcome::Set
@@ -963,8 +1086,14 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
             &w,
             &bob,
             &[
-                AppliedSkill { skill_id: sa.clone(), version_id: va },
-                AppliedSkill { skill_id: sb.clone(), version_id: vb },
+                AppliedSkill {
+                    skill_id: sa.clone(),
+                    version_id: va,
+                },
+                AppliedSkill {
+                    skill_id: sb.clone(),
+                    version_id: vb,
+                },
             ],
             NOW,
         )
@@ -981,7 +1110,13 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
     );
 
     // A second child of A to report a moved version.
-    let ca = fx.authority.db().read_current_commit(&w, &sa).await.unwrap().unwrap();
+    let ca = fx
+        .authority
+        .db()
+        .read_current_commit(&w, &sa)
+        .await
+        .unwrap()
+        .unwrap();
     let ra2 = child_pub(
         &fx,
         &w,
@@ -998,7 +1133,10 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
         .report_applied(
             &w,
             &bob,
-            &[AppliedSkill { skill_id: sa.clone(), version_id: va2 }],
+            &[AppliedSkill {
+                skill_id: sa.clone(),
+                version_id: va2,
+            }],
             later,
         )
         .await
@@ -1017,8 +1155,16 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(a_row.get::<Vec<u8>, _>("applied_commit"), va2.0.to_vec(), "A updated to v2");
-    assert_eq!(a_row.get::<i64, _>("reported_at"), later, "last-writer-wins reported_at");
+    assert_eq!(
+        a_row.get::<Vec<u8>, _>("applied_commit"),
+        va2.0.to_vec(),
+        "A updated to v2"
+    );
+    assert_eq!(
+        a_row.get::<i64, _>("reported_at"),
+        later,
+        "last-writer-wins reported_at"
+    );
     assert_eq!(a_row.get::<i64, _>("detached"), 0);
     // B stayed exactly the detach record the unfollow wrote — the snapshot never deletes/updates it.
     assert_eq!(
@@ -1027,14 +1173,15 @@ async fn report_snapshot_deletes_unnamed_rows_and_never_touches_a_detached_row(p
         "the detached row is immutable under a report"
     );
     // The device's last_report_at is the staleness clock.
-    let lr: Option<i64> =
-        sqlx::query("SELECT last_report_at FROM device_registry WHERE workspace_id=$1 AND device_key_id=$2")
-            .bind("w_acme")
-            .bind("dk_bob")
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            .get("last_report_at");
+    let lr: Option<i64> = sqlx::query(
+        "SELECT last_report_at FROM device_registry WHERE workspace_id=$1 AND device_key_id=$2",
+    )
+    .bind("w_acme")
+    .bind("dk_bob")
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("last_report_at");
     assert_eq!(lr, Some(later));
 }
 
@@ -1061,10 +1208,22 @@ async fn channel_operations_emit_audit_rows_attributed_to_the_actor(pool: PgPool
     let alice = cred(&w, "dk_alice");
     let bob = cred(&w, "dk_bob");
     // create + place (alice), join + leave (bob), then a removal (alice).
-    fx.authority.channel_place(&w, &alice, "ops", "deploy", CREATED_AT).await.unwrap();
-    fx.authority.channel_join(&w, &bob, "ops", CREATED_AT).await.unwrap();
-    fx.authority.channel_leave(&w, &bob, "ops", NOW, CREATED_AT).await.unwrap();
-    fx.authority.channel_unplace(&w, &alice, "ops", "deploy", CREATED_AT).await.unwrap();
+    fx.authority
+        .channel_place(&w, &alice, "ops", "deploy", CREATED_AT)
+        .await
+        .unwrap();
+    fx.authority
+        .channel_join(&w, &bob, "ops", CREATED_AT)
+        .await
+        .unwrap();
+    fx.authority
+        .channel_leave(&w, &bob, "ops", NOW, CREATED_AT)
+        .await
+        .unwrap();
+    fx.authority
+        .channel_unplace(&w, &alice, "ops", "deploy", CREATED_AT)
+        .await
+        .unwrap();
 
     let rows = events(&pool, "w_acme", "ops").await;
     // channel_created (alice) — skill_added (alice, deploy) — member_joined (bob) — member_left (bob)
@@ -1083,13 +1242,24 @@ async fn channel_operations_emit_audit_rows_attributed_to_the_actor(pool: PgPool
     );
     // The actor is the acting principal, and the join/leave name bob as the principal.
     let created = &rows[0];
-    assert_eq!(created.1, ALICE, "channel_created attributed to the creator");
+    assert_eq!(
+        created.1, ALICE,
+        "channel_created attributed to the creator"
+    );
     let joined = rows.iter().find(|(e, ..)| e == "member_joined").unwrap();
     assert_eq!(joined.1, BOB, "member_joined actor is bob");
-    assert_eq!(joined.3.as_deref(), Some(BOB), "…and names bob as the principal");
+    assert_eq!(
+        joined.3.as_deref(),
+        Some(BOB),
+        "…and names bob as the principal"
+    );
     let added = rows.iter().find(|(e, ..)| e == "skill_added").unwrap();
     assert_eq!(added.1, ALICE);
-    assert_eq!(added.2.as_deref(), Some("s_deploy"), "skill_added names the skill id");
+    assert_eq!(
+        added.2.as_deref(),
+        Some("s_deploy"),
+        "skill_added names the skill id"
+    );
 }
 
 /// The confirmed-member's delivery, by that member's own credential (the common read the assertions

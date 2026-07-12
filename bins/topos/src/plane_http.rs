@@ -18,6 +18,7 @@
 //! The client stays **sync + tokio-free**: `ureq` brings its own blocking TLS stack, so this adds no
 //! `plane-store`/`sqlx`/`tokio` edge (`check-arch` holds the line).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -54,6 +55,7 @@ const MAX_FETCH_BYTES: u64 = 128 * 1024 * 1024;
 /// One skill's transport credential — its workspace + the **secret** WORKSPACE credential (the Bearer that
 /// authenticates every read in that workspace). Keyed by skill id in [`UreqPlane`]'s map; distinct from the
 /// engine's [`FollowContext`] consent state (creds live in the transport, consent in the follow seam).
+#[derive(Clone)]
 pub(crate) struct SkillCred {
     pub(crate) workspace_id: String,
     /// The workspace Bearer credential (shared by every skill in the workspace). **SECRET.**
@@ -83,7 +85,11 @@ impl std::fmt::Debug for SkillCred {
 /// agent (connection-pooled, reused across requests).
 pub(crate) struct UreqPlane {
     base_url: String,
-    creds: HashMap<String, SkillCred>,
+    /// skill_id → the credential + workspace its reads present. Interior-mutable because the
+    /// delivery-driven reconcile LEARNS a brand-new arrival's skill mid-sweep (`bind_skill`): the
+    /// map is seeded from `follows.json`, which cannot name a skill this device has never held.
+    /// Single-threaded by construction (a blocking CLI transport).
+    creds: RefCell<HashMap<String, SkillCred>>,
     /// workspace_id → the workspace Bearer credential (the delivery/report lane's key — one call
     /// per WORKSPACE, unlike the per-skill read creds above). **SECRET values.**
     ws_creds: HashMap<String, String>,
@@ -95,7 +101,7 @@ impl std::fmt::Debug for UreqPlane {
         // The agent is not Debug, and the creds carry secrets — print only the safe shape.
         f.debug_struct("UreqPlane")
             .field("base_url", &self.base_url)
-            .field("skills", &self.creds.len())
+            .field("skills", &self.creds.borrow().len())
             .finish_non_exhaustive()
     }
 }
@@ -107,10 +113,15 @@ impl UreqPlane {
     pub(crate) fn new(base_url: String, creds: HashMap<String, SkillCred>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            creds,
+            creds: RefCell::new(creds),
             ws_creds: HashMap::new(),
             agent: ureq::Agent::new_with_config(agent_config()),
         }
+    }
+
+    /// The credential a skill's reads present, if this transport knows the skill.
+    fn skill_cred(&self, skill_id: &str) -> Option<SkillCred> {
+        self.creds.borrow().get(skill_id).cloned()
     }
 
     /// Attach the per-WORKSPACE credential map (`credentials.json`) — what arms the delivery-driven
@@ -152,7 +163,7 @@ impl PlaneSource for UreqPlane {
         skill_id: &str,
         known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
-        let cred = self.creds.get(skill_id).ok_or(PlaneError::NotFound)?;
+        let cred = self.skill_cred(skill_id).ok_or(PlaneError::NotFound)?;
         // The workspace + skill ids are spliced into the URL path; the credential rides the Bearer header,
         // so the URL carries no secret (safe in an error message). Refuse a non-URL-safe id defensively.
         ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
@@ -200,7 +211,7 @@ impl PlaneSource for UreqPlane {
         skill_id: &str,
         version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
-        let cred = self.creds.get(skill_id).ok_or(PlaneError::NotFound)?;
+        let cred = self.skill_cred(skill_id).ok_or(PlaneError::NotFound)?;
         // Both ids are spliced into the URL path — refuse anything outside the validated id charset
         // (defense in depth; the enrollment loaders already validated what they persisted).
         ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
@@ -223,7 +234,7 @@ impl PlaneSource for UreqPlane {
 
     fn list_open_proposals(&self, skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
         // No credential for this skill ⇒ none visible (best-effort; the count never errors out a pull).
-        let Some(cred) = self.creds.get(skill_id) else {
+        let Some(cred) = self.skill_cred(skill_id) else {
             return Ok(Vec::new());
         };
         ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
@@ -249,13 +260,29 @@ impl PlaneSource for UreqPlane {
 }
 
 impl crate::plane::DeliverySource for UreqPlane {
+    fn bind_skill(&self, workspace_id: &str, skill_id: &str) {
+        // A brand-new arrival is absent from the `follows.json`-derived per-skill map; its
+        // workspace credential already authenticates it (membership IS the authorization), so
+        // teach the read transport the pairing before its first version fetch.
+        let Some(credential) = self.ws_creds.get(workspace_id) else {
+            return;
+        };
+        self.creds
+            .borrow_mut()
+            .entry(skill_id.to_owned())
+            .or_insert_with(|| SkillCred::new(workspace_id.to_owned(), credential.clone()));
+    }
+
     fn workspaces(&self) -> Vec<String> {
         let mut ws: Vec<String> = self.ws_creds.keys().cloned().collect();
         ws.sort();
         ws
     }
 
-    fn fetch_delivery(&self, workspace_id: &str) -> Result<crate::plane::DeliverySnapshot, PlaneError> {
+    fn fetch_delivery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::plane::DeliverySnapshot, PlaneError> {
         let cred = self
             .ws_creds
             .get(workspace_id)
@@ -297,10 +324,12 @@ impl crate::plane::DeliverySource for UreqPlane {
             schema_version: topos_types::WIRE_SCHEMA_VERSION,
             applied: applied
                 .iter()
-                .map(|(skill_id, commit)| topos_types::requests::WireAppliedSkill {
-                    skill_id: skill_id.clone(),
-                    version_id: topos_core::digest::to_hex(commit),
-                })
+                .map(
+                    |(skill_id, commit)| topos_types::requests::WireAppliedSkill {
+                        skill_id: skill_id.clone(),
+                        version_id: topos_core::digest::to_hex(commit),
+                    },
+                )
                 .collect(),
         };
         let body = serde_json::to_vec(&report)

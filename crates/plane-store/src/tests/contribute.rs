@@ -872,9 +872,7 @@ async fn a_non_member_principal_cannot_reject(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_review_required_loop_direct_downgrades_propose_needs_review_approve_ok(
-    pool: PgPool,
-) {
+async fn the_review_required_loop_direct_downgrades_propose_needs_review_approve_ok(pool: PgPool) {
     // Under review_required a plain MEMBER's DIRECT publish is DOWNGRADED to a proposal (NEEDS_REVIEW with a
     // `downgraded` detail, current unmoved), an explicit --propose is NEEDS_REVIEW too, and a second-actor
     // approve promotes — the direct publish is no longer a dead-end, it reroutes to the same review queue.

@@ -54,6 +54,25 @@ directory is for what only a cross-crate loopback run can prove.
   gate (a credential resolving to a non-member device AND a credential on a revoked device both 404 → empty,
   where a bad signature used to be the denial vector), and the self-host lane (catalog visibility ==
   membership on both cloud and self-host).
+- **`tests/channels_e2e.rs`** — the DELIVERY-DRIVEN RECONCILE end to end: the real `ops::pull_reconcile`
+  over the real `ureq` `DeliverySource` (`GET …/delivery` + `PUT …/report` under the workspace **Bearer
+  credential**), driven through the `ReconcileHarness`. A genesis lands in the structural `everyone`
+  (row-witnessed on `plane.pool`) and a fresh member INSTALLS it as a first-receive OFFER, then `accept`s
+  it byte-exact; a channel placement installs and its removal WITHDRAWS (agent dir cleaned, sidecar +
+  snapshotted draft retained, the subscription itself untouched — a withdrawal is a delivery change, not
+  a subscription change, so a re-place re-delivers); two joined channels deliver ONE copy; leaving a
+  channel keeps a still-referenced skill live while an `unfollow` DETACHES it (frozen in place, bytes
+  intact); the `remove` verb's halves (server exclusion + local freeze) no-op on the next sweep and a
+  `follow` lifts them; a member's direct publish DOWNGRADES to a proposal, a reviewer approves, and the
+  follower lands v2 while the author collects a verdict notice; the reconcile REPORTS applied state to the
+  fleet (`device_skill_state` + `last_report_at`); an archive withdraws the follower, frees the name, and
+  auto-closes the open proposal with an author notice; a fresh follower installs v2 over a PURGED v1
+  ancestor (the backfill shallow-stops); and a removed member gets `ACCESS_GONE` with every placement
+  INTACT (never a clean), resuming when re-added. **Honest ceiling:** a brand-new arrival needs TWO sweeps
+  today — the transport's per-skill credential map is built from the *pre*-reconcile `follows.json`, so the
+  sweep that first discovers a skill has no credential for its disclosure fetch and warns instead of
+  offering; the follow entry + baseline still land, so the next sweep offers cleanly. `install_then_offer`
+  pins exactly that, and its doc comment names the defect.
 - **`tests/multi_workspace_e2e.rs`** — one install, one plane, TWO workspaces: a single `follow` twice into
   the same sidecar, both memberships retained, every verb scoped to the right workspace (an authoring
   `publish` moves only its skill's OWN workspace; `invite --workspace` mints into the named one), and

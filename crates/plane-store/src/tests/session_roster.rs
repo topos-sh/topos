@@ -138,14 +138,23 @@ async fn acting_gate_denies_member_reviewer_invited_and_absent_uniformly(pool: P
                 SessionInviteRole::Member,
                 CLOUD,
                 T0,
-            NOW)
+                NOW,
+            )
             .await
             .unwrap();
         let SessionInviteOutcome::Denied(inv_reason) = inv else {
             panic!("{acting} must be denied");
         };
         let rem = a
-            .roster_remove_session(&w, &op_id(200 + n), acting, "member@acme.com", CLOUD, T0, NOW)
+            .roster_remove_session(
+                &w,
+                &op_id(200 + n),
+                acting,
+                "member@acme.com",
+                CLOUD,
+                T0,
+                NOW,
+            )
             .await
             .unwrap();
         let GovernanceOutcome::Denied(rem_reason) = rem else {
@@ -271,7 +280,8 @@ async fn all_four_session_ops_deny_on_self_host(pool: PgPool) {
             SessionInviteRole::Member,
             sh,
             T0,
-        NOW)
+            NOW
+        )
         .await
         .unwrap(),
         SessionInviteOutcome::Denied(_)
@@ -313,7 +323,8 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             SessionInviteRole::Member,
             CLOUD,
             T0,
-        NOW)
+            NOW
+        )
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("request_id is not a canonical UUID")
@@ -354,7 +365,8 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
             SessionInviteRole::Member,
             CLOUD,
             T0,
-        NOW)
+            NOW
+        )
         .await
         .unwrap(),
         SessionInviteOutcome::Denied("op id reused with a different request")
@@ -381,9 +393,17 @@ async fn request_id_replays_identically_and_divergence_is_denied(pool: PgPool) {
     )
     .await;
     assert!(matches!(
-        a.roster_remove_session(&w, &device_op, owner.as_str(), "carol@acme.com", CLOUD, T0, NOW)
-            .await
-            .unwrap(),
+        a.roster_remove_session(
+            &w,
+            &device_op,
+            owner.as_str(),
+            "carol@acme.com",
+            CLOUD,
+            T0,
+            NOW
+        )
+        .await
+        .unwrap(),
         GovernanceOutcome::Denied("op id reused with a different request")
     ));
 
@@ -489,17 +509,33 @@ async fn remove_locks_out_the_last_owner_and_revokes_the_members_reads(pool: PgP
 
     // The last confirmed owner cannot be removed — typed, recorded.
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(1), owner.as_str(), owner.as_str(), CLOUD, T0, NOW)
-            .await
-            .unwrap(),
+        a.roster_remove_session(
+            &w,
+            &op_id(1),
+            owner.as_str(),
+            owner.as_str(),
+            CLOUD,
+            T0,
+            NOW
+        )
+        .await
+        .unwrap(),
         GovernanceOutcome::Denied("would remove the last owner")
     ));
 
     // Removing alice severs the seat AND her per-skill roster row in ONE transaction.
     assert!(matches!(
-        a.roster_remove_session(&w, &op_id(2), owner.as_str(), alice.as_str(), CLOUD, T0, NOW)
-            .await
-            .unwrap(),
+        a.roster_remove_session(
+            &w,
+            &op_id(2),
+            owner.as_str(),
+            alice.as_str(),
+            CLOUD,
+            T0,
+            NOW
+        )
+        .await
+        .unwrap(),
         GovernanceOutcome::Ok
     ));
     assert!(seat_of(&pool, "w_rm", "alice@acme.com").await.is_none());
@@ -618,10 +654,39 @@ async fn mixed_case_remove_severs_the_canonical_seat(pool: PgPool) {
     // Bob has a device with an applied fleet-state row (device × skill) — the per-skill `roster` table
     // is gone; removal no longer deletes rows, it writes the FINAL DETACH RECORD on the person's fleet
     // rows. Register the device under the CANONICAL principal, then stage a live (detached = 0) row.
+    //
+    // The detach is EVENT-EXACT: it freezes exactly what the removal cost this person, so the skill
+    // must actually be ENTITLED (catalog row + a delivering source) before the removal — a fleet row
+    // for a skill they never received is not something their removal takes away. Seat it in the
+    // structural `everyone` channel, which every confirmed member receives.
     a.db()
         .seed_device(&w, "dk_bob", &dev_key(9), &bob, false, &cred(&w, "dk_bob"))
         .await
         .unwrap();
+    a.db()
+        .seed_catalog(&w, &skill("s_deploy"), "deploy")
+        .await
+        .unwrap();
+    // The entitlement union is membership-gated, so bob must hold a CONFIRMED seat to be receiving
+    // anything at the moment of removal (the invite above seats him `invited`; his redeem would
+    // confirm it — seed that end state directly).
+    a.db()
+        .seed_workspace_member(&w, &bob, "member", "confirmed")
+        .await
+        .unwrap();
+    sqlx::query("SELECT topos_ensure_everyone($1, 'seed')")
+        .bind("w_canon_rm")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_skills (workspace_id, channel_id, skill_id, added_by, added_at) \
+         VALUES ($1, 'everyone', 's_deploy', 'seed', 'seed')",
+    )
+    .bind("w_canon_rm")
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO device_skill_state \
            (workspace_id, device_key_id, skill_id, applied_commit, reported_at, detached) \
@@ -866,9 +931,17 @@ async fn receipts_carry_the_method_discriminant_and_the_acting_principal(pool: P
         SessionInviteRole::Member,
     )
     .await;
-    a.roster_remove_session(&w, &op_id(2), owner.as_str(), "alice@acme.com", CLOUD, T0, NOW)
-        .await
-        .unwrap();
+    a.roster_remove_session(
+        &w,
+        &op_id(2),
+        owner.as_str(),
+        "alice@acme.com",
+        CLOUD,
+        T0,
+        NOW,
+    )
+    .await
+    .unwrap();
     let SessionRotateOutcome::Rotated { .. } = a
         .rotate_join_link_session(&w, &op_id(3), owner.as_str(), CLOUD, T0, NOW)
         .await
@@ -977,7 +1050,8 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             SessionInviteRole::Member,
             CLOUD,
             T0,
-        NOW),
+            NOW
+        ),
         a.invite_members_session(
             &w,
             &rid,
@@ -986,7 +1060,8 @@ async fn raced_identical_invites_converge_to_one_byte_identical_outcome(pool: Pg
             SessionInviteRole::Member,
             CLOUD,
             T0,
-        NOW),
+            NOW
+        ),
     );
     let tok = |o: SessionInviteOutcome| match o {
         SessionInviteOutcome::Invited {

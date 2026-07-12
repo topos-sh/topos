@@ -299,8 +299,8 @@ impl Db {
 
 /// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a transient class the SERIALIZABLE runner
 /// retries: a serialization failure (`40001`) or deadlock (`40P01`), OR a unique-violation (`23505`) on one
-/// of the four CONVERGENT constraints — the two idempotency-key PKs, the one-open-proposal index, and the
-/// create-workspace request ledger (`genesis_requests_pkey`: two racing creates of the SAME request both
+/// of the CONVERGENT constraints — the two idempotency-key PKs, the one-open-proposal index, the catalog's
+/// registration keys, and the create-workspace request ledger (`genesis_requests_pkey`: two racing creates of the SAME request both
 /// pass the replay probe; the loser's ledger INSERT aborts here, and its retry's probe replays the winner's
 /// workspace — the same shape as the `workspace_events` idempotency slot).
 ///
@@ -331,6 +331,14 @@ pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
                     | "workspace_events_pkey"
                     | "proposals_one_open"
                     | "genesis_requests_pkey"
+                    // The catalog registration two concurrent GENESIS publishes both attempt: both
+                    // probe the catalog before either commits, so the loser's INSERT aborts on the
+                    // skill-id PK (same skill) or the name index (two skills minting one name).
+                    // Retrying re-runs `register_publish`'s probe against the winner's committed row
+                    // and takes the already-registered arm (or answers the typed NameTaken) — the
+                    // same convergence the idempotency slots get, instead of a spurious 500.
+                    | "catalog_pkey"
+                    | "catalog_by_name"
             )
         ),
         _ => false,
@@ -405,10 +413,12 @@ mod retry_classification_tests {
 
     /// The SERIALIZABLE runner retries a `23505` on a CONVERGENT constraint — the two idempotency-key PKs
     /// (`op_receipts` / `workspace_events`) and the one-open-proposal partial-unique (`proposals_one_open`) —
-    /// so a concurrent same-`op_id` receipt sibling or same-candidate proposer converges to the winner's
-    /// outcome rather than surfacing a 500 — but NEVER on an ordinary unique violation (e.g. `catalog_pkey`), a
-    /// real business/integrity duplicate that must not be silently retried. Proven against real Postgres
-    /// duplicate-key errors. Raw `sqlx::query` (not `query!`), so it adds nothing to the `.sqlx` drift surface.
+    /// plus the catalog's registration keys (two racing GENESIS publishes both probe the catalog before
+    /// either commits) — so a concurrent same-`op_id` receipt sibling, same-candidate proposer, or
+    /// co-genesis publisher converges to the winner's outcome rather than surfacing a 500 — but NEVER on an
+    /// ordinary unique violation (e.g. `skill_follows_pkey`), a real business/integrity duplicate that must
+    /// not be silently retried. Proven against real Postgres duplicate-key errors. Raw `sqlx::query` (not
+    /// `query!`), so it adds nothing to the `.sqlx` drift surface.
     #[sqlx::test]
     async fn only_convergent_unique_violations_are_retryable(pool: PgPool) {
         // op_receipts_pkey → a unique violation the runner treats as retryable.
@@ -481,19 +491,26 @@ mod retry_classification_tests {
             "a 23505 on genesis_requests_pkey must be retryable"
         );
 
-        // catalog_pkey → an ordinary unique violation the runner must NOT retry (the per-skill `roster`
-        // table that once stood in here was dropped when channels landed; the catalog PK is the same
-        // shape — a real integrity duplicate, not a convergent idempotency key).
+        // skill_follows_pkey → an ordinary unique violation the runner must NOT retry (a person's own
+        // subscription row: a real duplicate, never a convergent idempotency key). The catalog keys, by
+        // contrast, ARE convergent now — two racing genesis publishes both probe the catalog before either
+        // commits, and the loser must converge on the winner's registration rather than 500.
         let catalog = "INSERT INTO catalog (workspace_id, skill_id, name, status, created_at) \
             VALUES ('w_a', 's_a', 's-a', 'active', 'seed')";
         sqlx::query(catalog)
             .execute(&pool)
             .await
-            .expect("first catalog insert");
-        let dup = sqlx::query(catalog)
+            .expect("catalog row for the follow FK");
+        let follow = "INSERT INTO skill_follows (workspace_id, principal, skill_id, created_at) \
+            VALUES ('w_a', 'bob@x.io', 's_a', 'seed')";
+        sqlx::query(follow)
             .execute(&pool)
             .await
-            .expect_err("a duplicate catalog row must raise a unique violation");
+            .expect("first follow insert");
+        let dup = sqlx::query(follow)
+            .execute(&pool)
+            .await
+            .expect_err("a duplicate follow row must raise a unique violation");
         assert!(
             !is_serialization_failure_sqlx(&dup),
             "a 23505 on an ordinary constraint must NOT be retried"
