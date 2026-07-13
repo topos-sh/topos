@@ -83,6 +83,22 @@ if ! printf '%s' "$card" | grep -q '"api_base_url":"http://localhost:3000/api"';
 fi
 echo "PASS: the constant protocol card answers with the app's /api follow base."
 
+# A BROWSER document render — the only face that runs the web tier's boot migrator. This is the
+# probe that catches a runtime image missing its drizzle folder (API + card green, every page 500)
+# and any first-render crash the resource routes never reach.
+echo "== rendering a browser document (the boot-migration path) =="
+doc_code="$(curl -s -o /tmp/smoke-doc.html -w '%{http_code}' -H 'Accept: text/html' http://localhost:3000/ || true)"
+if [ "$doc_code" != "200" ]; then
+  echo "FAIL: the landing document answered '$doc_code' (boot migration or render is broken)"
+  compose logs --no-color web | tail -40
+  exit 1
+fi
+if ! grep -qi 'topos' /tmp/smoke-doc.html; then
+  echo "FAIL: the rendered document does not look like the landing page"
+  exit 1
+fi
+echo "PASS: a browser document renders (web-schema boot migration ran)."
+
 # The ORIGIN ROOT serves the same card: the token-less CLI doors (`follow <bare-ws>`, `auth login`,
 # the un-enrolled standup publish) card-fetch the bare origin before re-rooting onto /api.
 echo "== probing the card at the origin root (the doors' own dial point) =="

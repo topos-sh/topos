@@ -62,12 +62,17 @@ ENV NODE_ENV=production \
 # user is enough.
 RUN useradd --system --uid 10001 --create-home --home-dir /home/topos topos
 
-# react-router-serve needs exactly: the build output (server + client), the installed deps, and
-# package.json (`"type": "module"` + the `start` script). The installer bytes ride along at the mirrored
-# sibling path the ENV points at. No app source, no config file is needed at runtime.
+# react-router-serve needs exactly: the build output (server + client), the installed deps,
+# package.json (`"type": "module"` + the `start` script), and the DRIZZLE MIGRATIONS — the boot
+# migrator (app/lib/db/migrate.server.ts) resolves `<cwd>/drizzle` at the first document render
+# and fails LOUDLY when it is absent, so an image without that folder serves a working API but
+# 500s every page on a fresh database (the compose smoke renders a document to pin this). The
+# installer bytes ride along at the mirrored sibling path the ENV points at. No app source, no
+# config file is needed at runtime.
 COPY --from=builder --chown=10001:10001 /app/web/build ./build
 COPY --from=builder --chown=10001:10001 /app/web/node_modules ./node_modules
 COPY --from=builder --chown=10001:10001 /app/web/package.json ./package.json
+COPY --from=builder --chown=10001:10001 /app/web/drizzle ./drizzle
 COPY --from=builder --chown=10001:10001 /app/scripts/install.sh /app/scripts/install.sh
 
 USER topos

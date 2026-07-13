@@ -11,7 +11,7 @@ import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import type { ReactNode } from "react";
-import type { LinksFunction, MetaFunction } from "react-router";
+import type { LinksFunction, MetaFunction, MiddlewareFunction } from "react-router";
 import {
   isRouteErrorResponse,
   Link,
@@ -21,7 +21,16 @@ import {
   Scripts,
   ScrollRestoration,
 } from "react-router";
+import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import appStylesHref from "./app.css?url";
+
+/**
+ * Outermost, before every route's own middleware: a browser on an ALIAS origin is 301'd to the
+ * canonical one (sessions are anchored there); every machine face passes through untouched.
+ */
+export const middleware: MiddlewareFunction[] = [
+  ({ request }, next) => canonicalOriginRedirect(request) ?? next(),
+];
 
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: appStylesHref }];
 

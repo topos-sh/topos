@@ -6,15 +6,20 @@ import { getDb } from "./index.server";
 /**
  * The committed migrations folder lives at the package root (`drizzle/`). In dev that is the
  * cwd; the built server (`react-router-serve ./build/server/index.js`) is launched from the
- * same package dir, so cwd-relative resolution covers both. Missing folder = a broken build;
- * fail loudly rather than serve unmigrated.
+ * same package dir, so cwd-relative resolution covers both. A SUPERSET build's cwd carries its
+ * OWN drizzle folder (a different schema's journal), so `WEB_MIGRATIONS_DIR` overrides the
+ * search outright — the deployment points the boot migrator at THIS app's journal explicitly.
+ * Missing folder = a broken build; fail loudly rather than serve unmigrated.
  */
 function resolveMigrationsFolder(): string {
-  const candidates = [
-    path.join(process.cwd(), "drizzle"),
-    // Tooling launched from the repo root rather than the package dir.
-    path.join(process.cwd(), "web", "drizzle"),
-  ];
+  const override = process.env.WEB_MIGRATIONS_DIR;
+  const candidates = override
+    ? [override]
+    : [
+        path.join(process.cwd(), "drizzle"),
+        // Tooling launched from the repo root rather than the package dir.
+        path.join(process.cwd(), "web", "drizzle"),
+      ];
   for (const candidate of candidates) {
     if (fs.existsSync(path.join(candidate, "meta", "_journal.json"))) {
       return candidate;
