@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Scan THIS app's own source, always. Tailwind v4 auto-detects sources from the build's ROOT, which
+   is right when this app is built in place and WRONG when a downstream superset build compiles this
+   stylesheet from a sibling checkout: the root is then the other app, our modules fall outside the
+   scan, and every utility only WE use (bg-panel, the grids, the destructive reds) is silently
+   dropped from the emitted CSS — the API works and the product renders unstyled. `@source` resolves
+   relative to this file, so it is a no-op in place and the fix everywhere else. */
+@source "./";
+
 @custom-variant dark (&:is(.dark *));
 
 /* The design tokens — the Klein system, the app-wide source of truth (see DESIGN.md).

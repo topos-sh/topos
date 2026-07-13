@@ -74,7 +74,31 @@ if (scanned === 0) {
   console.error("scan-bundle: nothing scanned — build output layout unexpected");
   process.exit(1);
 }
+
+// THE STYLESHEET IS PART OF THE BUILD, and it can silently lose most of itself: Tailwind emits only
+// the utilities it finds by SCANNING SOURCE, and a build whose root does not cover this app's modules
+// (a downstream superset compiling this stylesheet from a sibling checkout) drops every class only we
+// use — the app serves, the API works, and every page renders unstyled. `app.css`'s `@source "./"`
+// is the fix; these witnesses are what keep it from being deleted as "redundant". Each is a utility
+// used ONLY by app modules, so its absence means the scan missed them.
+const CSS_WITNESSES = ["bg-panel", "grid-cols-", "tabular-nums"];
+const css = [...walk(CLIENT_DIR)].filter((f) => f.endsWith(".css"));
+if (css.length === 0) {
+  console.error("scan-bundle: no stylesheet in the build output — the CSS pipeline is broken");
+  process.exit(1);
+}
+const allCss = css.map((f) => readFileSync(f, "utf8")).join("\n");
+for (const witness of CSS_WITNESSES) {
+  if (!allCss.includes(witness)) {
+    failed = true;
+    console.error(
+      `FAIL: the emitted CSS carries no "${witness}" — Tailwind did not scan this app's sources ` +
+        `(check app.css's @source; a superset build roots detection at ITS own directory)`,
+    );
+  }
+}
+
 if (failed) {
   process.exit(1);
 }
-console.warn(`bundle scan passed (${scanned} files clean)`);
+console.warn(`bundle scan passed (${scanned} files clean, ${CSS_WITNESSES.length} css witnesses)`);
