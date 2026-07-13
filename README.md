@@ -253,8 +253,10 @@ needed).
   owns the schema; the web role holds column-grain grants and writes policy rows only through the
   guarded SQL functions).
 - `TOPOS_PLANE_ADMIN_TOKEN` *(optional)* — enables the review-required gate's operator route.
-- `TOPOS_PLANE_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — enable emailed-passcode
-  enrollment (set all five).
+- `TOPOS_MAIL_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — bring your own SMTP relay
+  to turn the app's outbound mail on (set all five): invite notices really send, and emailed-passcode
+  enrollment becomes available (advertise it with `TOPOS_PLANE_ENROLLMENT_METHOD=passcode`). Unset, mail
+  is off and everything still works — invites share the workspace address, enrollment approves in the app.
 
 The bundled `docker-compose.yml` is an annotated starting point (common vars with defaults; optional
 features commented out). For the vault's full reference run `topos-plane --help`; the app's variables

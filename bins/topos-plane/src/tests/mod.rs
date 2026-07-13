@@ -50,7 +50,6 @@ use topos_types::requests::{
 };
 use topos_types::{Generation, JsonEnvelope, TerminalOutcome};
 
-use crate::enroll::mailer::FakeMailer;
 use crate::{PlaneState, router};
 
 // ── constants ──────────────────────────────────────────────────────────────────────────────────────
@@ -294,8 +293,9 @@ fn envelope(bytes: &[u8]) -> JsonEnvelope {
 // ══ the enrollment + governance fixture family ════════════════════════════════════════════════════════
 //
 // The shared support for the `bootstrap` / `enroll` / `governance` test modules: the [`EnrollCtx`] scaffold
-// (a cloud workspace, a confirmed owner + device, a FakeMailer) and the wire helpers their per-route
-// proofs drive. The comprehensive acceptance suite + the cross-component `follow` e2e live in `tests/`.
+// (a cloud workspace, a confirmed owner + device, the internal lane armed) and the wire helpers their
+// per-route proofs drive. The comprehensive acceptance suite + the cross-component `follow` e2e live in
+// `tests/`.
 
 const OWNER_DK: &str = "dk_owner";
 const OWNER_PRINCIPAL: &str = "owner@acme.com";
@@ -313,13 +313,16 @@ const TARGET_CRED: &str = "cred_target";
 const ALICE_EMAIL: &str = "alice@acme.com";
 const ALICE_SEED: u8 = 14;
 const ENROLL_BASE_URL: &str = "https://plane.test";
+/// The harness's internal-session-lane bearer — arms `/internal/v1/*` so the passcode MINT is drivable
+/// without a composing surface (delivery is the composing surface's mail seam; the test reads the code
+/// straight off the mint response).
+const ENROLL_INTERNAL_TOKEN: &str = "internal-test-token";
 
 /// A seeded enrollment plane: a cloud `workspace`, a confirmed owner + its registered device, the enrollment
-/// secret loaded, and a `FakeMailer` injected so the passcode is readable without SMTP.
+/// secret loaded, and the internal session lane armed (the passcode mint rides it).
 struct EnrollCtx {
     dir: PathBuf,
     state: PlaneState,
-    fake: Arc<FakeMailer>,
 }
 
 impl Drop for EnrollCtx {
@@ -394,9 +397,8 @@ async fn enroll_setup_full(
         .await
         .unwrap();
 
-    let fake = Arc::new(FakeMailer::default());
-    // with_enroll_config first (it builds a NoopMailer from the no-SMTP config), then with_mailer overrides it
-    // with the FakeMailer so the passcode handler's send is readable.
+    // The internal lane is armed so the passcode MINT is drivable (the composing surface's step; the test
+    // plays that surface and reads the code off the mint response).
     let state = PlaneState::new(Arc::new(authority))
         .with_rate_limit(crate::Limits {
             burst: 1.0,
@@ -410,10 +412,9 @@ async fn enroll_setup_full(
             strict_deployment_mode: Some(mode),
             deployment_mode: mode,
             enrollment_method: "passcode".to_owned(),
-            smtp: None,
         })
-        .with_mailer(fake.clone());
-    EnrollCtx { dir, state, fake }
+        .with_internal_token(ENROLL_INTERNAL_TOKEN);
+    EnrollCtx { dir, state }
 }
 
 /// The server-derived device key id from a raw public key — `dk_<first 32 hex of sha256(pubkey)>` (the same
@@ -471,15 +472,45 @@ fn token_from_link(link: &str) -> String {
         .to_owned()
 }
 
-/// Block (briefly) until the fire-and-forget passcode send lands in the `FakeMailer`, returning the code.
-fn wait_for_passcode(fake: &FakeMailer) -> String {
-    for _ in 0..200 {
-        if let Some(m) = fake.sent().into_iter().next() {
-            return m.code;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("no passcode mailed within the timeout");
+/// An INTERNAL-lane request presenting the harness's internal bearer (the composing surface's shared
+/// secret). The passcode mint deliberately takes no `x-topos-acting-email` — it is the PRE-IDENTITY step.
+fn req_json_internal(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {ENROLL_INTERNAL_TOKEN}"),
+        )
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// Mint the passcode for a live session over the INTERNAL lane, returning the plaintext code — the test
+/// plays the composing surface (which would mail it) and reads the code straight off the mint response.
+async fn mint_passcode(ctx: &EnrollCtx, user_code: &str, email: &str) -> String {
+    let (s, _, b) = send(
+        ctx.app(),
+        req_json_internal(
+            "POST",
+            "/internal/v1/enroll/passcode",
+            serde_json::json!({ "user_code": user_code, "email": email }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let mint: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    // The display-name field always rides (for the mail body); its VALUE tracks the session — the
+    // workspace context for an enroll, empty for a workspace-less login — so only its presence is pinned.
+    assert!(
+        mint["workspace_display_name"].is_string(),
+        "the mint carries the workspace display name for the mail body"
+    );
+    mint["passcode"]
+        .as_str()
+        .expect("the mint returns the plaintext passcode once")
+        .to_owned()
 }
 
 /// Seat `email` as an INVITED member of the seeded workspace (the redeem's membership gate flips it to
@@ -538,17 +569,8 @@ async fn enroll_to_grant(
     let poll: DeviceTokenResponse = serde_json::from_slice(&b).unwrap();
     assert_eq!(poll.status, DeviceTokenStatus::Pending);
 
-    // passcode start → the FakeMailer receives the code (fire-and-forget send).
-    let (s, _, _) = send(
-        ctx.app(),
-        post_nosig(
-            "/v1/enroll/passcode",
-            serde_json::json!({ "user_code": auth.user_code, "email": email }),
-        ),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
-    let code = wait_for_passcode(&ctx.fake);
+    // passcode mint over the INTERNAL lane (the composing surface's step — it mails what this returns).
+    let code = mint_passcode(ctx, &auth.user_code, email).await;
 
     // passcode confirm → the session's identity is confirmed.
     let (s, _, b) = send(

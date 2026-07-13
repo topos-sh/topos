@@ -183,6 +183,12 @@ fn internal_session_routes() -> Router<PlaneState> {
             "/internal/v1/workspaces/{ws}/skills/{skill}/rename",
             post(routes::internal::rename_skill),
         )
+        // The PRE-IDENTITY passcode mint: returns the code ONCE to the composing surface, whose mail seam
+        // delivers it (bearer-gated only — no acting principal exists before the passcode proves one).
+        .route(
+            "/internal/v1/enroll/passcode",
+            post(routes::internal::mint_passcode),
+        )
 }
 
 /// Request-level tracing, wired into [`router`] so every composition gets it (no new dependency): ONE
@@ -227,7 +233,9 @@ fn enroll_and_governance_routes() -> Router<PlaneState> {
             "/v1/enroll/verify/{user_code}",
             get(routes::enroll::read_verification_context),
         )
-        .route("/v1/enroll/passcode", post(routes::enroll::start_passcode))
+        // The passcode START (`POST /v1/enroll/passcode`) is served by the composing surface since the mail
+        // unification — it mints through the internal lane and mails through its own seam; only the confirm
+        // stays here (`routes::door::start_passcode` pins the start's public wire).
         .route(
             "/v1/enroll/passcode/confirm",
             post(routes::enroll::complete_passcode),

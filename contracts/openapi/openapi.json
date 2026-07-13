@@ -288,7 +288,7 @@
         },
         "responses": {
           "200": {
-            "description": "A constant-shaped ack (the send is fire-and-forget; no enumeration oracle).",
+            "description": "A constant-shaped ack (delivery is fire-and-forget through the serving tier's mail seam; no enumeration oracle).",
             "content": {
               "application/json": {
                 "schema": {

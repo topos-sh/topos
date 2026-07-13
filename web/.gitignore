@@ -8,4 +8,6 @@ playwright-report/
 !.env.example
 *.tsbuildinfo
 .invite-emails.jsonl
+.magic-links.jsonl
+.passcode-emails.jsonl
 tests/e2e/.auth/

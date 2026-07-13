@@ -5,7 +5,7 @@
 **Implemented** — the HTTP surface over the built `plane-store::Authority`:
 
 - **The leak-free construction surface (what a downstream plane composes without naming `plane-store`):**
-  `pub struct PlaneConfig` (plain/owned fields only — `mode: String`, `database_url: String`, paths, `Option<SmtpConfig>`) +
+  `pub struct PlaneConfig` (plain/owned fields only — `mode: String`, `database_url: String`, paths) +
   `pub async fn PlaneState::open(cfg: PlaneConfig) -> anyhow::Result<PlaneState>`, which builds the
   `Authority` + the (now crate-private) enrollment config **internally**. The **bin dogfoods it** (one
   construction path — `main.rs` names no `plane_store` type). A `no_run` doc-test + a runtime parity test pin
@@ -53,8 +53,10 @@
   WIRE lives on here as **`routes/door.rs`** — contract-only stubs carrying the `#[utoipa::path]`
   annotations the committed OpenAPI is generated from, so the product's frozen contract stays ONE
   generated artifact across both serving tiers (the drift gate held byte-identical through the
-  move). The invitation's courtesy mail moved with the route (the app's own mail seam carries it
-  and the honest `mailed` flag); the vault's mailer seam is passcode-only again.
+  move). ALL outbound mail is the app's since the mail unification: the invitation's courtesy
+  notice AND the passcode delivery ride the app's ONE mail seam (its `routes/door.rs` stub pins
+  the passcode start's wire); the vault holds no mail transport at all — it only MINTS the
+  passcode over the internal lane.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,card,enroll,login,governance,oidc}.rs`): the
   unauthenticated bootstrap `GET /i/{token}` — now **CLAIMS ONLY** (the tokened invite door was interred;
   invitations became roster writes with no `/i/` link, and enrollment is by workspace ADDRESS). It serves the
@@ -79,9 +81,10 @@
   the plane block [API base + posture + method, no trust root] so the client re-roots without an `/i/` fetch),
   `POST /v1/device/token` (a granted poll carries the `{workspace_id, display_name, address}` context for a
   workspace-anchored grant, none for a login grant), `GET /v1/enroll/verify/{user_code}` (disclosing the
-  session's `intent`, now incl. `login`), `POST /v1/enroll/passcode` (the code sent fire-and-forget on
-  `spawn_blocking`, so the constant ack never leaks whether an address was rostered),
-  `POST /v1/enroll/passcode/confirm`, the central **redeem** `POST /v1/workspaces/{ws}/devices` (the grant is
+  session's `intent`, now incl. `login`), `POST /v1/enroll/passcode/confirm` (the start
+  `POST /v1/enroll/passcode` is APP-SERVED since the mail unification — the app mints over the internal
+  lane, mails through its own seam, and answers the constant no-oracle ack; the `routes/door.rs` stub
+  pins its wire), the central **redeem** `POST /v1/workspaces/{ws}/devices` (the grant is
   the bearer credential in the body, checked against the bound device key — no signature; the `{ws}` path
   scopes it, checked against the grant's own workspace; mints the device's ONE **workspace credential**,
   **never a user token, never a per-skill token**), `POST /v1/admin-claim`, and the **LOGIN redeem** `POST
@@ -95,7 +98,7 @@
   email is op data. The OIDC routes (`POST /v1/enroll/oidc/{start,callback}`) are behind the default-off
   `enroll-oidc` feature (so the committed OpenAPI contract excludes them).
 - The wire mapping (`wire/map.rs`): a *read* enrollment step (bootstrap / device-auth / verification /
-  passcode) + the member-lane describe reads (me / channels / proposals / log / reach) → a plain typed DTO
+  passcode-confirm) + the member-lane describe reads (me / channels / proposals / log / reach) → a plain typed DTO
   (a miss is the route's indistinguishable 404); every terminal protocol outcome
   of an op_id-carrying *write* (publish/propose/revert/review, and the redeem/admin-claim/login/roster/revoke
   envelopes) + the naturally-idempotent member-lane row ops (a `status`-string OK or a coded DENIED — the ONE
@@ -158,7 +161,11 @@
   member-entitled miss stays a 200 `not_found` the composing page renders itself), except the idempotent
   policy set (**204**). Its request/response DTOs are **lane-local** (`snake_case` serde) — deliberately NOT
   in `topos-types` and NOT in the OpenAPI (the handlers carry no `#[utoipa::path]`); the lane is
-  composition-internal, out of the public contract.
+  composition-internal, out of the public contract. One PRE-IDENTITY route rides the lane's bearer steps
+  only (no acting email exists before the second factor proves one): `POST /internal/v1/enroll/passcode`
+  (`mint_passcode`) mints the passcode for a live session and returns the plaintext code + workspace
+  display name ONCE, `no-store` — the composing surface mails it and serves the public start's
+  constant-shaped ack itself.
 - A generated **OpenAPI** (`openapi()`, utoipa) emitted to `contracts/openapi/` and folded into the
   `gen-schema` drift gate.
 - **The backup/restore epoch bump** (`restore_cmd.rs`): `PlaneState::restore_bump_epochs(workspaces,
@@ -220,7 +227,7 @@
   wrappers.
 - **The two public-base seams**: `PlaneConfig.verify_base_url` (`--verify-base-url` /
   `TOPOS_PLANE_VERIFY_BASE_URL`, default the base URL) — the HUMAN-facing base the device-auth
-  `verification_uri`(+`_complete`) and the passcode mail link are built on (`{base}/verify[/{code}]`) —
+  `verification_uri`(+`_complete`) is built on (`{base}/verify[/{code}]`) —
   and `PlaneConfig.link_base_url` (`--link-base-url` / `TOPOS_PLANE_LINK_BASE_URL`, default the base
   URL) — the PUBLIC base every minted `/i/<token>` share link rides (create-invite, mint-claim, the
   standup self-invite), for a hosted plane whose user-visible links live on its web origin (that origin
@@ -233,28 +240,26 @@
 **Implemented — the enrollment protocol GLUE the routes drive** (`src/enroll/`). No durable state, no
 issuance decision (every credential/identity decision is `plane-store::Authority`'s):
 
-- **The mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
-  no async-trait: the handler runs the blocking send on `spawn_blocking`, fire-and-forget so neither the body
-  nor its latency leaks whether an address was rostered): `send_passcode`, passcode-only again since
-  the door cutover (the invitation route — and its courtesy mail + honest `mailed` flag — moved to
-  the composing web app's own mail seam). With `SmtpMailer` (lettre, blocking SMTP + rustls),
-  `NoopMailer` (the no-SMTP self-host default — silently drops, so the bootstrap won't advertise
-  the passcode method), and a recording `FakeMailer` (test-gated — records passcodes).
-  **Redaction:** the code rides in a `Passcode` whose hand-written `Debug` is `<redacted>`; `SmtpMailer` /
-  `SmtpConfig` `Debug` omit the transport / creds.
+- **The passcode MINT, not a mailer** — the plane holds NO mail transport since the mail unification
+  (the whole outbound-mail surface, invite notices included, is the composing web app's ONE mail seam).
+  `POST /internal/v1/enroll/passcode` (`routes/internal.rs::mint_passcode`) mints the second factor for a
+  live session and returns the plaintext code ONCE — bearer-gated (the lane's steps (a)+(b) only: the op
+  is PRE-IDENTITY, so no `x-topos-acting-email` exists yet), `no-store`, never logged. The composing
+  surface serves the public `POST /v1/enroll/passcode` ack itself (the `routes/door.rs` stub pins that
+  wire) and fire-and-forgets the send through its mail seam, preserving the no-enumeration-oracle ack.
 - **The OIDC connector** (`enroll/oidc.rs`, behind `enroll-oidc`, **DEFAULT-OFF** — a default build resolves
   NO oauth2/openidconnect/reqwest). A minimal single-provider id-token flow: `start` builds the authorize
   redirect (PKCE + CSRF state + nonce, the `user_code` bound into `state`); `callback` runs SERVER-SIDE
   (validate state → exchange code → validate the id_token via JWKS/nonce → confirm the session). **The
   id/access token is consumed here and dropped — it NEVER returns to the agent; only the
   proven email crosses to `confirm_external_identity`.** A regression test pins the callback's Ok type to `()`.
-- **`PlaneState` extension** — `mailer: Arc<dyn Mailer>` + `enroll: Arc<EnrollConfig>` (+ a feature-gated
-  `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the **crate-private** `with_enroll_config` builds the
-  mailer INTERNALLY (SmtpMailer when SMTP is set, else NoopMailer), mirroring `with_rate_limit` + the internal
-  Limiter — `PlaneState::open` calls it from a leak-free `PlaneConfig` (`EnrollConfig` is now `pub(crate)`,
-  so it never crosses the public API). The feature-gated `with_oidc_config` loads the connector. A test-gated
-  `with_mailer` shim injects the FakeMailer (a check-arch guard keeps the `test-fixtures` feature off in
-  production).
+- **`PlaneState` extension** — `enroll: Arc<EnrollConfig>` (+ a feature-gated
+  `oidc: Option<Arc<OidcConfig>>` under `enroll-oidc`); the **crate-private** `with_enroll_config` sets the
+  static config, mirroring `with_rate_limit` — `PlaneState::open` calls it from a leak-free `PlaneConfig`
+  (`EnrollConfig` is `pub(crate)`, so it never crosses the public API). The feature-gated
+  `with_oidc_config` loads the connector. The advertised enrollment method defaults to `device_code` and is
+  never inferred from a transport — a deployment whose surface mails passcodes sets
+  `TOPOS_PLANE_ENROLLMENT_METHOD=passcode` explicitly.
 
 **Planned (lands later):** a **device-credential-authenticated `PUT /policy` variant** (the
 admin-token operator route is built — see above; a governance route over the same policy authenticated by
@@ -270,9 +275,9 @@ a real box (public DNS, Let's Encrypt staging→prod, rate limits, renewal timin
 ## bin
 
 A thin `axum` `main` (composition root only — no trust logic): parses config (bind addr / database URL / git-root /
-large-root / enrollment secret / base URL / mode / SMTP relay / the optional operator
-admin token, which enables the policy route / the maintenance interval), resolves its two bin-local
-marshals (the base URL default + the 5-or-none SMTP relay), then builds the serving state through the
+large-root / enrollment secret / base URL / mode / the optional operator
+admin token, which enables the policy route / the maintenance interval), resolves its one bin-local
+marshal (the base URL default), then builds the serving state through the
 **single leak-free constructor** `PlaneState::open(PlaneConfig { .. })` — which opens the `Authority`,
 loads the enrollment secret, and builds the enrollment config INTERNALLY (the bin names no
 `plane-store` type, dogfooding the same path a downstream plane uses) — spawns the maintenance scheduler
@@ -300,4 +305,4 @@ into it. Anything that must run inside the publish transaction is, by definition
 here, parameterized by config (like the `review-required` boolean) — never injected from outside.
 
 Dependencies: `plane-store`, `topos-core`, `topos-types`, `axum`, tower middleware, `oauth2` /
-`openidconnect` (feature-gated), `lettre`, `tracing`.
+`openidconnect` (feature-gated), `tracing`.

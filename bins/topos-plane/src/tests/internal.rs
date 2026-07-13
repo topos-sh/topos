@@ -121,7 +121,6 @@ async fn internal_setup(pool: PgPool, tag: &str, internal_token: Option<&str>) -
             strict_deployment_mode: Some(DeploymentMode::Cloud),
             deployment_mode: DeploymentMode::Cloud,
             enrollment_method: "passcode".to_owned(),
-            smtp: None,
         });
     if let Some(token) = internal_token {
         state = state.with_internal_token(token);

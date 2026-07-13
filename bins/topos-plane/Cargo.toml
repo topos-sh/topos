@@ -13,9 +13,6 @@ description = "The OSS plane, library-first (lib + thin bin). The lib is the com
 # pulls in NEITHER oauth2 nor openidconnect (nor their reqwest/tokio/hyper stack) — `cargo build -p
 # topos-plane` resolves none of it; only `--features enroll-oidc` does.
 enroll-oidc = ["dep:oauth2", "dep:openidconnect"]
-# The test-only mailer-injection shim (`PlaneState::with_mailer` + the in-crate `FakeMailer`). Mirrors
-# `plane-store/test-fixtures`: gated OUT of the production build (a check-arch guard asserts it stays off).
-test-fixtures = []
 # The built-in ACME TLS listener (tls-alpn-01 via rustls-acme + axum-server). DEFAULT-OFF and
 # EXPERIMENTAL: bin-side composition only (the lib's public surface gains nothing), armed at runtime only
 # by a non-empty --acme-domain — a build with the feature but no domains serves exactly like a default
@@ -35,9 +32,6 @@ topos-core.workspace = true
 # the feature stays off everywhere else, so the client's DTOs stay pure serde.
 topos-types = { workspace = true, features = ["contract-derives"] }
 plane-store.workspace = true
-# The passcode mailer: blocking SMTP over rustls (no C/openssl). The send is fire-and-forget on
-# `spawn_blocking` from the handler, so the sync `SmtpTransport` never blocks the async runtime.
-lettre.workspace = true
 # The enrollment OIDC connector — feature-gated (`enroll-oidc`), so a default build never resolves them. The
 # id/access token is consumed SERVER-SIDE and never returned to the agent.
 oauth2 = { workspace = true, optional = true }
@@ -49,7 +43,7 @@ axum-server = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
-thiserror.workspace = true # the mailer / OIDC typed error (creds never reach its Debug/Display)
+thiserror.workspace = true # the OIDC typed error (creds never reach its Debug/Display)
 # The HTTP surface: axum (default features cover json/http1/tokio/query; matchit is built-in), the OpenAPI
 # generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.
 axum.workspace = true

@@ -81,11 +81,13 @@ use topos_types::{
         crate::routes::door::invite,
         // The unauthenticated claim bootstrap.
         crate::routes::bootstrap::read_bootstrap,
-        // Enrollment flow (+ the login redeem).
+        // Enrollment flow (+ the login redeem). The passcode START is served by the composing web app
+        // since the mail unification (it mints over the internal lane and mails through its own seam) —
+        // its wire stays pinned by the `routes::door` stub; the confirm stays live on the vault.
         crate::routes::enroll::start_device_auth,
         crate::routes::enroll::poll_device_auth,
         crate::routes::enroll::read_verification_context,
-        crate::routes::enroll::start_passcode,
+        crate::routes::door::start_passcode,
         crate::routes::enroll::complete_passcode,
         crate::routes::enroll::redeem,
         crate::routes::enroll::admin_claim,

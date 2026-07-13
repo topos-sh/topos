@@ -55,7 +55,6 @@ pub mod openapi;
 #[cfg(test)]
 mod tests;
 
-pub use enroll::mailer::SmtpConfig;
 pub use lifecycle_cmd::{
     ArchiveSkillSummary, DeleteSkillSummary, PurgeVersionSummary, RenameSkillSummary,
     UnarchiveSkillSummary,

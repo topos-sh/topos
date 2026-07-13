@@ -37,9 +37,20 @@ export const ALLOWED_ROUTES = [
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/delete",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/purge",
   "POST /internal/v1/workspaces/{ws}/skills/{skill}/rename",
+  // The passcode MINT — the send half lives in this tier's mail seam (the served
+  // `api/v1/enroll/passcode` route mints here, mails, and answers the constant ack).
+  "POST /internal/v1/enroll/passcode",
 ] as const;
 
 export type AllowedRoute = (typeof ALLOWED_ROUTES)[number];
+
+/**
+ * The ONE internal route with no acting principal: the passcode mint is PRE-IDENTITY — the email
+ * in its body is the unverified subject the code will prove, so there is no session-verified
+ * actor to assert (the vault gates the route on the lane bearer alone and never reads the
+ * acting-email header there).
+ */
+const PRE_IDENTITY_ROUTES = new Set<string>(["POST /internal/v1/enroll/passcode"]);
 
 const allowed = new Set<string>(ALLOWED_ROUTES);
 
@@ -81,11 +92,14 @@ export async function vaultFetch(req: VaultRequest): Promise<Response> {
   const path = fillTemplate(req.template, req.params ?? {});
   const headers = new Headers(req.headers);
   if (req.template.startsWith("/internal/")) {
-    if (!req.actingEmail) {
+    const preIdentity = PRE_IDENTITY_ROUTES.has(`${req.method} ${req.template}`);
+    if (!req.actingEmail && !preIdentity) {
       throw new Error("vault client: internal lane requires an acting principal");
     }
     headers.set("authorization", `Bearer ${env.PLANE_INTERNAL_TOKEN}`);
-    headers.set("x-topos-acting-email", req.actingEmail);
+    if (req.actingEmail) {
+      headers.set("x-topos-acting-email", req.actingEmail);
+    }
   }
   let body: string | undefined;
   if (req.body !== undefined) {

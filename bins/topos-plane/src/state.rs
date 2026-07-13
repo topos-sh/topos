@@ -1,10 +1,9 @@
 //! [`PlaneState`] — the shared handle every handler and the rate-limit middleware read.
 //!
-//! Cheap to clone (an `Arc<Authority>`, the `Arc`-backed limiter, an `Arc<dyn Mailer>`, and an
-//! `Arc<EnrollConfig>`), so axum can hand a copy to each request. The fields are private: a handler reaches
-//! the authority through [`PlaneState::authority`], the limiter through [`PlaneState::limiter`], the mailer
-//! through [`PlaneState::mailer`], and the enrollment config through [`PlaneState::enroll`] — never by
-//! destructuring the struct.
+//! Cheap to clone (an `Arc<Authority>`, the `Arc`-backed limiter, and an `Arc<EnrollConfig>`), so axum can
+//! hand a copy to each request. The fields are private: a handler reaches the authority through
+//! [`PlaneState::authority`], the limiter through [`PlaneState::limiter`], and the enrollment config through
+//! [`PlaneState::enroll`] — never by destructuring the struct.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,18 +14,16 @@ use plane_store::{Authority, DeploymentMode, EnrollmentConfig, PoolConfig, Works
 
 use topos_types::requests::WireSkillIndex;
 
-use crate::enroll::mailer::{Mailer, NoopMailer, SmtpConfig, SmtpMailer};
 use crate::rate_limit::{Limiter, Limits};
 use crate::wire::error::PlaneHttpError;
 
-/// The composed plane's shared state: the storage authority + the in-process rate limiter + the passcode
-/// mailer + the static enrollment config. One value, cloned per request (every field is `Arc`-backed, so a
-/// clone is a handful of pointer bumps).
+/// The composed plane's shared state: the storage authority + the in-process rate limiter + the static
+/// enrollment config. One value, cloned per request (every field is `Arc`-backed, so a clone is a handful
+/// of pointer bumps).
 #[derive(Clone, Debug)]
 pub struct PlaneState {
     authority: Arc<Authority>,
     limiter: Limiter,
-    mailer: Arc<dyn Mailer>,
     enroll: Arc<EnrollConfig>,
     /// The OIDC connector config — only present under `enroll-oidc` (default-off), set by the bin from the
     /// environment via [`with_oidc_config`](Self::with_oidc_config); `None` until configured.
@@ -45,8 +42,9 @@ pub struct PlaneState {
 }
 
 /// The static enrollment configuration the verification routes read: the public base URL, the deployment
-/// posture, the offered enrollment method, and the optional SMTP relay (Some ⇒ a real [`SmtpMailer`]; None ⇒
-/// the silent [`NoopMailer`], and the bootstrap won't advertise the passcode method).
+/// posture, and the offered enrollment method. (Passcode DELIVERY is the composing surface's since the mail
+/// unification: the internal lane mints the code once and the surface's mail seam carries it — the vault
+/// holds no mail transport.)
 ///
 /// **Crate-private** — it names a `plane_store` type (`deployment_mode`), so it is built **internally** by
 /// [`PlaneState::open`] from the leak-free [`PlaneConfig`]; a downstream plane never constructs it.
@@ -59,8 +57,9 @@ pub(crate) struct EnrollConfig {
     #[cfg_attr(not(test), allow(dead_code))]
     pub base_url: String,
     /// The HUMAN-facing verification base (already resolved: `verify_base_url` else `base_url`). The
-    /// passcode mail body points at `{this}/verify`; the authority builds the device-auth
-    /// `verification_uri`(+`_complete`) from its own copy of the same value.
+    /// **authority** builds the device-auth `verification_uri`(+`_complete`) from its own copy of the same
+    /// value; this is the construction record, asserted by tests — mirroring `base_url` above.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub verify_base_url: String,
     /// The PUBLIC share-link base (already resolved: `link_base_url` else `base_url`). The
     /// **authority** holds the authoritative copy every consumer reads (the link composers + the
@@ -75,16 +74,14 @@ pub(crate) struct EnrollConfig {
     pub strict_deployment_mode: Option<DeploymentMode>,
     /// This plane's deployment posture. The **authority** holds the authoritative copy the bootstrap serves;
     /// this is the construction record (built by [`PlaneState::open`], asserted by tests). Production
-    /// reads only `base_url` + `smtp` from here — hence `allow(dead_code)` off-test (mirrors the [`enroll`]
-    /// accessor idiom), while parity with the original construction is preserved.
+    /// reads only `strict_deployment_mode` from here — hence `allow(dead_code)` off-test (mirrors the
+    /// [`enroll`] accessor idiom), while parity with the original construction is preserved.
     #[cfg_attr(not(test), allow(dead_code))]
     pub deployment_mode: DeploymentMode,
     /// The enrollment method advertised to a bootstrapping device (e.g. `"device_code"`). The authority's copy
     /// is authoritative; see `deployment_mode`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub enrollment_method: String,
-    /// The SMTP relay, if configured. `None` ⇒ no passcode email (the self-host default).
-    pub smtp: Option<SmtpConfig>,
 }
 
 /// The leak-free construction config for [`PlaneState::open`] — the one a downstream plane (or the OSS
@@ -118,15 +115,14 @@ pub struct PlaneConfig {
     /// The deployment posture — `"self_host"` or `"cloud"`. Parsed internally (an unknown value warns and
     /// falls back to `self_host`), so no `plane_store::DeploymentMode` crosses the boundary.
     pub mode: String,
-    /// The enrollment method advertised in the bootstrap. `None` ⇒ `passcode` when SMTP is set, else
-    /// `device_code` (resolved in the constructor).
+    /// The enrollment method advertised in the bootstrap. `None` ⇒ `device_code`. A deployment whose
+    /// composing surface delivers the passcode mail sets `"passcode"` explicitly — the vault holds no
+    /// mail transport, so it never infers the method from one.
     pub enrollment_method: Option<String>,
-    /// The SMTP relay, if configured (`None` ⇒ no passcode email — the self-host default).
-    pub smtp: Option<SmtpConfig>,
 }
 
 impl Default for EnrollConfig {
-    /// The accountless self-host default: no base URL, self-host posture, the device-code method, no SMTP.
+    /// The accountless self-host default: no base URL, self-host posture, the device-code method.
     /// The STRICT mode is deliberately `None` — a [`PlaneState::new`] composition that never set an enroll
     /// config has not configured a mode, so the genesis/standup wrappers must refuse typed (fail closed)
     /// rather than silently assume self_host against an Authority that may be configured cloud.
@@ -139,7 +135,6 @@ impl Default for EnrollConfig {
             strict_deployment_mode: None,
             deployment_mode: DeploymentMode::SelfHost,
             enrollment_method: "device_code".to_owned(),
-            smtp: None,
         }
     }
 }
@@ -171,13 +166,14 @@ fn pool_config_from_env() -> PoolConfig {
 }
 
 /// Resolve the enrollment method a plane ADVERTISES on its bootstraps: an explicit configured value wins,
-/// else `passcode` when SMTP is configured, else `device_code`. The reserved value `"admin_claim"` is
-/// refused as a typed startup error: it is the claim-only species marker a one-time `/i/` claim link
-/// carries — a plane configured to advertise it would make every client treat LIVE INVITES as one-shot
-/// claims (the wrong door: no device-auth session, a `--resume`-less flow that wedges).
-fn resolve_enrollment_method(configured: Option<String>, has_smtp: bool) -> anyhow::Result<String> {
-    let method =
-        configured.unwrap_or_else(|| if has_smtp { "passcode" } else { "device_code" }.to_owned());
+/// else `device_code`. (`passcode` is never inferred: delivery belongs to the composing surface's mail
+/// seam, which the vault cannot see — a deployment that mails passcodes says so explicitly.) The reserved
+/// value `"admin_claim"` is refused as a typed startup error: it is the claim-only species marker a
+/// one-time `/i/` claim link carries — a plane configured to advertise it would make every client treat
+/// LIVE INVITES as one-shot claims (the wrong door: no device-auth session, a `--resume`-less flow that
+/// wedges).
+fn resolve_enrollment_method(configured: Option<String>) -> anyhow::Result<String> {
+    let method = configured.unwrap_or_else(|| "device_code".to_owned());
     anyhow::ensure!(
         method != "admin_claim",
         "enrollment method \"admin_claim\" is reserved for one-time claim links and cannot be a \
@@ -189,7 +185,7 @@ fn resolve_enrollment_method(configured: Option<String>, has_smtp: bool) -> anyh
 impl PlaneState {
     /// Construct from an already-built [`Authority`] with the **default** rate limits (read from the
     /// environment — `TOPOS_PLANE_RATELIMIT=off` disables enforcement; otherwise a generous in-process token
-    /// bucket), a silent `NoopMailer`, and the default enrollment config. Override the limits with
+    /// bucket) and the default enrollment config. Override the limits with
     /// [`with_rate_limit`](Self::with_rate_limit). This names the `plane_store` [`Authority`] in its signature
     /// — it is the explicit test / advanced construction path; a downstream plane builds through the leak-free
     /// [`open`](Self::open) ([`PlaneConfig`]) instead.
@@ -198,7 +194,6 @@ impl PlaneState {
         Self {
             authority,
             limiter: Limiter::new(Limits::from_env()),
-            mailer: Arc::new(NoopMailer),
             enroll: Arc::new(EnrollConfig::default()),
             #[cfg(feature = "enroll-oidc")]
             oidc: None,
@@ -234,7 +229,6 @@ impl PlaneState {
     ///     link_base_url: None,
     ///     mode: "cloud".to_owned(),
     ///     enrollment_method: None,
-    ///     smtp: None,
     /// })
     /// .await?;
     ///
@@ -264,10 +258,8 @@ impl PlaneState {
             tracing::warn!(mode = %cfg.mode, "unknown plane mode; defaulting to self_host");
             DeploymentMode::SelfHost
         });
-        // Resolve the enrollment method after SMTP (the dependency is load-bearing: passcode only when a relay
-        // is configured, else device_code) — refusing the reserved claim-only marker (fail closed at startup).
-        let enrollment_method =
-            resolve_enrollment_method(cfg.enrollment_method, cfg.smtp.is_some())?;
+        // Resolve the enrollment method — refusing the reserved claim-only marker (fail closed at startup).
+        let enrollment_method = resolve_enrollment_method(cfg.enrollment_method)?;
         let verify_base_url = cfg
             .verify_base_url
             .clone()
@@ -302,7 +294,6 @@ impl PlaneState {
                 strict_deployment_mode,
                 deployment_mode,
                 enrollment_method,
-                smtp: cfg.smtp,
             }),
         )
     }
@@ -363,25 +354,11 @@ impl PlaneState {
             .is_some_and(|stored| topos_core::digest::sha256(provided.as_bytes()) == stored)
     }
 
-    /// Set the enrollment config, constructing the mailer **internally** — a real [`SmtpMailer`] when `smtp`
-    /// is `Some`, else the silent [`NoopMailer`]. Mirrors [`with_rate_limit`](Self::with_rate_limit) +
-    /// internal `Limiter`: the `Mailer` trait stays crate-private; only the config crosses. An invalid SMTP
-    /// config falls back to the no-op mailer (passcode email disabled) rather than failing the build, so the
-    /// construction stays infallible. **Crate-private** (it takes the crate-private [`EnrollConfig`]) —
+    /// Set the enrollment config. Mirrors [`with_rate_limit`](Self::with_rate_limit): a builder the
+    /// construction path calls once. **Crate-private** (it takes the crate-private [`EnrollConfig`]) —
     /// [`open`](Self::open) calls it from a leak-free [`PlaneConfig`].
     #[must_use]
     pub(crate) fn with_enroll_config(mut self, config: EnrollConfig) -> Self {
-        self.mailer = match &config.smtp {
-            Some(smtp) => match SmtpMailer::from_smtp_config(smtp) {
-                Ok(mailer) => Arc::new(mailer),
-                Err(error) => {
-                    // The error never contains the credentials (they are attached infallibly, never parsed).
-                    tracing::warn!(%error, "invalid SMTP config; passcode email disabled (no-op mailer)");
-                    Arc::new(NoopMailer)
-                }
-            },
-            None => Arc::new(NoopMailer),
-        };
         self.enroll = Arc::new(config);
         self
     }
@@ -401,16 +378,6 @@ impl PlaneState {
     #[cfg(feature = "enroll-oidc")]
     pub(crate) fn oidc(&self) -> Option<&crate::enroll::oidc::OidcConfig> {
         self.oidc.as_deref()
-    }
-
-    /// Inject a mailer directly — the route tests pass a `FakeMailer` to read the passcode without SMTP.
-    /// Test-gated (`test` / `test-fixtures`), so production never carries it (a check-arch guard asserts the
-    /// feature stays off). The `Mailer` trait is crate-private, so only in-crate code can call this.
-    #[cfg(any(test, feature = "test-fixtures"))]
-    #[must_use]
-    pub(crate) fn with_mailer(mut self, mailer: Arc<dyn Mailer>) -> Self {
-        self.mailer = mailer;
-        self
     }
 
     /// Set the workspace's `review_required` policy through the public authority op — the **leak-free** surface
@@ -467,16 +434,8 @@ impl PlaneState {
         &self.limiter
     }
 
-    /// The passcode mailer (cloned by the verification handler to run the blocking send on `spawn_blocking`).
-    /// Consumed by the verification routes (landing next), so unreferenced in a production lib build today.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn mailer(&self) -> &Arc<dyn Mailer> {
-        &self.mailer
-    }
-
-    /// The static enrollment config (the verification routes read the base URL / posture / method / SMTP).
-    /// Consumed by the verification routes (landing next), so unreferenced in a production lib build today.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The static enrollment config (the standup wrappers read the strict posture; tests assert the
+    /// construction record).
     pub(crate) fn enroll(&self) -> &EnrollConfig {
         &self.enroll
     }
@@ -487,14 +446,16 @@ mod tests {
     use super::resolve_enrollment_method;
 
     #[test]
-    fn enrollment_method_resolves_the_defaults_and_honors_an_explicit_value() {
+    fn enrollment_method_resolves_the_default_and_honors_an_explicit_value() {
+        // `passcode` is never inferred (the vault holds no mail transport to infer it from) — the default
+        // is `device_code`, and a mail-delivering deployment says `passcode` explicitly.
+        assert_eq!(resolve_enrollment_method(None).unwrap(), "device_code");
         assert_eq!(
-            resolve_enrollment_method(None, false).unwrap(),
-            "device_code"
+            resolve_enrollment_method(Some("passcode".to_owned())).unwrap(),
+            "passcode"
         );
-        assert_eq!(resolve_enrollment_method(None, true).unwrap(), "passcode");
         assert_eq!(
-            resolve_enrollment_method(Some("device_code".to_owned()), true).unwrap(),
+            resolve_enrollment_method(Some("device_code".to_owned())).unwrap(),
             "device_code"
         );
     }
@@ -503,7 +464,7 @@ mod tests {
     fn the_reserved_admin_claim_method_is_a_typed_startup_error() {
         // "admin_claim" is a claim-only species marker: a plane ADVERTISING it would make clients treat
         // live invites as one-shot claims (the wrong door). Constructing a PlaneState with it must fail.
-        let err = resolve_enrollment_method(Some("admin_claim".to_owned()), false).unwrap_err();
+        let err = resolve_enrollment_method(Some("admin_claim".to_owned())).unwrap_err();
         assert!(err.to_string().contains("reserved"), "got {err}");
     }
 }

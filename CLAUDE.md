@@ -120,7 +120,8 @@ topos        ──► topos-core, topos-types, topos-gitstore, topos-harness   
 
 Heavy-dependency placement, enforced by `cargo xtask check-arch`: `sqlx` is referenced by `plane-store`
 only (and kept out of the client build); `axum` powers the OSS plane's HTTP server, `ureq` the client's
-blocking transport, and `lettre` the plane's passcode mailer. The OIDC stack (`oauth2`/`openidconnect`,
+blocking transport. Outbound MAIL is the web app's alone (nodemailer over bring-your-own SMTP — the
+plane only mints the passcode over its internal lane). The OIDC stack (`oauth2`/`openidconnect`,
 with their `reqwest`) is feature-gated **default-off** in `topos-plane` — a production-tree check asserts
 a default build resolves none of it.
 

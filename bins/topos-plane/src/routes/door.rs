@@ -4,7 +4,9 @@
 //! is bytes/pointers, enrollment, and governance. What stays HERE is the contract — these stubs
 //! carry the `#[utoipa::path]` annotations the committed OpenAPI is generated from, so the wire
 //! stays pinned in ONE generated artifact no matter which tier serves an operation. The stub
-//! bodies never run and nothing routes to them.
+//! bodies never run and nothing routes to them. The enrollment passcode START rides here too
+//! since the mail unification: the app mints the code over the internal lane and delivers it
+//! through its own mail seam (the vault keeps only the confirm — no mail transport).
 //!
 //! Two describe reads that LOOK like row ops — the review inbox (`GET /v1/workspaces/{ws}/proposals`)
 //! and the skill log — are deliberately absent: both decorate their rows with git commit
@@ -15,8 +17,8 @@
 
 use topos_types::JsonEnvelope;
 use topos_types::requests::{
-    InvitationRequest, NoticeAckRequest, ProtectionSetRequest, WireAppliedReport, WireChannelIndex,
-    WireDelivery, WireMe, WireReach,
+    InvitationRequest, NoticeAckRequest, PasscodeAck, PasscodeRequest, ProtectionSetRequest,
+    WireAppliedReport, WireChannelIndex, WireDelivery, WireMe, WireReach,
 };
 
 #[utoipa::path(
@@ -312,3 +314,18 @@ pub(crate) fn get_delivery() {}
     ),
 )]
 pub(crate) fn put_report() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/enroll/passcode",
+    tag = "enrollment",
+    request_body = PasscodeRequest,
+    responses(
+        (status = 200, description = "A constant-shaped ack (delivery is fire-and-forget through the serving tier's mail seam; no enumeration oracle).", body = PasscodeAck),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 404, description = "No live session for that user code.", body = JsonEnvelope),
+        (status = 429, description = "Rate limited.", body = JsonEnvelope),
+        (status = 500, description = "Internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn start_passcode() {}

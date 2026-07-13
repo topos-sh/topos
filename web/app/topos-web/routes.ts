@@ -54,6 +54,11 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
       route("skills/:skill/protection", file("api.v1.skill-protection.ts")),
     ]),
+    // The passcode START is served here since the mail unification — the one enrollment step
+    // with a mail side effect: mint over the vault's internal lane, mail through the app's ONE
+    // seam, answer the constant ack (the confirm keeps riding the splat to the vault, which
+    // pins this start's wire with a contract stub).
+    route("api/v1/enroll/passcode", file("api.v1.enroll.passcode.ts")),
     route("api/v1/*", file("api.v1.$.ts")),
     // The claim resource ALSO lives under the API base — `{api_base_url}/i/<token>` — the same
     // passthrough the origin-root `/i/` link serves, mounted twice. TIER PARITY: on the vault the

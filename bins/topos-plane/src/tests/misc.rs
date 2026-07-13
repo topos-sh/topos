@@ -50,7 +50,6 @@ async fn open_builds_a_serving_state() {
         link_base_url: None,
         mode: "cloud".to_owned(),
         enrollment_method: None,
-        smtp: None,
     })
     .await
     .expect("open builds a serving state");
@@ -95,7 +94,6 @@ async fn open_refuses_the_reserved_admin_claim_enrollment_method() {
         link_base_url: None,
         mode: "self_host".to_owned(),
         enrollment_method: Some("admin_claim".to_owned()),
-        smtp: None,
     })
     .await
     .expect_err("the reserved method must refuse the construction");

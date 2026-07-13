@@ -203,6 +203,10 @@ const SESSIONLESS_ROUTES = new Set([
   // is the authority (a guard here could only drift from the vault's replay-before-revoked
   // ordering). Every SERVED /api/v1 route guards with requireDeviceActor like any other.
   "api.v1.$",
+  // The passcode START — PRE-IDENTITY by definition (the emailed code is what proves the
+  // person): no session, no device credential exists yet; the vault's internal-lane mint does
+  // the only authoritative work and the constant ack discloses nothing.
+  "api.v1.enroll.passcode",
 ]);
 const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer|DeviceActor)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;

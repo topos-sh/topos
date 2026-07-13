@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use topos_plane::{PlaneConfig, PlaneState, SmtpConfig, router, spawn_maintenance};
+use topos_plane::{PlaneConfig, PlaneState, router, spawn_maintenance};
 
 // The optional built-in ACME TLS serve path — bin-side composition only, behind the default-off `acme`
 // feature (the library surface gains nothing; a default build resolves none of its dependencies).
@@ -111,7 +111,7 @@ struct Config {
     base_url: Option<String>,
     /// The HUMAN-facing verification base URL, when it differs from the base URL (a hosted plane whose
     /// verification pages live on another host). Defaults to the base URL. Only the device-auth
-    /// verification links + the passcode mail link are built on it; `/i/` links stay on the base URL.
+    /// verification links are built on it; `/i/` links stay on the base URL.
     #[arg(long, env = "TOPOS_PLANE_VERIFY_BASE_URL")]
     verify_base_url: Option<String>,
     /// The PUBLIC share-link base the minted `/i/<token>` links ride, when it differs from the base URL
@@ -123,25 +123,11 @@ struct Config {
     /// The deployment posture — `cloud` or `self_host` (default `self_host`).
     #[arg(long, env = "TOPOS_PLANE_MODE", default_value = "self_host")]
     mode: String,
-    /// The enrollment method advertised in the bootstrap. Defaults to `passcode` when SMTP is configured,
-    /// else `device_code`.
+    /// The enrollment method advertised in the bootstrap. Defaults to `device_code`. A deployment whose
+    /// composing surface delivers the passcode mail sets `passcode` explicitly (the plane holds no mail
+    /// transport, so it never infers the method from one).
     #[arg(long, env = "TOPOS_PLANE_ENROLLMENT_METHOD")]
     enrollment_method: Option<String>,
-    /// The SMTP relay host (passcode email; all five `--smtp-*` must be set to enable it).
-    #[arg(long, env = "TOPOS_PLANE_SMTP_HOST")]
-    smtp_host: Option<String>,
-    /// The SMTP relay port.
-    #[arg(long, env = "TOPOS_PLANE_SMTP_PORT")]
-    smtp_port: Option<u16>,
-    /// The SMTP username (a credential — never logged).
-    #[arg(long, env = "TOPOS_PLANE_SMTP_USER")]
-    smtp_user: Option<String>,
-    /// The SMTP password (a credential — never logged).
-    #[arg(long, env = "TOPOS_PLANE_SMTP_PASS")]
-    smtp_pass: Option<String>,
-    /// The SMTP from-address.
-    #[arg(long, env = "TOPOS_PLANE_SMTP_FROM")]
-    smtp_from: Option<String>,
     /// The operator admin token (a secret — never logged; only its sha256 is retained). Enables the
     /// `PUT /v1/workspaces/{ws}/policy/review-required` toggle; unset, that route answers 404.
     #[arg(long, env = "TOPOS_PLANE_ADMIN_TOKEN", hide_env_values = true)]
@@ -323,32 +309,15 @@ async fn restore_bump_epoch(
     Ok(())
 }
 
-/// The ONE construction home serve and the operator subcommands share: the two bin-local marshals
-/// (default the public base URL to the bind address; assemble the SMTP relay from the five all-or-nothing
-/// fields — any missing ⇒ no passcode email, the no-op mailer), then the library's leak-free constructor
-/// (the same one a downstream plane uses), which opens the authority, loads/generates the `0600` enrollment
-/// secret, and builds the enrollment config internally. Binds no socket.
+/// The ONE construction home serve and the operator subcommands share: the bin-local marshal (default the
+/// public base URL to the bind address), then the library's leak-free constructor (the same one a
+/// downstream plane uses), which opens the authority, loads/generates the `0600` enrollment secret, and
+/// builds the enrollment config internally. Binds no socket.
 async fn open_state(cfg: Config) -> Result<PlaneState> {
     let base_url = cfg
         .base_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", cfg.bind));
-    let smtp = match (
-        cfg.smtp_host.clone(),
-        cfg.smtp_port,
-        cfg.smtp_user.clone(),
-        cfg.smtp_pass.clone(),
-        cfg.smtp_from.clone(),
-    ) {
-        (Some(host), Some(port), Some(user), Some(pass), Some(from)) => Some(SmtpConfig {
-            host,
-            port,
-            user,
-            pass,
-            from,
-        }),
-        _ => None,
-    };
 
     let state = PlaneState::open(PlaneConfig {
         database_url: cfg.database_url,
@@ -360,7 +329,6 @@ async fn open_state(cfg: Config) -> Result<PlaneState> {
         link_base_url: cfg.link_base_url,
         mode: cfg.mode,
         enrollment_method: cfg.enrollment_method,
-        smtp,
     })
     .await?;
     // The operator admin token (post-construction, like the rate limits): only its sha256 is retained.

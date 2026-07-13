@@ -47,10 +47,10 @@ const ACTING_EMAIL_HEADER: &str = "x-topos-acting-email";
 
 // ── the lane guard ───────────────────────────────────────────────────────────────────────────────────
 
-/// The ONE lane guard: the unconfigured-lane 404 → the internal-token 401 → the acting-principal 400, in
-/// that order, so an unconfigured plane's response carries no oracle (auth is decided BEFORE any body or
-/// id parse). Returns the session-verified acting email on success.
-fn acting_principal(state: &PlaneState, headers: &HeaderMap) -> Result<String, PlaneHttpError> {
+/// The lane's BEARER guard — steps (a)+(b) of the ordering discipline: the unconfigured-lane 404, then the
+/// internal-token 401, both decided BEFORE any body or id parse. [`acting_principal`] adds step (c); the
+/// PRE-IDENTITY passcode mint ([`mint_passcode`]) stops here, because no session-verified actor exists yet.
+fn lane_guard(state: &PlaneState, headers: &HeaderMap) -> Result<(), PlaneHttpError> {
     // (a) Disabled ⇒ the same indistinguishable 404 a missing route answers — an unconfigured plane never
     //     exposes the lane. Checked FIRST, before any parse or authority touch.
     if !state.internal_token_configured() {
@@ -62,6 +62,14 @@ fn acting_principal(state: &PlaneState, headers: &HeaderMap) -> Result<String, P
     if !state.internal_token_matches(&provided) {
         return Err(PlaneHttpError::Unauthorized);
     }
+    Ok(())
+}
+
+/// The ONE lane guard: the unconfigured-lane 404 → the internal-token 401 → the acting-principal 400, in
+/// that order, so an unconfigured plane's response carries no oracle (auth is decided BEFORE any body or
+/// id parse). Returns the session-verified acting email on success.
+fn acting_principal(state: &PlaneState, headers: &HeaderMap) -> Result<String, PlaneHttpError> {
+    lane_guard(state, headers)?;
     // (c) The session-verified acting principal — the composing surface proves it; the wrappers re-verify the
     //     roster rows in-transaction. A missing/empty header is a 400 (only ever reachable past a correct
     //     bearer, so it is never an oracle).
@@ -711,4 +719,61 @@ pub(crate) async fn revert(
         SessionRevertSummary::NotFound => PointerMoveResponse::NotFound,
     };
     Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+// ── the pre-identity passcode mint (the composing surface delivers what this returns) ──────────────────
+
+/// `POST /internal/v1/enroll/passcode` body — the live session's user code + the address to verify.
+#[derive(serde::Deserialize)]
+struct PasscodeMintRequest {
+    user_code: String,
+    email: String,
+}
+
+/// The minted passcode + the workspace display name the mail renders with. The plaintext code crosses HERE
+/// ONCE — bearer-gated, `no-store`, never logged (the trace layer records route templates only); the
+/// composing surface mails it and the vault holds no mail transport.
+#[derive(serde::Serialize)]
+struct PasscodeMintResponse {
+    passcode: String,
+    workspace_display_name: String,
+}
+
+/// `POST /internal/v1/enroll/passcode` — mint the passcode second factor for a live device-auth session.
+///
+/// Deliberately [`lane_guard`]-only, no acting principal: the op is PRE-IDENTITY — the body's email is the
+/// UNVERIFIED subject the passcode will prove (parsed inside the authority op, never a handler
+/// `Principal::parse`), not a session-verified actor. The PUBLIC wire keeps its shape at the composing
+/// surface: the app serves `POST /v1/enroll/passcode`'s constant-shaped ack itself (the [`routes::door`]
+/// stub pins that contract) and fire-and-forgets the send through its mail seam, so neither the ack body
+/// nor its latency says whether the address was rostered.
+///
+/// [`routes::door`]: super::door
+pub(crate) async fn mint_passcode(
+    State(state): State<PlaneState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, PlaneHttpError> {
+    lane_guard(&state, &headers)?;
+    let req: PasscodeMintRequest = parse_body(&body)?;
+    let (created_at, now) = crate::wire::now_utc();
+    // The verification context supplies the workspace name for the mail body (and confirms the session is
+    // live — the same indistinguishable 404 a dead user code answers on the public verify read).
+    let context = state
+        .authority()
+        .read_verification_context(&req.user_code, now)
+        .await?;
+    let started = state
+        .authority()
+        .start_passcode(&req.user_code, &req.email, now, &created_at)
+        .await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(PasscodeMintResponse {
+            passcode: started.passcode,
+            workspace_display_name: context.workspace_display_name,
+        }),
+    )
+        .into_response())
 }

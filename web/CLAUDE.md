@@ -8,12 +8,15 @@ guarded `topos_*` SQL functions under the scoped `topos_web` role, behind the de
 guard (`requireDeviceActor` — the presented Bearer resolved by `topos_device_actor`, whose
 credential hash is computed IN Postgres, so this tier still contains zero crypto). Everything the
 vault must decide itself — publish/propose/revert/review, the pointer/object/version reads, the
-review inbox + skill log (git commit messages ride both), ALL of enrollment, governance, the
+review inbox + skill log (git commit messages ride both), enrollment, governance, the
 operator policy route — forwards VERBATIM over the internal network (`api.v1.$.ts` →
 `forwardDeviceLane`: the path pinned under `/v1`, header allowlists both ways, the device's own
 bearer passing through so the vault's in-transaction resolve and replay-before-revoked ordering
-stay the sole authority). Misses answer the vault's exact uniform-404 envelope; a rate belt wears
-the frozen 429.
+stay the sole authority). ONE enrollment step is served here instead: the passcode START
+(`api.v1.enroll.passcode.ts`) — the vault only MINTS the code (its internal lane), this tier
+mails it through the app's ONE mail seam and answers the constant no-oracle ack (the vault's
+`routes/door.rs` stub pins that wire). Misses answer the vault's exact uniform-404 envelope; a
+rate belt wears the frozen 429.
 
 The signed-in surface: a workspace dashboard, the skill browser, the rendered review UI
 (unified diff + Approve/Reject + comments), the verification page, the create/join flows, and the
@@ -69,6 +72,17 @@ entries, entitlements provider, and auth rungs. Composition is **additive-only**
 never patches or shadows an OSS entry. The route modules type their args with the generic
 `LoaderFunctionArgs`/`ActionFunctionArgs` (never `./+types/*`) so the table works unchanged from another
 app directory.
+
+**Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module
+allowed to hold an SMTP client; every product mail rides it — the invite notice
+(`invite-mail.server.ts`), the enrollment passcode (`passcode-mail.server.ts`), and a
+composition's magic links (`magic-link-mail.server.ts`). BRING YOUR OWN SMTP: the five
+`TOPOS_MAIL_SMTP_*` env vars arm it all-or-nothing (the vault holds no mail transport since the
+mail unification); unarmed, every flow keeps its honest no-send posture (`canSend` false, the
+`mailed` flag true only when delivery is real, the passcode dropped silently behind its constant
+ack). Outside production each flow records to its OWN jsonl (`.invite-emails` / `.magic-links` /
+`.passcode-emails`) plus the dev terminal. A send failure is COARSE — a body can carry a live
+credential, so no error ever echoes the message, the recipient, or the relay response.
 
 **Auth + authorization (fail-closed).** The OSS default rung is **email+password with zero delivery
 dependency** — a self-hosted team signs in with no SMTP or OAuth. A session is evidence, never

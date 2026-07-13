@@ -4,7 +4,7 @@
 //! → call ONE authority op → serialize. A confirmed identity is NEVER `Principal::parse`d here — it is
 //! resolved from a server-trusted row inside the authority.
 //!
-//! Read-shaped steps (authorize / token / verify / passcode / confirm) return a plain typed DTO and reserve
+//! Read-shaped steps (authorize / token / verify / passcode-confirm) return a plain typed DTO and reserve
 //! 404 for the single indistinguishable not-found (a dead invite, an unknown code, a non-live session). The
 //! op_id-less WRITES (redeem / admin-claim) return a 200 all-outcome envelope: `OK` carries the data,
 //! `DENIED` the uniform flat error (never a 403).
@@ -14,11 +14,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use topos_types::requests::{
-    AdminClaimRequest, DeviceAuthorizeRequest, DeviceTokenRequest, PasscodeAck, PasscodeAckStatus,
-    PasscodeConfirmRequest, PasscodeRequest, RedeemRequest, SessionIntent,
+    AdminClaimRequest, DeviceAuthorizeRequest, DeviceTokenRequest, PasscodeConfirmRequest,
+    RedeemRequest, SessionIntent,
 };
 
-use crate::enroll::mailer::{MailContext, Passcode};
 use crate::state::PlaneState;
 use crate::wire::error::PlaneHttpError;
 use crate::wire::{self, ApiJson, map};
@@ -143,57 +142,6 @@ pub(crate) async fn read_verification_context(
         .read_verification_context(&user_code, now)
         .await?;
     Ok(Json(map::verification_to_wire(context)).into_response())
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/enroll/passcode",
-    tag = "enrollment",
-    request_body = PasscodeRequest,
-    responses(
-        (status = 200, description = "A constant-shaped ack (the send is fire-and-forget; no enumeration oracle).", body = topos_types::requests::PasscodeAck),
-        (status = 400, description = "Malformed body.", body = topos_types::JsonEnvelope),
-        (status = 404, description = "No live session for that user code.", body = topos_types::JsonEnvelope),
-        (status = 429, description = "Rate limited.", body = topos_types::JsonEnvelope),
-        (status = 500, description = "Internal store fault.", body = topos_types::JsonEnvelope),
-    ),
-)]
-pub(crate) async fn start_passcode(
-    State(state): State<PlaneState>,
-    ApiJson(req): ApiJson<PasscodeRequest>,
-) -> Result<Response, PlaneHttpError> {
-    let (created_at, now) = wire::now_utc();
-    // The verification context supplies the workspace name for the email body (and confirms the session is
-    // live — the same indistinguishable 404 the passcode start would give for a non-live user code).
-    let context = state
-        .authority()
-        .read_verification_context(&req.user_code, now)
-        .await?;
-    // The email is parsed INSIDE the authority op (never a handler `Principal::parse`); a constant-shaped ack
-    // means a non-rostered address is no enumeration oracle (the cloud gate is enforced at redeem).
-    let started = state
-        .authority()
-        .start_passcode(&req.user_code, &req.email, now, &created_at)
-        .await?;
-
-    // Fire-and-forget the blocking SMTP send on `spawn_blocking`: spawn it, drop the handle, return the ack
-    // immediately — so neither the response body nor its latency leaks whether the address was rostered.
-    let mailer = state.mailer().clone();
-    let to = req.email.clone();
-    let ctx = MailContext {
-        workspace_display_name: context.workspace_display_name,
-        verify_base_url: state.enroll().verify_base_url.clone(),
-    };
-    let code = Passcode::new(started.passcode);
-    tokio::task::spawn_blocking(move || {
-        // The send result is intentionally dropped — a failure is never surfaced (no oracle, no latency leak).
-        let _ = mailer.send_passcode(&to, &code, &ctx);
-    });
-
-    Ok(Json(PasscodeAck {
-        status: PasscodeAckStatus::Sent,
-    })
-    .into_response())
 }
 
 #[utoipa::path(

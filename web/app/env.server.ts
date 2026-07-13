@@ -39,6 +39,35 @@ const serverSchema = z.object({
     (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
     z.url().optional(),
   ),
+  /**
+   * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none (the vault's old five-flag
+   * rule, moved app-side with the mail unification). With all five set, the app's ONE mail seam
+   * really sends: invite notices, the enrollment passcode, and a composition's magic links. Any
+   * missing ⇒ mail is off and every flow stays durable without it (the seat + the address stand,
+   * the passcode ack stays constant-shaped). Empty spells unset — how compose and every deploy
+   * panel spell it. The user/pass/from are credentials-adjacent: they live here and never in a
+   * log or an error (the transport throws coarse).
+   */
+  TOPOS_MAIL_SMTP_HOST: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().optional(),
+  ),
+  TOPOS_MAIL_SMTP_PORT: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.coerce.number().int().min(1).max(65535).optional(),
+  ),
+  TOPOS_MAIL_SMTP_USER: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().optional(),
+  ),
+  TOPOS_MAIL_SMTP_PASS: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().optional(),
+  ),
+  TOPOS_MAIL_SMTP_FROM: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().optional(),
+  ),
 });
 
 export type ServerEnv = z.infer<typeof serverSchema>;

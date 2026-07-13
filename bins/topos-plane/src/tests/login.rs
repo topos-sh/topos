@@ -57,15 +57,7 @@ async fn login_redeems_one_credential_per_confirmed_seat(pool: PgPool) {
     let poll: DeviceTokenResponse = serde_json::from_slice(&b).unwrap();
     assert_eq!(poll.status, DeviceTokenStatus::Pending);
 
-    let (_, _, _) = send(
-        ctx.app(),
-        post_nosig(
-            "/v1/enroll/passcode",
-            serde_json::json!({ "user_code": auth.user_code, "email": ALICE_EMAIL }),
-        ),
-    )
-    .await;
-    let code = wait_for_passcode(&ctx.fake);
+    let code = mint_passcode(&ctx, &auth.user_code, ALICE_EMAIL).await;
     let (_, _, _) = send(
         ctx.app(),
         post_nosig(

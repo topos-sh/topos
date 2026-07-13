@@ -1,20 +1,16 @@
-//! The enrollment surface: the state wiring (`with_enroll_config` / `with_mailer`) and the full
-//! device flow to a redeem (happy path + the wrong-device-key binding denial).
+//! The enrollment surface: the state wiring (`with_enroll_config` / the accessors), the internal-lane
+//! passcode mint's gate, and the full device flow to a redeem (happy path + the wrong-device-key binding
+//! denial).
 
 use topos_types::requests::RedeemResponse;
 
 use super::*;
 
-// ── enrollment wiring: with_enroll_config / with_mailer / the accessors ───────────────────────────────
+// ── enrollment wiring: with_enroll_config / the accessors ─────────────────────────────────────────────
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]
-async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
-    use crate::enroll::mailer::{FakeMailer, MailContext, Passcode};
-
+async fn enroll_config_accessors_read_the_construction_record(pool: PgPool) {
     let ctx = setup(pool, "state-enroll").await;
-    let fake = Arc::new(FakeMailer::default());
-    // with_enroll_config sets the static config (no SMTP ⇒ a NoopMailer); with_mailer overrides it for the
-    // test so we can assert the handler sends through exactly the injected mailer.
     let state = ctx
         .state
         .clone()
@@ -25,34 +21,60 @@ async fn enroll_config_and_injected_mailer_are_readable(pool: PgPool) {
             strict_deployment_mode: Some(plane_store::DeploymentMode::Cloud),
             deployment_mode: plane_store::DeploymentMode::Cloud,
             enrollment_method: "passcode".to_owned(),
-            smtp: None,
-        })
-        .with_mailer(fake.clone());
+        });
 
     assert_eq!(state.enroll().base_url, "https://plane.test");
+    assert_eq!(state.enroll().verify_base_url, "https://plane.test");
     assert_eq!(state.enroll().enrollment_method, "passcode");
     assert_eq!(
         state.enroll().deployment_mode,
         plane_store::DeploymentMode::Cloud
     );
+}
 
-    // The accessor returns exactly the injected mailer — a send lands in the FakeMailer's record.
-    let mail_ctx = MailContext {
-        workspace_display_name: "Acme".to_owned(),
-        verify_base_url: "https://plane.test".to_owned(),
-    };
-    state
-        .mailer()
-        .send_passcode(
-            "alice@acme.com",
-            &Passcode::new("424242".to_owned()),
-            &mail_ctx,
-        )
-        .unwrap();
-    let sent = fake.sent();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].to, "alice@acme.com");
-    assert_eq!(sent[0].code, "424242");
+/// The passcode MINT is internal-lane gated: a missing or wrong bearer is the honest 401 (this harness
+/// arms the lane), and a dead user code past a correct bearer is the uniform 404 — the plaintext code
+/// never rides an unauthenticated response. (The unarmed-lane 404 discipline is pinned by the
+/// internal-lane suite; the happy path is [`enroll_to_grant`]'s first leg.)
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn passcode_mint_is_internal_lane_gated(pool: PgPool) {
+    let ctx = enroll_setup(pool, "mint-gate").await;
+
+    // No bearer → 401 (the lane is armed; the token is missing).
+    let (s, _, _) = send(
+        ctx.app(),
+        post_nosig(
+            "/internal/v1/enroll/passcode",
+            serde_json::json!({ "user_code": "UC-DEAD", "email": ALICE_EMAIL }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Wrong bearer → 401.
+    let (s, _, _) = send(
+        ctx.app(),
+        req_json_auth(
+            "POST",
+            "/internal/v1/enroll/passcode",
+            serde_json::json!({ "user_code": "UC-DEAD", "email": ALICE_EMAIL }),
+            "not-the-internal-token",
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Correct bearer, dead user code → the uniform 404 (indistinguishable from a missing route).
+    let (s, _, _) = send(
+        ctx.app(),
+        req_json_internal(
+            "POST",
+            "/internal/v1/enroll/passcode",
+            serde_json::json!({ "user_code": "UC-DEAD", "email": ALICE_EMAIL }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 #[sqlx::test(migrator = "plane_store::MIGRATOR")]

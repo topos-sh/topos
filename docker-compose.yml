@@ -126,6 +126,15 @@ services:
       # the public origin sessions are minted for. BETTER_AUTH_URL is the app's externally reachable origin.
       BETTER_AUTH_SECRET: ${TOPOS_WEB_AUTH_SECRET:-change-me-auth-secret-change-me-auth-secret}
       BETTER_AUTH_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      # Outbound mail — BRING YOUR OWN SMTP, all five or none (passed through empty = mail off,
+      # and everything still works: invites share the workspace address, enrollment approves in
+      # the app). Armed, invite notices really send and emailed-passcode enrollment becomes
+      # available (advertise it on the plane with TOPOS_PLANE_ENROLLMENT_METHOD=passcode).
+      TOPOS_MAIL_SMTP_HOST: ${TOPOS_MAIL_SMTP_HOST:-}
+      TOPOS_MAIL_SMTP_PORT: ${TOPOS_MAIL_SMTP_PORT:-}
+      TOPOS_MAIL_SMTP_USER: ${TOPOS_MAIL_SMTP_USER:-}
+      TOPOS_MAIL_SMTP_PASS: ${TOPOS_MAIL_SMTP_PASS:-}
+      TOPOS_MAIL_SMTP_FROM: ${TOPOS_MAIL_SMTP_FROM:-}
       APP_ENV: production
 
 volumes:
