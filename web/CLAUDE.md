@@ -41,13 +41,16 @@ re-enter and every ceremony would refuse; a second factor for password-less depl
 work.
 
 **Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
-`/{workspace}/skills/{name}` are the shareable addresses, plus a root catch-all: a non-browser
-fetcher gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault card's negotiation
-mirrored; served whole from route middleware, byte-identical on every path, `api_base_url` = this
-origin's own `/api` mount, where the device lane is served — the interim `PLANE_PUBLIC_URL`
-override retired with the vault's public listener); an anonymous browser gets one constant teaser
-page; a signed-in member is resolved through their own confirmed seats into the workspace surface;
-everyone else gets the house 404. No face is an existence oracle.
+`/{workspace}/skills/{name}` are the shareable addresses, plus the ORIGIN ROOT and a catch-all: a
+non-browser fetcher gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault card's
+negotiation mirrored; served whole from route middleware, byte-identical on every path incl. `/`,
+`api_base_url` = this origin's own `/api` mount, where the device lane is served — the root face is
+what the token-less CLI doors card-fetch); an anonymous browser gets one constant teaser page (the
+landing page at `/`); a signed-in member is resolved through their own confirmed seats into the
+workspace surface; everyone else gets the house 404. No face is an existence oracle. The claim
+passthrough `/i/{token}` is ALSO mounted at `/api/i/{token}` — tier parity: on the vault the API
+base IS the root, so `{base}/i/` always resolves there, and this mount keeps that true when the
+app is the serving tier (a claim link rooted at either base enrolls identically).
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the

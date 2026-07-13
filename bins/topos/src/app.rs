@@ -409,11 +409,13 @@ pub fn run() -> ExitCode {
                 yes_argv.push("--yes".to_owned());
                 return finish_publish_describe(json, cmd_name, described, yes_argv, &diag);
             }
-            // The standup branch's plane base: the env override, else the compiled-in hosted default.
-            // Used ONLY when un-enrolled (an enrolled publish reads its plane from instance.json).
+            // The standup branch dials the SAME resolved web origin as the other token-less doors
+            // (`follow <bare-ws>`, `auth login`) — the door card-fetches it and re-roots onto the
+            // declared API base. Used ONLY when un-enrolled (an enrolled publish reads its plane
+            // from instance.json).
             let standup = ops::StandupConnectors {
                 enroll: &connect_enroll,
-                base_url: resolve_standup_base(std::env::var("TOPOS_PLANE_URL").ok()),
+                base_url: web_origin.clone(),
             };
             let publish_once = |t: &str| {
                 ops::publish(
@@ -730,25 +732,14 @@ fn connect_releases() -> Box<dyn crate::release::ReleaseSource> {
     Box::new(crate::plane_http::UreqReleases::new())
 }
 
-/// The hosted plane's compiled-in base URL — used ONLY by the un-enrolled `publish` standup branch (an
-/// enrolled client reads its plane from `instance.json`, and the `/i/` doors carry their own base).
-pub(crate) const DEFAULT_HOSTED_BASE_URL: &str = "https://api.topos.sh";
-
-/// Resolve the standup base URL: a non-empty `TOPOS_PLANE_URL` override wins, else the hosted default.
-/// Pure (the env read happens at the call site) so the override precedence is unit-testable.
-pub(crate) fn resolve_standup_base(env_override: Option<String>) -> String {
-    match env_override {
-        Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
-        _ => DEFAULT_HOSTED_BASE_URL.to_owned(),
-    }
-}
-
-/// The hosted WEB origin the token-less doors default to (`follow <bare-workspace>`, `auth login`) —
-/// the card fetch re-roots it onto the declared API base, so pasting the human-facing origin works.
+/// The hosted WEB origin every token-less door defaults to (`follow <bare-workspace>`, `auth login`,
+/// the un-enrolled `publish` standup) — the card fetch re-roots it onto the declared API base, so
+/// pasting the human-facing origin works. The ONE compiled-in dial point.
 pub(crate) const DEFAULT_WEB_ORIGIN: &str = "https://topos.sh";
 
 /// Resolve the default web origin: a non-empty `TOPOS_PLANE_URL` override wins (a self-host plane
-/// serves the card at its own base), else the hosted web origin. Pure, like [`resolve_standup_base`].
+/// serves the card at its own base), else the hosted web origin. Pure (the env read happens at the
+/// call site) so the override precedence is unit-testable.
 pub(crate) fn resolve_web_origin(env_override: Option<String>) -> String {
     match env_override {
         Some(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_owned(),
@@ -1846,9 +1837,7 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_HOSTED_BASE_URL, build_pull_scope, resolve_standup_base, standup_repoll_target,
-    };
+    use super::{DEFAULT_WEB_ORIGIN, build_pull_scope, resolve_web_origin, standup_repoll_target};
     use crate::ops::{PublishOutcome, PullScope, TargetMode, VersionRef};
 
     /// A standup PENDING outcome whose ops-built `resume_argv` pins `resume_target`, as
@@ -1909,16 +1898,17 @@ mod tests {
     }
 
     #[test]
-    fn standup_base_env_override_beats_the_compiled_default() {
-        // No override (or a blank one) → the compiled-in hosted default.
-        assert_eq!(resolve_standup_base(None), DEFAULT_HOSTED_BASE_URL);
+    fn web_origin_env_override_beats_the_compiled_default() {
+        // No override (or a blank one) → the ONE compiled-in hosted web origin every token-less
+        // door dials (`follow <bare-ws>`, `auth login`, the un-enrolled standup publish).
+        assert_eq!(resolve_web_origin(None), DEFAULT_WEB_ORIGIN);
         assert_eq!(
-            resolve_standup_base(Some("   ".to_owned())),
-            DEFAULT_HOSTED_BASE_URL
+            resolve_web_origin(Some("   ".to_owned())),
+            DEFAULT_WEB_ORIGIN
         );
         // A non-empty TOPOS_PLANE_URL wins, trimmed of whitespace + a trailing slash.
         assert_eq!(
-            resolve_standup_base(Some("http://127.0.0.1:8787/".to_owned())),
+            resolve_web_origin(Some("http://127.0.0.1:8787/".to_owned())),
             "http://127.0.0.1:8787"
         );
     }

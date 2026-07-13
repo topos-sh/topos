@@ -119,6 +119,51 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
   });
 });
 
+test.describe("the origin root + the API-base claim mount — the doors' own dial points", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("JSON at `/` answers the same constant card (the token-less doors card-fetch the bare origin)", async ({
+    request,
+  }) => {
+    const root = await request.get("/", {
+      headers: { accept: "application/json" },
+      maxRedirects: 0,
+    });
+    const workspace = await request.get(`/${WS_ADDRESS}`, {
+      headers: { accept: "application/json" },
+      maxRedirects: 0,
+    });
+    expect(root.status()).toBe(200);
+    // Byte-identical to every other path's card: the root is a resource address like any other.
+    expect(await root.text()).toBe(await workspace.text());
+  });
+
+  test("a browser at `/` still gets the landing page, never the card", async ({ request }) => {
+    const root = await request.get("/", {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(root.status()).toBe(200);
+    expect(root.headers()["content-type"]).toContain("text/html");
+    expect(await root.text()).toContain("align the behavior");
+  });
+
+  test("`/api/i/<token>` answers the SAME claim passthrough `/i/<token>` does (tier parity: the claim lives under the API base)", async ({
+    request,
+  }) => {
+    const atRoot = await request.get("/i/e2e-claim-token", {
+      headers: { accept: "application/json" },
+      maxRedirects: 0,
+    });
+    const atApiBase = await request.get("/api/i/e2e-claim-token", {
+      headers: { accept: "application/json" },
+      maxRedirects: 0,
+    });
+    expect(atApiBase.status()).toBe(atRoot.status());
+    expect(await atApiBase.text()).toBe(await atRoot.text());
+  });
+});
+
 test.describe("signed in — the browser faces resolve against the confirmed seat", () => {
   test("a member browsing the workspace address lands on the workspace surface", async ({
     page,

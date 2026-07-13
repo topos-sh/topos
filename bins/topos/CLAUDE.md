@@ -245,9 +245,10 @@ are asserted byte-equal in tests.
 - **The workspace-standup client** (`ops/publish`'s standup branch + `ops/follow`'s claim door) — the two
   self-serve doors onto the server's genesis seat. **The un-enrolled direct `publish`** stands the
   workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the optional
-  `@<digest>` gate) runs BEFORE any network, then a standup device authorization against the hosted base
-  (`TOPOS_PLANE_URL` override, else the compiled-in `https://api.topos.sh` — consulted ONLY on this
-  branch), a one-plane-per-install guard against the response's declared plane base, a `0600`
+  `@<digest>` gate) runs BEFORE any network, then the ONE discovery rule every door runs — card-fetch
+  the resolved web origin (`TOPOS_PLANE_URL` override, else the compiled-in `https://topos.sh`) and
+  re-root onto the card-declared API base — then a standup device authorization there, a
+  one-plane-per-install guard against the response's declared plane base, a `0600`
   `AuthorizingStandup` WAL, and an `ok`
   PENDING receipt (`PublishData.pending` = `signin_required` + the SERVER-built
   `verification_uri_complete` verbatim + the code + an RFC-3339 expiry) whose `ENROLL_RESUME` next-action

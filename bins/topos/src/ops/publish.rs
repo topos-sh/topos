@@ -48,7 +48,7 @@ use crate::ctx::Ctx;
 use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
-use crate::plane::{TokenPoll, WriteReceipt};
+use crate::plane::{Card, TokenPoll, WriteReceipt};
 use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
 
@@ -71,9 +71,11 @@ pub(crate) enum PublishOutcome {
     },
 }
 
-/// The standup branch's network seam + base URL — the enroll transport factory (the same creds-free
-/// connector `follow` uses) and the RESOLVED plane base (the `TOPOS_PLANE_URL` override, else the
-/// compiled-in hosted default; tests always pass an explicit base).
+/// The standup branch's network seam + dial point — the enroll transport factory (the same creds-free
+/// connector `follow` uses) and the base the door card-fetches FIRST (the `TOPOS_PLANE_URL` override,
+/// else the compiled-in hosted WEB ORIGIN; tests always pass an explicit base). Like every other door,
+/// the base may be a human origin or an API base: the constant card at either declares the API base to
+/// re-root onto.
 pub(crate) struct StandupConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
     pub base_url: String,
@@ -723,7 +725,8 @@ fn standup_preflight(
     Ok(digest_hex)
 }
 
-/// Call 1: start the standup device authorization, guard one-plane-per-install against the response's
+/// Call 1: card-fetch the configured base for the API base (the ONE discovery rule every door runs),
+/// start the standup device authorization there, guard one-plane-per-install against the response's
 /// declared plane base, write the `AuthorizingStandup` WAL, and return the PENDING receipt.
 fn standup_begin(
     ctx: &Ctx<'_>,
@@ -733,14 +736,30 @@ fn standup_begin(
     computed_digest: &str,
 ) -> Result<PublishOutcome, ClientError> {
     let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-    let enroll_src = (standup.enroll)(&standup.base_url);
+
+    // The card fetch FIRST, exactly as the address and login doors do: the configured base is a web
+    // ORIGIN (the compiled-in hosted origin, a `TOPOS_PLANE_URL` override, a self-host address) whose
+    // constant card declares the API base to dial. A base that already IS an API base re-roots onto
+    // itself — every face serves the same card — so no caller has to know which kind it holds.
+    let origin = standup.base_url.trim_end_matches('/');
+    let api_base = match (standup.enroll)(origin).fetch_card(origin)? {
+        Card::Protocol(card) => resolve_api_base(origin, &card.api_base_url)?,
+        Card::Claim(_) => {
+            return Err(ClientError::Enrollment(
+                "this address answered a claim bootstrap — pass the full /i/ claim link to \
+                 `topos follow` instead of publishing"
+                    .into(),
+            ));
+        }
+    };
+    let enroll_src = (standup.enroll)(&api_base);
     let start = enroll_src.device_authorize_standup(signer.public_key(), &machine_name(&signer))?;
 
-    // RE-ROOT, exactly as a link follow does: the response's plane block declares the API base every later
-    // call dials (normally the dialed base itself — the compiled-in hosted default IS the API base). Guard
-    // one-plane-per-install against that declared base, so the standup door and a later `/i/`-link door
-    // never refuse each other as cross-plane.
-    let base_url = resolve_api_base(&standup.base_url, &start.plane.base_url)?;
+    // RE-ROOT once more, exactly as a link follow does: the response's plane block declares the API base
+    // every later call dials (normally the card-declared base itself). Guard one-plane-per-install
+    // against that declared base, so the standup door and a later `/i/`-link door never refuse each
+    // other as cross-plane.
+    let base_url = resolve_api_base(&api_base, &start.plane.base_url)?;
     guard_one_plane(ctx, &base_url)?;
 
     let expires_at_millis = i64::try_from(ctx.clock.now_unix_millis())

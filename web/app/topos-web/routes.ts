@@ -55,6 +55,11 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("skills/:skill/protection", file("api.v1.skill-protection.ts")),
     ]),
     route("api/v1/*", file("api.v1.$.ts")),
+    // The claim resource ALSO lives under the API base — `{api_base_url}/i/<token>` — the same
+    // passthrough the origin-root `/i/` link serves, mounted twice. TIER PARITY: on the vault the
+    // API base IS the root, so `{base}/i/` always resolves there; this mount keeps that true when
+    // the app is the serving tier, and a claim link rooted at either base enrolls identically.
+    route("api/i/:token", file("claim-link.ts"), { id: "routes/claim-link-api" }),
     // Signed-in surface: one shell layout carries the session middleware + chrome.
     route("api/memberships", file("api.memberships.ts")),
     route("app", file("app-entry.tsx")),

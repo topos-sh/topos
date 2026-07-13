@@ -907,16 +907,19 @@ fn s08_the_protocol_card_is_identical_on_every_path() {
         seed_owner_ws(a).await;
         common::Seeded::default()
     });
-    // Three DIFFERENT resource paths — a real workspace, a real-shaped channel path, and pure noise —
-    // answer the byte-identical markdown card: an unmatched GET is never an existence oracle.
+    // Four DIFFERENT resource paths — the ORIGIN ROOT (what the token-less doors card-fetch), a real
+    // workspace, a real-shaped channel path, and pure noise — answer the byte-identical markdown
+    // card: an unmatched GET is never an existence oracle, and the root is an address like any other.
     let paths = [
+        format!("{}/", plane.link_base_url),
         format!("{}/{WS_NAME}", plane.link_base_url),
         format!("{}/{WS_NAME}/channels/ops", plane.link_base_url),
         format!("{}/totally/made/up", plane.base_url),
     ];
     let bodies: Vec<String> = paths.iter().map(|p| http_get_body(p, "*/*")).collect();
-    assert_eq!(bodies[0], bodies[1], "the card echoes no path");
-    assert_eq!(bodies[1], bodies[2], "noise answers the same card");
+    assert_eq!(bodies[0], bodies[1], "the origin root serves the same card");
+    assert_eq!(bodies[1], bodies[2], "the card echoes no path");
+    assert_eq!(bodies[2], bodies[3], "noise answers the same card");
     assert!(
         bodies[0].contains("topos follow"),
         "the agent hand-off line: {}",

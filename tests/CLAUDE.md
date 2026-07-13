@@ -105,7 +105,9 @@ for what only a cross-crate composed run can prove.
   rolls BACKWARD onto it — there is no anti-rollback ALARM anymore, a server restore is a team rollback the
   client applies toward whatever is served, backward included.
 - **`tests/standup_e2e.rs`** — the workspace-standup full chain (the self-serve genesis release-blocker
-  proof): **door 1** (an un-enrolled `publish` goes PENDING → the authority's `approve_standup` web leg →
+  proof): **door 1** (an un-enrolled `publish` dialed at the app ORIGIN — the door card-fetches it and
+  re-roots onto the declared `/api` base, the production shape — goes PENDING → the authority's
+  `approve_standup` web leg →
   the SAME re-invoked publish enrolls + lands the genesis in one invocation, with ZERO operator ops —
   the `admin_claim` table stays empty — the receipt disclosing the workspace ADDRESS rooted on the minted
   `workspace.name` slug, and a follower pulling the object back byte-exact), **door 2**
@@ -119,8 +121,10 @@ for what only a cross-crate composed run can prove.
   envelope), uniform approve-standup misses + idempotent double-approve (ONE workspace), the 4th-create
   cap, the reserved-address-name refusal at `create_workspace`, the standup-session intent guard (refused
   identity legs consume nothing), same-device claim replay vs different-device denial, and claim expiry
-  (+ `/i/` NotFound). (The invite-token cross-species witnesses retired with the token itself; the claim
-  door's own witnesses stand.)
+  (+ `/i/` NotFound), plus the **api-base-rooted claim link** (a claim link rooted at the app's `/api`
+  mount enrolls identically to the origin-root spelling — the claim resource's tier-parity mount, the
+  door-cutover regression's witness). (The invite-token cross-species witnesses retired with the token
+  itself; the claim door's own witnesses stand.)
 - **`tests/revocation_e2e.rs`** — the credential-model revocation story: a follower joins by ADDRESS (the
   real `follow` + `--yes`) and lands v1; the owner **removes** the member (`Authority::roster_remove` under
   the owner's Bearer credential — the device-lane op the `DELETE …/roster/{email}` route composes); the
@@ -150,7 +154,8 @@ for what only a cross-crate composed run can prove.
   purged target is refused (the purged bytes left the read surface; the pointer never moves), and an
   archive frees the base name (`base_name`/successor facts); (7) a multi-`--skill` follow resolves
   ALL-OR-NONE (one bad name ⇒ zero `skill_follows` rows); (8) the protocol card is byte-identical on
-  three different paths and its JSON face carries `api_base_url`; (9) `invite` on a relay-less plane
+  four different paths — the origin ROOT (the token-less doors' dial point) included — and its JSON
+  face carries `api_base_url`; (9) `invite` on a relay-less plane
   answers the ADDRESS with the honest `mailed: false`, seats the invitee, and the invitee joins by
   address (the `mailed: true` half is the plane's in-crate mailer tests' — the capturing test mailer is
   deliberately crate-private); (10) `protect` tighten as reviewer works (catalog row witnessed), loosen

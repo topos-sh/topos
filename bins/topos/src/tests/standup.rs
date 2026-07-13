@@ -18,7 +18,9 @@ use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapWorkspace, ConsentMode,
     DeploymentMode, VerifiedDomainStatus,
 };
-use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
+use topos_types::requests::{
+    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireProtocolCard,
+};
 use topos_types::results::{PublishPendingStatus, PullAction};
 use topos_types::{
     ActionCode, CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, Receipt,
@@ -30,7 +32,7 @@ use crate::error::ClientError;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    ContributeSource, DeviceAuthorize, EnrollSource, Grant, GrantedToken, GrantedWorkspace,
+    Card, ContributeSource, DeviceAuthorize, EnrollSource, Grant, GrantedToken, GrantedWorkspace,
     InertFollow, InertPlane, Redeem, StandupAuthorize, TokenPoll, WriteReceipt,
 };
 use crate::plane_http::SkillCred;
@@ -187,6 +189,17 @@ impl FakeStandup {
     }
 }
 impl EnrollSource for FakeStandup {
+    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
+        // The door's FIRST call — the one discovery rule: the constant card at the configured base
+        // declares the API base to dial. This fake's card is a FIXED POINT (HOSTED declares
+        // HOSTED); the origin-faced re-root test serves a diverging card instead.
+        assert_eq!(url, HOSTED, "the card fetch dials the configured base");
+        Ok(Card::Protocol(WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: HOSTED.to_owned(),
+        }))
+    }
     fn fetch_bootstrap(&self, _t: &str) -> Result<BootstrapData, ClientError> {
         panic!("a standup publish never reads an /i/ bootstrap")
     }
@@ -258,6 +271,58 @@ impl EnrollSource for FakeStandup {
     }
     fn admin_claim(&self, _c: &str, _k: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
         panic!("a standup publish never redeems an admin claim")
+    }
+}
+
+/// The ORIGIN the re-root unit test dials — its card declares [`HOSTED`] as the API base (the
+/// production topology: the human origin's card names the `/api` mount to dial).
+const ORIGIN: &str = "https://topos.test";
+
+/// An origin-faced wrapper over [`FakeStandup`]: the card at [`ORIGIN`] declares [`HOSTED`], and
+/// every device-flow call delegates to the inner fake (which asserts nothing about the card).
+#[derive(Clone)]
+struct OriginFacedStandup(FakeStandup);
+impl EnrollSource for OriginFacedStandup {
+    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
+        assert_eq!(url, ORIGIN, "the card fetch dials the configured origin");
+        Ok(Card::Protocol(WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: HOSTED.to_owned(),
+        }))
+    }
+    fn fetch_bootstrap(&self, t: &str) -> Result<BootstrapData, ClientError> {
+        self.0.fetch_bootstrap(t)
+    }
+    fn device_authorize(
+        &self,
+        t: &str,
+        k: [u8; 32],
+        m: &str,
+    ) -> Result<DeviceAuthorize, ClientError> {
+        self.0.device_authorize(t, k, m)
+    }
+    fn device_authorize_standup(
+        &self,
+        device_public_key: [u8; 32],
+        machine_name: &str,
+    ) -> Result<StandupAuthorize, ClientError> {
+        self.0
+            .device_authorize_standup(device_public_key, machine_name)
+    }
+    fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError> {
+        self.0.poll_token(device_code)
+    }
+    fn redeem(
+        &self,
+        workspace_id: &str,
+        grant: &str,
+        device_public_key: [u8; 32],
+    ) -> Result<Redeem, ClientError> {
+        self.0.redeem(workspace_id, grant, device_public_key)
+    }
+    fn admin_claim(&self, c: &str, k: [u8; 32], d: &str) -> Result<Redeem, ClientError> {
+        self.0.admin_claim(c, k, d)
     }
 }
 
@@ -457,6 +522,58 @@ fn unenrolled_publish_call1_emits_pending_and_writes_the_standup_wal() {
     // NOT enrolled yet — nothing promoted, nothing published.
     assert!(enroll::read_instance(&rig.fs, &layout).unwrap().is_none());
     assert_eq!(fake.authorize_calls.get(), 1);
+}
+
+#[test]
+fn standup_call1_re_roots_the_origin_onto_the_card_declared_base() {
+    // The production topology: the configured base is the human WEB ORIGIN, whose card declares
+    // the API base (the `/api` mount). The authorize transport — and the WAL every later call
+    // rides — must carry the DECLARED base, never the origin.
+    let rig = Rig::new("cardreroot");
+    let (name, digest_hex) = rig.adopt("deploy", "# deploy v1\n");
+    let fake = FakeStandup::new(Poll::Pending);
+    let bases = RefCell::new(Vec::<String>::new());
+    let enroll_connect = |b: &str| -> Box<dyn EnrollSource> {
+        bases.borrow_mut().push(b.to_owned());
+        Box::new(OriginFacedStandup(fake.clone()))
+    };
+    let standup = ops::StandupConnectors {
+        enroll: &enroll_connect,
+        base_url: ORIGIN.to_owned(),
+    };
+    let ctx = rig.ctx();
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(SigningPlane::new()) };
+    let outcome = ops::publish(
+        &ctx,
+        &contribute,
+        &standup,
+        None,
+        &format!("{name}@{digest_hex}"),
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("call 1 is ok-pending");
+    assert!(matches!(outcome, ops::PublishOutcome::Pending { .. }));
+
+    // Two transports, in discovery order: the card at the ORIGIN, then the authorize at the
+    // card-DECLARED base.
+    assert_eq!(
+        *bases.borrow(),
+        vec![ORIGIN.to_owned(), HOSTED.to_owned()],
+        "the door card-fetches the origin, then dials the declared API base"
+    );
+    assert_eq!(fake.authorize_calls.get(), 1);
+
+    // The WAL rides the declared base too (the response's plane block confirms it).
+    let wal = enroll::read_wal(&rig.fs, &rig.layout())
+        .unwrap()
+        .expect("a WAL");
+    let enroll::EnrollPhase::AuthorizingStandup { base_url, .. } = &wal.state else {
+        panic!("the WAL is the standup phase");
+    };
+    assert_eq!(base_url, HOSTED, "every later call rides the declared base");
 }
 
 #[test]

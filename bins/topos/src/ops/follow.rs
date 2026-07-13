@@ -338,7 +338,7 @@ fn begin(
     link: &str,
     _manual: bool,
 ) -> Result<FollowData, ClientError> {
-    let (link_base, token) = parse_link(ctx, link)?;
+    let (link_base, token) = parse_link(link)?;
 
     // `begin` is only reached with NO pending enrollment WAL on disk: the [`follow`] dispatch resumes an
     // in-flight session (rule 1) BEFORE ever dispatching a target to `begin`, and the start-of-command
@@ -2046,15 +2046,16 @@ fn approve(
 // Small helpers.
 // =================================================================================================
 
-/// Parse `<base_url>/i/<token>` into `(base_url, token)`. A FULL URL splits on `/i/` (the token is the
-/// first path segment after it). A bare token reuses the already-pinned plane's `base_url` (so a follow-up
-/// `follow <token>` works once enrolled); without a prior enrollment a bare token is refused.
+/// Parse `<base_url>/i/<token>` into `(base_url, token)` — the FULL URL splits on `/i/` (the token is
+/// the first path segment after it). That is the ONLY spelling the product hands out (`mint-claim`
+/// prints the whole link; the web shows the whole link), and the dispatch routes only `/i/`-carrying
+/// targets here, so a bare token is a malformed link — never a base to guess.
 ///
 /// The base is validated as a well-formed absolute http(s) URL HERE — before the secret token is ever
 /// spliced into a request URL — because a malformed base would otherwise surface downstream as a ureq
 /// `BadUri` transport error whose message echoes the FULL URI (token included), and every transport error
 /// detail is persisted to the `~/.topos/log.jsonl` diagnostics file.
-fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError> {
+fn parse_link(link: &str) -> Result<(String, String), ClientError> {
     let link = link.trim();
     if let Some(idx) = link.find("/i/") {
         let base = link[..idx].trim_end_matches('/');
@@ -2066,14 +2067,8 @@ fn parse_link(ctx: &Ctx<'_>, link: &str) -> Result<(String, String), ClientError
         validate_base_url(base)?;
         return Ok((base.to_owned(), token.to_owned()));
     }
-    // A bare token: reuse the pinned plane (must already be enrolled). The persisted base gets the same
-    // gate — a hand-edited `instance.json` must not smuggle the token into a URI-shaped error either.
-    if let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)? {
-        validate_base_url(&instance.base_url)?;
-        return Ok((instance.base_url, link.to_owned()));
-    }
     Err(ClientError::Enrollment(
-        "a bare invite token needs a prior enrollment; pass the full /i/<token> link".into(),
+        "pass the full /i/<token> claim link".into(),
     ))
 }
 

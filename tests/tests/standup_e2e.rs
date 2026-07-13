@@ -137,8 +137,12 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     let approve = format!("{SKILL}@{digest}");
 
     // Call 1 — the un-enrolled direct publish does not fail: it goes PENDING the human sign-in.
+    // This door dials the app ORIGIN (the production shape: the compiled-in default is the hosted
+    // web origin) — the standup card-fetches it and re-roots onto the card-declared `/api` base,
+    // the same discovery rule every other door runs. The sibling standup tests dial the API base
+    // directly, proving the card re-root is a fixed point there.
     let call1 = client
-        .publish(&plane.base_url, &approve)
+        .publish(&plane.link_base_url, &approve)
         .expect("publish call 1");
     let PublishResult::Pending { data, resume_argv } = call1 else {
         panic!("an un-enrolled publish must go PENDING, got {call1:?}");
@@ -878,6 +882,39 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
         expected(DRAFT),
         "the pull lands byte-exact on the second client"
     );
+}
+
+#[test]
+fn e2e_a_claim_link_rooted_at_the_api_base_enrolls() {
+    // TIER PARITY: the claim resource lives under the API base on EVERY serving tier — the vault's
+    // base IS its root, and the app carries a second `/api/i/` mount — so a claim link rooted at
+    // either base enrolls identically. (Post-cutover, an `/api`-rooted link once answered the
+    // constant card here and the claim door died parsing it as a bootstrap.)
+    let plane = empty_plane("apiclaim", DeploymentMode::SelfHost);
+    let minted = plane
+        .rt
+        .block_on(plane.authority.mint_admin_claim(
+            &WorkspaceId::parse(WS).expect("ws id"),
+            Some("Acme"),
+            None,
+            DeploymentMode::SelfHost,
+            3_600_000,
+            wall_ms(),
+            AT,
+        ))
+        .expect("mint the claim");
+    let MintClaimOutcome::Minted(claim) = minted else {
+        panic!("expected Minted, got {minted:?}");
+    };
+    // `plane.base_url` is the app's `/api` mount on the composed stack — the link dials
+    // `{api_base}/i/<token>`, not the origin-root spelling the mint prints.
+    let owner = FollowHarness::new("standup-api-claim");
+    let done = owner
+        .follow(&format!("{}/i/{}", plane.base_url, claim.token))
+        .expect("the api-base-rooted claim link enrolls");
+    assert!(done.enrolled, "the claim enrolls through the /api/i/ mount");
+    assert_eq!(done.workspace_id, WS);
+    assert!(owner.instance_written());
 }
 
 #[test]

@@ -83,6 +83,28 @@ if ! printf '%s' "$card" | grep -q '"api_base_url":"http://localhost:3000/api"';
 fi
 echo "PASS: the constant protocol card answers with the app's /api follow base."
 
+# The ORIGIN ROOT serves the same card: the token-less CLI doors (`follow <bare-ws>`, `auth login`,
+# the un-enrolled standup publish) card-fetch the bare origin before re-rooting onto /api.
+echo "== probing the card at the origin root (the doors' own dial point) =="
+root_card="$(curl -s -H 'Accept: application/json' http://localhost:3000/ || true)"
+if [ "$root_card" != "$card" ]; then
+  echo "FAIL: the origin root's card differs from the deep path's card"
+  echo "root: $root_card"
+  exit 1
+fi
+echo "PASS: the origin root answers the byte-identical card."
+
+# The claim resource is mounted under the API base too — `{api_base}/i/<token>` — tier parity with
+# the vault, whose API base IS its root. An unknown token must answer the vault's own 404 THROUGH
+# the app (proving the mount forwards), never a 200 card.
+echo "== probing the API-base claim mount (/api/i/<unknown> must forward to the vault's 404) =="
+claim_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: application/json' http://localhost:3000/api/i/smoke-unknown-token || true)"
+if [ "$claim_code" != "404" ]; then
+  echo "FAIL: expected the vault's 404 through /api/i/<unknown>, got '$claim_code'"
+  exit 1
+fi
+echo "PASS: the API-base claim mount forwards to the vault."
+
 # ── (e) first-boot secret hardening (mode 0600, owner uid 10001), via the internal-only plane ────────
 # The 404 above proved first boot completed, so the enrollment secret exists — now assert the stated
 # custody posture instead of trusting the docs. `compose exec` reaches the plane even with no host port.
