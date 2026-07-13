@@ -6,6 +6,7 @@ import type { RenderToPipeableStreamOptions } from "react-dom/server";
 import { renderToPipeableStream } from "react-dom/server";
 import type { EntryContext, RouterContextProvider } from "react-router";
 import { ServerRouter } from "react-router";
+import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
@@ -85,6 +86,17 @@ export default async function handleRequest(
   routerContext: EntryContext,
   _loadContext: RouterContextProvider,
 ): Promise<Response> {
+  // A browser on an ALIAS origin goes to the canonical one before anything renders. This lives
+  // HERE — the structurally server-only module — rather than as root middleware, because a
+  // superset build re-exports this entry whole while a route module's server-only exports are
+  // stripped per-module (an OSS root middleware would drag its .server import into the
+  // superset's CLIENT graph). handleRequest sees exactly the document requests the redirect is
+  // for; every machine face bypasses it untouched.
+  const canonical = canonicalOriginRedirect(request);
+  if (canonical) {
+    return canonical;
+  }
+
   await ensureMigrations();
 
   return new Promise((resolve, reject) => {
