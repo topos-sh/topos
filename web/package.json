@@ -44,7 +44,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "0.45.2",
-    "isbot": "^5",
     "lucide-react": "^1.23.0",
     "pg": "^8.22.0",
     "radix-ui": "^1.6.1",

@@ -1,8 +1,7 @@
-import { Link, type MetaFunction, type MiddlewareFunction, useLoaderData } from "react-router";
+import { Link, type MetaFunction, useLoaderData } from "react-router";
 import { CommandBlock } from "@/components/command-block";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { TerminalDemo } from "@/components/landing/terminal-demo";
-import { cardResponse } from "@/lib/card.server";
 import { hasAnyWorkspace } from "@/lib/db/resolve.server";
 
 /**
@@ -14,20 +13,13 @@ import { hasAnyWorkspace } from "@/lib/db/resolve.server";
  */
 
 /**
- * The origin ROOT is a resource address too: a non-browser fetcher gets the CONSTANT protocol
- * card, served whole from the middleware before the loader's probe runs — the token-less CLI
- * doors (`follow <bare-workspace>`, `auth login`, the un-enrolled standup publish) card-fetch
- * the bare origin, exactly as they card-fetch any deeper path. A browser gets the landing page.
+ * The origin ROOT is a resource address too: a non-browser DOCUMENT fetch gets the CONSTANT
+ * protocol card, served whole from the server entry (handleRequest) before this route runs —
+ * the token-less CLI doors (`follow <bare-workspace>`, `auth login`, the un-enrolled standup
+ * publish) card-fetch the bare origin, exactly as they card-fetch any deeper path. A browser
+ * gets the landing page, and the app's own client-side `.data` fetches reach the loader
+ * untouched (the entry never sees them, so they can never be answered with the card).
  */
-export const middleware: MiddlewareFunction[] = [
-  async ({ request }, next) => {
-    const card = cardResponse(request);
-    if (card) {
-      return card;
-    }
-    return next();
-  },
-];
 
 /**
  * The single sessionless probe: does this plane hold ANY workspace yet? A fresh self-hosted

@@ -1,12 +1,11 @@
 import { PassThrough } from "node:stream";
 import { createReadableStreamFromReadable } from "@react-router/node";
 import * as Sentry from "@sentry/react-router";
-import { isbot } from "isbot";
-import type { RenderToPipeableStreamOptions } from "react-dom/server";
 import { renderToPipeableStream } from "react-dom/server";
 import type { EntryContext, RouterContextProvider } from "react-router";
 import { ServerRouter } from "react-router";
 import { canonicalOriginRedirect } from "@/lib/canonical.server";
+import { cardResponse } from "@/lib/card.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
@@ -97,21 +96,37 @@ export default async function handleRequest(
     return canonical;
   }
 
+  // The CONSTANT protocol card for every non-browser document fetch, served from THIS entry for
+  // the same structural reason the canonical redirect lives here: handleRequest sees exactly the
+  // document requests — and never the app's own client-side `.data` fetches, whose bare
+  // `Accept: */*` is indistinguishable from curl's. A route-level card middleware cannot make
+  // that split (it runs for data requests too), and answering a data request with the card
+  // poisons every client-side navigation into a carded route: the router cannot decode a
+  // markdown card, and the miss surfaces as the root boundary's bogus 500. Served before the
+  // migration gate on purpose — the card is constant and needs no database.
+  const card = cardResponse(request);
+  if (card) {
+    return card;
+  }
+
   await ensureMigrations();
 
   return new Promise((resolve, reject) => {
     let shellRendered = false;
-    const userAgent = request.headers.get("user-agent");
-
-    // Bots (and SPA mode) wait for the FULL document so crawlers see complete markup; a real
-    // browser gets the shell as soon as it is ready and streams the rest.
-    const readyOption: keyof RenderToPipeableStreamOptions =
-      (userAgent && isbot(userAgent)) || routerContext.isSpaMode ? "onAllReady" : "onShellReady";
 
     const { pipe, abort } = renderToPipeableStream(
       <ServerRouter context={routerContext} url={request.url} />,
       {
-        [readyOption]() {
+        // EVERY response waits for the complete document (onAllReady), never just the shell.
+        // This app's SSR is blocking by design — loaders resolve before render, so there is
+        // nothing left to stream — and the early-shell path is actively harmful: it ships the
+        // router's stream-transfer scripts inside pending Suspense boundaries, which the
+        // production React build can leave dehydrated past initial hydration; the first
+        // history pop then forces them to hydrate against a client tree that renders nothing
+        // there, and the hydration mismatch (React #418) lands in the root ErrorBoundary as a
+        // bogus 500. A complete document has no pending boundaries, so none of that machinery
+        // ever reaches the client.
+        onAllReady() {
           shellRendered = true;
           const body = new PassThrough();
           const stream = createReadableStreamFromReadable(body);

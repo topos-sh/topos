@@ -42,8 +42,11 @@ work.
 
 **Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
 `/{workspace}/skills/{name}` are the shareable addresses, plus the ORIGIN ROOT and a catch-all: a
-non-browser fetcher gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault card's
-negotiation mirrored; served whole from route middleware, byte-identical on every path incl. `/`,
+non-browser DOCUMENT fetch gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault
+card's negotiation mirrored; served whole from the server entry's `handleRequest`, which sees only
+document requests — the app's own client-side `.data` fetches carry the same bare `Accept: */*` as
+curl, so a route-level card would answer them too and break every client-side navigation into a
+carded route; byte-identical on every path incl. `/`,
 `api_base_url` = this origin's own `/api` mount, where the device lane is served — the root face is
 what the token-less CLI doors card-fetch); an anonymous browser gets one constant teaser page (the
 landing page at `/`); a signed-in member is resolved through their own confirmed seats into the
