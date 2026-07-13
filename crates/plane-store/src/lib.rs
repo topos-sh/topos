@@ -122,7 +122,7 @@ pub use governance::{
     ApproveStandupOutcome, CreateWorkspaceOutcome, GovernanceOp, GovernanceOutcome,
     GovernanceRequest, MintClaimOutcome, MintedClaim, Role, WorkspaceCreated,
 };
-pub use id::{CommitId, IdError, ObjectId, OpId, Principal, SkillId, WorkspaceId};
+pub use id::{BundleId, CommitId, IdError, ObjectId, OpId, Principal, WorkspaceId};
 pub use lineage::{CandidateCommit, LineageDecision};
 pub use read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionFile, VersionMeta};
 pub use restore::EpochBumpReport;

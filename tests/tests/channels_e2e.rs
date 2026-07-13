@@ -17,8 +17,8 @@ mod common;
 
 use common::{NOW, Seeded};
 use plane_store::{
-    Authority, CandidateUpload, CommitId, DeploymentMode, FileMode, GovernanceOp,
-    GovernanceRequest, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, CandidateUpload, CommitId, DeploymentMode, FileMode, GovernanceOp,
+    GovernanceRequest, OpId, Principal, UploadedFile, WorkspaceId,
 };
 use topos::test_support::{ContributeHarness, PublishResult, ReconcileHarness};
 use topos_types::Generation;
@@ -74,7 +74,7 @@ async fn genesis(
     let receipt = a
         .publish(
             &ws(),
-            &SkillId::parse(skill_id).unwrap(),
+            &BundleId::parse(skill_id).unwrap(),
             &OpId::parse(op_id).unwrap(),
             CandidateUpload {
                 files,
@@ -677,7 +677,7 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
         let r = a
             .review_approve_session(
                 &ws(),
-                &SkillId::parse("s_deploy").unwrap(),
+                &BundleId::parse("s_deploy").unwrap(),
                 candidate,
                 expected,
                 "77777777-0000-4000-8000-000000000001",
@@ -849,7 +849,7 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
         let pr = a
             .propose(
                 &ws(),
-                &SkillId::parse("s_deploy").unwrap(),
+                &BundleId::parse("s_deploy").unwrap(),
                 &OpId::parse("88888888-0000-4000-8000-000000000001").unwrap(),
                 cand,
                 plane_store::DeviceOpAuth {
@@ -978,7 +978,7 @@ fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
             None,
         )
         .await;
-        let c1 = SkillId::parse("s_deploy").unwrap();
+        let c1 = BundleId::parse("s_deploy").unwrap();
         a.seed_published_child(
             &ws(),
             &c1,

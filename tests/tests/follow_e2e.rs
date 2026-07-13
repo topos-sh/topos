@@ -18,7 +18,7 @@
 mod common;
 
 use common::{NOW, Plane, SKILL, WS, WS_NAME, expected_placement, genesis_files, ws_address};
-use plane_store::{Authority, OpId, SkillId, WorkspaceId};
+use plane_store::{Authority, BundleId, OpId, WorkspaceId};
 use topos::test_support::FollowHarness;
 use topos_types::Generation;
 use topos_types::TerminalOutcome;
@@ -56,7 +56,7 @@ fn start_plane_split(tag: &str) -> Plane {
 
 async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
     let ws = WorkspaceId::parse(WS).unwrap();
-    let skill = SkillId::parse(SKILL).unwrap();
+    let skill = BundleId::parse(SKILL).unwrap();
 
     // The workspace + a confirmed owner holding OWNER_CRED (publishes the genesis, drives the invite).
     authority

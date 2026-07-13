@@ -1132,6 +1132,12 @@ export interface components {
             display_name?: string | null;
             /** @description The `current` pointer's `(epoch, seq)`. */
             generation: components["schemas"]["Generation"];
+            /**
+             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+             *     only: clients render it and never branch on it (an OPEN vocabulary, like `protection`).
+             *     Additive: an older producer that omits it is serving skills.
+             */
+            kind?: string;
             /** @description The catalog's user-facing name (the on-disk directory name for a fresh install). */
             name: string;
             /**
@@ -1395,6 +1401,12 @@ export interface components {
             display_name?: string | null;
             /** @description The `current` pointer's `(epoch, seq)`. */
             generation: components["schemas"]["Generation"];
+            /**
+             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+             *     only: clients render it and never branch on it (an OPEN vocabulary, like `status`).
+             *     Additive: an older producer that omits it is serving skills.
+             */
+            kind?: string;
             /** @description The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id). */
             name: string;
             /**
@@ -1425,6 +1437,11 @@ export interface components {
         WireSkillLog: {
             /** @description The pre-archive name, when archived (what the skill was called before the rename freed it). */
             base_name?: string | null;
+            /**
+             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+             *     only: clients render it and never branch on it. Additive: an older producer omits it.
+             */
+            kind?: string;
             /** @description The skill's current catalog name (the archived spelling once archived). */
             name: string;
             /** @description The proposal events, newest first. */

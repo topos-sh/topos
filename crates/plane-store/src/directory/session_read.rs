@@ -29,7 +29,7 @@ use crate::authority::Authority;
 use crate::db::directory::session_read::SkillIndexDbRow;
 use crate::enroll::DeploymentMode;
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, Principal, WorkspaceId};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 
 /// One skill of the workspace catalog, as [`Authority::list_skills_session`] returns it: the skill, its
@@ -41,6 +41,9 @@ pub struct SkillIndexRow {
     pub skill_id: String,
     /// The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id).
     pub name: String,
+    /// The catalog's bundle kind (`"skill"` for everything that exists today; a pre-catalog seeded
+    /// pointer reads as a skill). Display metadata only — no reader branches on it.
+    pub kind: String,
     /// The catalog lifecycle status (`active` / `archived`; a deleted skill's `current` row is gone).
     /// Delivery excludes archived skills; the index deliberately still lists them (history is
     /// inspectable, and the dashboard names the state).
@@ -76,7 +79,7 @@ async fn member_gate(
 /// Parse a skill-scoped session op's skill id and build the member-lane scope. A malformed skill id is
 /// the uniform miss (never a distinguishable 400 from this layer).
 fn member_scope(ws: &WorkspaceId, skill: &str, acting: Principal) -> Result<ReadScope> {
-    let skill = SkillId::parse(skill).map_err(|_| AuthorityError::NotFound)?;
+    let skill = BundleId::parse(skill).map_err(|_| AuthorityError::NotFound)?;
     Ok(ReadScope::for_member(ws.clone(), skill, acting))
 }
 
@@ -110,16 +113,18 @@ async fn build_skill_index(authority: &Authority, ws: &WorkspaceId) -> Result<Ve
         updated_at,
         bundle_digest,
         name,
+        kind,
         status,
         display_name,
     } in rows
     {
         // A stored skill_id was validated on the way in; a re-parse failure is store corruption (the
         // `commit_owners` convention), never a not-found.
-        let skill = SkillId::parse(&skill_id).map_err(AuthorityError::integrity)?;
+        let skill = BundleId::parse(&skill_id).map_err(AuthorityError::integrity)?;
         let open_proposals = authority.db().open_proposal_rows(ws, &skill).await?.len() as u64;
         out.push(SkillIndexRow {
             name: name.unwrap_or_else(|| skill_id.clone()),
+            kind: kind.unwrap_or_else(|| "skill".to_owned()),
             status: status.unwrap_or_else(|| "active".to_owned()),
             skill_id,
             version_id: commit,
@@ -205,7 +210,7 @@ pub(crate) async fn serve_object_session(
         authority,
         &scope,
         ws.as_str(),
-        scope.skill().as_str(),
+        scope.bundle().as_str(),
         object_id_hex,
     )
     .await
@@ -227,7 +232,7 @@ pub(crate) async fn read_version_metadata_session(
         authority,
         &scope,
         ws.as_str(),
-        scope.skill().as_str(),
+        scope.bundle().as_str(),
         version_id_hex,
     )
     .await
@@ -246,7 +251,7 @@ pub(crate) async fn list_open_proposals_session(
 ) -> Result<Vec<OpenProposalSummary>> {
     let acting = member_gate(authority, ws, acting_email, plane_mode).await?;
     let scope = member_scope(ws, skill, acting)?;
-    crate::read::list_open_proposals(authority, &scope, ws.as_str(), scope.skill().as_str()).await
+    crate::read::list_open_proposals(authority, &scope, ws.as_str(), scope.bundle().as_str()).await
 }
 
 /// One proposal's detail for a confirmed member — the review surface's read: status + base + proposer
@@ -292,7 +297,7 @@ pub(crate) async fn read_proposal_detail_session(
     let commit = crate::read::parse_hex32(version_id_hex).ok_or(AuthorityError::NotFound)?;
     let Some(row) = authority
         .db()
-        .read_proposal_detail(ws, scope.skill(), crate::id::CommitId(commit))
+        .read_proposal_detail(ws, scope.bundle(), crate::id::CommitId(commit))
         .await?
     else {
         return Ok(None);
@@ -301,7 +306,7 @@ pub(crate) async fn read_proposal_detail_session(
     // default) — what actually gates this proposal's approve (four-eyes) and the author's next publish.
     let review_required = authority
         .db()
-        .effective_protection_reviewed(ws, scope.skill())
+        .effective_protection_reviewed(ws, scope.bundle())
         .await?;
     Ok(Some(ProposalDetailSession {
         version_id: commit,

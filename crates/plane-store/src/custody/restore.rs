@@ -18,7 +18,7 @@ use topos_types::Generation;
 
 use crate::authority::Authority;
 use crate::error::Result;
-use crate::id::{CommitId, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, WorkspaceId};
 
 /// One bumped `current` pointer, as [`Authority::restore_bump_epochs`] reports it: the scope, the commit
 /// the pointer names (UNCHANGED by the bump), and the old and new generations.
@@ -26,8 +26,8 @@ use crate::id::{CommitId, SkillId, WorkspaceId};
 pub struct EpochBumpReport {
     /// The workspace the bumped pointer belongs to.
     pub workspace_id: WorkspaceId,
-    /// The skill whose `current` was bumped.
-    pub skill_id: SkillId,
+    /// The bundle whose `current` was bumped.
+    pub bundle_id: BundleId,
     /// The commit the pointer names — byte-identical before and after the bump.
     pub commit: CommitId,
     /// The generation the row held when it was locked.
@@ -37,7 +37,7 @@ pub struct EpochBumpReport {
 }
 
 impl Authority {
-    /// Bump every selected skill's `current` pointer one epoch forward — the operator recovery step
+    /// Bump every selected bundle's `current` pointer one epoch forward — the operator recovery step
     /// after restoring the plane's database from a backup. Per row: `new_epoch = max(epoch + 1,
     /// epoch_at_least)` (the floor lets an operator who restored once before, from an even older backup,
     /// jump past every epoch ever served), the commit and `seq` unchanged — epoch-dominant ordering makes

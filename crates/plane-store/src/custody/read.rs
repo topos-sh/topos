@@ -1,4 +1,4 @@
-//! The skill-scoped object read — the one auditable access surface.
+//! The bundle-scoped object read — the one auditable access surface.
 //!
 //! Authorization is one database join that yields a *witness* commit (or nothing); only then is the
 //! per-workspace git store touched, to fetch the bytes by content id. There is no read-by-bare-hash
@@ -15,25 +15,25 @@ use topos_types::{Generation, WireCurrentRecord};
 use crate::authority::{Authority, run_blocking};
 use crate::db::Location;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
 
 pub(crate) async fn read_object(
     authority: &Authority,
     principal: &Principal,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     object_id: ObjectId,
 ) -> Result<Vec<u8>> {
     // Step one (async DB): authorize. The witness commit proves BOTH facts at once — the principal is
-    // a confirmed workspace member, and the skill reaches the object. The borrow on the database is
+    // a confirmed workspace member, and the bundle reaches the object. The borrow on the database is
     // released before the store read below (no git borrow ever crosses an await).
     let witness = match authority
         .db()
-        .authorize_object_read(ws, skill, principal, object_id)
+        .authorize_object_read(ws, bundle, principal, object_id)
         .await?
     {
         Some(witness) => witness,
-        // Not a member, the skill does not reach the object, or the object does not exist — all one
+        // Not a member, the bundle does not reach the object, or the object does not exist — all one
         // indistinguishable not-found.
         None => return Err(AuthorityError::NotFound),
     };
@@ -86,7 +86,7 @@ pub(crate) async fn read_object(
     if let Err(AuthorityError::Integrity(_)) = &fetched
         && authority
             .db()
-            .authorize_object_read(ws, skill, principal, object_id)
+            .authorize_object_read(ws, bundle, principal, object_id)
             .await?
             .is_none()
     {
@@ -101,7 +101,7 @@ struct GitLocatorMismatch;
 
 // ── the authenticated read surface (resolve a read token → an opaque scope → the bound reads) ───────────
 
-/// An **opaque read capability** — the (workspace, skill, principal) an authenticated read resolves to.
+/// An **opaque read capability** — the (workspace, bundle, principal) an authenticated read resolves to.
 ///
 /// The fields are private on purpose: a consumer (the HTTP layer) holds this as a token and passes it back to
 /// the bound reads (`serve_object` / `read_current` / `read_version_metadata`); it never inspects the
@@ -113,7 +113,7 @@ struct GitLocatorMismatch;
 #[derive(Debug, Clone)]
 pub struct ReadScope {
     ws: WorkspaceId,
-    skill: SkillId,
+    bundle: BundleId,
     principal: Principal,
 }
 
@@ -122,9 +122,9 @@ impl ReadScope {
     pub(crate) fn ws(&self) -> &WorkspaceId {
         &self.ws
     }
-    /// The resolved skill (`pub(crate)`).
-    pub(crate) fn skill(&self) -> &SkillId {
-        &self.skill
+    /// The resolved bundle (`pub(crate)`).
+    pub(crate) fn bundle(&self) -> &BundleId {
+        &self.bundle
     }
     /// The resolved principal (`pub(crate)` — never public: the scope stays an opaque capability).
     pub(crate) fn principal(&self) -> &Principal {
@@ -132,16 +132,16 @@ impl ReadScope {
     }
     /// The one trusted constructor — called strictly AFTER a confirmed-member probe admitted
     /// `principal` (this fn does no checking of its own).
-    pub(crate) fn for_member(ws: WorkspaceId, skill: SkillId, principal: Principal) -> Self {
+    pub(crate) fn for_member(ws: WorkspaceId, bundle: BundleId, principal: Principal) -> Self {
         Self {
             ws,
-            skill,
+            bundle,
             principal,
         }
     }
 }
 
-/// A skill's `current` pointer, ready to serve: the raw `WireCurrentRecord` bytes a follower applies,
+/// A bundle's `current` pointer, ready to serve: the raw `WireCurrentRecord` bytes a follower applies,
 /// plus the `(epoch, seq)` AND the `version_id` extracted from them (so the caller can build a
 /// **commit-sensitive** ETag / `304` — a clean field comparison against the client's known commit — without
 /// re-parsing the blob in the handler).
@@ -188,7 +188,7 @@ pub struct OpenProposalSummary {
     pub created_at: String,
 }
 
-/// Read a skill's `current` pointer for an authenticated scope. `None` until the pointer has first been
+/// Read a bundle's `current` pointer for an authenticated scope. `None` until the pointer has first been
 /// moved. Reads the stored record bytes, then extracts the generation + version id from the deserialized
 /// record.
 ///
@@ -201,7 +201,7 @@ pub(crate) async fn read_current(
 ) -> Result<Option<CurrentPointer>> {
     let Some(record_bytes) = authority
         .db()
-        .read_current_record(scope.ws(), scope.skill())
+        .read_current_record(scope.ws(), scope.bundle())
         .await?
     else {
         return Ok(None);
@@ -223,10 +223,10 @@ pub(crate) async fn read_current(
 #[error("a stored current record carries a malformed version_id")]
 struct BadVersionIdHex;
 
-/// Serve one object's bytes for an authenticated scope, asserting the scope's `(ws, skill)` matches the
+/// Serve one object's bytes for an authenticated scope, asserting the scope's `(ws, bundle)` matches the
 /// request path's. A scope/path mismatch — or a malformed object id — is the single indistinguishable
-/// [`AuthorityError::NotFound`] (the capability is bound to exactly one skill; a bad hex id is never a `400`
-/// from here, so a caller cannot probe). Then the read goes through the skill-scoped [`read_object`].
+/// [`AuthorityError::NotFound`] (the capability is bound to exactly one bundle; a bad hex id is never a `400`
+/// from here, so a caller cannot probe). Then the read goes through the bundle-scoped [`read_object`].
 ///
 /// # Errors
 /// [`AuthorityError::NotFound`] on a scope/path mismatch, a malformed id, or a not-reachable object;
@@ -235,10 +235,10 @@ pub(crate) async fn serve_object(
     authority: &Authority,
     scope: &ReadScope,
     req_ws: &str,
-    req_skill: &str,
+    req_bundle: &str,
     object_id_hex: &str,
 ) -> Result<Vec<u8>> {
-    if scope.ws().as_str() != req_ws || scope.skill().as_str() != req_skill {
+    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
         return Err(AuthorityError::NotFound);
     }
     let Some(object_id) = parse_hex32(object_id_hex) else {
@@ -248,7 +248,7 @@ pub(crate) async fn serve_object(
         authority,
         scope.principal(),
         scope.ws(),
-        scope.skill(),
+        scope.bundle(),
         ObjectId(object_id),
     )
     .await
@@ -271,10 +271,10 @@ pub(crate) async fn read_version_metadata(
     authority: &Authority,
     scope: &ReadScope,
     req_ws: &str,
-    req_skill: &str,
+    req_bundle: &str,
     version_id_hex: &str,
 ) -> Result<VersionMeta> {
-    if scope.ws().as_str() != req_ws || scope.skill().as_str() != req_skill {
+    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
         return Err(AuthorityError::NotFound);
     }
     let Some(version_id) = parse_hex32(version_id_hex) else {
@@ -284,7 +284,7 @@ pub(crate) async fn read_version_metadata(
     // R1: member ∧ (accepted-trunk OR open-non-stale proposal). Unauthorized/unreachable → the one not-found.
     if !authority
         .db()
-        .authorize_version_read(scope.ws(), scope.skill(), scope.principal(), commit)
+        .authorize_version_read(scope.ws(), scope.bundle(), scope.principal(), commit)
         .await?
     {
         return Err(AuthorityError::NotFound);
@@ -294,7 +294,7 @@ pub(crate) async fn read_version_metadata(
     // provenance divergence (corruption), never a not-found.
     let bundle_digest = authority
         .db()
-        .skill_commit_bundle_digest(scope.ws(), scope.skill(), commit)
+        .commit_bundle_digest(scope.ws(), scope.bundle(), commit)
         .await?
         .ok_or_else(|| AuthorityError::integrity(MissingProvenanceDigest))?;
 
@@ -306,8 +306,8 @@ pub(crate) async fn read_version_metadata(
     let (node, leaves) = run_blocking(move || {
         let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
         // Follow-up: `read_commit_meta` recovers this ONE commit's parents by enumerating every version
-        // ref in the skill's repo (the reverse map) — per-request cost that grows with the skill's version
-        // count. The DB provenance (`skill_commit`) records no parent edges today, so it cannot source the
+        // ref in the bundle's repo (the reverse map) — per-request cost that grows with the bundle's version
+        // count. The DB provenance table records no parent edges today, so it cannot source the
         // parent set; a provenance parents column (or a cached reverse map) is the named follow-up.
         let node = store
             .read_commit_meta(version_id)
@@ -348,8 +348,8 @@ pub(crate) async fn read_version_metadata(
     })
 }
 
-/// List a skill's OPEN, non-stale proposals for an authenticated scope (the proposals-listing route's core).
-/// Asserts the scope/path match (the cross-skill/workspace leak guard — the **FIRST** thing it does, copied
+/// List a bundle's OPEN, non-stale proposals for an authenticated scope (the proposals-listing route's core).
+/// Asserts the scope/path match (the cross-bundle/workspace leak guard — the **FIRST** thing it does, copied
 /// verbatim from [`serve_object`] / [`read_version_metadata`]), then enumerates the member-gated ∧
 /// `open ∧ base == current` rows. Returns only `(version_id, base, created_at)` per proposal — NO bytes, NO
 /// proposer.
@@ -368,14 +368,14 @@ pub(crate) async fn list_open_proposals(
     authority: &Authority,
     scope: &ReadScope,
     req_ws: &str,
-    req_skill: &str,
+    req_bundle: &str,
 ) -> Result<Vec<OpenProposalSummary>> {
-    if scope.ws().as_str() != req_ws || scope.skill().as_str() != req_skill {
+    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
         return Err(AuthorityError::NotFound);
     }
     let rows = authority
         .db()
-        .list_open_proposals(scope.ws(), scope.skill(), scope.principal())
+        .list_open_proposals(scope.ws(), scope.bundle(), scope.principal())
         .await?;
     Ok(rows
         .into_iter()
@@ -429,7 +429,7 @@ struct VersionObjectMissing;
 /// recomputed `bundle_digest` must then equal the pin. Offload never forks identity (the digest is over real
 /// bytes) and never adds a pointer object. **Authorization is the caller's job** (mirrors [`read_object`]:
 /// authorize first, then assemble) — this is the assembly primitive the future read-bundle / review-diff op
-/// builds on; it is test-driven this increment (no public verb yet), like the rest of the fence.
+/// builds on — the whole-bundle assembly primitive the composing read surfaces drive.
 ///
 /// # Errors
 /// [`AuthorityError::Integrity`] if a file's bytes are missing/corrupt in either store, a stored path is

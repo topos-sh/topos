@@ -13,7 +13,7 @@
 use crate::db::custody::witness::AccessWitness;
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
 
 impl Db {
     /// The object-read authorization: the membership gate, then the principal-free reachability
@@ -24,7 +24,7 @@ impl Db {
     pub(crate) async fn authorize_object_read(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         principal: &Principal,
         object_id: ObjectId,
     ) -> Result<Option<CommitId>> {
@@ -62,7 +62,7 @@ impl Db {
     async fn object_witness(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         object_id: ObjectId,
     ) -> Result<Option<CommitId>> {
         let ws = ws.as_str();
@@ -102,7 +102,7 @@ impl Db {
         &self,
         ws: &WorkspaceId,
         commit_ids: &[CommitId],
-    ) -> Result<Vec<(CommitId, SkillId)>> {
+    ) -> Result<Vec<(CommitId, BundleId)>> {
         let ws_s = ws.as_str();
         let mut out = Vec::new();
         // One bound lookup per id (the candidate-and-parents set is tiny). A per-id `query!` keeps
@@ -121,7 +121,7 @@ impl Db {
                 // A stored skill_id is always pre-validated on the way in, so a re-parse failure here is
                 // store corruption — map it to an integrity fault, not the boundary `InvalidId` (mirroring
                 // `commit_id_from_row`'s handling of a bad-width BLOB).
-                let skill = SkillId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
+                let skill = BundleId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
                 out.push((id, skill));
             }
         }
@@ -136,7 +136,7 @@ impl Db {
     pub(crate) async fn authorize_version_read(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         principal: &Principal,
         version_id: CommitId,
     ) -> Result<bool> {
@@ -165,7 +165,7 @@ impl Db {
     async fn version_readable(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         version_id: CommitId,
     ) -> Result<bool> {
         let ws = ws.as_str();

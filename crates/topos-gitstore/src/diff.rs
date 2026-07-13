@@ -371,11 +371,11 @@ mod tests {
     fn single_line_edit_renders_one_replacement_hunk() {
         // The shape the `diff` golden pins: a one-line change with leading context, deletions before
         // insertions. imara-diff and a naive LCS agree byte-for-byte on this.
-        let base = [f("SKILL.md", FileMode::Regular, b"a\nb\nc\nold\n")];
-        let draft = [f("SKILL.md", FileMode::Regular, b"a\nb\nc\nnew\n")];
+        let base = [f("GUIDE.md", FileMode::Regular, b"a\nb\nc\nold\n")];
+        let draft = [f("GUIDE.md", FileMode::Regular, b"a\nb\nc\nnew\n")];
         let out = unified_diff(&base, &draft);
         assert_eq!(
-            out, "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,4 +1,4 @@\n a\n b\n c\n-old\n+new\n",
+            out, "--- a/GUIDE.md\n+++ b/GUIDE.md\n@@ -1,4 +1,4 @@\n a\n b\n c\n-old\n+new\n",
             "{out}"
         );
     }

@@ -45,7 +45,7 @@ async fn seat(
 async fn gpub(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     dkid: &str,
     op_id: &str,
     files: Vec<UploadedFile>,

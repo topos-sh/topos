@@ -45,7 +45,7 @@ pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvel
         command: command.clone(),
         outcome,
         workspace_id: ws.to_owned(),
-        skill_id: Some(receipt.skill_id.clone()),
+        skill_id: Some(receipt.bundle_id.clone()),
         version_id: version_hex.clone(),
         bundle_digest: receipt.bundle_digest.map(hex::encode),
         expected_generation: Some(receipt.expected),
@@ -80,7 +80,7 @@ pub(crate) fn write_envelope(receipt: &SetCurrentReceipt, ws: &str) -> JsonEnvel
             retryable: retryable(outcome),
             affected: Affected {
                 workspace: Some(ws.to_owned()),
-                skill: Some(receipt.skill_id.clone()),
+                skill: Some(receipt.bundle_id.clone()),
                 version: version_hex,
                 proposal: None,
             },
@@ -183,6 +183,7 @@ pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {
             .map(|r| WireSkillIndexEntry {
                 skill_id: r.skill_id,
                 name: r.name,
+                kind: r.kind,
                 status: r.status,
                 version_id: hex::encode(r.version_id),
                 bundle_digest: hex::encode(r.bundle_digest),
@@ -474,6 +475,7 @@ pub(crate) fn skill_log_to_wire(log: SkillLog) -> WireSkillLog {
     WireSkillLog {
         skill_id: log.skill_id,
         name: log.name,
+        kind: log.kind,
         status: log.status,
         base_name: log.base_name,
         versions: log

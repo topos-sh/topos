@@ -23,7 +23,13 @@ work, credential derivation, candidate assembly; no SQL) + `src/db/{custody,dire
 `mod db`). Custody consults access ONLY through the **access-witness** trait — never a directory module
 path, never a directory table (a one-way seam `cargo xtask check-arch` enforces).
 
-**Custody** (`custody/` + `db/custody/`) — byte custody:
+**Custody** (`custody/` + `db/custody/`) — byte custody. This half is **bundle-generic** and speaks
+**bundles**, never skills — the shared id newtype is `BundleId`, and the words-change boundary is an
+AUTOMATED `cargo xtask check-arch` gate: `grep -rni 'skill' crates/topos-gitstore/src/
+crates/plane-store/src/custody/` returns zero hits (any case, identifiers/strings/comments alike). The
+directory's `catalog` is where a name + `kind` map onto a bundle id; a version IS the hash of its bytes,
+whatever the bundle's kind. (DB table/column names — `skill_commit`, `skill_id` — and the wire field names
+stay put; only the Rust custody vocabulary moved.)
 - `set_current.rs` / `db/custody/set_current.rs` — the pointer-move: `run`'s ordered arms (replay → authz →
   CAS → availability → lineage → the op tails) as its single story, plus the reject transaction; the
   proposals' orchestration lives here too (propose/approve are arms of the one write).
@@ -153,7 +159,9 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   `device_signed → device` (nothing signs; the receipt's actor is the presented device credential's key id).
   **`0015` is the CHANNELS schema**: `catalog` (the first real name→skill mapping — `skill_id` stays the
   immutable custody key, `name` the mutable user-facing key, `display_name` absorbed off `current`,
-  `status` active|archived|deleted, `protection` the per-bundle pin over the `workspace_policy` default),
+  `status` active|archived|deleted, `protection` the per-bundle pin over the `workspace_policy` default —
+  and, via migration `0020`, `kind`, the bundle kind the name points at (`'skill'` for everything today, a
+  slug-CHECKed open vocabulary; display metadata clients render but never branch on)),
   `channels`/`channel_skills`/`channel_members` (the structural `everyone`: builtin, roster-derived
   membership, trigger-guarded undeletable/unrenameable/unjoinable), the trigger-emitted `channel_events`
   audit, person-scoped `skill_follows`/`skill_unfollows`, per-device `device_exclusions`, person-scoped
@@ -169,7 +177,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   (`device_auth_sessions.requested_workspace`, the `login` intent, a nullable grant workspace + a grant
   `intent` discriminant) — and the tokened invite door's interment: `DROP TABLE invites, invite_skill`,
   the session/grant `invite_sha256` columns and the standing-door `workspace.link_epoch` dropped.
-- **`Authority::read_object`** — the skill-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
+- **`Authority::read_object`** — the bundle-scoped read. Gate + reach authorize on **confirmed member ∧ reachable** —
   reachable through EITHER the accepted trunk (`commit_object`) OR an **open, non-stale proposal**
   (`proposal_object`), the latter gated on the **same** `open ∧ base == current` predicate the GC keep-set
   uses, so **keep-set == read surface** — and yields a witness commit; the bytes are then read + re-verified.
@@ -261,7 +269,7 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   (every id is over real-byte sha256s, computed before any store write — a test forces the *same* bytes into
   each store and asserts identical `version_id`/`bundle_digest`); **no pointer object** (the tree faithfully
   carries the offloaded blob's `git_oid`, built via the gitstore plumbing editor). Reads dispatch on the
-  recorded `location`: `read_object` (single object — through the same skill-scoped join, **404-not-403, never
+  recorded `location`: `read_object` (single object — through the same bundle-scoped join, **404-not-403, never
   by bare hash**; a post-authz failure in *either* store is `Integrity`, never not-found) and `render_version`
   (whole bundle — tree-driven, the offloaded subset joined in memory by `git_oid`, every byte re-verified to
   its content id, the recomputed digest matched to the pin). GC's unlink step **dispatches on `location`**

@@ -26,7 +26,7 @@ use crate::custody::set_current::DeviceOp;
 use crate::enroll::{DeploymentMode, parse_op_id};
 use crate::error::Result;
 use crate::governance::Role;
-use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, OpId, Principal, WorkspaceId};
 use crate::set_current::{self, SetCurrentReceipt, device_op_command};
 
 /// The domain tag of the session review request identity (`request_sha256`) — versioned, and distinct
@@ -61,7 +61,7 @@ fn review_request_sha256(
     verb: &str,
     ws: &WorkspaceId,
     acting: &Principal,
-    skill: &SkillId,
+    skill: &BundleId,
     candidate: CommitId,
     expected: Generation,
     reason: Option<&str>,
@@ -100,7 +100,7 @@ fn review_request_sha256(
 fn revert_request_sha256(
     ws: &WorkspaceId,
     acting: &Principal,
-    skill: &SkillId,
+    skill: &BundleId,
     good: CommitId,
     expected: Generation,
 ) -> [u8; 32] {
@@ -130,7 +130,7 @@ fn revert_request_sha256(
 /// Deterministic per input; only `created_at` re-stamps — an unproven caller is owed no byte-stable replay.
 fn synth_denied(
     op: DeviceOp,
-    skill: &SkillId,
+    skill: &BundleId,
     candidate: CommitId,
     expected: Generation,
     request_id: &str,
@@ -140,7 +140,7 @@ fn synth_denied(
     SetCurrentReceipt {
         op_id: request_id.to_owned(),
         command: device_op_command(op).to_owned(),
-        skill_id: skill.as_str().to_owned(),
+        bundle_id: skill.as_str().to_owned(),
         version_id: Some(candidate),
         bundle_digest: None,
         expected,
@@ -168,7 +168,7 @@ fn code_details(code: &str, msg: &str) -> serde_json::Value {
 async fn session_preamble(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     candidate: CommitId,
     expected: Generation,
     op: DeviceOp,
@@ -222,7 +222,7 @@ async fn session_preamble(
 pub(crate) async fn review_approve_session(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     candidate: CommitId,
     expected: Generation,
     request_id: &str,
@@ -283,7 +283,7 @@ pub(crate) async fn review_approve_session(
 pub(crate) async fn review_reject_session(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     candidate: CommitId,
     expected: Generation,
     reason: &str,
@@ -369,7 +369,7 @@ pub(crate) async fn review_reject_session(
 pub(crate) async fn revert_session(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     good: CommitId,
     expected: Generation,
     request_id: &str,
@@ -406,10 +406,7 @@ pub(crate) async fn revert_session(
     // stored OK can exist (a session digest-absent failure is synthesized, never persisted), so fall through
     // to the fence. (`set_current::revert` re-runs this same stable replay for a FRESH request — a cheap
     // no-op here on the common path.)
-    if let Some(good_digest) = authority
-        .db()
-        .skill_commit_bundle_digest(ws, skill, good)
-        .await?
+    if let Some(good_digest) = authority.db().commit_bundle_digest(ws, skill, good).await?
         && let Some(replayed) = authority
             .db()
             .replay_revert_session(
@@ -478,13 +475,13 @@ mod tests {
     use topos_types::Generation;
 
     use super::review_request_sha256;
-    use crate::id::{CommitId, Principal, SkillId, WorkspaceId};
+    use crate::id::{BundleId, CommitId, Principal, WorkspaceId};
 
-    fn fixture() -> (WorkspaceId, Principal, SkillId, CommitId, Generation) {
+    fn fixture() -> (WorkspaceId, Principal, BundleId, CommitId, Generation) {
         (
             WorkspaceId::parse("w_1234").expect("workspace id"),
             Principal::parse("reviewer@acme.com").expect("principal"),
-            SkillId::parse("s_demo").expect("skill id"),
+            BundleId::parse("s_demo").expect("skill id"),
             CommitId([7u8; 32]),
             Generation { epoch: 1, seq: 3 },
         )

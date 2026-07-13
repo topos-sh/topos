@@ -20,7 +20,7 @@
 mod common;
 
 use common::{NOW, Plane, Seeded, expected_placement};
-use plane_store::{Authority, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId};
+use plane_store::{Authority, BundleId, FileMode, OpId, Principal, UploadedFile, WorkspaceId};
 use sqlx::Row as _;
 use topos::test_support::{FollowHarness, PublishResult, Scope};
 use topos_types::{Generation, TerminalOutcome};
@@ -122,7 +122,7 @@ struct WsSeed<'a> {
 /// No invite link: joining is by the workspace ADDRESS, and the invited seat is the lock.
 async fn seed_one_workspace(authority: &Authority, s: WsSeed<'_>) {
     let ws = WorkspaceId::parse(s.ws).unwrap();
-    let skill = SkillId::parse(s.skill).unwrap();
+    let skill = BundleId::parse(s.skill).unwrap();
     let invitee = Principal::parse(INVITEE).unwrap();
 
     authority

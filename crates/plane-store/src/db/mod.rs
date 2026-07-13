@@ -249,7 +249,7 @@ impl Db {
     pub(crate) async fn test_force_one_serialization_retry(
         &self,
         ws: &crate::id::WorkspaceId,
-        skill: &crate::id::SkillId,
+        skill: &crate::id::BundleId,
     ) -> Result<()> {
         let inject = std::sync::atomic::AtomicBool::new(true);
         let ws_s = ws.as_str();

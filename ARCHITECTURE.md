@@ -88,9 +88,12 @@ receipts, a one-command revert — and content addressing keeps optional signing
 `plane-store` is the only crate that touches the database or reads a raw object, and it is split into two
 halves along the row/byte line:
 
-- **Custody** owns the bytes: versions, the object store, and the one movable `current` pointer per skill. It
-  ingests candidate bundles, holds them through an upload/quarantine/GC lifecycle, and moves `current` under
-  a compare-and-set. It knows nothing about who a principal is.
+- **Custody** owns the bytes: it holds content-addressed **bundles** (a `SKILL.md` bundle today), their
+  versions, the object store, and the one movable `current` pointer per bundle. It ingests candidates, holds
+  them through an upload/quarantine/GC lifecycle, and moves `current` under a compare-and-set. It is **generic
+  over a bundle's kind** — the directory's catalog carries a `kind` tag (`skill` today) naming what a bundle
+  is, so a new kind is catalog and surface work, never a custody change. Custody knows nothing about who a
+  principal is, or what a bundle is for.
 - **Directory** owns identity and policy: workspaces, the roster, enrolled devices, invitations and
   enrollment, governance roles, and the review-required policy. It is the source of every authorization
   decision.
@@ -110,12 +113,14 @@ pointer advances and records a durable, attributed receipt for **every** outcome
 writers on its own, so each read-then-write invariant — the CAS, the last-owner guard, the object-presence
 fence — is re-proven by serializable isolation plus retry, not by a lock the caller must remember to take.
 
-**The read model.** Every read is **skill-scoped and capability-gated**. A per-skill read token (or, for a
-member browsing the catalog, a session or device identity) is mapped to a `(workspace, skill, principal)`
-built from the trusted row — never a caller-asserted id — and authorized on *rostered ∧ reachable*. **No
-object is served by bare hash**, and every not-entitled or not-found case returns the same indistinguishable
-**404, not a 403**, so the read surface is no oracle for which skills exist. A store failure on an
-already-authorized object is a separate integrity fault, never a 404.
+**The read model.** Every device-lane request carries **one bearer membership credential** per (workspace ×
+device) — minted at enrollment, stored only as its sha256 on the device's registry row, and presented in the
+`Authorization: Bearer` header (never a body field). Authorization is a single predicate: a **confirmed
+workspace-member seat**, re-resolved from that trusted row — never a caller-asserted id — and re-checked in
+the same transaction as the read, so a revoked device or a removed member loses access the instant the row
+commits. Reads gate on *member ∧ reachable*. **No object is served by bare hash**, and every not-entitled or
+not-found case returns the same indistinguishable **404, not a 403**, so the read surface is no oracle for
+which skills exist. A store failure on an already-authorized object is a separate integrity fault, never a 404.
 
 **The object lifecycle fence.** Bytes move through a database-authoritative lifecycle: ingest into a
 quarantine, lease-then-install on the way to a version, and a mark-then-claim garbage collector whose keep-set

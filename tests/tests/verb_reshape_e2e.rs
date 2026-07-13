@@ -36,9 +36,9 @@ mod common;
 
 use common::{NOW, Plane, WS, WS_NAME, expected, expected_placement, genesis_files, ws_address};
 use plane_store::{
-    Authority, CandidateUpload, CommitId, DeploymentMode, GovernanceOp, GovernanceOutcome,
-    GovernanceRequest, LifecycleOutcome, OpId, Principal, ProtectKind, ProtectLevel, PurgeOutcome,
-    SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, CandidateUpload, CommitId, DeploymentMode, GovernanceOp,
+    GovernanceOutcome, GovernanceRequest, LifecycleOutcome, OpId, Principal, ProtectKind,
+    ProtectLevel, PurgeOutcome, UploadedFile, WorkspaceId,
 };
 use topos::test_support::{FollowHarness, PublishResult};
 use topos_types::requests::WireProtocolCard;
@@ -120,7 +120,7 @@ async fn genesis(
     let receipt = a
         .publish(
             &WorkspaceId::parse(WS).unwrap(),
-            &SkillId::parse(skill_id).unwrap(),
+            &BundleId::parse(skill_id).unwrap(),
             &OpId::parse(op_id).unwrap(),
             CandidateUpload {
                 files,
@@ -509,7 +509,7 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
             .authority
             .seed_published_child(
                 &plane.ws(),
-                &SkillId::parse(SKILL).unwrap(),
+                &BundleId::parse(SKILL).unwrap(),
                 OWNER_CRED,
                 &OpId::parse(&op(2)).unwrap(),
                 plane.genesis(),

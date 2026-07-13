@@ -772,6 +772,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             WireDeliverySkill {
                 skill_id: "s_prdescribe".to_owned(),
                 name: "pr-describe".to_owned(),
+                kind: "skill".to_owned(),
                 display_name: Some("PR describe".to_owned()),
                 protection: "open".to_owned(),
                 version_id: "a".repeat(64),
@@ -786,6 +787,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             WireDeliverySkill {
                 skill_id: "s_deploy".to_owned(),
                 name: "deploy".to_owned(),
+                kind: "skill".to_owned(),
                 display_name: None,
                 protection: "reviewed".to_owned(),
                 version_id: "c".repeat(64),
@@ -1799,7 +1801,47 @@ fn check_arch() -> Result<()> {
     check_toolchain_pins()?;
     // Custody never reaches into the directory: not by module path, not by SQL table.
     check_seam()?;
+    // Custody speaks bundles: no `skill` vocabulary below the words-change boundary.
+    check_custody_vocabulary()?;
     Ok(())
+}
+
+/// The words-change boundary gate: the custody layer speaks BUNDLES — the word `skill` (any case,
+/// any position: identifiers, strings, comments) must not appear in `crates/topos-gitstore/src/`
+/// or `crates/plane-store/src/custody/`. This is the automated form of the repo's documented grep
+/// (`grep -rni 'skill' crates/topos-gitstore/src/ crates/plane-store/src/custody/` → zero hits).
+/// The `db/custody/` SQL twins are deliberately OUTSIDE the gate: their query strings must name
+/// the frozen table/column spellings (`skill_commit`, `skill_id`), which are storage vocabulary,
+/// not custody vocabulary.
+fn check_custody_vocabulary() -> Result<()> {
+    let root = workspace_root();
+    let gated_dirs = [
+        root.join("crates/topos-gitstore/src"),
+        root.join("crates/plane-store/src/custody"),
+    ];
+    let mut violations = Vec::new();
+    for dir in &gated_dirs {
+        // EVERY file, not just `.rs` — the documented grep covers the whole tree, so a stray
+        // non-Rust file cannot slip vocabulary past the automated form.
+        for file in files_under(dir, "vocabulary gate")? {
+            let text =
+                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let shown = file.strip_prefix(&root).unwrap_or(&file).display();
+            for (n, line) in text.lines().enumerate() {
+                if line.to_ascii_lowercase().contains("skill") {
+                    violations.push(format!("{shown}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "custody speaks bundles — `skill` vocabulary below the words-change boundary:\n  {}",
+            violations.join("\n  ")
+        );
+    }
 }
 
 /// The vault/directory seam gate: `plane-store`'s CUSTODY modules (bytes, versions, pointers, GC —
@@ -1912,13 +1954,20 @@ fn check_seam() -> Result<()> {
 /// Every `.rs` file under `dir`, recursively (deterministic order). An absent dir is a gate failure —
 /// the seam check must never silently pass because the tree moved out from under it.
 fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(files_under(dir, "seam check")?
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .collect())
+}
+
+/// Every regular file under `dir`, recursively (deterministic order). An absent dir is a gate
+/// failure attributed to `gate` — a scan must never silently pass because the tree moved out from
+/// under it.
+fn files_under(dir: &Path, gate: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     if !dir.is_dir() {
-        bail!(
-            "seam check: expected custody module dir {} to exist",
-            dir.display()
-        );
+        bail!("{gate}: expected gated dir {} to exist", dir.display());
     }
     while let Some(d) = stack.pop() {
         let mut entries: Vec<PathBuf> = fs::read_dir(&d)
@@ -1929,7 +1978,7 @@ fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
         for path in entries {
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
+            } else {
                 out.push(path);
             }
         }

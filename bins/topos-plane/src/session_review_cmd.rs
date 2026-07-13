@@ -17,8 +17,8 @@
 //! stay typed [`SessionReviewSummary::Denied`] so the composing surface can say why.
 
 use plane_store::{
-    AuthorityError, REVIEWER_ROLE_REQUIRED_CODE, SESSION_REVIEW_ACTING_DENIED, SetCurrentReceipt,
-    SkillId, WorkspaceId,
+    AuthorityError, BundleId, REVIEWER_ROLE_REQUIRED_CODE, SESSION_REVIEW_ACTING_DENIED,
+    SetCurrentReceipt, WorkspaceId,
 };
 use topos_types::TerminalOutcome;
 
@@ -403,9 +403,9 @@ fn parse_review_ids(
     workspace_id: &str,
     skill_id: &str,
     version_id_hex: &str,
-) -> Option<(WorkspaceId, SkillId, plane_store::CommitId)> {
+) -> Option<(WorkspaceId, BundleId, plane_store::CommitId)> {
     let ws = WorkspaceId::parse(workspace_id).ok()?;
-    let skill = SkillId::parse(skill_id).ok()?;
+    let skill = BundleId::parse(skill_id).ok()?;
     let commit = parse_version_hex(version_id_hex)?;
     Some((ws, skill, commit))
 }
@@ -448,7 +448,7 @@ mod tests {
         SetCurrentReceipt {
             op_id: "8c4b1a52-6f0f-4a3e-9a51-0e2f6f5a7c11".to_owned(),
             command: "review-approve".to_owned(),
-            skill_id: "s_demo".to_owned(),
+            bundle_id: "s_demo".to_owned(),
             version_id: None,
             bundle_digest: None,
             expected: Generation { epoch: 1, seq: 1 },

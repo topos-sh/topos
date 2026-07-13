@@ -14,7 +14,7 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::error::Result;
-use crate::id::{CommitId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, Principal, WorkspaceId};
 
 /// A device resolved from its presented workspace credential — the registry row's facts.
 #[derive(Debug, Clone)]
@@ -173,7 +173,7 @@ pub(crate) trait AccessWitness {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<SkillGate>;
 
     /// Register a skill in the catalog at its first publish — the genesis directory writes, atomic
@@ -186,7 +186,7 @@ pub(crate) trait AccessWitness {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         display_name: Option<&str>,
         author: &Principal,
         to_channel: Option<&str>,
@@ -200,7 +200,7 @@ pub(crate) trait AccessWitness {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         channel: &str,
         actor: &Principal,
         created_at: &str,
@@ -212,7 +212,7 @@ pub(crate) trait AccessWitness {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         display_name: &str,
     ) -> Result<()>;
 
@@ -223,7 +223,7 @@ pub(crate) trait AccessWitness {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         version: CommitId,
         recipient: &Principal,
         outcome: &str,

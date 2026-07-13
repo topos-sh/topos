@@ -69,7 +69,7 @@ pub(crate) async fn ingest(
 ) -> Result<StagedCandidate> {
     if candidate.files.is_empty() {
         return Err(AuthorityError::RejectedUpload(
-            "a skill bundle must contain at least one file".to_owned(),
+            "a bundle must contain at least one file".to_owned(),
         ));
     }
     // Per-blob guards BEFORE staging, so an oversize or purged blob is never persisted to the quarantine

@@ -49,6 +49,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
+    kind: row.kind,
     openProposals: row.openProposals,
     versionId: row.versionId,
     versionFiles,
@@ -56,11 +57,17 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 export default function SkillCurrentPage() {
-  const { ws, skill, currentShort, displayName, openProposals, versionId, versionFiles } =
+  const { ws, skill, currentShort, displayName, kind, openProposals, versionId, versionFiles } =
     useLoaderData<typeof loader>();
   return (
     <div className="space-y-6">
-      <SkillHeader ws={ws} skill={skill} currentShort={currentShort} displayName={displayName} />
+      <SkillHeader
+        ws={ws}
+        skill={skill}
+        currentShort={currentShort}
+        displayName={displayName}
+        kind={kind}
+      />
       <SkillTabs
         basePath={`/workspaces/${ws}/skills/${skill}`}
         active="current"

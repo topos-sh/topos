@@ -150,6 +150,8 @@ export interface SkillIndexRow {
   /** The advisory display name (the author's folder name); render falls back to `name`. */
   displayName: string | null;
   status: "active" | "archived" | "deleted";
+  /** The bundle kind — `"skill"` for everything today; display metadata only, never branched on. */
+  kind: string;
   /** The `current` version id (lowercase hex64), or null while nothing is published. */
   versionId: string | null;
   epoch: number | null;
@@ -203,6 +205,9 @@ function skillIndexSelect() {
       name: planeCatalog.name,
       displayName: planeCatalog.displayName,
       status: planeCatalog.status,
+      // Straight off the catalog (the FROM table), like name/status — never LEFT-JOIN-null; the
+      // column is NOT NULL DEFAULT 'skill', so a pre-kind producer's rows already read 'skill'.
+      kind: planeCatalog.kind,
       versionId: planeCurrent.commitId,
       epoch: planeCurrent.epoch,
       seq: planeCurrent.seq,

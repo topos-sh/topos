@@ -205,6 +205,10 @@ pub struct RemoteSkillEntry {
     pub skill_id: String,
     /// The workspace the skill lives in (its catalog scope).
     pub workspace_id: String,
+    /// The catalog's bundle kind (`"skill"` for everything today) — display metadata, never branched
+    /// on. Additive: an older plane omits it.
+    #[serde(default = "default_bundle_kind")]
+    pub kind: String,
     /// The advisory display name, when the plane discloses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -218,6 +222,11 @@ pub struct RemoteSkillEntry {
     pub open_proposals: u64,
     /// This install's follow-state for the skill.
     pub state: RemoteFollowState,
+}
+
+/// The wire fallback for a plane predating the catalog `kind` (everything it serves is a skill).
+fn default_bundle_kind() -> String {
+    "skill".to_owned()
 }
 
 /// The local follow-state annotation on a `--remote` catalog entry.

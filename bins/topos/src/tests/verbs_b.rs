@@ -225,6 +225,7 @@ fn skill(id: &str, name: &str) -> WireSkillIndexEntry {
     WireSkillIndexEntry {
         skill_id: id.to_owned(),
         name: name.to_owned(),
+        kind: "skill".to_owned(),
         status: "active".to_owned(),
         version_id: "a".repeat(64),
         bundle_digest: "b".repeat(64),

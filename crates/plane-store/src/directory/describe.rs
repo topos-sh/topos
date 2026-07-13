@@ -21,7 +21,7 @@ use crate::authority::run_blocking;
 use crate::channels::device_member;
 use crate::db::directory::describe::{CatalogRow, SkillCommitRow};
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, Principal, WorkspaceId};
 
 /// The caller's own membership facts (the `follow`/`invite` describe header, and a `me` read): the
 /// workspace identity + its share address, the caller's seat, and who may invite.
@@ -62,6 +62,8 @@ pub struct ProposalIndexEntry {
 pub struct SkillLog {
     pub skill_id: String,
     pub name: String,
+    /// The catalog's bundle kind (`"skill"` today) — display metadata, no reader branches on it.
+    pub kind: String,
     pub status: String,
     /// The pre-archive name — present only for an archived skill.
     pub base_name: Option<String>,
@@ -193,7 +195,7 @@ pub(crate) async fn skill_log(
         .await?
     {
         Some(row) => row,
-        None if SkillId::parse(skill).is_ok() => authority
+        None if BundleId::parse(skill).is_ok() => authority
             .db()
             .catalog_by_id(ws, skill)
             .await?
@@ -203,10 +205,11 @@ pub(crate) async fn skill_log(
     let CatalogRow {
         skill_id,
         name,
+        kind,
         status,
         base_name,
     } = catalog;
-    let sid = SkillId::parse(&skill_id).map_err(AuthorityError::integrity)?;
+    let sid = BundleId::parse(&skill_id).map_err(AuthorityError::integrity)?;
     let current = authority.db().read_current_commit(ws, &sid).await?;
     let current_commit = current.map(|c| c.0);
     // Every provenance row: the tombstone facts + the full version set for the unordered tail.
@@ -259,6 +262,7 @@ pub(crate) async fn skill_log(
     Ok(SkillLog {
         skill_id,
         name,
+        kind,
         status,
         base_name,
         versions,

@@ -7,14 +7,16 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
   the content-addressed identity derivations (`commit_id` / `device_key_id` / `canonical_principal` — no
   keys, nothing signs). No I/O. Depends on nothing else in the workspace (not even `topos-types`).
 - **`topos-gitstore/`** — the `gix` object mechanics + the content-addressed large-object store
-  (verify-on-read). Depends on `topos-core` only.
+  (verify-on-read). Path-parameterized and **bundle-generic** — one bare repo per bundle for the client,
+  one per workspace for the plane; it never asks what a bundle is. Depends on `topos-core` only.
 - **`topos-harness/`** — the `HarnessAdapter` port + its three impls, all built (Claude Code the
   reference; OpenClaw's concrete config bytes and Hermes's per-turn-injection claim stay provisional
   behind their pilot readiness probes). The one client-side port. Depends on `topos-core` + `topos-types`.
 - **`plane-store/`** — the server authority boundary: private SQL + membership-scoped authorization + the
-  atomic publish transaction, split into **custody** (bytes/versions/pointers/GC) and **directory**
-  (identity/policy: the catalog, channels, person-scoped subscriptions, the entitlement predicate, the
-  guarded `topos_*` policy functions) — custody consults access ONLY through the in-transaction
+  atomic publish transaction, split into **custody** (bundle-generic byte custody:
+  bytes/versions/pointers/GC — it speaks bundles, never skills) and **directory**
+  (identity/policy: the catalog mapping names + kinds onto bundle ids, channels, person-scoped
+  subscriptions, the entitlement predicate, the guarded `topos_*` policy functions) — custody consults access ONLY through the in-transaction
   **access-witness** trait the directory implements (a one-way seam `check-arch` enforces). Depends on
   `topos-core` + `topos-types` + `topos-gitstore`.
 

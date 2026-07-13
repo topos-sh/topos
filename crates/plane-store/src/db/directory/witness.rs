@@ -19,7 +19,7 @@ use crate::db::custody::witness::{
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
 use crate::governance::Role;
-use crate::id::{CommitId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, Principal, WorkspaceId};
 
 impl AccessWitness for Db {
     async fn device(
@@ -77,7 +77,7 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<SkillGate> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         // One round trip: the catalog row's status (absent ⇒ unregistered) + the resolved protection
@@ -110,7 +110,7 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         display_name: Option<&str>,
         author: &Principal,
         to_channel: Option<&str>,
@@ -147,8 +147,8 @@ impl AccessWitness for Db {
                     return Ok(GenesisRegistration::NameTaken { name: minted });
                 }
                 sqlx::query!(
-                    "INSERT INTO catalog (workspace_id, skill_id, name, display_name, status, created_at) \
-                     VALUES ($1, $2, $3, $4, 'active', $5)",
+                    "INSERT INTO catalog (workspace_id, skill_id, name, kind, display_name, status, created_at) \
+                     VALUES ($1, $2, $3, 'skill', $4, 'active', $5)",
                     ws_s,
                     skill_s,
                     &minted,
@@ -211,7 +211,7 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         channel: &str,
         actor: &Principal,
         created_at: &str,
@@ -223,7 +223,7 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         display_name: &str,
     ) -> Result<()> {
         set_catalog_display_name(&mut **tx, ws, skill, display_name).await
@@ -233,7 +233,7 @@ impl AccessWitness for Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         version: CommitId,
         recipient: &Principal,
         outcome: &str,
@@ -272,7 +272,7 @@ impl AccessWitness for Db {
 async fn place_via_function(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     channel: &str,
     actor: &Principal,
     created_at: &str,
@@ -314,7 +314,7 @@ async fn place_via_function(
 async fn set_catalog_display_name<'e, E>(
     executor: E,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     display_name: &str,
 ) -> Result<()>
 where
@@ -452,7 +452,7 @@ impl Db {
     pub(crate) async fn effective_protection_reviewed(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<bool> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         let row = sqlx::query!(

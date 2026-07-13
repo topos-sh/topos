@@ -5,6 +5,7 @@
     {
       "skill_id": "s_prdescribe",
       "name": "pr-describe",
+      "kind": "skill",
       "display_name": "PR describe",
       "protection": "open",
       "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -24,6 +25,7 @@
     {
       "skill_id": "s_deploy",
       "name": "deploy",
+      "kind": "skill",
       "protection": "reviewed",
       "version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "bundle_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",

@@ -143,7 +143,13 @@ async function appliedMigrationVersions(db) {
   // Pre-ledger bootstrap: probe the marker objects that tell the applied prefix apart. Each
   // entry is [version, EXISTS-probe]; extend when a new migration lands in this fallback era
   // (post-0019 databases always carry the marker function below or were ledger-migrated).
-  const markers = [[19, "SELECT to_regproc('topos_delivery') IS NOT NULL AS ok"]];
+  const markers = [
+    [19, "SELECT to_regproc('topos_delivery') IS NOT NULL AS ok"],
+    [
+      20,
+      "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('catalog') AND attname = 'kind' AND NOT attisdropped) AS ok",
+    ],
+  ];
   const applied = new Set();
   for (let v = 1; v <= 18; v += 1) {
     applied.add(v); // this fallback only exists for databases bootstrapped at 0018

@@ -305,6 +305,11 @@ pub struct WireSkillIndexEntry {
     pub skill_id: String,
     /// The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id).
     pub name: String,
+    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+    /// only: clients render it and never branch on it (an OPEN vocabulary, like `status`).
+    /// Additive: an older producer that omits it is serving skills.
+    #[serde(default = "default_bundle_kind")]
+    pub kind: String,
     /// The catalog lifecycle status — `"active"` / `"archived"` (a deleted skill has no `current` row and
     /// so no entry). An OPEN string, deliberately: a new state can land without a schema break.
     pub status: String,
@@ -368,6 +373,11 @@ pub struct WireDeliverySkill {
     pub skill_id: String,
     /// The catalog's user-facing name (the on-disk directory name for a fresh install).
     pub name: String,
+    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+    /// only: clients render it and never branch on it (an OPEN vocabulary, like `protection`).
+    /// Additive: an older producer that omits it is serving skills.
+    #[serde(default = "default_bundle_kind")]
+    pub kind: String,
     /// The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -468,6 +478,12 @@ pub struct WireDelivery {
     /// body must never fail to parse over one new field).
     #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
+}
+
+/// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
+/// (everything such a producer serves is a skill).
+fn default_bundle_kind() -> String {
+    "skill".to_owned()
 }
 
 /// The default staleness window (one week, ms) — the fallback when a producer omits the field.
@@ -1244,6 +1260,10 @@ pub struct WireSkillLog {
     pub skill_id: String,
     /// The skill's current catalog name (the archived spelling once archived).
     pub name: String,
+    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
+    /// only: clients render it and never branch on it. Additive: an older producer omits it.
+    #[serde(default = "default_bundle_kind")]
+    pub kind: String,
     /// The skill's lifecycle status (`active` / `archived` / `deleted`).
     pub status: String,
     /// The pre-archive name, when archived (what the skill was called before the rename freed it).
@@ -1552,6 +1572,7 @@ mod tests {
         let entry = WireSkillIndexEntry {
             skill_id: "s_prdescribe".to_owned(),
             name: "pr-describe".to_owned(),
+            kind: "skill".to_owned(),
             status: "active".to_owned(),
             version_id: "a".repeat(64),
             bundle_digest: "b".repeat(64),
@@ -1579,6 +1600,7 @@ mod tests {
             skills: vec![WireDeliverySkill {
                 skill_id: "s_prdescribe".to_owned(),
                 name: "pr-describe".to_owned(),
+                kind: "skill".to_owned(),
                 display_name: Some("PR describe".to_owned()),
                 protection: "reviewed".to_owned(),
                 version_id: "a".repeat(64),

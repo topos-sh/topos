@@ -77,7 +77,8 @@ loader that skipped its guard cannot construct one. Every function in the DAL
 take their scope from the actor — a wrong-scope actor fails loudly. **Misses render 404, never 403.**
 
 **Data path split.** Row **reads** (roster, catalog, policy, memberships) are direct Drizzle SELECTs on
-the read-only `plane` schema. Row **writes** go through the directory's guarded `topos_*` SQL functions
+the read-only `plane` schema (catalog rows now carry a `kind` tag — `'skill'` today — the dashboard and
+skill pages display but never branch on). Row **writes** go through the directory's guarded `topos_*` SQL functions
 (e.g. `topos_invite`) — policy logic lives in the database, written once. **Byte/pointer** ops (current,
 versions, bundles, proposals, review approve/reject, revert, workspace create, session approves) ride
 the vault's **internal session lane** through the one transport, `app/lib/plane/client.server.ts`

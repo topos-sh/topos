@@ -11,6 +11,11 @@
         "null"
       ]
     },
+    "kind": {
+      "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it. Additive: an older producer omits it.",
+      "type": "string",
+      "default": "skill"
+    },
     "name": {
       "description": "The skill's current catalog name (the archived spelling once archived).",
       "type": "string"

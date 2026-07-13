@@ -38,7 +38,7 @@ use crate::db::custody::receipts::{
 };
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
 
 /// The I-JSON safe-integer bound (2^53 − 1) the wire record enforces — a generation a JSON consumer
 /// (the web app, an agent) could not represent exactly is never stored or served.
@@ -71,10 +71,10 @@ impl Db {
     /// workspace (which would graft that skill's tree under this skill's `commit_object` edges and leak its
     /// bytes). `None` if the commit is not a version of this skill, or its digest is unrecorded (a legacy
     /// pre-pointer-move version) — either way it cannot be a revert target.
-    pub(crate) async fn skill_commit_bundle_digest(
+    pub(crate) async fn commit_bundle_digest(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
     ) -> Result<Option<[u8; 32]>> {
         let ws_s = ws.as_str();
@@ -96,13 +96,13 @@ impl Db {
         }
     }
 
-    /// [`Self::skill_commit_bundle_digest`] plus the version's PURGE tombstone (`purged_at`) — the
+    /// [`Self::commit_bundle_digest`] plus the version's PURGE tombstone (`purged_at`) — the
     /// revert path's read: a purged target must be refused BEFORE any staging (its bytes are gone by
     /// decision; the hash stays only as a who/when tombstone). Same skill scoping, same `None` rule.
-    pub(crate) async fn skill_commit_digest_and_purge(
+    pub(crate) async fn commit_digest_and_purge(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
     ) -> Result<Option<([u8; 32], Option<i64>)>> {
         let ws_s = ws.as_str();
@@ -135,7 +135,7 @@ impl Db {
     pub(crate) async fn read_current_generation(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Option<Generation>> {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
@@ -161,7 +161,7 @@ impl Db {
     pub(crate) async fn read_current_commit(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Option<CommitId>> {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
@@ -205,7 +205,7 @@ impl Db {
     pub(crate) async fn read_current_record(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Option<Vec<u8>>> {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
@@ -238,7 +238,7 @@ async fn run(
 ) -> Result<SetCurrentReceipt> {
     let bound = BoundIdentity {
         command: crate::set_current::device_op_command(input.op),
-        skill_id: input.skill.as_str(),
+        bundle_id: input.bundle.as_str(),
         commit: Some(input.candidate_commit),
         bundle_digest: Some(input.candidate_bundle_digest),
         expected: input.expected,
@@ -327,7 +327,7 @@ async fn run(
             if device.revoked {
                 return denied_preauth(tx, input, &bound, "device unknown or revoked").await;
             }
-            let current = read_current(tx, input.ws, input.skill).await?;
+            let current = read_current(tx, input.ws, input.bundle).await?;
             // THE MEMBERSHIP GATE: a confirmed workspace seat authorizes the write (the git/GitHub
             // model — push access is workspace-wide; protection + channel modes are the finer gates).
             let Some(role) = witness.member_role(tx, input.ws, &device.principal).await? else {
@@ -372,7 +372,7 @@ async fn run(
                     return denied_preauth(tx, input, &bound, SESSION_REVIEW_ACTING_DENIED).await;
                 }
             }
-            let current = read_current(tx, input.ws, input.skill).await?;
+            let current = read_current(tx, input.ws, input.bundle).await?;
             ((*acting).clone(), None, current)
         }
     };
@@ -382,13 +382,13 @@ async fn run(
     // archived or deleted skill refuses EVERY pointer write, typed, before the CAS (a DENIED, never
     // a confusing CONFLICT against a frozen pointer). `Missing` is a genesis (or a pre-catalog
     // seeded pointer) — registered at step (6c) below, after every deny-returning gate has passed.
-    let gate = witness.skill_gate(tx, input.ws, input.skill).await?;
+    let gate = witness.skill_gate(tx, input.ws, input.bundle).await?;
     match gate {
         SkillGate::Archived => {
-            return denied(tx, input, &bound, "the skill is archived").await;
+            return denied(tx, input, &bound, "the bundle is archived").await;
         }
         SkillGate::Deleted => {
-            return denied(tx, input, &bound, "the skill is deleted").await;
+            return denied(tx, input, &bound, "the bundle is deleted").await;
         }
         SkillGate::Missing { .. } | SkillGate::Active { .. } => {}
     }
@@ -475,13 +475,13 @@ async fn run(
     }
 
     // (6) Lineage — no cross-skill adoption; same-skill parents.
-    if matches!(commit_owner(tx, input.ws, input.candidate_commit).await?, Some(owner) if owner != *input.skill)
+    if matches!(commit_owner(tx, input.ws, input.candidate_commit).await?, Some(owner) if owner != *input.bundle)
     {
         return denied(
             tx,
             input,
             &bound,
-            "candidate commit is owned by another skill",
+            "candidate commit is owned by another bundle",
         )
         .await;
     }
@@ -499,10 +499,15 @@ async fn run(
         // Same-skill lineage: every parent must already be in this skill's history.
         for p in input.parents {
             match commit_owner(tx, input.ws, *p).await? {
-                Some(owner) if owner == *input.skill => {}
+                Some(owner) if owner == *input.bundle => {}
                 _ => {
-                    return denied(tx, input, &bound, "a parent is not in this skill's history")
-                        .await;
+                    return denied(
+                        tx,
+                        input,
+                        &bound,
+                        "a parent is not in this bundle's history",
+                    )
+                    .await;
                 }
             }
         }
@@ -545,7 +550,7 @@ async fn run(
                     .register_publish(
                         tx,
                         input.ws,
-                        input.skill,
+                        input.bundle,
                         input.display_name,
                         &acting,
                         input.channel,
@@ -559,7 +564,7 @@ async fn run(
                             tx,
                             input,
                             &bound,
-                            &format!("the skill name {name:?} is already taken in this workspace"),
+                            &format!("the bundle name {name:?} is already taken in this workspace"),
                         )
                         .await;
                     }
@@ -568,13 +573,13 @@ async fn run(
             SkillGate::Active { .. } => {
                 if let Some(dn) = input.display_name {
                     witness
-                        .set_display_name(tx, input.ws, input.skill, dn)
+                        .set_display_name(tx, input.ws, input.bundle, dn)
                         .await?;
                 }
                 match input.channel {
                     Some(ch) => Some(
                         witness
-                            .place_skill(tx, input.ws, input.skill, ch, &acting, input.created_at)
+                            .place_skill(tx, input.ws, input.bundle, ch, &acting, input.created_at)
                             .await?,
                     ),
                     None => None,
@@ -649,18 +654,18 @@ async fn advance_current(
         tx,
         input.ws,
         input.candidate_commit,
-        input.skill,
+        input.bundle,
         input.candidate_bundle_digest,
     )
     .await?;
     for obj in input.object_ids {
         insert_commit_object(tx, input.ws, input.candidate_commit, *obj).await?;
     }
-    let record = serialize_record(input.ws, input.skill, input.candidate_commit, new_gen)?;
+    let record = serialize_record(input.ws, input.bundle, input.candidate_commit, new_gen)?;
     upsert_current(
         tx,
         input.ws,
-        input.skill,
+        input.bundle,
         input.candidate_commit,
         new_gen,
         &record,
@@ -670,7 +675,7 @@ async fn advance_current(
     let stored = StoredReceipt {
         op_id: input.op_id.to_owned(),
         command: bound.command.to_owned(),
-        skill_id: input.skill.as_str().to_owned(),
+        bundle_id: input.bundle.as_str().to_owned(),
         commit: Some(input.candidate_commit),
         bundle_digest: Some(input.candidate_bundle_digest),
         expected: input.expected,
@@ -727,7 +732,7 @@ async fn propose_arm(
     close_superseded_proposals(
         tx,
         input.ws,
-        input.skill,
+        input.bundle,
         proposer,
         input.candidate_commit,
         input.created_at,
@@ -738,11 +743,11 @@ async fn propose_arm(
         tx,
         input.ws,
         input.candidate_commit,
-        input.skill,
+        input.bundle,
         input.candidate_bundle_digest,
     )
     .await?;
-    if read_open_proposal(tx, input.ws, input.skill, input.candidate_commit, base)
+    if read_open_proposal(tx, input.ws, input.bundle, input.candidate_commit, base)
         .await?
         .is_none()
     {
@@ -757,7 +762,7 @@ async fn propose_arm(
             tx,
             input.ws,
             input.op_id,
-            input.skill,
+            input.bundle,
             input.candidate_commit,
             base_commit,
             base,
@@ -772,7 +777,7 @@ async fn propose_arm(
     let stored = StoredReceipt {
         op_id: input.op_id.to_owned(),
         command: bound.command.to_owned(),
-        skill_id: input.skill.as_str().to_owned(),
+        bundle_id: input.bundle.as_str().to_owned(),
         commit: Some(input.candidate_commit),
         bundle_digest: Some(input.candidate_bundle_digest),
         expected: input.expected,
@@ -805,7 +810,7 @@ async fn approve_arm(
 ) -> Result<SetCurrentReceipt> {
     let base = input.expected; // == current.es (the CAS proved it) ⇒ this is NOT a stale CONFLICT
     let Some(proposal) =
-        read_open_proposal(tx, input.ws, input.skill, input.candidate_commit, base).await?
+        read_open_proposal(tx, input.ws, input.bundle, input.candidate_commit, base).await?
     else {
         // The CAS passed (current.es == base), so the base is fresh — yet no OPEN proposal matches it: the
         // proposal was already accepted, or rejected. A resolved/absent target, not a stale base ⇒ DENIED.
@@ -855,7 +860,7 @@ async fn approve_arm(
             .notify_verdict(
                 tx,
                 input.ws,
-                input.skill,
+                input.bundle,
                 input.candidate_commit,
                 &proposal.proposer,
                 "accepted",
@@ -877,7 +882,7 @@ async fn reject_run(
 ) -> Result<SetCurrentReceipt> {
     let bound = BoundIdentity {
         command: crate::set_current::device_op_command(r.op),
-        skill_id: r.skill.as_str(),
+        bundle_id: r.bundle.as_str(),
         commit: Some(r.commit),
         bundle_digest: Some(r.bundle_digest),
         expected: r.expected,
@@ -957,7 +962,7 @@ async fn reject_run(
     // names: a REJECT is a reviewer's refusal (mandatory reason, author notified); a WITHDRAW is the
     // AUTHOR retracting their own draft (actor must equal the proposer; closed as `withdrawn`, no
     // notice — the author did it).
-    let resolved = resolve_proposal(tx, r.ws, r.skill, r.commit, r.expected).await?;
+    let resolved = resolve_proposal(tx, r.ws, r.bundle, r.commit, r.expected).await?;
     if matches!(r.op, DeviceOp::ReviewWithdraw) {
         return match resolved {
             Some(p) if p.status == ProposalStatus::Open => {
@@ -1021,7 +1026,7 @@ async fn reject_run(
                     .notify_verdict(
                         tx,
                         r.ws,
-                        r.skill,
+                        r.bundle,
                         r.commit,
                         &author,
                         "rejected",
@@ -1059,7 +1064,7 @@ pub(super) struct CurrentRow {
 async fn read_current(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
 ) -> Result<Option<CurrentRow>> {
     let ws_s = ws.as_str();
     let skill_s = skill.as_str();
@@ -1131,7 +1136,7 @@ async fn commit_owner(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     commit: CommitId,
-) -> Result<Option<SkillId>> {
+) -> Result<Option<BundleId>> {
     let ws_s = ws.as_str();
     let cid = commit.0.as_slice();
     let row = sqlx::query!(
@@ -1145,7 +1150,7 @@ async fn commit_owner(
     match row {
         None => Ok(None),
         Some(r) => Ok(Some(
-            SkillId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
+            BundleId::parse(&r.skill_id).map_err(AuthorityError::integrity)?,
         )),
     }
 }
@@ -1154,7 +1159,7 @@ async fn insert_skill_commit(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     commit: CommitId,
-    skill: &SkillId,
+    skill: &BundleId,
     bundle_digest: [u8; 32],
 ) -> Result<()> {
     let ws_s = ws.as_str();
@@ -1210,7 +1215,7 @@ async fn insert_commit_object(
 async fn upsert_current(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     generation: Generation,
     record: &[u8],
@@ -1265,7 +1270,7 @@ pub(super) async fn delete_lease(
 /// content-addressed `version_id` a follower re-verifies by digest on every apply.
 fn serialize_record(
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     generation: Generation,
 ) -> Result<Vec<u8>> {

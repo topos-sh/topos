@@ -14,7 +14,7 @@ async fn publish_named(
     fx: &Fixture,
     key: &[u8; 32],
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     op_id_str: &str,
     files: Vec<UploadedFile>,
     display_name: Option<&str>,

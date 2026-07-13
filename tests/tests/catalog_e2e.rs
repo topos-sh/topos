@@ -27,7 +27,7 @@ mod common;
 
 use common::{NOW, Seeded};
 use plane_store::{
-    Authority, DeploymentMode, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, DeploymentMode, FileMode, OpId, Principal, UploadedFile, WorkspaceId,
 };
 use topos::test_support::ContributeHarness;
 use topos_types::Generation;
@@ -127,8 +127,8 @@ async fn seed_two_published_skills(
     deployment_mode: &str,
 ) -> (SkillFacts, SkillFacts) {
     let ws = WorkspaceId::parse(WS).unwrap();
-    let sa = SkillId::parse(SA).unwrap();
-    let sb = SkillId::parse(SB).unwrap();
+    let sa = BundleId::parse(SA).unwrap();
+    let sb = BundleId::parse(SB).unwrap();
 
     authority
         .seed_workspace(&ws, "Acme", "verified", deployment_mode)
@@ -156,7 +156,7 @@ async fn seed_two_published_skills(
 async fn publish_genesis(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     op_id: &str,
     files: Vec<UploadedFile>,
 ) -> SkillFacts {

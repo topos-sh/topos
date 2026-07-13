@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use plane_store::{
-    Authority, CommitId, ConfirmOutcome, DeploymentMode, EnrollmentConfig, FileMode, InviteOutcome,
-    OpId, Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, CommitId, ConfirmOutcome, DeploymentMode, EnrollmentConfig, FileMode,
+    InviteOutcome, OpId, Principal, UploadedFile, WorkspaceId,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
@@ -326,8 +326,8 @@ impl Plane {
         WorkspaceId::parse(WS).unwrap()
     }
 
-    pub(crate) fn skill(&self) -> SkillId {
-        SkillId::parse(SKILL).unwrap()
+    pub(crate) fn skill(&self) -> BundleId {
+        BundleId::parse(SKILL).unwrap()
     }
 
     /// The genesis version id the seeding published (panics if the scenario stood none up).
@@ -603,7 +603,7 @@ pub(crate) struct GenesisSpec<'a> {
 /// Run a [`GenesisSpec`] against a fresh authority; returns the genesis version id.
 pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<'_>) -> CommitId {
     let ws = WorkspaceId::parse(WS).unwrap();
-    let skill = SkillId::parse(SKILL).unwrap();
+    let skill = BundleId::parse(SKILL).unwrap();
 
     // The publisher device + its credential + a confirmed-member seat — the whole authorization for the
     // genesis write and every subsequent read under this credential (per-skill roster grants nothing).

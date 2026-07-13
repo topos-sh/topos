@@ -48,6 +48,8 @@ export const planeCatalog = plane.table("catalog", {
   name: text("name").notNull(),
   displayName: text("display_name"),
   status: text("status", { enum: ["active", "archived", "deleted"] }).notNull(),
+  /** The bundle kind — `'skill'` for everything today; an OPEN vocabulary, display-only (never branched on). */
+  kind: text("kind").notNull(),
   protection: text("protection", { enum: ["open", "reviewed"] }),
   baseName: text("base_name"),
   archivedAt: bigint("archived_at", { mode: "number" }),

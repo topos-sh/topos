@@ -402,8 +402,9 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     s.trim_end().to_owned()
 }
 
-/// One `--remote` catalog row: `<name>  <name>@<short>  <state note>` (+ any open-proposal count). The
-/// name falls back to the skill id when the plane discloses no display name. HONEST annotations — no
+/// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <state note>` (+ any open-proposal
+/// count). The name falls back to the skill id when the plane discloses no display name; the kind is
+/// the catalog's bundle kind, displayed verbatim (never branched on). HONEST annotations — no
 /// `topos follow <skill>` promise for an `Available` skill (that grant is not self-serve yet).
 fn remote_row(r: &RemoteSkillEntry) -> String {
     let name = r.display_name.as_deref().unwrap_or(&r.skill_id);
@@ -420,10 +421,11 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
         String::new()
     };
     format!(
-        "    {}  {}@{}  {}{}\n",
+        "    {}  {}@{}  {}  {}{}\n",
         name,
         name,
         short(&r.version_id),
+        r.kind,
         note,
         proposals
     )
@@ -2114,6 +2116,7 @@ mod tests {
         let remote = |skill: &str, ws: &str, state| RemoteSkillEntry {
             skill_id: skill.to_owned(),
             workspace_id: ws.to_owned(),
+            kind: "skill".to_owned(),
             display_name: Some(skill.to_owned()),
             version_id: "ab".repeat(32),
             bundle_digest: "cd".repeat(32),
@@ -2145,12 +2148,20 @@ mod tests {
         // Grouped under the workspace's membership label.
         assert!(text.contains("  Acme:\n"), "{text}");
         // Available is honest — it does NOT print `topos follow`.
-        assert!(text.contains("deploy@abababababab  (available)"), "{text}");
+        assert!(
+            text.contains("deploy@abababababab  skill  (available)"),
+            "{text}"
+        );
         assert!(!text.contains("topos follow deploy"), "{text}");
-        assert!(text.contains("runbook@abababababab  (following)"), "{text}");
+        assert!(
+            text.contains("runbook@abababababab  skill  (following)"),
+            "{text}"
+        );
         // Behind points at `topos update` (the real advance path).
         assert!(
-            text.contains("audit@abababababab  (update available — run `topos update audit`)"),
+            text.contains(
+                "audit@abababababab  skill  (update available — run `topos update audit`)"
+            ),
             "{text}"
         );
         // The per-workspace degradation warning surfaces.

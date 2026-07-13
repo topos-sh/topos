@@ -33,7 +33,7 @@ mod common;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use plane_store::{
-    Authority, CommitId, FileMode, OpId, Principal, SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, CommitId, FileMode, OpId, Principal, UploadedFile, WorkspaceId,
 };
 use sqlx::PgPool;
 use topos::test_support::{Follow, PullHarness, Scope};
@@ -127,8 +127,8 @@ impl Plane {
     fn ws(&self) -> WorkspaceId {
         WorkspaceId::parse(WS).unwrap()
     }
-    fn skill(&self) -> SkillId {
-        SkillId::parse(SKILL).unwrap()
+    fn skill(&self) -> BundleId {
+        BundleId::parse(SKILL).unwrap()
     }
 
     /// Publish a 1-parent child of `parent` through the real pointer-move (the author's next version).
@@ -173,7 +173,7 @@ fn start_plane(tag: &str) -> Plane {
                 .expect("open authority");
 
         let ws = WorkspaceId::parse(WS).unwrap();
-        let skill = SkillId::parse(SKILL).unwrap();
+        let skill = BundleId::parse(SKILL).unwrap();
         let principal = Principal::parse(PRINCIPAL).unwrap();
 
         // Register the publisher device WITH its workspace credential + seat its principal as a confirmed

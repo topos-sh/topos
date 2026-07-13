@@ -12,6 +12,7 @@ export function SkillHeader({
   skill,
   currentShort,
   displayName,
+  kind,
 }: {
   ws: string;
   /** The catalog NAME — the URL key and the honest title fallback. */
@@ -19,6 +20,8 @@ export function SkillHeader({
   /** The current version's short hash, or absent/empty while nothing is published. */
   currentShort?: string | null;
   displayName?: string | null;
+  /** The bundle kind — `"skill"` today; display metadata only, absent on a pre-kind read. */
+  kind?: string | null;
 }) {
   return (
     <div>
@@ -27,6 +30,7 @@ export function SkillHeader({
       </h1>
       <p className="mt-0.5 font-mono text-xs text-faint">
         {ws} / {skill}
+        {kind ? ` · ${kind}` : ""}
         {currentShort ? ` · current ${currentShort}` : " · nothing published yet"}
       </p>
     </div>

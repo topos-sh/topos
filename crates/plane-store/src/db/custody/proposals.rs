@@ -14,7 +14,7 @@ use topos_types::Generation;
 use crate::db::custody::witness::AccessWitness;
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
 
 /// A proposal's stored lifecycle state (`stale` is never stored — it is derived from `open` + the live
 /// `current` generation).
@@ -78,7 +78,7 @@ impl Db {
     pub(crate) async fn proposal_approve_inputs(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         base: Generation,
     ) -> Result<Option<ProposalApproveInputs>> {
@@ -138,7 +138,7 @@ impl Db {
     pub(crate) async fn open_proposal_exists(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         base: Generation,
     ) -> Result<bool> {
@@ -171,7 +171,7 @@ impl Db {
     pub(crate) async fn list_open_proposals(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         principal: &Principal,
     ) -> Result<Vec<OpenProposalRow>> {
         if !self.read_gate(ws, principal).await? {
@@ -191,7 +191,7 @@ impl Db {
     pub(crate) async fn open_proposal_rows(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Vec<OpenProposalRow>> {
         let ws_s = ws.as_str();
         let skill_s = skill.as_str();
@@ -250,7 +250,7 @@ impl Db {
     pub(crate) async fn read_proposal_detail(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
     ) -> Result<Option<ProposalDetailRow>> {
         let ws_s = ws.as_str();
@@ -299,7 +299,7 @@ pub(super) async fn insert_proposal(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     id: &str,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     base_commit: CommitId,
     base: Generation,
@@ -388,7 +388,7 @@ pub(super) async fn proposal_id_exists(
 pub(super) async fn read_open_proposal(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     base: Generation,
 ) -> Result<Option<OpenProposal>> {
@@ -442,7 +442,7 @@ pub(crate) struct ResolvedProposal {
 pub(super) async fn resolve_proposal(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     base: Generation,
 ) -> Result<Option<ResolvedProposal>> {
@@ -487,7 +487,7 @@ pub(super) async fn resolve_proposal(
 pub(super) async fn close_superseded_proposals(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     proposer: &Principal,
     keep_commit: CommitId,
     resolved_at: &str,

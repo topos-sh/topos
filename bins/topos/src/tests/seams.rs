@@ -409,6 +409,7 @@ impl DirectorySource for FakeDir {
             skills: vec![WireSkillIndexEntry {
                 skill_id: "s_deploy".into(),
                 name: "deploy".into(),
+                kind: "skill".into(),
                 status: "active".into(),
                 version_id: "a".repeat(64),
                 bundle_digest: "b".repeat(64),

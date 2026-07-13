@@ -77,7 +77,7 @@ impl PlaneState {
             .into_iter()
             .map(|r| EpochBumpSummary {
                 workspace_id: r.workspace_id.as_str().to_owned(),
-                skill_id: r.skill_id.as_str().to_owned(),
+                skill_id: r.bundle_id.as_str().to_owned(),
                 commit_hex: topos_core::digest::to_hex(r.commit.as_bytes()),
                 old_epoch: r.old.epoch,
                 old_seq: r.old.seq,

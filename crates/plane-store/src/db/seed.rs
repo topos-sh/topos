@@ -15,7 +15,7 @@ use topos_core::digest;
 use super::Db;
 use crate::db::custody::lifecycle::GIT_OID_LEN;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
 
 impl Db {
     /// Stage a `deleting` object_presence row directly (a crashed GC's leftover) — drives the recovery sweep.
@@ -48,7 +48,7 @@ impl Db {
     pub(crate) async fn seed_catalog(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         name: &str,
     ) -> Result<()> {
         let (ws, skill) = (ws.as_str(), skill.as_str());
@@ -70,7 +70,7 @@ impl Db {
     pub(crate) async fn seed_follow(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         principal: &Principal,
     ) -> Result<()> {
         let (ws, skill, principal) = (ws.as_str(), skill.as_str(), principal.as_str());
@@ -94,7 +94,7 @@ impl Db {
     pub(crate) async fn seed_commit(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         objects: &[ObjectId],
     ) -> Result<()> {
@@ -114,7 +114,7 @@ impl Db {
         &self,
         ws: &WorkspaceId,
         id: &str,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         base_commit: CommitId,
         base_epoch: i64,
@@ -219,7 +219,7 @@ impl Db {
     pub(crate) async fn force_current_generation(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         epoch: i64,
         seq: i64,
     ) -> Result<()> {
@@ -244,7 +244,7 @@ impl Db {
     pub(crate) async fn force_current_record(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         bytes: &[u8],
     ) -> Result<()> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
@@ -334,12 +334,13 @@ impl Db {
         Ok(())
     }
 
-    /// Stage the per-skill `current` pointer (created, never moved this increment; the signed record
-    /// stays absent). Requires the commit's provenance to exist first (the foreign key).
+    /// Stage the per-skill `current` pointer (the seed only CREATES it — pointer moves go through the
+    /// real transaction; the stored record stays absent). Requires the commit's provenance to exist
+    /// first (the foreign key).
     pub(crate) async fn seed_current(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         epoch: i64,
         seq: i64,
@@ -369,7 +370,7 @@ impl Db {
 async fn seed_commit_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     objects: &[ObjectId],
 ) -> Result<()> {
@@ -410,7 +411,7 @@ async fn seed_proposal_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     id: &str,
-    skill: &SkillId,
+    skill: &BundleId,
     commit: CommitId,
     base_commit: CommitId,
     base_epoch: i64,

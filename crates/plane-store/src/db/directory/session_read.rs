@@ -23,6 +23,8 @@ pub(crate) struct SkillIndexDbRow {
     /// The catalog's user-facing name, or `None` for a pre-catalog seeded pointer (the reader falls
     /// back to the skill id).
     pub(crate) name: Option<String>,
+    /// The catalog's bundle kind (`skill` today), or `None` when unregistered (read as a skill).
+    pub(crate) kind: Option<String>,
     /// The catalog lifecycle status (`active`/`archived`/`deleted`), or `None` when unregistered
     /// (read as active).
     pub(crate) status: Option<String>,
@@ -51,6 +53,7 @@ impl Db {
                    c.seq           AS "seq!: i64",
                    c.updated_at    AS "updated_at!: i64",
                    cat.name         AS "name?",
+                   cat.kind         AS "kind?",
                    cat.status       AS "status?",
                    cat.display_name AS "display_name?",
                    sc.bundle_digest AS "bundle_digest?: Vec<u8>"
@@ -80,6 +83,7 @@ impl Db {
                             .ok_or_else(|| AuthorityError::integrity(MissingIndexDigest))?,
                     )?,
                     name: r.name,
+                    kind: r.kind,
                     status: r.status,
                     display_name: r.display_name,
                 })

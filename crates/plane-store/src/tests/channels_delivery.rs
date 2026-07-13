@@ -48,7 +48,7 @@ async fn seat(
 async fn gpub(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     dkid: &str,
     op_id: &str,
     files: Vec<UploadedFile>,
@@ -86,7 +86,7 @@ fn find<'a>(d: &'a Delivery, skill_id: &str) -> Option<&'a DeliveredSkill> {
 async fn child_pub(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     dkid: &str,
     op_id: &str,
     parent: CommitId,

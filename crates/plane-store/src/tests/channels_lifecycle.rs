@@ -35,7 +35,7 @@ async fn seat(fx: &Fixture, w: &WorkspaceId, dkid: &str, seed: u8, principal: &s
 async fn gpub(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     dkid: &str,
     op_id: &str,
     files: Vec<UploadedFile>,
@@ -138,7 +138,7 @@ fn fake_commit(tag: &[u8]) -> CommitId {
 async fn child_pub(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     dkid: &str,
     op_id: &str,
     parent: CommitId,
@@ -626,7 +626,7 @@ async fn delete_requires_archive_first_then_un_roots_reclaims_and_denies_writes(
             .as_ref()
             .and_then(|d| d.get("message"))
             .and_then(serde_json::Value::as_str),
-        Some("the skill is deleted"),
+        Some("the bundle is deleted"),
     );
 }
 
@@ -693,7 +693,7 @@ async fn publish_and_follow_on_an_archived_skill_are_typed_refusals(pool: PgPool
             .as_ref()
             .and_then(|d| d.get("message"))
             .and_then(serde_json::Value::as_str),
-        Some("the skill is archived"),
+        Some("the bundle is archived"),
     );
     // A follow of the archived name is SkillNotActive.
     assert_eq!(

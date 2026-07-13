@@ -39,7 +39,7 @@ use sqlx::PgPool;
 use tower::ServiceExt as _;
 
 use plane_store::{
-    Authority, DeploymentMode, EnrollmentConfig, FileMode, OpId, Principal, SkillId, UploadedFile,
+    Authority, BundleId, DeploymentMode, EnrollmentConfig, FileMode, OpId, Principal, UploadedFile,
     WorkspaceId,
 };
 use topos_core::digest::{self, ManifestEntry};
@@ -150,7 +150,7 @@ async fn seed_genesis(ctx: &Ctx, op_id: &str) -> ([u8; 32], [u8; 32]) {
         .authority()
         .seed_published_genesis(
             &WorkspaceId::parse(WS).unwrap(),
-            &SkillId::parse(SKILL).unwrap(),
+            &BundleId::parse(SKILL).unwrap(),
             CREDENTIAL,
             &OpId::parse(op_id).unwrap(),
             vec![file("SKILL.md", b"genesis v0\n")],

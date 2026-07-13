@@ -1,7 +1,7 @@
 //! The candidate-upload types — a full bundle's files + lineage, as the publish/propose paths receive them.
 //!
 //! Every file carries its raw bytes (there is **no** blob-id field — no reference-by-id; the server rehashes
-//! every byte). The server-rehash + canonical-rule + roster + cross-skill enforcement lives in the
+//! every byte). The server-rehash + canonical-rule + roster + cross-bundle enforcement lives in the
 //! ingest → migrate → one-pointer-move-transaction path (`lifecycle` + `set_current`); this module is just
 //! the shared input shape.
 

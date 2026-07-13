@@ -17,7 +17,7 @@ use crate::actor::{ReceiptActor, ReceiptMethod};
 use crate::db::custody::set_current::{CurrentRow, delete_lease, i64_to_u64, u64_to_i64};
 use crate::db::{Db, blob32};
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, WorkspaceId};
 use crate::set_current::{PretxnReceipt, PromoteInput, RejectInput, SetCurrentReceipt};
 
 impl Db {
@@ -41,7 +41,7 @@ impl Db {
         ws: &WorkspaceId,
         device_key_id: &str,
         op_id: &str,
-        skill: &SkillId,
+        skill: &BundleId,
         good_digest: [u8; 32],
         expected: Generation,
     ) -> Result<Option<SetCurrentReceipt>> {
@@ -49,7 +49,7 @@ impl Db {
             return Ok(None);
         };
         let stable_match = stored.command == "revert"
-            && stored.skill_id == skill.as_str()
+            && stored.bundle_id == skill.as_str()
             && stored.bundle_digest == Some(good_digest)
             && stored.expected == expected;
         Ok(Some(if stable_match {
@@ -61,7 +61,7 @@ impl Db {
             // byte-stable across retries.
             let bound = BoundIdentity {
                 command: "revert",
-                skill_id: skill.as_str(),
+                bundle_id: skill.as_str(),
                 commit: None,
                 bundle_digest: Some(good_digest),
                 expected,
@@ -88,7 +88,7 @@ impl Db {
         ws: &WorkspaceId,
         acting: &str,
         op_id: &str,
-        skill: &SkillId,
+        skill: &BundleId,
         good_digest: [u8; 32],
         expected: Generation,
         request_sha256: [u8; 32],
@@ -99,7 +99,7 @@ impl Db {
             return Ok(None);
         };
         let stable_match = stored.command == "revert"
-            && stored.skill_id == skill.as_str()
+            && stored.bundle_id == skill.as_str()
             && stored.bundle_digest == Some(good_digest)
             && stored.expected == expected
             && stored_sha == Some(request_sha256);
@@ -111,7 +111,7 @@ impl Db {
             // The ORIGINAL receipt's `created_at` keeps the reuse receipt byte-stable across retries.
             let bound = BoundIdentity {
                 command: "revert",
-                skill_id: skill.as_str(),
+                bundle_id: skill.as_str(),
                 commit: None,
                 bundle_digest: Some(good_digest),
                 expected,
@@ -147,7 +147,7 @@ async fn record_pretxn_body(
 ) -> Result<SetCurrentReceipt> {
     let bound = BoundIdentity {
         command: r.command,
-        skill_id: r.skill.as_str(),
+        bundle_id: r.bundle.as_str(),
         commit: r.commit,
         bundle_digest: r.bundle_digest,
         expected: r.expected,
@@ -166,7 +166,7 @@ async fn record_pretxn_body(
             let stored = StoredReceipt {
                 op_id: r.op_id.to_owned(),
                 command: r.command.to_owned(),
-                skill_id: r.skill.as_str().to_owned(),
+                bundle_id: r.bundle.as_str().to_owned(),
                 commit: r.commit,
                 bundle_digest: r.bundle_digest,
                 expected: r.expected,
@@ -227,7 +227,7 @@ pub(super) async fn denied_preauth(
     Ok(SetCurrentReceipt {
         op_id: input.op_id.to_owned(),
         command: bound.command.to_owned(),
-        skill_id: bound.skill_id.to_owned(),
+        bundle_id: bound.bundle_id.to_owned(),
         version_id: bound.commit,
         bundle_digest: bound.bundle_digest,
         expected: bound.expected,
@@ -351,7 +351,7 @@ async fn write_terminal(
     let stored = StoredReceipt {
         op_id: input.op_id.to_owned(),
         command: bound.command.to_owned(),
-        skill_id: bound.skill_id.to_owned(),
+        bundle_id: bound.bundle_id.to_owned(),
         commit: bound.commit,
         bundle_digest: bound.bundle_digest,
         expected: bound.expected,
@@ -393,7 +393,7 @@ pub(super) fn permanent_key_reuse(
     SetCurrentReceipt {
         op_id: op_id.to_owned(),
         command: bound.command.to_owned(),
-        skill_id: bound.skill_id.to_owned(),
+        bundle_id: bound.bundle_id.to_owned(),
         version_id: None,
         bundle_digest: None,
         expected: bound.expected,
@@ -419,7 +419,7 @@ pub(super) async fn reject_terminal(
     let stored = StoredReceipt {
         op_id: r.op_id.to_owned(),
         command: crate::set_current::device_op_command(r.op).to_owned(),
-        skill_id: r.skill.as_str().to_owned(),
+        bundle_id: r.bundle.as_str().to_owned(),
         commit: Some(r.commit),
         bundle_digest: Some(r.bundle_digest),
         expected: r.expected,
@@ -439,7 +439,7 @@ pub(super) fn reject_denied_preauth(r: &RejectInput<'_>, msg: &str) -> SetCurren
     SetCurrentReceipt {
         op_id: r.op_id.to_owned(),
         command: crate::set_current::device_op_command(r.op).to_owned(),
-        skill_id: r.skill.as_str().to_owned(),
+        bundle_id: r.bundle.as_str().to_owned(),
         version_id: Some(r.commit),
         bundle_digest: Some(r.bundle_digest),
         expected: r.expected,
@@ -459,7 +459,7 @@ pub(super) async fn reject_denied(
     let stored = StoredReceipt {
         op_id: r.op_id.to_owned(),
         command: crate::set_current::device_op_command(r.op).to_owned(),
-        skill_id: r.skill.as_str().to_owned(),
+        bundle_id: r.bundle.as_str().to_owned(),
         commit: Some(r.commit),
         bundle_digest: Some(r.bundle_digest),
         expected: r.expected,
@@ -484,7 +484,7 @@ pub(super) async fn reject_denied_code(
     let stored = StoredReceipt {
         op_id: r.op_id.to_owned(),
         command: crate::set_current::device_op_command(r.op).to_owned(),
-        skill_id: r.skill.as_str().to_owned(),
+        bundle_id: r.bundle.as_str().to_owned(),
         commit: Some(r.commit),
         bundle_digest: Some(r.bundle_digest),
         expected: r.expected,
@@ -503,7 +503,7 @@ pub(super) async fn reject_denied_code(
 /// The fields a same-`op_id` retry must match to replay (the value of the receipt, never its key).
 pub(super) struct BoundIdentity<'a> {
     pub(super) command: &'a str,
-    pub(super) skill_id: &'a str,
+    pub(super) bundle_id: &'a str,
     pub(super) commit: Option<CommitId>,
     pub(super) bundle_digest: Option<[u8; 32]>,
     pub(super) expected: Generation,
@@ -576,7 +576,7 @@ pub(super) async fn replay(
         let stored = StoredReceipt {
             op_id: op_id.to_owned(),
             command: own.command.clone(),
-            skill_id: own.skill_id.clone(),
+            bundle_id: own.skill_id.clone(),
             commit: own
                 .commit_id
                 .as_deref()
@@ -603,7 +603,7 @@ pub(super) async fn replay(
         return Ok(
             if sha_matches
                 && stored.command == bound.command
-                && stored.skill_id == bound.skill_id
+                && stored.bundle_id == bound.bundle_id
                 && stored.commit == bound.commit
                 && stored.bundle_digest == bound.bundle_digest
                 && stored.expected == bound.expected
@@ -630,7 +630,7 @@ pub(super) async fn replay(
 pub(super) struct StoredReceipt {
     pub(super) op_id: String,
     pub(super) command: String,
-    pub(super) skill_id: String,
+    pub(super) bundle_id: String,
     pub(super) commit: Option<CommitId>,
     pub(super) bundle_digest: Option<[u8; 32]>,
     pub(super) expected: Generation,
@@ -646,7 +646,7 @@ impl StoredReceipt {
         SetCurrentReceipt {
             op_id: self.op_id,
             command: self.command,
-            skill_id: self.skill_id,
+            bundle_id: self.bundle_id,
             version_id: self.commit,
             bundle_digest: self.bundle_digest,
             expected: self.expected,
@@ -701,7 +701,7 @@ where
     Ok(Some(StoredReceipt {
         op_id: op_id.to_owned(),
         command: r.command,
-        skill_id: r.skill_id,
+        bundle_id: r.skill_id,
         commit: r.commit_id.map(|b| blob32(&b)).transpose()?.map(CommitId),
         bundle_digest: r.bundle_digest.map(|b| blob32(&b)).transpose()?,
         expected: Generation {
@@ -768,7 +768,7 @@ where
     let stored = StoredReceipt {
         op_id: op_id.to_owned(),
         command: r.command,
-        skill_id: r.skill_id,
+        bundle_id: r.skill_id,
         commit: r.commit_id.map(|b| blob32(&b)).transpose()?.map(CommitId),
         bundle_digest: r.bundle_digest.map(|b| blob32(&b)).transpose()?,
         expected: Generation {
@@ -819,7 +819,7 @@ pub(super) async fn insert_receipt(
         method,
         request_sha256,
         r.command,
-        r.skill_id,
+        r.bundle_id,
         commit,
         digest,
         expected_epoch,

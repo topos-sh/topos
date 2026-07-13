@@ -24,7 +24,7 @@ use topos_core::digest;
 use crate::authority::Authority;
 use crate::custody::read::ReadScope;
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, Principal, WorkspaceId};
 
 // ── TTLs + caps (epoch-MILLISECOND budgets, the one server-clock unit) ─────────────────────────────────
 
@@ -1006,7 +1006,7 @@ pub(crate) async fn redeem_login(
 pub(crate) async fn resolve_read_scope(
     authority: &Authority,
     ws: WorkspaceId,
-    skill: SkillId,
+    skill: BundleId,
     credential: &str,
 ) -> Result<ReadScope> {
     let credential_sha256 = digest::sha256(credential.as_bytes());

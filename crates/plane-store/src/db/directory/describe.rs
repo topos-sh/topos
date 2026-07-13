@@ -11,7 +11,7 @@ use super::channels::unexpected;
 use crate::db::{Db, blob32};
 use crate::describe::{InviteOutcome, LogProposal, Reach};
 use crate::error::{AuthorityError, Result};
-use crate::id::{Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, Principal, WorkspaceId};
 
 /// The caller's membership facts (a `workspace` ⋈ `workspace_member` row) + the invite policy.
 pub(crate) struct MembershipRow {
@@ -39,6 +39,7 @@ pub(crate) struct ProposalIndexDbRow {
 pub(crate) struct CatalogRow {
     pub(crate) skill_id: String,
     pub(crate) name: String,
+    pub(crate) kind: String,
     pub(crate) status: String,
     pub(crate) base_name: Option<String>,
 }
@@ -130,7 +131,7 @@ impl Db {
     ) -> Result<Option<CatalogRow>> {
         let ws_s = ws.as_str();
         let row = sqlx::query!(
-            r#"SELECT skill_id AS "skill_id!", name AS "name!", status AS "status!",
+            r#"SELECT skill_id AS "skill_id!", name AS "name!", kind AS "kind!", status AS "status!",
                       base_name AS "base_name?"
                FROM catalog
                WHERE workspace_id = $1
@@ -146,6 +147,7 @@ impl Db {
         Ok(row.map(|r| CatalogRow {
             skill_id: r.skill_id,
             name: r.name,
+            kind: r.kind,
             status: r.status,
             base_name: r.base_name,
         }))
@@ -159,7 +161,7 @@ impl Db {
     ) -> Result<Option<CatalogRow>> {
         let ws_s = ws.as_str();
         let row = sqlx::query!(
-            r#"SELECT skill_id AS "skill_id!", name AS "name!", status AS "status!",
+            r#"SELECT skill_id AS "skill_id!", name AS "name!", kind AS "kind!", status AS "status!",
                       base_name AS "base_name?"
                FROM catalog WHERE workspace_id = $1 AND skill_id = $2"#,
             ws_s,
@@ -171,6 +173,7 @@ impl Db {
         Ok(row.map(|r| CatalogRow {
             skill_id: r.skill_id,
             name: r.name,
+            kind: r.kind,
             status: r.status,
             base_name: r.base_name,
         }))
@@ -181,7 +184,7 @@ impl Db {
     pub(crate) async fn skill_commit_log(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Vec<SkillCommitRow>> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         let rows = sqlx::query!(
@@ -210,7 +213,7 @@ impl Db {
     pub(crate) async fn skill_proposals_log(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
     ) -> Result<Vec<LogProposal>> {
         let (ws_s, skill_s) = (ws.as_str(), skill.as_str());
         let rows = sqlx::query!(

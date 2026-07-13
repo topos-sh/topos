@@ -132,7 +132,7 @@ async fn internal_setup(pool: PgPool, tag: &str, internal_token: Option<&str>) -
         .authority()
         .seed_published_genesis(
             &ws,
-            &SkillId::parse(SKILL).unwrap(),
+            &BundleId::parse(SKILL).unwrap(),
             INT_OWNER_CRED,
             &OpId::parse(OP_GENESIS).unwrap(),
             vec![file("SKILL.md", b"genesis v0\n")],
@@ -775,7 +775,7 @@ async fn the_lifecycle_ceremonies_land_and_refuse_typed(pool: PgPool) {
         .authority()
         .seed_catalog(
             &WorkspaceId::parse(WS).unwrap(),
-            &SkillId::parse("s_docs").unwrap(),
+            &BundleId::parse("s_docs").unwrap(),
             "docs",
         )
         .await

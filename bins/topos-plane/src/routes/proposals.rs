@@ -13,7 +13,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use plane_store::{DeviceOp, DeviceOpAuth, SkillId, WorkspaceId};
+use plane_store::{BundleId, DeviceOp, DeviceOpAuth, WorkspaceId};
 use topos_types::JsonEnvelope;
 use topos_types::requests::{ProposeRequest, WireProposalList};
 
@@ -53,7 +53,7 @@ pub(crate) async fn propose(
     let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-    let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
+    let skill = BundleId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let op_id = wire::parse_op_id(&req.op_id)?;
     let candidate = map::candidate_to_domain(req.candidate)?;
     let auth = DeviceOpAuth {

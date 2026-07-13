@@ -131,6 +131,7 @@ function CatalogRow({ ws, row }: { ws: string; row: SkillIndexRow }) {
           <span className="min-w-0 truncate font-medium text-ink text-sm">
             {row.displayName ?? row.name}
           </span>
+          <span className="text-faint text-xs">{row.kind}</span>
           {row.openProposals > 0 && (
             <Chip tone="accent">
               {row.openProposals === 1

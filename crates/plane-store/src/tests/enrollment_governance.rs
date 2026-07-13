@@ -288,7 +288,7 @@ async fn enroll_by_address_mints_a_credential_and_flips_the_invited_seat(pool: P
         .await
         .unwrap();
     assert_eq!(scope.ws().as_str(), "w_acme");
-    assert_eq!(scope.skill().as_str(), "s_deploy");
+    assert_eq!(scope.bundle().as_str(), "s_deploy");
     // The invited seat flipped to confirmed — the redeem IS the join ceremony's end.
     let status = sqlx::query_scalar::<_, String>(
         "SELECT status FROM workspace_member WHERE workspace_id = $1 AND principal = 'alice@acme.com'",

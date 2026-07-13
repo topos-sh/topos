@@ -14,8 +14,9 @@ use topos_core::digest;
 use crate::db::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
 
 use crate::{
-    Authority, AuthorityError, CandidateUpload, CommitId, DeploymentMode, EnrollmentConfig,
-    FileMode, ObjectId, OpId, Principal, SkillId, UploadedFile, WorkspaceId, gc, lifecycle,
+    Authority, AuthorityError, BundleId, CandidateUpload, CommitId, DeploymentMode,
+    EnrollmentConfig, FileMode, ObjectId, OpId, Principal, UploadedFile, WorkspaceId, gc,
+    lifecycle,
 };
 
 // ── fixtures + helpers ───────────────────────────────────────────────────────────────────────────
@@ -91,8 +92,8 @@ fn ws(s: &str) -> WorkspaceId {
     WorkspaceId::parse(s).expect("workspace id")
 }
 
-fn skill(s: &str) -> SkillId {
-    SkillId::parse(s).expect("skill id")
+fn skill(s: &str) -> BundleId {
+    BundleId::parse(s).expect("skill id")
 }
 
 fn prin(s: &str) -> Principal {
@@ -140,7 +141,7 @@ async fn stage_committed(
 
     w: &WorkspaceId,
 
-    s: &SkillId,
+    s: &BundleId,
 
     op_id: &str,
 
@@ -288,7 +289,7 @@ async fn register(
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    skill: &BundleId,
 
     dkid: &str,
 
@@ -327,7 +328,7 @@ async fn prepare(
 
     ws: &WorkspaceId,
 
-    _skill: &SkillId,
+    _skill: &BundleId,
 
     op_kind: DeviceOp,
 
@@ -366,7 +367,7 @@ async fn publish(
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    skill: &BundleId,
 
     op_id_str: &str,
 
@@ -438,7 +439,7 @@ fn revert_request(ws: &WorkspaceId, dkid: &str, expected: Generation) -> DeviceO
 // authenticates it by registry-row lookup exactly as production does.
 
 /// The commit `current` points at for a skill (the parent for the next candidate).
-async fn current_commit(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> CommitId {
+async fn current_commit(fx: &Fixture, w: &WorkspaceId, s: &BundleId) -> CommitId {
     fx.authority
         .db()
         .read_current_commit(w, s)
@@ -458,7 +459,7 @@ async fn do_propose(
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    skill: &BundleId,
 
     op_id_str: &str,
 
@@ -506,7 +507,7 @@ async fn do_approve(
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    skill: &BundleId,
 
     op_id_str: &str,
 
@@ -540,7 +541,7 @@ async fn do_reject(
 
     ws: &WorkspaceId,
 
-    skill: &SkillId,
+    skill: &BundleId,
 
     op_id_str: &str,
 
@@ -579,7 +580,7 @@ async fn member_read_scope(
 
     w: &WorkspaceId,
 
-    s: &SkillId,
+    s: &BundleId,
 
     dkid: &str,
 
@@ -610,6 +611,7 @@ async fn member_read_scope(
 
 // ── the split suites (most `use super::*;` for the shared fixtures/helpers above;
 //    canonical_migration is self-contained — it probes raw migration SQL, not the Authority) ──
+mod bundle_kinds;
 mod canonical_migration;
 mod channels_delivery;
 mod channels_lifecycle;

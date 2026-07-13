@@ -30,7 +30,7 @@ async fn seat(fx: &Fixture, w: &WorkspaceId, email: &str, role: &str) {
 async fn open_proposal(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     key: &[u8; 32],
     op_publish: &str,
     op_propose: &str,
@@ -73,7 +73,7 @@ async fn open_proposal(
 async fn approve_session(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     candidate: CommitId,
     expected: Generation,
     rid: &str,
@@ -92,7 +92,7 @@ async fn approve_session(
 async fn reject_session(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     candidate: CommitId,
     expected: Generation,
     reason: &str,
@@ -1357,7 +1357,7 @@ async fn session_pretxn_misses_are_synthesized_never_durable(pool: PgPool) {
     assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
     assert_eq!(
         msg_of(&r).as_deref(),
-        Some("no such proposal commit for this skill")
+        Some("no such proposal commit for this bundle")
     );
     assert!(receipts_for(&pool, "w_acme", rid_unknown).await.is_empty());
 
@@ -1387,7 +1387,7 @@ async fn session_pretxn_misses_are_synthesized_never_durable(pool: PgPool) {
     assert_eq!(r.outcome, TerminalOutcome::PermanentFailure);
     assert_eq!(
         msg_of(&r).as_deref(),
-        Some("no such proposal commit for this skill")
+        Some("no such proposal commit for this bundle")
     );
     assert!(receipts_for(&pool, "w_acme", rid_reject).await.is_empty());
 
@@ -1428,7 +1428,7 @@ async fn session_pretxn_misses_are_synthesized_never_durable(pool: PgPool) {
 async fn revert_session(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     good: CommitId,
     expected: Generation,
     rid: &str,
@@ -1446,7 +1446,7 @@ async fn revert_session(
 async fn two_versions(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     key: &[u8; 32],
     op0: &str,
     op1: &str,

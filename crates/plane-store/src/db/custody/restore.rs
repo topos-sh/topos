@@ -22,7 +22,7 @@ use topos_types::{
 use crate::custody::restore::EpochBumpReport;
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
-use crate::id::{SkillId, WorkspaceId};
+use crate::id::{BundleId, WorkspaceId};
 
 /// The I-JSON safe-integer bound (2^53 − 1) the wire record enforces — a generation a JSON consumer could
 /// not represent exactly is never stored or served. Mirrors the pointer-move's own bound (private to
@@ -92,13 +92,13 @@ async fn run(
             epoch: new_epoch,
             seq: old.seq,
         };
-        let record = serialize_record(&row.workspace_id, &row.skill_id, &commit.0, new)?;
+        let record = serialize_record(&row.workspace_id, &row.bundle_id, &commit.0, new)?;
         bump_row(tx, &row, new.epoch, &record, now).await?;
         // Stored ids were validated on the way in, so a re-parse failure here is store corruption.
         reports.push(EpochBumpReport {
             workspace_id: WorkspaceId::parse(&row.workspace_id)
                 .map_err(AuthorityError::integrity)?,
-            skill_id: SkillId::parse(&row.skill_id).map_err(AuthorityError::integrity)?,
+            bundle_id: BundleId::parse(&row.bundle_id).map_err(AuthorityError::integrity)?,
             commit,
             old,
             new,
@@ -110,7 +110,7 @@ async fn run(
 /// One selected-and-locked `current` row, exactly as stored.
 struct LockedCurrentRow {
     workspace_id: String,
-    skill_id: String,
+    bundle_id: String,
     commit_id: Vec<u8>,
     epoch: i64,
     seq: i64,
@@ -136,7 +136,7 @@ async fn lock_current_rows(
             rows.into_iter()
                 .map(|r| LockedCurrentRow {
                     workspace_id: r.workspace_id,
-                    skill_id: r.skill_id,
+                    bundle_id: r.skill_id,
                     commit_id: r.commit_id,
                     epoch: r.epoch,
                     seq: r.seq,
@@ -157,7 +157,7 @@ async fn lock_current_rows(
             rows.into_iter()
                 .map(|r| LockedCurrentRow {
                     workspace_id: r.workspace_id,
-                    skill_id: r.skill_id,
+                    bundle_id: r.skill_id,
                     commit_id: r.commit_id,
                     epoch: r.epoch,
                     seq: r.seq,
@@ -178,7 +178,7 @@ async fn bump_row(
 ) -> Result<()> {
     let epoch = u64_to_i64(new_epoch)?;
     let ws_s = row.workspace_id.as_str();
-    let skill_s = row.skill_id.as_str();
+    let skill_s = row.bundle_id.as_str();
     let done = sqlx::query!(
         "UPDATE current SET epoch = $1, record = $2, updated_at = $3 \
          WHERE workspace_id = $4 AND skill_id = $5 AND epoch = $6 AND seq = $7",
@@ -208,7 +208,7 @@ async fn bump_row(
 /// `tests/restore.rs` pins the two shapes together against drift).
 fn serialize_record(
     workspace_id: &str,
-    skill_id: &str,
+    bundle_id: &str,
     version_id: &[u8; 32],
     generation: Generation,
 ) -> Result<Vec<u8>> {
@@ -216,7 +216,7 @@ fn serialize_record(
         schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
             workspace_id: workspace_id.to_owned(),
-            skill_id: skill_id.to_owned(),
+            skill_id: bundle_id.to_owned(),
         },
         record: CurrentRecord {
             version_id: topos_core::digest::to_hex(version_id),

@@ -72,6 +72,7 @@ fn good_delivery() -> WireDelivery {
         skills: vec![WireDeliverySkill {
             skill_id: "s_1".into(),
             name: "one".into(),
+            kind: "skill".into(),
             display_name: None,
             protection: "open".into(),
             version_id: "a".repeat(64),

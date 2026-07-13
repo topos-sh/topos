@@ -30,8 +30,8 @@ mod common;
 
 use common::{NOW, Plane, SKILL, WS, expected_placement, genesis_files, ws_address};
 use plane_store::{
-    Authority, CommitId, GovernanceOp, GovernanceOutcome, GovernanceRequest, OpId, Principal,
-    SkillId, UploadedFile, WorkspaceId,
+    Authority, BundleId, CommitId, GovernanceOp, GovernanceOutcome, GovernanceRequest, OpId,
+    Principal, UploadedFile, WorkspaceId,
 };
 use topos::test_support::{FollowHarness, Scope};
 use topos_types::results::PullAction;
@@ -81,7 +81,7 @@ fn start_plane(tag: &str) -> Plane {
         true,
         async |authority: &Authority| {
             let ws = WorkspaceId::parse(WS).unwrap();
-            let skill = SkillId::parse(SKILL).unwrap();
+            let skill = BundleId::parse(SKILL).unwrap();
 
             authority
                 .seed_workspace(&ws, "Acme", "verified", "cloud")

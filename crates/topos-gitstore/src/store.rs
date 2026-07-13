@@ -65,7 +65,7 @@ impl WriteBatch {
     }
 }
 
-/// A path-parameterized embedded-git object store (one bare repo per skill).
+/// A path-parameterized embedded-git object store (one bare repo per caller-chosen scope: the client keeps one per bundle, the plane one per workspace).
 #[derive(Debug)]
 pub struct Store {
     repo: gix::Repository,
@@ -73,7 +73,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Initialize a fresh **bare** repo at `git_dir` (no worktree, no index — the harness skill dir
+    /// Initialize a fresh **bare** repo at `git_dir` (no worktree, no index — the harness placement dir
     /// stays plain files with no `.git`).
     ///
     /// # Errors

@@ -23,7 +23,7 @@ use crate::governance::{
     ApproveStandupOutcome, CreateWorkspaceOutcome, GovernanceOp, GovernanceOutcome,
     GovernanceRequest, MintClaimOutcome,
 };
-use crate::id::{CommitId, ObjectId, OpId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, OpId, Principal, WorkspaceId};
 use crate::lineage::{CandidateCommit, LineageDecision};
 use crate::read::{CurrentPointer, OpenProposalSummary, ReadScope, VersionMeta};
 use crate::session_read::SkillIndexRow;
@@ -205,7 +205,7 @@ impl Authority {
         &self,
         principal: &Principal,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         object_id: ObjectId,
     ) -> Result<Vec<u8>> {
         crate::read::read_object(self, principal, ws, skill, object_id).await
@@ -232,7 +232,7 @@ impl Authority {
         credential: &str,
     ) -> Result<ReadScope> {
         let ws = WorkspaceId::parse(ws).map_err(|_| AuthorityError::NotFound)?;
-        let skill = SkillId::parse(skill).map_err(|_| AuthorityError::NotFound)?;
+        let skill = BundleId::parse(skill).map_err(|_| AuthorityError::NotFound)?;
         crate::enroll::resolve_read_scope(self, ws, skill, credential).await
     }
 
@@ -314,7 +314,7 @@ impl Authority {
     pub async fn check_lineage(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         candidates: &[CandidateCommit],
     ) -> Result<LineageDecision> {
         crate::lineage::check_lineage(self, ws, skill, candidates).await
@@ -333,7 +333,7 @@ impl Authority {
     async fn resolve_device_op(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         op_id: &OpId,
         auth: &crate::set_current::DeviceOpAuth,
         created_at: &str,
@@ -373,7 +373,7 @@ impl Authority {
     /// review-required preflight agree).
     fn synthesized_device_denied(
         &self,
-        skill: &SkillId,
+        skill: &BundleId,
         op_id: &OpId,
         auth: &crate::set_current::DeviceOpAuth,
         created_at: &str,
@@ -381,7 +381,7 @@ impl Authority {
         SetCurrentReceipt {
             op_id: op_id.as_str().to_owned(),
             command: crate::set_current::device_op_command(auth.op).to_owned(),
-            skill_id: skill.as_str().to_owned(),
+            bundle_id: skill.as_str().to_owned(),
             version_id: None,
             bundle_digest: None,
             expected: auth.expected,
@@ -413,7 +413,7 @@ impl Authority {
     pub async fn publish(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         op_id: &OpId,
         candidate: CandidateUpload,
         auth: DeviceOpAuth,
@@ -467,7 +467,7 @@ impl Authority {
     pub async fn revert(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         good: CommitId,
         auth: DeviceOpAuth,
         author: &str,
@@ -534,7 +534,7 @@ impl Authority {
     pub async fn propose(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         op_id: &OpId,
         candidate: CandidateUpload,
         auth: DeviceOpAuth,
@@ -609,7 +609,7 @@ impl Authority {
     pub async fn review_approve(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         auth: DeviceOpAuth,
         op_id: &OpId,
@@ -664,7 +664,7 @@ impl Authority {
     pub async fn review_reject(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         auth: DeviceOpAuth,
         reason: &str,
@@ -698,7 +698,7 @@ impl Authority {
             return Ok(SetCurrentReceipt {
                 op_id: op_id.as_str().to_owned(),
                 command: crate::set_current::device_op_command(device.op).to_owned(),
-                skill_id: skill.as_str().to_owned(),
+                bundle_id: skill.as_str().to_owned(),
                 version_id: Some(commit),
                 bundle_digest: None,
                 expected: device.expected,
@@ -740,7 +740,7 @@ impl Authority {
     pub async fn review_withdraw(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         commit: CommitId,
         auth: DeviceOpAuth,
         op_id: &OpId,
@@ -804,7 +804,7 @@ impl Authority {
     pub async fn review_approve_session(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         candidate: CommitId,
         expected: topos_types::Generation,
         request_id: &str,
@@ -839,7 +839,7 @@ impl Authority {
     pub async fn review_reject_session(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         candidate: CommitId,
         expected: topos_types::Generation,
         reason: &str,
@@ -880,7 +880,7 @@ impl Authority {
     pub async fn revert_session(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         good: CommitId,
         expected: topos_types::Generation,
         request_id: &str,

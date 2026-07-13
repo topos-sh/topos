@@ -12,7 +12,7 @@ use crate::store::Store;
 use crate::{GIT_OID_LEN, VERSION_REF_PREFIX};
 
 /// The maximum directory nesting `render_verified` will follow — a forged store can't overflow the stack.
-/// Far beyond any real skill bundle's depth.
+/// Far beyond any real bundle's depth.
 const MAX_TREE_DEPTH: usize = 64;
 
 /// One file rendered out of the store, with its content sha256 recomputed from the raw bytes.
@@ -42,7 +42,7 @@ pub struct TreeLeaf {
     pub git_oid: [u8; GIT_OID_LEN],
 }
 
-/// One node of per-skill history (for `log`): the version, its parents, and the commit's display
+/// One node of per-bundle history (for `log`): the version, its parents, and the commit's display
 /// author + message. Author/message are read from the git commit for **display only** — they are not the
 /// consent-critical path (that is `bundle_digest`, re-verified in [`Store::render_verified`]).
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ impl Store {
     /// Resolves the version's commit, walks its tree re-hashing each blob through the kernel sha256
     /// (never trusting gix's object id), and returns the bytes of the entry whose recomputed hash
     /// equals `object_id` — the hash match **is** the verification, so a corrupted or forged blob can
-    /// never be returned. The plane drives this only *after* its skill-scoped authorization has
+    /// never be returned. The plane drives this only *after* its bundle-scoped authorization has
     /// produced a witness version that provenance says reaches `object_id`; there is no read-by-bare-
     /// hash path. Keying retrieval on the content sha256 keeps a future size-routed large-object store
     /// a one-branch change here, with no change to identity, the database, or this signature.

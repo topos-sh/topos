@@ -10,7 +10,7 @@
 
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, OpId, Principal, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, OpId, Principal, WorkspaceId};
 use crate::set_current::{DeviceOp, DeviceOpAuth, SetCurrentReceipt};
 
 impl Authority {
@@ -18,7 +18,7 @@ impl Authority {
     ///
     /// # Errors
     /// [`AuthorityError::Internal`] on a database fault.
-    pub async fn seed_catalog(&self, ws: &WorkspaceId, skill: &SkillId, name: &str) -> Result<()> {
+    pub async fn seed_catalog(&self, ws: &WorkspaceId, skill: &BundleId, name: &str) -> Result<()> {
         self.db().seed_catalog(ws, skill, name).await
     }
 
@@ -29,7 +29,7 @@ impl Authority {
     pub async fn seed_follow(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         principal: &Principal,
     ) -> Result<()> {
         self.db().seed_follow(ws, skill, principal).await
@@ -130,7 +130,7 @@ impl Authority {
     pub async fn seed_published_genesis(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         credential: &str,
         op_id: &OpId,
         files: Vec<crate::UploadedFile>,
@@ -178,7 +178,7 @@ impl Authority {
     pub async fn seed_published_child(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         credential: &str,
         op_id: &OpId,
         parent: CommitId,
@@ -226,7 +226,7 @@ impl Authority {
     pub async fn force_current_record(
         &self,
         ws: &WorkspaceId,
-        skill: &SkillId,
+        skill: &BundleId,
         bytes: &[u8],
     ) -> Result<()> {
         self.db().force_current_record(ws, skill, bytes).await

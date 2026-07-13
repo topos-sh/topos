@@ -48,7 +48,7 @@ const MIN_MARKER_LEN: usize = 7;
 /// The ceiling on conflict-marker length. `diffy` emits the full marker length × 4 per conflict hunk, so an
 /// unbounded marker length (driven by a marker-char run in the attacker-controlled `theirs`) is a
 /// super-linear allocation blowup. Beyond this, the content is pathological — refuse to line-merge it
-/// (the caller keeps both sides) rather than emit a huge or forgeable marker. No real skill file has a
+/// (the caller keeps both sides) rather than emit a huge or forgeable marker. No real bundle file has a
 /// 256-char run of `<`/`|`/`=`/`>` at a line start.
 const MAX_MARKER_LEN: usize = 256;
 

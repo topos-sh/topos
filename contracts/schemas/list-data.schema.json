@@ -115,6 +115,11 @@
             "null"
           ]
         },
+        "kind": {
+          "description": "The catalog's bundle kind (`\"skill\"` for everything today) — display metadata, never branched\non. Additive: an older plane omits it.",
+          "type": "string",
+          "default": "skill"
+        },
         "open_proposals": {
           "description": "Open, non-stale proposal count on the skill.",
           "type": "integer",

@@ -460,6 +460,7 @@ fn build_remote(
             out.push(RemoteSkillEntry {
                 skill_id: entry.skill_id.clone(),
                 workspace_id: ws_id.to_owned(),
+                kind: entry.kind.clone(),
                 display_name: entry.display_name.clone(),
                 version_id: entry.version_id.clone(),
                 bundle_digest: entry.bundle_digest.clone(),
@@ -790,6 +791,7 @@ mod tests {
         WireSkillIndexEntry {
             skill_id: skill_id.to_owned(),
             name: skill_id.to_owned(),
+            kind: "skill".to_owned(),
             status: "active".to_owned(),
             version_id: hex(version),
             bundle_digest: hex(DIGEST),

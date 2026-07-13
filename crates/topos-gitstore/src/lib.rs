@@ -1,6 +1,6 @@
 //! `topos-gitstore` — the shared dumb `gix` object/byte layer.
 //!
-//! A path-**parameterized** embedded-git store (one bare repo per skill): import a bundle of files as
+//! A path-**parameterized** embedded-git store (one bare repo per caller-chosen scope — the client keeps one per bundle, the plane one per workspace): import a bundle of files as
 //! real content-addressed git objects, snapshot it as a commit, render it back, and walk its history.
 //! It depends only on `topos-core` (the trust kernel) + `topos-types` + `gix`, holds **no `~/.topos/`
 //! policy and no access control**, and is shared by the client today (the plane later).
@@ -11,7 +11,7 @@
 //! sha256, computed by the kernel:
 //! - `blob_id      = sha256(raw file bytes)`            (the byte-exact unit; no Git-LFS pointer files)
 //! - `bundle_digest = sha256(canonical manifest)`        (the unit of consent — [`topos_core::digest`])
-//! - `version_id    = sha256(canonical commit frame)`    (the user-facing `<skill>@<version_id>` — [`topos_core::identity`])
+//! - `version_id    = sha256(canonical commit frame)`    (the user-facing `<name>@<version_id>` pin — [`topos_core::identity`])
 //!
 //! The `version_id -> git commit` map **is** a ref name (`refs/topos/versions/<version_id_hex>`) — no
 //! second index to keep crash-safe. [`Store::commit`] re-derives the `version_id` from its arguments

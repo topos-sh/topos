@@ -20,7 +20,7 @@ pub enum AuthorityError {
     NotFound,
 
     /// An upload was refused: the uploading principal is not rostered for the target skill, or the
-    /// candidate would adopt a commit already owned by another skill.
+    /// candidate would adopt a commit already owned by another bundle.
     #[error("denied")]
     Denied,
 

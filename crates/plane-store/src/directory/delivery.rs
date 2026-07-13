@@ -14,7 +14,7 @@ use topos_types::Generation;
 use crate::Authority;
 use crate::db::custody::witness::AccessWitness;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, WorkspaceId};
 
 /// One skill this device should have — catalog identity, the pinned current version, the resolved
 /// protection posture, and the `via` attribution the narration uses.
@@ -23,6 +23,8 @@ pub struct DeliveredSkill {
     pub skill_id: String,
     /// The catalog's user-facing name (the on-disk directory name for a fresh install).
     pub name: String,
+    /// The catalog's bundle kind (`"skill"` today) — display metadata, no reader branches on it.
+    pub kind: String,
     pub display_name: Option<String>,
     /// `"open"` / `"reviewed"` — the resolved per-bundle cascade (the client's publish preflight
     /// posture; the server re-decides authoritatively on every write).
@@ -82,7 +84,7 @@ pub struct Delivery {
 /// One applied-state report row: what this device holds for a skill after its reconcile.
 #[derive(Debug, Clone)]
 pub struct AppliedSkill {
-    pub skill_id: SkillId,
+    pub skill_id: BundleId,
     pub version_id: CommitId,
 }
 
@@ -104,6 +106,8 @@ struct WireDeliveryBody {
 struct WireSkillEntry {
     skill_id: String,
     name: String,
+    #[serde(default = "default_bundle_kind")]
+    kind: String,
     #[serde(default)]
     display_name: Option<String>,
     protection: String,
@@ -112,6 +116,11 @@ struct WireSkillEntry {
     generation: Generation,
     updated_at: i64,
     via: WireViaEntry,
+}
+
+/// The wire fallback for a producer predating the catalog `kind` (everything it serves is a skill).
+fn default_bundle_kind() -> String {
+    "skill".to_owned()
 }
 
 #[derive(Deserialize)]
@@ -183,6 +192,7 @@ pub(crate) async fn delivery(
             Ok(DeliveredSkill {
                 skill_id: s.skill_id,
                 name: s.name,
+                kind: s.kind,
                 display_name: s.display_name,
                 protection: s.protection,
                 version_id: hex32(&s.version_id)?,

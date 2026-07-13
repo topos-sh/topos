@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plane_store::{CommitId, DeviceOp, DeviceOpAuth, SkillId, WorkspaceId};
+use plane_store::{BundleId, CommitId, DeviceOp, DeviceOpAuth, WorkspaceId};
 use topos_types::JsonEnvelope;
 use topos_types::requests::RevertRequest;
 
@@ -37,7 +37,7 @@ pub(crate) async fn revert(
     let credential = wire::bearer_token(&headers)?;
     let ws =
         WorkspaceId::parse(&req.workspace_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-    let skill = SkillId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
+    let skill = BundleId::parse(&req.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
     let op_id = wire::parse_op_id(&req.op_id)?;
     let good = wire::hex32(&req.good)
         .map(CommitId)

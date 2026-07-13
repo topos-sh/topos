@@ -6,7 +6,7 @@ const OP_G: &str = "0e000000-0000-4000-8000-000000000001";
 const OP_C: &str = "0e000000-0000-4000-8000-000000000002";
 
 /// Publish a genesis + one child through the real pointer-move, landing `current` at `(1, 2)`.
-async fn genesis_and_child(fx: &Fixture, w: &WorkspaceId, s: &SkillId) -> CommitId {
+async fn genesis_and_child(fx: &Fixture, w: &WorkspaceId, s: &BundleId) -> CommitId {
     let key = dev_key(0xE1);
     register(fx, w, s, "dk_r", &key, "p_op").await;
     let g = publish(
@@ -51,7 +51,7 @@ async fn bump_rewrites_current_same_commit(pool: PgPool) {
     assert_eq!(reports.len(), 1);
     let r = &reports[0];
     assert_eq!(r.workspace_id, w);
-    assert_eq!(r.skill_id, s);
+    assert_eq!(r.bundle_id, s);
     assert_eq!(r.commit, c2, "the bump never changes the named commit");
     assert_eq!(r.old, gn(1, 2));
     assert_eq!(r.new, gn(2, 2), "epoch bumps by one; seq is preserved");

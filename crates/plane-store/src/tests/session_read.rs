@@ -21,7 +21,7 @@ async fn seat(fx: &Fixture, w: &WorkspaceId, email: &str, role: &str) {
 async fn published_skill(
     fx: &Fixture,
     w: &WorkspaceId,
-    s: &SkillId,
+    s: &BundleId,
     key: &[u8; 32],
     op_id: &str,
     body: &[u8],

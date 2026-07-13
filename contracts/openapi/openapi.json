@@ -4958,6 +4958,10 @@
             "$ref": "#/components/schemas/Generation",
             "description": "The `current` pointer's `(epoch, seq)`."
           },
+          "kind": {
+            "type": "string",
+            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `protection`).\nAdditive: an older producer that omits it is serving skills."
+          },
           "name": {
             "type": "string",
             "description": "The catalog's user-facing name (the on-disk directory name for a fresh install)."
@@ -5482,6 +5486,10 @@
             "$ref": "#/components/schemas/Generation",
             "description": "The `current` pointer's `(epoch, seq)`."
           },
+          "kind": {
+            "type": "string",
+            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `status`).\nAdditive: an older producer that omits it is serving skills."
+          },
           "name": {
             "type": "string",
             "description": "The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id)."
@@ -5528,6 +5536,10 @@
               "null"
             ],
             "description": "The pre-archive name, when archived (what the skill was called before the rename freed it)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it. Additive: an older producer omits it."
           },
           "name": {
             "type": "string",

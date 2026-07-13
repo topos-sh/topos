@@ -23,7 +23,7 @@ async fn resolve_read_scope_resolves_a_scope_and_a_miss_is_notfound(pool: PgPool
         .await
         .unwrap();
     assert_eq!(scope.ws().as_str(), "w_acme");
-    assert_eq!(scope.skill().as_str(), "s_pr");
+    assert_eq!(scope.bundle().as_str(), "s_pr");
     assert_eq!(scope.principal().as_str(), "dev_read");
 
     // An unknown credential is the single indistinguishable not-found (a caller cannot probe what exists).

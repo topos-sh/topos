@@ -8,7 +8,7 @@
 //! `bundle_digest`, or any `version_id` — offload is a pure placement change, client-invisible.
 //!
 //! This is a **dumb byte layer**: content-addressed `put`/`get`/`exists`/`delete`, verify-on-read, and a
-//! crash-safe two-phase install. It holds **no access control and no database** — the skill-scoped access
+//! crash-safe two-phase install. It holds **no access control and no database** — the bundle-scoped access
 //! rule and the `object_presence.location` dispatch live in the authority crate (`plane-store`), which
 //! constructs **one [`LocalLargeStore`] per workspace** (rooted at a per-workspace directory) so
 //! cross-workspace isolation is the path itself, never a shared store. The deferred remote backend (an

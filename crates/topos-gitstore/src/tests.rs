@@ -59,7 +59,7 @@ fn round_trip_preserves_every_byte_for_nested_and_empty_and_binary() {
     // A deterministic fuzz over many bundles: varied file counts, nested paths, both modes, and content
     // that includes empty files and arbitrary (incl. high/NUL) bytes. put -> render must be byte-identical.
     let path_pool: &[&str] = &[
-        "SKILL.md",
+        "GUIDE.md",
         "a.txt",
         "scripts/run.sh",
         "scripts/lib/util.sh",
@@ -127,9 +127,9 @@ fn read_object_in_version_returns_verified_bytes_and_typed_misses() {
     let store = Store::init(&scratch.0).expect("init");
     let files = [
         ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
-            bytes: b"# skill\n",
+            bytes: b"# guide\n",
         },
         ImportFile {
             path: "scripts/run.sh",
@@ -182,7 +182,7 @@ fn a_manifest_valued_file_is_not_addressable_as_the_version_or_digest_it_renders
     let scratch = Scratch::new("idspace");
     let store = Store::init(&scratch.0).expect("init");
     let a_files = [ImportFile {
-        path: "SKILL.md",
+        path: "GUIDE.md",
         mode: FileMode::Regular,
         bytes: b"# the described bundle\n",
     }];
@@ -244,7 +244,7 @@ fn first_parent_lineage_and_missing_parent() {
 
     // genesis
     let f1 = [ImportFile {
-        path: "SKILL.md",
+        path: "GUIDE.md",
         mode: FileMode::Regular,
         bytes: b"v1\n",
     }];
@@ -253,7 +253,7 @@ fn first_parent_lineage_and_missing_parent() {
     // child of genesis (a new version with the genesis as parents[0])
     let th2 = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"v2\n",
         }])
@@ -287,7 +287,7 @@ fn first_parent_lineage_and_missing_parent() {
     // committing against an unknown parent fails typed (never silently orphaned).
     let th3 = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"v3\n",
         }])
@@ -315,14 +315,14 @@ fn read_commit_meta_reads_exact_metadata_and_fails_on_an_unmapped_parent() {
     let (vid1, _bd1) = commit_genesis(
         &store,
         &[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"v1\n",
         }],
     );
     let th2 = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"v2\n",
         }])
@@ -374,7 +374,7 @@ fn commit_refuses_a_lying_version_id() {
     let store = Store::init(&scratch.0).expect("init");
     let th = store
         .write_bundle(&[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"hi\n",
         }])
@@ -395,7 +395,7 @@ fn verify_rejects_a_swapped_tree_under_a_versions_ref() {
     let (vid, bd) = commit_genesis(
         &store,
         &[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"original\n",
         }],
@@ -404,7 +404,7 @@ fn verify_rejects_a_swapped_tree_under_a_versions_ref() {
     assert!(store.render_verified(vid, bd).is_ok());
 
     // Forge a different-content tree + commit, then aim vid's ref at it.
-    let forged_tree = forge_tree(&store, b"SKILL.md", EntryKind::Blob, b"TAMPERED\n");
+    let forged_tree = forge_tree(&store, b"GUIDE.md", EntryKind::Blob, b"TAMPERED\n");
     let forged_commit = forge_commit(&store, forged_tree);
     force_version_ref(&store, vid, forged_commit);
 
@@ -424,7 +424,7 @@ fn verify_rejects_a_corrupted_loose_object() {
     let (vid, bd) = commit_genesis(
         &store,
         &[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"some content to corrupt\n",
         }],
@@ -496,7 +496,7 @@ fn durability_set_names_the_whole_store_not_just_objects() {
     commit_genesis(
         &store,
         &[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"x\n",
         }],
@@ -565,7 +565,7 @@ fn version_durability_names_exactly_the_versions_objects() {
     let (v1, _d1) = commit_genesis(
         &store,
         &[ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"# v1\n",
         }],
@@ -575,7 +575,7 @@ fn version_durability_names_exactly_the_versions_objects() {
     // v2: a child of v1 with all-new content, including a nested path (so a subtree object is written).
     let files = [
         ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
             bytes: b"# v2\n",
         },
@@ -663,9 +663,9 @@ fn fence_stage_install_commit_render_and_delete() {
     let main = Store::init(&main_scratch.0).expect("init main");
     let files = [
         ImportFile {
-            path: "SKILL.md",
+            path: "GUIDE.md",
             mode: FileMode::Regular,
-            bytes: b"# skill\n",
+            bytes: b"# guide\n",
         },
         ImportFile {
             path: "scripts/run.sh",
@@ -732,7 +732,7 @@ fn install_refuses_a_corrupted_staged_object() {
     let q_scratch = Scratch::new("fence-corrupt-q");
     let main = Store::init(&main_scratch.0).expect("init main");
     let files = [ImportFile {
-        path: "SKILL.md",
+        path: "GUIDE.md",
         mode: FileMode::Regular,
         bytes: b"content to corrupt in quarantine\n",
     }];

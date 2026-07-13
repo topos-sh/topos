@@ -10,7 +10,8 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
 
 ## Implemented (each behind a test in `src/tests.rs`)
 
-- `Store::{init, open}` — one **bare** repo per skill (no worktree/index).
+- `Store::{init, open}` — one **bare** repo per store path (no worktree/index): the crate is
+  path-parameterized and bundle-generic, so the client keeps one repo per bundle, the plane one per workspace.
 - `write_bundle` — validate every path through the kernel, write one real content-addressed git blob per
   file (no size cap, **no LFS pointer files**), build a tree mirroring paths + modes; returns the kernel
   `bundle_digest`.
@@ -27,7 +28,7 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
 - `read_object_in_version` — read + verify **one** object's bytes from a version by its content id: walk
   the version's tree, re-hash each blob, return the one whose sha256 matches (the match **is** the
   verification); a content id absent from that tree is the typed `ObjectNotInVersion`. The plane's
-  skill-scoped read drives this *after* authorization yields a witness version — there is **no**
+  bundle-scoped read drives this *after* authorization yields a witness version — there is **no**
   read-by-bare-hash path. (The git-resident / all-in-git read path; the authority's location-dispatching
   read handles an offloaded object — see the two primitives below.)
 - `read_tree_structure` — recover a version's tree **structure** (`path, mode, git_oid` per file) **without

@@ -1,7 +1,7 @@
 //! The one pointer-move write — `set-current` (publish · genesis · revert), the orchestration half.
 //!
 //! `publish`, `revert`, and (later) `review --approve` are three intents, **one** operation: advance the
-//! per-skill `current` pointer by exactly one `(epoch, seq)` step, under a compare-and-set, re-rooting
+//! per-bundle `current` pointer by exactly one `(epoch, seq)` step, under a compare-and-set, re-rooting
 //! the migrated bytes — all in one serializable, pure-DB transaction. This module
 //! does the work that happens **outside** that transaction (no filesystem op may run inside it): it
 //! re-verifies the migrated candidate is renderable, derives the candidate's object set, and — for a revert
@@ -17,7 +17,7 @@ use topos_types::{Generation, TerminalOutcome};
 use crate::actor::WriteActor;
 use crate::authority::Authority;
 use crate::error::{AuthorityError, Result};
-use crate::id::{CommitId, ObjectId, OpId, SkillId, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, OpId, WorkspaceId};
 use crate::lifecycle::{self, StagedCandidate};
 
 /// The pointer-move operations — the server's op vocabulary. Dispatches the transaction's op tail and
@@ -94,8 +94,8 @@ pub struct SetCurrentReceipt {
     /// The canonical command this op carried (`publish-direct` / `publish-propose` / `revert` /
     /// `review-approve` / `review-reject`) — part of the bound identity a same-`op_id` retry must match.
     pub command: String,
-    /// The skill the op targets — part of the bound identity.
-    pub skill_id: String,
+    /// The bundle the op targets — part of the bound identity.
+    pub bundle_id: String,
     /// The candidate's server-rehashed version id. `None` for an outcome that ingested no version (a
     /// rejected key-reuse, or a pre-ingest typed failure), never a client-claimed value.
     pub version_id: Option<CommitId>,
@@ -130,7 +130,7 @@ impl SetCurrentReceipt {
 /// scope), never a client claim.
 pub(crate) struct PromoteInput<'a> {
     pub ws: &'a WorkspaceId,
-    pub skill: &'a SkillId,
+    pub bundle: &'a BundleId,
     pub op_id: &'a str,
     /// Which lane the request arrived on — the txn body branches on it ONLY at its authz step.
     pub actor: WriteActor<'a>,
@@ -140,7 +140,7 @@ pub(crate) struct PromoteInput<'a> {
     pub candidate_bundle_digest: [u8; 32],
     pub parents: &'a [CommitId],
     pub object_ids: &'a [ObjectId],
-    /// The skill's advisory display name (`None` ⇒ keep any existing name). UNSIGNED — never in the
+    /// The bundle's advisory display name (`None` ⇒ keep any existing name). UNSIGNED — never in the
     /// device-op preimage or the bundle digest; recorded on the CATALOG row (and, at a genesis, it
     /// seeds the catalog name).
     pub display_name: Option<&'a str>,
@@ -162,7 +162,7 @@ pub(crate) struct PromoteInput<'a> {
 pub(crate) async fn publish(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     staged: &StagedCandidate,
     device: &DeviceOpRequest,
     display_name: Option<&str>,
@@ -182,7 +182,7 @@ pub(crate) async fn publish(
         authority,
         Candidate {
             ws,
-            skill,
+            bundle,
             op_id: &staged.op_id,
             commit: staged.version_id,
             bundle_digest: staged.bundle_digest,
@@ -208,7 +208,7 @@ pub(crate) async fn publish(
 pub(crate) async fn reject_non_publish_op(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     op_id: &OpId,
     device: &DeviceOpRequest,
     created_at: &str,
@@ -220,7 +220,7 @@ pub(crate) async fn reject_non_publish_op(
             &device.device_key_id,
             op_id.as_str(),
             device_op_command(device.op),
-            skill,
+            bundle,
             None,
             None,
             device.expected,
@@ -250,7 +250,7 @@ pub(crate) async fn reject_non_publish_op(
 pub(crate) async fn revert(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     good: CommitId,
     actor: WriteActor<'_>,
     expected: Generation,
@@ -263,12 +263,12 @@ pub(crate) async fn revert(
     let command = device_op_command(DeviceOp::Revert);
 
     // good's tree digest (recorded on its provenance row; render needs a KNOWN digest, so it cannot
-    // discover this) + its purge tombstone, SCOPED TO THIS SKILL — reverting to another skill's commit is
-    // refused here, so the forward commit can never graft a foreign tree under this skill.
+    // discover this) + its purge tombstone, SCOPED TO THIS BUNDLE — reverting to another bundle's commit is
+    // refused here, so the forward commit can never graft a foreign tree under this bundle.
     // Absent/legacy/foreign ⇒ refused.
     let Some((good_digest, good_purged_at)) = authority
         .db()
-        .skill_commit_digest_and_purge(ws, skill, good)
+        .commit_digest_and_purge(ws, bundle, good)
         .await?
     else {
         return pretxn_fail(
@@ -277,7 +277,7 @@ pub(crate) async fn revert(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(good),
             None,
             expected,
@@ -291,7 +291,7 @@ pub(crate) async fn revert(
     // Idempotent replay BEFORE rebuilding the forward commit. The forward commit re-parents on the LIVE
     // `current`, so after the first revert commits a retry would derive a DIFFERENT commit id, and the
     // in-transaction replay (which compares the commit) would burn the op as OP_ID_REUSED rather than
-    // replaying the original OK. Keying on the stable (command, skill, target digest, expected) replays it —
+    // replaying the original OK. Keying on the stable (command, bundle, target digest, expected) replays it —
     // per lane: the device slot by device key id, the session slot by acting email + `request_sha256`.
     let replayed = match &actor {
         WriteActor::Device { device_key_id, .. } => {
@@ -301,7 +301,7 @@ pub(crate) async fn revert(
                     ws,
                     device_key_id,
                     op_id.as_str(),
-                    skill,
+                    bundle,
                     good_digest,
                     expected,
                 )
@@ -317,7 +317,7 @@ pub(crate) async fn revert(
                     ws,
                     acting.as_str(),
                     op_id.as_str(),
-                    skill,
+                    bundle,
                     good_digest,
                     expected,
                     *request_sha256,
@@ -341,7 +341,7 @@ pub(crate) async fn revert(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(good),
             Some(good_digest),
             expected,
@@ -353,19 +353,19 @@ pub(crate) async fn revert(
     }
 
     // The current pointer is the forward commit's first parent.
-    let Some(current) = authority.db().read_current_commit(ws, skill).await? else {
+    let Some(current) = authority.db().read_current_commit(ws, bundle).await? else {
         return pretxn_fail(
             authority,
             &actor,
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             None,
             None,
             expected,
             TerminalOutcome::PermanentFailure,
-            detail_msg("cannot revert a skill with no current pointer"),
+            detail_msg("cannot revert a bundle with no current pointer"),
             created_at,
         )
         .await;
@@ -376,7 +376,7 @@ pub(crate) async fn revert(
     let object_ids = authority.db().commit_object_ids(ws, good).await?;
 
     // A revert may target ONLY an ACCEPTED version — one rooted on `commit_object`. `propose` records a
-    // `skill_commit` provenance row (+ digest) for its candidate but roots its bytes via `proposal_object`,
+    // provenance row (+ digest) for its candidate but roots its bytes via `proposal_object`,
     // NEVER `commit_object` — so an empty trunk object set means `good` is a proposal (or otherwise
     // un-accepted) commit. Forward-promoting its tree would smuggle un-reviewed bytes past the review gate +
     // four-eyes (revert bypasses both) and strand `current` over immediately-GC-reclaimable bytes (the forward
@@ -389,7 +389,7 @@ pub(crate) async fn revert(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(good),
             Some(good_digest),
             expected,
@@ -445,13 +445,13 @@ pub(crate) async fn revert(
         authority,
         Candidate {
             ws,
-            skill,
+            bundle,
             op_id,
             commit: CommitId(version_id),
             bundle_digest: good_digest,
             parents: &parents,
             object_ids: &object_ids,
-            // A revert restores prior bytes; it never renames or re-places the skill.
+            // A revert restores prior bytes; it never renames or re-places the bundle.
             display_name: None,
             channel: None,
         },
@@ -469,7 +469,7 @@ pub(crate) async fn revert(
 /// scope), never a client claim.
 pub(crate) struct RejectInput<'a> {
     pub ws: &'a WorkspaceId,
-    pub skill: &'a SkillId,
+    pub bundle: &'a BundleId,
     pub commit: CommitId,
     pub bundle_digest: [u8; 32],
     /// Which lane the request arrived on — `reject_run` branches on it ONLY at its authz step.
@@ -492,7 +492,7 @@ pub(crate) struct RejectInput<'a> {
 pub(crate) async fn propose(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     staged: &StagedCandidate,
     device: &DeviceOpRequest,
     display_name: Option<&str>,
@@ -509,7 +509,7 @@ pub(crate) async fn propose(
         authority,
         Candidate {
             ws,
-            skill,
+            bundle,
             op_id: &staged.op_id,
             commit: staged.version_id,
             bundle_digest: staged.bundle_digest,
@@ -543,7 +543,7 @@ pub(crate) async fn propose(
 pub(crate) async fn review_approve(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     commit: CommitId,
     actor: WriteActor<'_>,
     expected: Generation,
@@ -555,11 +555,11 @@ pub(crate) async fn review_approve(
     let command = device_op_command(DeviceOp::ReviewApprove);
 
     // The proposal commit's recorded digest (server-trusted, written at propose) — needed to bound the
-    // receipt and render. Absent ⇒ this skill has no such commit ⇒ a typed permanent failure (there is
+    // receipt and render. Absent ⇒ this bundle has no such commit ⇒ a typed permanent failure (there is
     // nothing to approve).
     let Some(digest) = authority
         .db()
-        .skill_commit_bundle_digest(ws, skill, commit)
+        .commit_bundle_digest(ws, bundle, commit)
         .await?
     else {
         return pretxn_fail(
@@ -568,12 +568,12 @@ pub(crate) async fn review_approve(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             None,
             base,
             TerminalOutcome::PermanentFailure,
-            detail_msg("no such proposal commit for this skill"),
+            detail_msg("no such proposal commit for this bundle"),
             created_at,
         )
         .await;
@@ -583,7 +583,7 @@ pub(crate) async fn review_approve(
     // of this candidate+base ever existed ⇒ a typed permanent failure.
     let Some(inputs) = authority
         .db()
-        .proposal_approve_inputs(ws, skill, commit, base)
+        .proposal_approve_inputs(ws, bundle, commit, base)
         .await?
     else {
         return pretxn_fail(
@@ -592,7 +592,7 @@ pub(crate) async fn review_approve(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             Some(digest),
             base,
@@ -610,7 +610,7 @@ pub(crate) async fn review_approve(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             Some(digest),
             base,
@@ -630,10 +630,10 @@ pub(crate) async fn review_approve(
     // and the transaction returns DENIED/CONFLICT): fall through and let the transaction produce that typed,
     // receipted outcome, never a misleading Integrity 500 for a normal approve-after-reject or stale approve.
     if let Err(e) = crate::read::render_version(authority, ws, commit.0, digest).await {
-        let live = authority.db().read_current_generation(ws, skill).await? == Some(base);
+        let live = authority.db().read_current_generation(ws, bundle).await? == Some(base);
         let open = authority
             .db()
-            .open_proposal_exists(ws, skill, commit, base)
+            .open_proposal_exists(ws, bundle, commit, base)
             .await?;
         if live && open {
             return Err(e);
@@ -642,7 +642,7 @@ pub(crate) async fn review_approve(
 
     let input = PromoteInput {
         ws,
-        skill,
+        bundle,
         op_id: op_id.as_str(),
         actor,
         op: DeviceOp::ReviewApprove,
@@ -667,7 +667,7 @@ pub(crate) async fn review_approve(
 pub(crate) async fn review_reject(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     commit: CommitId,
     actor: WriteActor<'_>,
     expected: Generation,
@@ -678,7 +678,7 @@ pub(crate) async fn review_reject(
     let command = device_op_command(DeviceOp::ReviewReject);
     let Some(digest) = authority
         .db()
-        .skill_commit_bundle_digest(ws, skill, commit)
+        .commit_bundle_digest(ws, bundle, commit)
         .await?
     else {
         return pretxn_fail(
@@ -687,12 +687,12 @@ pub(crate) async fn review_reject(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             None,
             expected,
             TerminalOutcome::PermanentFailure,
-            detail_msg("no such proposal commit for this skill"),
+            detail_msg("no such proposal commit for this bundle"),
             created_at,
         )
         .await;
@@ -704,7 +704,7 @@ pub(crate) async fn review_reject(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             Some(digest),
             expected,
@@ -718,7 +718,7 @@ pub(crate) async fn review_reject(
         .db()
         .review_reject_txn(RejectInput {
             ws,
-            skill,
+            bundle,
             commit,
             bundle_digest: digest,
             actor,
@@ -739,7 +739,7 @@ pub(crate) async fn review_reject(
 pub(crate) async fn review_withdraw(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     commit: CommitId,
     actor: WriteActor<'_>,
     expected: Generation,
@@ -749,7 +749,7 @@ pub(crate) async fn review_withdraw(
     let command = device_op_command(DeviceOp::ReviewWithdraw);
     let Some(digest) = authority
         .db()
-        .skill_commit_bundle_digest(ws, skill, commit)
+        .commit_bundle_digest(ws, bundle, commit)
         .await?
     else {
         return pretxn_fail(
@@ -758,12 +758,12 @@ pub(crate) async fn review_withdraw(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             None,
             expected,
             TerminalOutcome::PermanentFailure,
-            detail_msg("no such proposal commit for this skill"),
+            detail_msg("no such proposal commit for this bundle"),
             created_at,
         )
         .await;
@@ -775,7 +775,7 @@ pub(crate) async fn review_withdraw(
             ws,
             op_id.as_str(),
             command,
-            skill,
+            bundle,
             Some(commit),
             Some(digest),
             expected,
@@ -789,7 +789,7 @@ pub(crate) async fn review_withdraw(
         .db()
         .review_reject_txn(RejectInput {
             ws,
-            skill,
+            bundle,
             commit,
             bundle_digest: digest,
             actor,
@@ -814,7 +814,7 @@ async fn pretxn_fail(
     ws: &WorkspaceId,
     op_id: &str,
     command: &str,
-    skill: &SkillId,
+    bundle: &BundleId,
     commit: Option<CommitId>,
     bundle_digest: Option<[u8; 32]>,
     expected: Generation,
@@ -831,7 +831,7 @@ async fn pretxn_fail(
                     device_key_id,
                     op_id,
                     command,
-                    skill,
+                    bundle,
                     commit,
                     bundle_digest,
                     expected,
@@ -844,7 +844,7 @@ async fn pretxn_fail(
         WriteActor::Session { .. } => Ok(SetCurrentReceipt {
             op_id: op_id.to_owned(),
             command: command.to_owned(),
-            skill_id: skill.as_str().to_owned(),
+            bundle_id: bundle.as_str().to_owned(),
             version_id: commit,
             bundle_digest,
             expected,
@@ -863,7 +863,7 @@ async fn pretxn_fail(
 pub(crate) async fn reject_op_mismatch(
     authority: &Authority,
     ws: &WorkspaceId,
-    skill: &SkillId,
+    bundle: &BundleId,
     op_id: &OpId,
     device: &DeviceOpRequest,
     created_at: &str,
@@ -876,7 +876,7 @@ pub(crate) async fn reject_op_mismatch(
             &device.device_key_id,
             op_id.as_str(),
             device_op_command(device.op),
-            skill,
+            bundle,
             None,
             None,
             device.expected,
@@ -891,13 +891,13 @@ pub(crate) async fn reject_op_mismatch(
 /// came from a publish upload or a server-constructed revert.
 struct Candidate<'a> {
     ws: &'a WorkspaceId,
-    skill: &'a SkillId,
+    bundle: &'a BundleId,
     op_id: &'a OpId,
     commit: CommitId,
     bundle_digest: [u8; 32],
     parents: &'a [CommitId],
     object_ids: &'a [ObjectId],
-    /// The skill's advisory display name (`None` ⇒ keep any existing name).
+    /// The bundle's advisory display name (`None` ⇒ keep any existing name).
     display_name: Option<&'a str>,
     /// The `--to` channel placement (`None` ⇒ no explicit placement).
     channel: Option<&'a str>,
@@ -928,7 +928,7 @@ async fn drive(
             cand.ws,
             cand.op_id.as_str(),
             command,
-            cand.skill,
+            cand.bundle,
             Some(cand.commit),
             Some(cand.bundle_digest),
             expected,
@@ -948,7 +948,7 @@ async fn drive(
 
     let input = PromoteInput {
         ws: cand.ws,
-        skill: cand.skill,
+        bundle: cand.bundle,
         op_id: cand.op_id.as_str(),
         actor,
         op,
@@ -972,7 +972,7 @@ pub(crate) struct PretxnReceipt<'a> {
     pub device_key_id: &'a str,
     pub op_id: &'a str,
     pub command: &'a str,
-    pub skill: &'a SkillId,
+    pub bundle: &'a BundleId,
     pub commit: Option<CommitId>,
     pub bundle_digest: Option<[u8; 32]>,
     pub expected: Generation,
@@ -988,7 +988,7 @@ fn pretxn<'a>(
     device_key_id: &'a str,
     op_id: &'a str,
     command: &'a str,
-    skill: &'a SkillId,
+    bundle: &'a BundleId,
     commit: Option<CommitId>,
     bundle_digest: Option<[u8; 32]>,
     expected: Generation,
@@ -1001,7 +1001,7 @@ fn pretxn<'a>(
         device_key_id,
         op_id,
         command,
-        skill,
+        bundle,
         commit,
         bundle_digest,
         expected,

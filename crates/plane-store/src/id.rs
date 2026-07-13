@@ -39,16 +39,18 @@ pub enum IdError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceId(String);
 
-/// A skill identifier (the `s_…` id shape) — a database key, never a path component on the plane.
+/// A bundle identifier (the `s_…` id shape) — custody's key: a database key, never a path component
+/// on the plane. The directory maps a user-facing catalog name (and `kind`) onto this id; custody
+/// itself never learns what kind of bundle it holds.
 ///
 /// Lowercase `[a-z0-9_-]` only, matching the CLIENT's rule: there the id IS a directory component
 /// (`~/.topos/skills/<id>`, the harness placement), and on a case-insensitive filesystem two
 /// case-only-distinct ids would fold to one physical directory. Every real id is lowercase
-/// (client-minted `topos_<hex>`, plane-minted `s_…`), so one charset at both ends means an id the plane
-/// accepts is an id every client can hold — no id can be mintable server-side yet unrepresentable
-/// client-side.
+/// (client-minted `topos_<hex>`, plane-minted `s_…` — the prefix is a frozen wire fact, like `w_`),
+/// so one charset at both ends means an id the plane accepts is an id every client can hold — no id
+/// can be mintable server-side yet unrepresentable client-side.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SkillId(String);
+pub struct BundleId(String);
 
 /// A principal identifier — the rostered reader/uploader identity (device id, account, …).
 ///
@@ -125,7 +127,7 @@ impl WorkspaceId {
     }
 }
 
-impl SkillId {
+impl BundleId {
     /// Parse a skill id, rejecting anything outside the lowercase path-safe charset (including
     /// uppercase — the client's directory-component rule, held at both ends).
     ///
@@ -186,7 +188,7 @@ impl fmt::Display for WorkspaceId {
         f.write_str(&self.0)
     }
 }
-impl fmt::Display for SkillId {
+impl fmt::Display for BundleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -265,7 +267,7 @@ mod tests {
         assert!(Principal::parse("dev@example.com").is_ok());
         assert!(Principal::parse("device+1_abc").is_ok());
         // The path-safe charset (skill/workspace) rejects the email metacharacters.
-        assert!(SkillId::parse("dev@example.com").is_err());
+        assert!(BundleId::parse("dev@example.com").is_err());
         assert!(WorkspaceId::parse("a.b").is_err());
     }
 
@@ -275,7 +277,7 @@ mod tests {
         // so a mixed-case id the plane accepted would be unrepresentable (or case-fold-colliding) there.
         for bad in ["S_deploy", "sD", "TOPOS_ABC", "Topos_X", "s.d", "s/d", ""] {
             assert!(
-                SkillId::parse(bad).is_err(),
+                BundleId::parse(bad).is_err(),
                 "should reject skill id {bad:?}"
             );
         }
@@ -284,7 +286,7 @@ mod tests {
             "topos_0af3c9d2b1e845f7a6c0d9e8b7a61234",
             "a_b-9",
         ] {
-            assert!(SkillId::parse(ok).is_ok(), "should accept skill id {ok:?}");
+            assert!(BundleId::parse(ok).is_ok(), "should accept skill id {ok:?}");
         }
     }
 
