@@ -25,13 +25,20 @@ const serverSchema = z.object({
   TOPOS_WEB_RATELIMIT: z.enum(["on", "off"]).default("on"),
   /**
    * The app's PUBLIC origin — the base every client-visible URL rides (resource addresses, the
-   * protocol card's `api_base_url` = this origin + `/api`, the invite/share lines). Behind a
-   * TLS-terminating reverse proxy this MUST be set: the container speaks plain HTTP, so a
-   * request-derived origin would be `http://…` and the CLI refuses to re-root an https link onto an
-   * http base. Unset, the app falls back to the request's own origin — correct for a same-origin
-   * (no-proxy) deployment.
+   * protocol card's `api_base_url` = this origin + `/api`, the invite/share lines) and the
+   * canonical host a browser on an alias origin is redirected to. Behind a TLS-terminating
+   * reverse proxy this MUST be set: the container speaks plain HTTP, so a request-derived origin
+   * would be `http://…` and the CLI refuses to re-root an https link onto an http base.
+   *
+   * Unset — or EMPTY, which is how compose and every deploy panel spell "unset" — the app falls
+   * back to the request's own origin, which is correct for a same-origin deployment and is what
+   * keeps a bare `docker compose up` reachable from another machine on the LAN (a hard-coded
+   * localhost default would make the canonical redirect bounce every remote browser home).
    */
-  TOPOS_PUBLIC_URL: z.url().optional(),
+  TOPOS_PUBLIC_URL: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.url().optional(),
+  ),
 });
 
 export type ServerEnv = z.infer<typeof serverSchema>;

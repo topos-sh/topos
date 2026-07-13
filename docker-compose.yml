@@ -116,8 +116,12 @@ services:
       # sign-in/verification pages. Behind a TLS-terminating proxy this MUST be set to the public
       # `https://…` origin (the app cannot infer it from the request — the proxy speaks plain HTTP to
       # the container), or the card would declare an `http://` base the CLI refuses to downgrade onto.
-      # Unset, the app falls back to the request origin (fine for this same-origin local `up`).
-      TOPOS_PUBLIC_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      #
+      # Deliberately NOT defaulted: passed through EMPTY, the app falls back to the REQUEST's own
+      # origin, so a bare `up` works on the laptop AND from another machine on the LAN. A localhost
+      # default would instead make localhost CANONICAL — and the app 301s browsers on any other host
+      # to it, bouncing every remote visitor back to their own machine.
+      TOPOS_PUBLIC_URL: ${TOPOS_PUBLIC_URL:-}
       # Better Auth: the session-signing secret (≥ 32 chars — the app refuses to parse a shorter one) and
       # the public origin sessions are minted for. BETTER_AUTH_URL is the app's externally reachable origin.
       BETTER_AUTH_SECRET: ${TOPOS_WEB_AUTH_SECRET:-change-me-auth-secret-change-me-auth-secret}
