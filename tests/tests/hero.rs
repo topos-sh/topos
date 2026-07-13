@@ -54,10 +54,11 @@ fn v2_files() -> Vec<UploadedFile> {
 /// first pull genuinely fast-forwards onto — and materializes — the plane's bytes).
 const LOCAL_PLACEHOLDER: &[(&str, bool, &[u8])] = &[("SKILL.md", false, b"# local placeholder\n")];
 
-/// Seed a real authority (device+credential+confirmed-member → genesis), then serve `router(state)` on a
-/// real loopback socket on a background runtime — all via the shared harness. Returns the live [`Plane`].
+/// Seed a real authority (device+credential+confirmed-member → genesis), then stand the COMPOSED
+/// stack up — the web app in front, the vault internal — via the shared harness. The pull engine
+/// below dials the APP's `/api` base, exactly like a real client after the door cutover.
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane(
+    common::start_stack(
         "topos-hero-plane",
         tag,
         false,

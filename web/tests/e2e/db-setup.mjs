@@ -40,30 +40,13 @@ const ADMIN_URL =
 const WEB_URL = process.env.DATABASE_URL ?? "postgres://topos_web:web@localhost:5439/topos_e2e";
 const DB_NAME = "topos_e2e";
 
-/** The grant shape the unit `topos_test` database already holds: broad SELECT + the exact
- * guarded-function DML edges (topos_web writes the authority tables ONLY through the topos_*
- * functions, which run SECURITY INVOKER, so it needs DML on precisely what they touch — UPDATE at
- * COLUMN grain, so the role cannot reach a column no guarded function writes). Production
- * provisioning must carry this same shape: this file is the in-repo record of it. */
-const PLANE_GRANTS = `
-GRANT USAGE ON SCHEMA plane TO topos_web;
-GRANT SELECT ON ALL TABLES IN SCHEMA plane TO topos_web;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA plane TO topos_web;
-GRANT INSERT ON plane.channel_events, plane.channel_members, plane.workspace_member, plane.workspace_policy TO topos_web;
-GRANT INSERT ON plane.skill_detachments TO topos_web;
-GRANT DELETE ON plane.channel_members, plane.channel_skills, plane.channels, plane.workspace_member TO topos_web;
--- UPDATE is granted at COLUMN grain — exactly the columns the guarded functions write. The
--- row/byte rule is enforced by grants, not convention: a table-wide UPDATE on device_registry
--- would let a compromised web tier rewrite a device's credential hash and then drive the DEVICE
--- lane as that device, which no guarded function can do.
-GRANT UPDATE (review_required, invite_policy, staleness_window_ms) ON plane.workspace_policy TO topos_web;
-GRANT UPDATE (role, invited_by) ON plane.workspace_member TO topos_web;
-GRANT UPDATE (acked_at) ON plane.notices TO topos_web;
-GRANT UPDATE (name) ON plane.channels TO topos_web;
-GRANT UPDATE (detached, detached_at) ON plane.device_skill_state TO topos_web;
-GRANT UPDATE (revoked) ON plane.device_registry TO topos_web;
-ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane GRANT SELECT ON TABLES TO topos_web;
-`;
+/* The topos_web grant shape (broad SELECT + the guarded-function DML edges, UPDATE at COLUMN
+ * grain) now lives IN the plane migrations — 0019 onward carry the grants next to the schema
+ * they bound, so applying the migrations AS topos_plane below grants the web role too. The one
+ * ordering rule that leaves here: BOTH roles must exist BEFORE the migrations run (0019 skips
+ * the web grants when the role is absent, and a deployment that creates the role afterward
+ * without re-granting fails CLOSED — the web tier cannot read). `ensureDatabase` creates the
+ * roles first for exactly that reason; compose initdb and production provisioning do the same. */
 
 function planeMigrationFiles() {
   return readdirSync(MIGRATIONS_DIR)
@@ -116,23 +99,62 @@ async function bootstrapPlane() {
     // created schema owned like the production init's.
     await db.query("CREATE SCHEMA IF NOT EXISTS plane AUTHORIZATION topos_plane");
 
-    const probe = await db.query("SELECT to_regclass('plane.workspace') AS t");
-    if (probe.rows[0]?.t === null) {
-      // Apply the plane migrations AS topos_plane (SET ROLE does not re-read the role search_path,
-      // so set it explicitly). Each file is one simple-protocol query (dollar-quoted bodies + all).
-      await db.query("SET ROLE topos_plane");
-      await db.query("SET search_path = plane");
-      for (const file of planeMigrationFiles()) {
+    // Apply the PENDING plane migrations AS topos_plane (SET ROLE does not re-read the role
+    // search_path, so set it explicitly). A fresh schema applies them all; an existing dev
+    // database picks up only what landed since (compared by leading migration number against
+    // the sqlx ledger, so a re-run never re-executes an applied file). Each file is one
+    // simple-protocol query (dollar-quoted bodies + all).
+    await db.query("SET ROLE topos_plane");
+    await db.query("SET search_path = plane");
+    const applied = await appliedMigrationVersions(db);
+    for (const file of planeMigrationFiles()) {
+      if (!applied.has(migrationVersion(file))) {
         await db.query(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
       }
-      await db.query("RESET ROLE");
     }
-
-    // Grants (idempotent; superuser may grant on topos_plane's tables).
-    await db.query(PLANE_GRANTS);
+    await db.query("RESET ROLE");
   } finally {
     await db.end();
   }
+}
+
+/** A migration file's version = its leading digits (sqlx's own convention). */
+function migrationVersion(file) {
+  return Number.parseInt(file, 10);
+}
+
+/**
+ * The versions already applied, from wherever the ledger is. The plane binary's migrator writes
+ * `_sqlx_migrations`; THIS bootstrap predates it on a fresh schema (no ledger, nothing applied).
+ * Databases this file bootstrapped before the pending-migrations rework carry no ledger either —
+ * for those, fall back to "which migration's tables/functions exist" via a probe of the LAST
+ * fully-applied file's marker object. Simplest honest probe: the highest numbered marker below.
+ */
+async function appliedMigrationVersions(db) {
+  const ledger = await db.query("SELECT to_regclass('_sqlx_migrations') AS t");
+  if (ledger.rows[0]?.t !== null) {
+    const { rows } = await db.query("SELECT version FROM _sqlx_migrations");
+    return new Set(rows.map((r) => Number(r.version)));
+  }
+  const probe = await db.query("SELECT to_regclass('workspace') AS t");
+  if (probe.rows[0]?.t === null) {
+    return new Set(); // virgin schema — apply everything
+  }
+  // Pre-ledger bootstrap: probe the marker objects that tell the applied prefix apart. Each
+  // entry is [version, EXISTS-probe]; extend when a new migration lands in this fallback era
+  // (post-0019 databases always carry the marker function below or were ledger-migrated).
+  const markers = [[19, "SELECT to_regproc('topos_delivery') IS NOT NULL AS ok"]];
+  const applied = new Set();
+  for (let v = 1; v <= 18; v += 1) {
+    applied.add(v); // this fallback only exists for databases bootstrapped at 0018
+  }
+  for (const [version, sql] of markers) {
+    const { rows } = await db.query(sql);
+    if (rows[0]?.ok === true) {
+      applied.add(version);
+    }
+  }
+  return applied;
 }
 
 /** Run the app's OWN drizzle migrator against topos_e2e (creates schema web + tables + ledger). The

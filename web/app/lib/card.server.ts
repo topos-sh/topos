@@ -1,4 +1,4 @@
-import { followBase } from "@/lib/plane/follow-base.server";
+import { apiBase } from "@/lib/plane/follow-base.server";
 
 /**
  * The CONSTANT PROTOCOL CARD — the app's non-browser face for every resource address
@@ -65,9 +65,8 @@ const CARD_HEADERS = {
 
 /**
  * The card response for a non-browser fetcher, or `null` for a browser (the caller renders its
- * page). Byte-identical for every path: the ONLY input that shapes the body is the deployment's
- * follow base (the API base a client re-roots onto — the app origin once the app fronts the
- * API, the configured plane URL until then).
+ * page). Byte-identical for every path: the ONLY input that shapes the body is this
+ * deployment's own API base — the origin's `/api` mount, where this app serves the device lane.
  */
 export function cardResponse(request: Request): Response | null {
   const face = cardFace(request);
@@ -76,7 +75,7 @@ export function cardResponse(request: Request): Response | null {
   }
   if (face === "json") {
     return Response.json(
-      { schema_version: 1, card: "topos-protocol-card", api_base_url: followBase(request) },
+      { schema_version: 1, card: "topos-protocol-card", api_base_url: apiBase(request) },
       { headers: CARD_HEADERS },
     );
   }

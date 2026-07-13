@@ -1,11 +1,30 @@
-# Self-host the Topos plane: the stateless plane container + a pinned Postgres, in one command.
+# Self-host Topos in one command: the web app (the ONE public surface), the stateless plane behind it,
+# and a pinned Postgres, on one internal network.
 #
-#   docker compose up --build      # plane on http://localhost:8787, Postgres beside it
+#   docker compose up --build      # the app on http://localhost:3000; the plane + Postgres beside it,
+#                                  # reachable only on the compose network (no published ports)
 #
-# Bring-your-own Postgres: set DATABASE_URL to your managed/external database (a `.env` file or the shell)
-# and start just the plane — `docker compose up --build --no-deps plane` — so the bundled `db` service stays
-# down (`--no-deps`, since the plane declares it as a dependency).
-# Postgres is a SEPARATE service (never baked into the plane image); the plane migrates the schema on start.
+# The TOPOLOGY after the door cutover: the WEB APP is the only thing the world reaches. It fronts `/api`,
+# serves the resource addresses + the constant protocol card, and drives the plane over an internal
+# session lane. The PLANE has NO published port — it answers on the compose-internal network only, at
+# `http://plane:8787`. Postgres is a SEPARATE service (never baked into an app image); the plane migrates
+# the `plane` schema on boot, the web app migrates its own `web` schema at first request.
+#
+# ── the change-me defaults ─────────────────────────────────────────────────────────────────────────────
+# Every secret below has a `change-me-…` default so a first `up` works with zero setup on a laptop. They
+# are FINE for a local trial and UNSAFE for anything reachable: for a real deployment you MUST override
+#   TOPOS_INTERNAL_TOKEN   (the app↔plane internal-lane bearer)
+#   TOPOS_WEB_AUTH_SECRET  (Better Auth session signing — must be ≥ 32 chars)
+#   TOPOS_PLANE_DB_PASSWORD / TOPOS_WEB_DB_PASSWORD   (the two database roles)
+# and set TOPOS_PUBLIC_URL to your externally reachable origin (behind a TLS-terminating reverse proxy).
+# Put them in a `.env` file beside this one, or export them in the shell.
+#
+# ── bring your own Postgres ────────────────────────────────────────────────────────────────────────────
+# To use a managed/external database instead of the bundled `db`: create the two roles + the `plane`
+# schema + the search_paths it expects (scripts/compose-init-db.sh is the exact recipe; run it once
+# against your server), then set the plane's DATABASE_URL (as topos_plane) and the web's DATABASE_URL (as
+# topos_web) to point there and start with `--no-deps` so the bundled `db` stays down. A networked
+# Postgres should append `?sslmode=require`.
 
 services:
   db:
@@ -18,6 +37,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-topos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topos}
       POSTGRES_DB: ${POSTGRES_DB:-topos}
+      # Read by the init script (below) to create the two app roles. The superuser above owns nothing the
+      # app uses — the plane connects as topos_plane, the web app as topos_web.
+      TOPOS_PLANE_DB_PASSWORD: ${TOPOS_PLANE_DB_PASSWORD:-plane}
+      TOPOS_WEB_DB_PASSWORD: ${TOPOS_WEB_DB_PASSWORD:-web}
     volumes:
       # The metadata database — back this up with `pg_dump` or a volume snapshot (see the README).
       # Mount at the image's PARENT data path, not `/var/lib/postgresql/data`: at v18 the official postgres
@@ -26,6 +49,10 @@ services:
       # refuse to start. Upgrading an EXISTING pre-18 `pg-data` volume is a `pg_dump`/restore into this new
       # layout (see the README's backups section) — an in-place tag bump against the old mount will not start.
       - pg-data:/var/lib/postgresql
+      # First-boot ONLY (initdb runs it once, on a fresh volume, before accepting TCP): create the two
+      # roles + schema `plane` + the search_paths BEFORE the plane boots — migration 0019's web grants
+      # skip if topos_web is absent, so the roles must already exist.
+      - ./scripts/compose-init-db.sh:/docker-entrypoint-initdb.d/10-topos-init.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos}"]
       interval: 5s
@@ -37,35 +64,65 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    # NO `ports:` — the plane is internal-only. The web app reaches it at http://plane:8787 over the
+    # compose network; nothing outside the network can. (The image already binds 0.0.0.0:8787.)
     depends_on:
       db:
         condition: service_healthy
     environment:
-      # BYO override: point this at a managed Postgres instead (and you can drop the `db` service). A
-      # managed/networked Postgres should append `?sslmode=require` — the plane speaks TLS to Postgres over rustls.
-      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-topos}:${POSTGRES_PASSWORD:-topos}@db:5432/${POSTGRES_DB:-topos}}
-      # The public base URL the invite + verification links are built on — set it to your externally
-      # reachable address behind a reverse proxy (which also terminates TLS).
-      TOPOS_PLANE_BASE_URL: ${TOPOS_PLANE_BASE_URL:-http://localhost:8787}
+      # Connects as topos_plane (owns schema `plane`, runs the migrations). A managed/networked Postgres
+      # should append `?sslmode=require` — the plane speaks TLS to Postgres over rustls.
+      DATABASE_URL: postgres://topos_plane:${TOPOS_PLANE_DB_PASSWORD:-plane}@db:5432/${POSTGRES_DB:-topos}
+      # The plane's PUBLIC-facing bases now all route THROUGH THE APP. The API base is the app origin + /api
+      # (the app fronts `/api`); the human verification pages + the `/i/` claim links live on the app origin.
+      TOPOS_PLANE_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}/api
+      TOPOS_PLANE_VERIFY_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      TOPOS_PLANE_LINK_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
       TOPOS_PLANE_MODE: self_host
-      # ── optional operator features (uncomment to enable; full reference in the README) ──────────
-      # The operator admin bearer token (only its sha256 is retained). Enables the review-required
-      # policy toggle — `PUT /v1/workspaces/{ws}/policy/review-required`; while unset, that route
-      # answers 404.
-      # TOPOS_PLANE_ADMIN_TOKEN: change-me-to-a-long-random-secret
-      # Emailed-passcode enrollment: set ALL FIVE to enable it (otherwise the plane advertises the
-      # device-code method). Credentials are never logged.
-      # TOPOS_PLANE_SMTP_HOST: smtp.example.com
-      # TOPOS_PLANE_SMTP_PORT: "587"
-      # TOPOS_PLANE_SMTP_USER: postmaster@example.com
-      # TOPOS_PLANE_SMTP_PASS: change-me
-      # TOPOS_PLANE_SMTP_FROM: topos@example.com
-    ports:
-      - "8787:8787"
+      # The internal session lane's shared bearer — the app is the only holder; with it unset the plane
+      # answers 404 on the whole /internal lane. Must match the web app's PLANE_INTERNAL_TOKEN below.
+      TOPOS_PLANE_INTERNAL_TOKEN: ${TOPOS_INTERNAL_TOKEN:-change-me-internal-token}
+      # Rate limiting OFF. The plane's limiter buckets per PEER IP, and in this topology its only peer is
+      # the web app — so an enabled bucket would throttle the ENTIRE fleet as if it were one client. The
+      # public belt belongs on the app (its own sign-in/step-up limiters) and/or the reverse proxy; the
+      # plane sits behind them on a trusted network.
+      TOPOS_PLANE_RATELIMIT: "off"
     volumes:
       # The git-object + large-object stores and the 0600 enrollment secret (generated on
       # first boot). Snapshot these BEFORE the database (see the README's backup order).
       - plane-data:/data
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      plane:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      # Connects as topos_web (owns schema `web`, reads `plane`, writes it only through the guarded
+      # topos_* functions). Migrates its own `web` schema at first request.
+      DATABASE_URL: postgres://topos_web:${TOPOS_WEB_DB_PASSWORD:-web}@db:5432/${POSTGRES_DB:-topos}
+      # The internal session lane — the plane, over the compose network, with the shared bearer.
+      PLANE_INTERNAL_URL: http://plane:8787
+      PLANE_INTERNAL_TOKEN: ${TOPOS_INTERNAL_TOKEN:-change-me-internal-token}
+      # The app's externally reachable origin — the ONE public base every client-visible URL rides:
+      # the resource addresses, the protocol card's `api_base_url` (this origin + `/api`), and the
+      # sign-in/verification pages. Behind a TLS-terminating proxy this MUST be set to the public
+      # `https://…` origin (the app cannot infer it from the request — the proxy speaks plain HTTP to
+      # the container), or the card would declare an `http://` base the CLI refuses to downgrade onto.
+      # Unset, the app falls back to the request origin (fine for this same-origin local `up`).
+      TOPOS_PUBLIC_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      # Better Auth: the session-signing secret (≥ 32 chars — the app refuses to parse a shorter one) and
+      # the public origin sessions are minted for. BETTER_AUTH_URL is the app's externally reachable origin.
+      BETTER_AUTH_SECRET: ${TOPOS_WEB_AUTH_SECRET:-change-me-auth-secret-change-me-auth-secret}
+      BETTER_AUTH_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      APP_ENV: production
 
 volumes:
   pg-data:

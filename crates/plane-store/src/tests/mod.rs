@@ -616,6 +616,7 @@ mod channels_lifecycle;
 mod channels_migration;
 mod channels_protect;
 mod contribute;
+mod device_door;
 mod display_name;
 mod enrollment_governance;
 mod ingest;

@@ -63,7 +63,7 @@ const DRAFT: &[(&str, bool, &[u8])] = &[
 /// afterward (via [`drafting_publisher`]) — the credential IS the authenticator, so no separate device
 /// registration is needed.
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane(
+    common::start_stack(
         "topos-contrib",
         tag,
         false,

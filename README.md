@@ -213,53 +213,64 @@ report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
 ## Self-hosting the plane
 
-The bundled compose file runs the plane and its Postgres together:
+The bundled compose file runs the WHOLE product — the web app (the one public surface), the vault (the
+Rust plane, internal-network only, no published port), and Postgres:
 
 ```sh
-docker compose up --build     # plane on http://localhost:8787
+docker compose up --build     # the app on http://localhost:3000; the vault stays internal
 ```
+
+The app serves everything a team touches: sign-in and the dashboard, the review UI, the admin surfaces,
+the shareable workspace addresses, and the device API itself (`/api/v1/…` — agents and the `topos` CLI
+dial the app, which serves the directory row ops under a scoped database role and forwards byte,
+enrollment, and governance ops to the vault). Nothing else needs to be reachable from outside.
 
 ### Stand up the first workspace
 
-A brand-new plane has no workspace yet. Mint its first identity in-band:
+A brand-new deployment has no workspace yet. Open `http://localhost:3000` in a browser and claim it
+(the first-run ownership claim), or mint the first identity in-band:
 
 ```sh
-topos-plane mint-claim --workspace w_acme --display-name "Acme"
+docker compose exec plane topos-plane mint-claim --workspace w_acme --display-name "Acme"
 ```
 
 This prints a one-time `/i/` claim link (a bearer owner capability — store it like a secret). A single
 `topos follow <claim-link>` stands the workspace up and seats that device as its first owner, who can then
-`publish` and invite teammates (`topos invite <emails…>` seats them; they join by the workspace address).
-
-**Joining a self-hosted workspace.** Following by address opens a browser sign-in page. That page lives
-in this repo's [`web/`](web/) app (sign-in, the device-approval verification page, the dashboard and
-review UI) — run it next to the plane (see `web/CLAUDE.md`; email+password by default, no SMTP needed).
-The compose stack does not package the web app yet — until it does, a plane-only deployment admits new
-members through **emailed-passcode enrollment** (the `TOPOS_PLANE_SMTP_*` vars below) or the **owner's
-claim link** — the same `topos-plane mint-claim` above, minted once per joining device.
+`publish` and invite teammates (`topos invite <emails…>` seats them; they join by the workspace address —
+following an address opens the app's sign-in + device-approval pages, email+password by default, no SMTP
+needed).
 
 ### Configuration
 
-`docker compose up` works out of the box. For a real (non-localhost) deployment, set:
+`docker compose up` works out of the box for a local try-out. For a real (non-localhost) deployment, set:
 
-- `TOPOS_PLANE_BASE_URL` — the public `https://…` address clients dial (behind your reverse proxy; the
-  workspace addresses and verification links are built on it).
-- `TOPOS_PLANE_ADMIN_TOKEN` *(optional)* — enables the review-required gate.
+- `TOPOS_PUBLIC_URL` — the public `https://…` origin (behind your reverse proxy). The workspace
+  addresses, the sign-in/verification pages, and the API base the protocol card teaches clients all ride
+  it.
+- `TOPOS_WEB_AUTH_SECRET` and `TOPOS_INTERNAL_TOKEN` — the app's session secret and the app↔vault
+  internal bearer. The compose file ships loud `change-me` defaults; replace both.
+- `TOPOS_PLANE_DB_PASSWORD` / `TOPOS_WEB_DB_PASSWORD` — the two database roles' passwords (the plane
+  owns the schema; the web role holds column-grain grants and writes policy rows only through the
+  guarded SQL functions).
+- `TOPOS_PLANE_ADMIN_TOKEN` *(optional)* — enables the review-required gate's operator route.
 - `TOPOS_PLANE_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — enable emailed-passcode
   enrollment (set all five).
 
 The bundled `docker-compose.yml` is an annotated starting point (common vars with defaults; optional
-features commented out). For the full reference — every variable and its default — run `topos-plane --help`.
+features commented out). For the vault's full reference run `topos-plane --help`; the app's variables
+are documented in [`web/CLAUDE.md`](web/CLAUDE.md).
 
 Client-side: `TOPOS_DEBUG=1` prints each error's full source chain to stderr (the chain always lands in
 `~/.topos/log.jsonl`); `TOPOS_HOME` overrides the `~/.topos` root.
 
 ### TLS
 
-The plane serves plain HTTP and is designed to sit behind a TLS-terminating reverse proxy (Caddy, nginx,
-Traefik, or your platform's load balancer). Point the proxy at `http://plane:8787`, set `TOPOS_PLANE_BASE_URL`
-to your public `https://…` address, and let the proxy own certificates. (An optional, default-off built-in
-ACME listener exists but is experimental — the reverse proxy is the supported path.)
+The app serves plain HTTP and is designed to sit behind a TLS-terminating reverse proxy (Caddy, nginx,
+Traefik, or your platform's load balancer). Point the proxy at `http://web:3000` (the app is the only
+public service), set `TOPOS_PUBLIC_URL` to your public `https://…` origin, and let the proxy own
+certificates. The vault never needs a public route. (The vault's optional, default-off built-in ACME
+listener still exists but is experimental and now redundant in the composed stack — the reverse proxy is
+the supported path.)
 
 ## Build & contribute
 

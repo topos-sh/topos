@@ -1,4 +1,5 @@
 import { serverEnv } from "@/env.server";
+import { internalError, uniformNotFound } from "@/lib/api/wire.server";
 
 /**
  * The ONE vault transport. Everything this tier asks the vault goes through `vaultFetch`:
@@ -96,4 +97,94 @@ export async function vaultFetch(req: VaultRequest): Promise<Response> {
     headers,
     body,
   });
+}
+
+/**
+ * The DOOR's pass-through half. The byte/pointer and enrollment/governance ops the vault must
+ * decide itself — publish/propose/revert/review (receipt + replay-before-revoked ordering),
+ * the pointer/object reads, credential minting, roster/revoke — cross this tier VERBATIM: the
+ * device's own `Authorization` bearer rides through untouched and the vault's in-transaction
+ * resolve stays the sole authority (this tier deliberately does NOT pre-authenticate a
+ * forwarded request — a pre-auth check here could only drift from the vault's ordering).
+ *
+ * What this tier DOES enforce at the door:
+ *  - the target is pinned under `/v1/` — the raw (still-encoded) path is checked segment by
+ *    segment, so no traversal or encoding trick can reach the vault's `/internal/v1` lane
+ *    through the public door;
+ *  - only protocol headers cross (allowlist below) — in particular `x-topos-acting-email`
+ *    and any cookie die here, so nothing session-shaped can be smuggled into the vault;
+ *  - response headers cross by the same discipline (the wire's caching/ETag family, nothing
+ *    hop-by-hop).
+ */
+const FORWARD_REQUEST_HEADERS = [
+  "authorization",
+  "accept",
+  "content-type",
+  "content-length",
+  "if-none-match",
+  "topos-known-version-id",
+  "user-agent",
+] as const;
+
+const FORWARD_RESPONSE_HEADERS = [
+  "cache-control",
+  "content-type",
+  "etag",
+  "retry-after",
+  "vary",
+  "x-robots-tag",
+] as const;
+
+export async function forwardDeviceLane(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const rawPath = url.pathname;
+  if (rawPath !== "/api/v1" && !rawPath.startsWith("/api/v1/")) {
+    return uniformNotFound();
+  }
+  // Traversal guard on the RAW segments: any dot-dot (plain or percent-encoded, any case) or
+  // backslash refuses before a URL is built. The suffix below keeps the raw encoding, so what
+  // the vault's router sees is byte-for-byte what the client sent past `/api`.
+  for (const segment of rawPath.split("/")) {
+    const lowered = segment.toLowerCase();
+    if (
+      segment === ".." ||
+      segment.includes("\\") ||
+      lowered.includes("%2e%2e") ||
+      lowered.includes("%5c") ||
+      lowered === ".%2e" ||
+      lowered === "%2e."
+    ) {
+      return uniformNotFound();
+    }
+  }
+  const suffix = rawPath.slice("/api".length);
+  const headers = new Headers();
+  for (const name of FORWARD_REQUEST_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) {
+      headers.set(name, value);
+    }
+  }
+  const method = request.method.toUpperCase();
+  const init: RequestInit & { duplex?: "half" } = { method, headers };
+  if (method !== "GET" && method !== "HEAD" && request.body !== null) {
+    // Streamed through — publishes carry up to the vault's own write cap; nothing buffers here.
+    init.body = request.body;
+    init.duplex = "half";
+  }
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${serverEnv().PLANE_INTERNAL_URL}${suffix}${url.search}`, init);
+  } catch (error) {
+    console.error("device-lane forward failed:", error);
+    return internalError();
+  }
+  const out = new Headers();
+  for (const name of FORWARD_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value !== null) {
+      out.set(name, value);
+    }
+  }
+  return new Response(upstream.body, { status: upstream.status, headers: out });
 }

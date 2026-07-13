@@ -10,9 +10,9 @@ import { installTestEnv } from "./helpers/test-env";
  *    deployment's follow base, never the URL — so a card fetched at a real address and at a
  *    nonexistent one cannot differ.
  *
- * No Postgres: the card module only reads request headers + the (memoized) server env. beforeAll
- * installs a complete env and clears PLANE_PUBLIC_URL so followBase resolves the request ORIGIN
- * (the door-cutover default), making the api_base_url deterministic across paths.
+ * No Postgres: the card module only reads request headers + the (memoized) server env. The card's
+ * api_base_url is the request origin's own `/api` mount — this app IS the door, and the interim
+ * PLANE_PUBLIC_URL override retired with the vault's public listener.
  */
 
 const ORIGIN = "http://localhost:3000";
@@ -23,10 +23,6 @@ let INSTALL_LINE: string;
 
 beforeAll(async () => {
   installTestEnv();
-  // Force the origin arm of followBase (unset → new URL(request.url).origin), so the card body is
-  // pinned to the request's own origin and identical across every same-origin path.
-  process.env.PLANE_PUBLIC_URL = undefined;
-  delete process.env.PLANE_PUBLIC_URL;
   const mod = await import("@/lib/card.server");
   cardFace = mod.cardFace;
   cardResponse = mod.cardResponse;
@@ -99,8 +95,8 @@ describe("cardResponse — the served card", () => {
     };
     expect(body.schema_version).toBe(1);
     expect(body.card).toBe("topos-protocol-card");
-    // PLANE_PUBLIC_URL is unset → the follow base is the request's own origin.
-    expect(body.api_base_url).toBe(ORIGIN);
+    // The API base a client re-roots onto is this origin's /api mount — the app is the door.
+    expect(body.api_base_url).toBe(`${ORIGIN}/api`);
   });
 
   it("serves the markdown card as text/plain with the same headers and the teaching copy", async () => {

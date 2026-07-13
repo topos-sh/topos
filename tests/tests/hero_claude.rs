@@ -228,7 +228,7 @@ fn openclaw_case() -> AdapterCase {
 fn start_plane(tag: &str, author_device: (&str, [u8; 32])) -> Plane {
     let (author_dkid, author_pubkey) = author_device;
     let author_dkid = author_dkid.to_owned();
-    common::start_plane(
+    common::start_stack(
         "topos-hero-real",
         tag,
         true,
@@ -385,7 +385,7 @@ fn run_distribute_hero(case: &AdapterCase) {
         .expect("a published receipt names its version");
 
     // The workspace ADDRESS both followers join by (w_acme slugifies to w-acme).
-    let address = ws_address(&plane.base_url);
+    let address = ws_address(&plane.link_base_url);
 
     // ── 2 · Machine B: a pure follower JOINS BY ADDRESS via the real `follow`; the hook arms; `--yes`
     //        lands `everyone`'s genesis in one invocation (no separate approve). ──

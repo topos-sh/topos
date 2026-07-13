@@ -1322,6 +1322,97 @@ async fn channel_operations_emit_audit_rows_attributed_to_the_actor(pool: PgPool
     );
 }
 
+/// F1 REGRESSION (the door cutover's report/detach fence). An applied-state report concurrent with
+/// the same person's unfollow-detach must NOT revive the frozen fleet row. Both callers are READ
+/// COMMITTED now (the web tier and the autocommit Rust wrapper), where the old SERIALIZABLE report
+/// used to catch this; the fix is that `topos_report_applied` FOR UPDATE-fences the device's
+/// registry row AND `topos_detach_lapsed` FOR UPDATE-locks the person's registry rows, so the two
+/// mutually exclude. The report that loses the race re-reads a post-commit snapshot — the skill no
+/// longer entitled — and skips it, leaving `detached = 1`. Before the fence was made real the report
+/// blocked on the `device_skill_state` row instead and revived it to `detached = 0`.
+#[sqlx::test]
+async fn a_report_racing_an_unfollow_detach_does_not_revive_the_frozen_row(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chd-race").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_bob", 12, BOB, "member", "confirmed").await;
+    let r = gpub(
+        &fx,
+        &w,
+        &s,
+        "dk_bob",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"v0")],
+        Some("Deploy"),
+        None,
+    )
+    .await;
+    let commit = r.version_id.unwrap();
+    // Seed the fleet row through the real report path (detached = 0).
+    fx.authority
+        .report_applied(
+            &w,
+            &cred(&w, "dk_bob"),
+            &[AppliedSkill {
+                skill_id: s.clone(),
+                version_id: commit,
+            }],
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        dss(&pool, "w_acme", "dk_bob", "s_deploy").await,
+        Some((0, None))
+    );
+
+    // Conn A: begin an unfollow and HOLD the transaction open — its detach reconcile takes the
+    // person's registry rows FOR UPDATE and leaves the fleet row's `detached = 1` uncommitted.
+    let mut a = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *a).await.unwrap();
+    sqlx::query("SELECT topos_unfollow_skill($1, $2, $3, $4, $5)")
+        .bind("w_acme")
+        .bind(BOB)
+        .bind("s_deploy")
+        .bind(NOW + 1)
+        .bind(CREATED_AT)
+        .execute(&mut *a)
+        .await
+        .unwrap();
+
+    // Conn B: a concurrent report must BLOCK on A's registry lock (its own FOR UPDATE fence).
+    let pool_b = pool.clone();
+    let commit_bytes = commit.0.to_vec();
+    let b = tokio::spawn(async move {
+        sqlx::query("SELECT topos_report_applied($1, $2, $3, $4, $5::text[], $6::bytea[])")
+            .bind("w_acme")
+            .bind(BOB)
+            .bind("dk_bob")
+            .bind(NOW + 2)
+            .bind(vec!["s_deploy".to_owned()])
+            .bind(vec![commit_bytes])
+            .execute(&pool_b)
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(
+        !b.is_finished(),
+        "the report must block on the detach's registry lock, not race past it"
+    );
+
+    // A commits; B unblocks and runs against the post-detach snapshot (s_deploy no longer entitled).
+    sqlx::query("COMMIT").execute(&mut *a).await.unwrap();
+    b.await.unwrap().unwrap();
+
+    // The frozen row stays detached = 1 — never revived to 0.
+    let (detached, _) = dss(&pool, "w_acme", "dk_bob", "s_deploy")
+        .await
+        .expect("the fleet row survives");
+    assert_eq!(
+        detached, 1,
+        "the racing report must not revive the frozen fleet row"
+    );
+}
+
 /// The confirmed-member's delivery, by that member's own credential (the common read the assertions
 /// above share — bob unless a test says otherwise).
 async fn delivery(fx: &Fixture, w: &WorkspaceId) -> Delivery {

@@ -1,3 +1,9 @@
 # Keep the build context small + reproducible: the compiled artifacts and VCS metadata never belong in it.
 target/
 .git/
+# Node/bun installs + web build output — the web image runs `bun install` + `bun run build` fresh, so a
+# host tree must never clobber the freshly-installed deps or leak a stale build into the image.
+node_modules
+**/node_modules
+web/build
+web/.react-router

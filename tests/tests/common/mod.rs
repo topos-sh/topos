@@ -81,6 +81,193 @@ pub(crate) async fn provision_pg() -> PgPool {
     pool
 }
 
+// ── the composed-stack provisioning (the door-cutover shape) ────────────────────────────────────────
+
+/// The shared internal-lane bearer the composed stack arms on both sides (test-only value).
+pub(crate) const INTERNAL_TOKEN: &str = "e2e-internal-token";
+
+/// [`provision_pg`], but in the DOOR-CUTOVER shape the web app requires: the plane schema is a real
+/// `plane` schema (the app's Drizzle mirror reads `plane.*` schema-qualified), the `topos_web` role
+/// exists BEFORE the migrations run (0019's role-guarded grant block must execute, not skip), and
+/// the role gets the same database-level shape the e2e bootstrap provisions (CONNECT is PUBLIC's
+/// default; CREATE for the app's own `web` schema; the `web, plane` search_path). Returns the
+/// authority-facing pool (search_path pinned to `plane`) plus the web-role URL the app dials.
+pub(crate) async fn provision_pg_composed() -> (PgPool, String) {
+    static N: AtomicU32 = AtomicU32::new(0);
+    let base = std::env::var("DATABASE_URL")
+        .expect("the e2e suite requires DATABASE_URL to point at a Postgres");
+    let opts: PgConnectOptions = base
+        .parse()
+        .expect("DATABASE_URL must be a valid Postgres connection string");
+    let name = format!(
+        "topos_e2e_web_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+
+    let mut admin = PgConnection::connect_with(&opts)
+        .await
+        .expect("connect to the base Postgres database");
+    // The role is cluster-wide and race-shared across parallel test binaries. Create it if
+    // absent, then ENFORCE the password unconditionally: on a shared dev cluster the role may
+    // already exist from an earlier run (or another suite) with a different password, and a bare
+    // `IF NOT EXISTS ... CREATE` would leave that stale password in place — the spawned app then
+    // can't authenticate and its `/healthz` 503s until the harness times out. Setting the
+    // password every time makes the app's login deterministic regardless of prior cluster state.
+    //
+    // A cluster-wide advisory lock serializes the role mutation: two binaries ALTERing the same
+    // `pg_authid` tuple at once raise "tuple concurrently updated" (Postgres won't concurrently
+    // update one catalog row). All writers target the SAME password, so serializing yields the
+    // same end state without the race. The lock is session-scoped and released on `admin.close()`.
+    admin
+        .execute("SELECT pg_advisory_lock(hashtext('topos_web_role_setup'))")
+        .await
+        .expect("acquire role-setup advisory lock");
+    admin
+        .execute(
+            r#"DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topos_web') THEN
+                    CREATE ROLE topos_web LOGIN PASSWORD 'web';
+                ELSE
+                    ALTER ROLE topos_web LOGIN PASSWORD 'web';
+                END IF;
+            END $$"#,
+        )
+        .await
+        .expect("ensure topos_web role");
+    admin
+        .execute("SELECT pg_advisory_unlock(hashtext('topos_web_role_setup'))")
+        .await
+        .expect("release role-setup advisory lock");
+    admin
+        .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
+        .await
+        .expect("create the per-test database");
+    admin
+        .execute(format!(r#"GRANT CREATE ON DATABASE "{name}" TO topos_web"#).as_str())
+        .await
+        .expect("grant create to topos_web");
+    admin
+        .execute(
+            format!(r#"ALTER ROLE topos_web IN DATABASE "{name}" SET search_path = web, plane"#)
+                .as_str(),
+        )
+        .await
+        .expect("set topos_web search_path");
+    admin.close().await.ok();
+
+    // Migrate INTO schema `plane` (production's layout — the app's read-only mirror is
+    // schema-qualified), on a pool whose search_path stays pinned there so the authority's
+    // unqualified SQL keeps resolving.
+    let host = opts.get_host().to_owned();
+    let port = opts.get_port();
+    let pool = PgPoolOptions::new()
+        .connect_with(opts.database(&name).options([("search_path", "plane")]))
+        .await
+        .expect("connect to the per-test database");
+    pool.execute("CREATE SCHEMA IF NOT EXISTS plane")
+        .await
+        .expect("create the plane schema");
+    plane_store::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrate the per-test database");
+
+    let web_url = format!("postgres://topos_web:web@{host}:{port}/{name}");
+    (pool, web_url)
+}
+
+/// The spawned web app (the door) — `bun run start` over the production build, killed on drop.
+pub(crate) struct AppServer {
+    child: std::process::Child,
+    /// The app's public origin (`http://127.0.0.1:<port>`).
+    pub(crate) origin: String,
+}
+
+impl Drop for AppServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Repo root (this crate lives at `<repo>/tests`).
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tests/ has a parent")
+        .to_path_buf()
+}
+
+/// Pick a free loopback port by binding :0 and dropping the socket (a small race with other
+/// processes is acceptable in a test harness — the bind failure would fail loudly).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind a probe socket")
+        .local_addr()
+        .expect("probe local addr")
+        .port()
+}
+
+/// Spawn the web app over its PRODUCTION build (`web/build/server/index.js` must exist — CI builds
+/// it before `cargo test`; locally run `cd web && bun install && bun run build` once) and wait for
+/// `/healthz`. The app connects to the composed database as `topos_web` and reaches the loopback
+/// plane over the armed internal lane.
+pub(crate) fn spawn_app(web_db_url: &str, plane_base: &str, app_port: u16) -> AppServer {
+    let web_dir = repo_root().join("web");
+    let build = web_dir.join("build").join("server").join("index.js");
+    assert!(
+        build.exists(),
+        "the composed e2e needs the web app's production build — run `cd web && bun install && bun run build` first"
+    );
+    let origin = format!("http://127.0.0.1:{app_port}");
+    // Spawn NODE directly (not `bun run start`): `bun run start` delegates to a node grandchild via
+    // the `react-router-serve` shebang, and `child.kill()` on the bun wrapper would leave that node
+    // process serving — the app would never actually die (leaking the listener, and defeating the
+    // "unreachable plane" e2e that drops the stack to prove the freeze). Running node itself makes
+    // the spawned child the real server, so Drop reaps it. `react-router-serve`'s entry is Node-native
+    // (`@react-router/node` + `renderToPipeableStream`); bun's runtime cannot serve it, so node is
+    // also the correct runtime — the same command the production image's CMD runs.
+    let serve_bin = web_dir
+        .join("node_modules")
+        .join("@react-router")
+        .join("serve")
+        .join("bin.cjs");
+    let child = std::process::Command::new("node")
+        .arg(&serve_bin)
+        .arg("./build/server/index.js")
+        .current_dir(&web_dir)
+        .env("PORT", app_port.to_string())
+        .env("HOST", "127.0.0.1")
+        .env("DATABASE_URL", web_db_url)
+        .env("PLANE_INTERNAL_URL", plane_base)
+        .env("PLANE_INTERNAL_TOKEN", INTERNAL_TOKEN)
+        .env(
+            "BETTER_AUTH_SECRET",
+            "e2e-secret-0123456789abcdef0123456789abcdef",
+        )
+        .env("BETTER_AUTH_URL", &origin)
+        .env("APP_ENV", "test")
+        .env("TOPOS_WEB_RATELIMIT", "off")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("spawn the web app (is `bun` on PATH?)");
+    let mut app = AppServer { child, origin };
+    let health = format!("{}/healthz", app.origin);
+    for _ in 0..120 {
+        if let Some(status) = app.child.try_wait().expect("poll the web app process") {
+            panic!("the web app exited during startup: {status}");
+        }
+        if ureq::get(&health).call().is_ok() {
+            return app;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    panic!("the web app never answered /healthz at {health}");
+}
+
 // ── the loopback plane scaffold ─────────────────────────────────────────────────────────────────────
 
 /// A self-cleaning temp dir (RAII).
@@ -112,9 +299,14 @@ pub(crate) struct Seeded {
     pub(crate) invites: Vec<String>,
 }
 
-/// A running loopback plane. Holds the runtime + authority handle alive for the test's duration; `_dir`
-/// drops LAST so the served store outlives the runtime/authority.
+/// A running loopback plane — and, for the composed variants ([`start_stack`]), the web app in
+/// front of it (the door): `base_url` is then the APP's `/api` base the CLI dials, and the plane
+/// itself has no public face at all. Holds the runtime + authority handle alive for the test's
+/// duration; `app` drops first (the door dies before the vault), `_dir` LAST so the served store
+/// outlives the runtime/authority.
 pub(crate) struct Plane {
+    /// The spawned web app, when this is a composed stack (None for a bare loopback plane).
+    app: Option<AppServer>,
     pub(crate) rt: tokio::runtime::Runtime,
     pub(crate) authority: Arc<Authority>,
     /// The provisioned per-test database — for direct row-level witnesses only (e.g. the standup chain's
@@ -122,7 +314,8 @@ pub(crate) struct Plane {
     pub(crate) pool: PgPool,
     pub(crate) base_url: String,
     /// The base the minted `/i/` links ride — `base_url` unless the plane was started split
-    /// ([`start_plane_split`]), the hosted links-on-the-web-origin shape.
+    /// ([`start_plane_split`]) or composed ([`start_stack`]: the app ORIGIN, address-shaped —
+    /// resource addresses carry no `/api`).
     pub(crate) link_base_url: String,
     seeded: Seeded,
     _dir: Scratch,
@@ -190,6 +383,107 @@ pub(crate) fn start_plane_split(
     start_plane_impl(scratch_prefix, tag, true, DeploymentMode::Cloud, true, seed)
 }
 
+/// Stand the COMPOSED stack up — the door-cutover shape every CLI flow now runs: the loopback
+/// plane serves only the vault surface (byte/pointer + enrollment + the internal lane, its
+/// internal token armed), the web app is spawned in FRONT of it, and the returned
+/// [`Plane::base_url`] is the APP's `/api` base — exactly what the protocol card teaches a real
+/// client to dial. Suites keep their seed closures and harness calls; only the door moved.
+pub(crate) fn start_stack(
+    scratch_prefix: &str,
+    tag: &str,
+    enrollment: bool,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
+    start_stack_mode(scratch_prefix, tag, enrollment, DeploymentMode::Cloud, seed)
+}
+
+/// [`start_stack`] with an explicit deployment posture (the standup chain needs self-host).
+pub(crate) fn start_stack_mode(
+    scratch_prefix: &str,
+    tag: &str,
+    enrollment: bool,
+    mode: DeploymentMode,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
+    start_stack_impl(scratch_prefix, tag, enrollment, mode, seed)
+}
+
+fn start_stack_impl(
+    scratch_prefix: &str,
+    tag: &str,
+    enrollment: bool,
+    mode: DeploymentMode,
+    seed: impl AsyncFnOnce(&Authority) -> Seeded,
+) -> Plane {
+    let dir = Scratch::new(scratch_prefix, tag);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    // The APP's port is chosen FIRST: the vault's enrollment disclosure (the bootstrap plane
+    // block, the card, every minted link) must name the DOOR, never the vault's own loopback
+    // address — a client that re-rooted onto the vault would prove the wrong topology.
+    let app_port = free_port();
+    let app_origin = format!("http://127.0.0.1:{app_port}");
+    let app_api_base = format!("{app_origin}/api");
+    // Resource addresses (and the card + `/i/` + `/verify` links) live at the app ORIGIN root; the
+    // device API the card declares is that origin's `/api` mount. The app derives `api_base_url`
+    // from the request origin, so the two share a host by construction — there is no separate plane
+    // host to point at (the app is the door, not a proxy to one).
+    let link_origin = app_origin.clone();
+
+    let listener = rt
+        .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
+        .expect("bind loopback listener");
+    let plane_addr = listener.local_addr().expect("local addr");
+    let plane_base = format!("http://{plane_addr}");
+
+    let (authority, seeded, pool, web_db_url) = rt.block_on(async {
+        let (pool, web_db_url) = provision_pg_composed().await;
+        let mut authority =
+            Authority::from_pool(pool.clone(), &dir.0.join("git"), &dir.0.join("large"))
+                .expect("open authority");
+        if enrollment {
+            authority = authority
+                .with_enrollment_config(EnrollmentConfig {
+                    secret_path: dir.0.join("enroll.key"),
+                    base_url: app_api_base.clone(),
+                    verify_base_url: Some(link_origin.clone()),
+                    link_base_url: Some(link_origin.clone()),
+                    deployment_mode: mode,
+                    enrollment_method: "device_code".to_owned(),
+                })
+                .expect("load enrollment secret");
+        }
+        let seeded = seed(&authority).await;
+        (authority, seeded, pool, web_db_url)
+    });
+
+    let authority = Arc::new(authority);
+    let state = PlaneState::new(authority.clone()).with_internal_token(INTERNAL_TOKEN);
+    rt.spawn(async move {
+        let _ = axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+
+    let app = spawn_app(&web_db_url, &plane_base, app_port);
+
+    Plane {
+        app: Some(app),
+        rt,
+        authority,
+        pool,
+        base_url: app_api_base,
+        link_base_url: link_origin,
+        seeded,
+        _dir: dir,
+    }
+}
+
 fn start_plane_impl(
     scratch_prefix: &str,
     tag: &str,
@@ -247,6 +541,7 @@ fn start_plane_impl(
     });
 
     Plane {
+        app: None,
         rt,
         authority,
         pool,

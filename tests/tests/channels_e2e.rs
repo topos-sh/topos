@@ -128,7 +128,7 @@ fn install_then_offer(rig: &ReconcileHarness) -> (topos_types::results::PullData
 
 #[test]
 fn genesis_delivers_via_everyone_and_a_fresh_member_installs_then_accepts() {
-    let plane = common::start_plane("topos-channels-e2e", "s1", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s1", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     plane.rt.block_on(async {
@@ -182,7 +182,7 @@ fn genesis_delivers_via_everyone_and_a_fresh_member_installs_then_accepts() {
 
 #[test]
 fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft() {
-    let plane = common::start_plane("topos-channels-e2e", "s2", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s2", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     plane.rt.block_on(async {
@@ -314,7 +314,7 @@ fn a_channel_placement_installs_and_its_removal_withdraws_snapshotting_a_draft()
 
 #[test]
 fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
-    let plane = common::start_plane("topos-channels-e2e", "s3", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s3", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     plane.rt.block_on(async {
@@ -385,7 +385,7 @@ fn a_skill_in_two_joined_channels_delivers_exactly_one_copy() {
 
 #[test]
 fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_place() {
-    let plane = common::start_plane("topos-channels-e2e", "s4", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s4", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     plane.rt.block_on(async {
@@ -479,7 +479,7 @@ fn leaving_a_channel_keeps_a_still_referenced_skill_but_unfollow_detaches_in_pla
 
 #[test]
 fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
-    let plane = common::start_plane("topos-channels-e2e", "s5", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s5", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     plane.rt.block_on(async {
@@ -577,7 +577,7 @@ fn a_device_exclusion_frozen_locally_no_ops_and_a_follow_lifts_it() {
 
 #[test]
 fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_notice() {
-    let plane = common::start_plane("topos-channels-e2e", "s6", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s6", true, empty_seed);
     let v1_files = deploy_files();
     let v1_seed = v1_files.clone();
     plane.rt.block_on(async {
@@ -716,7 +716,7 @@ fn a_downgraded_publish_is_approved_and_reaches_the_follower_with_a_verdict_noti
 
 #[test]
 fn the_reconcile_reports_applied_state_to_the_fleet() {
-    let plane = common::start_plane("topos-channels-e2e", "s7", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s7", true, empty_seed);
     let files = deploy_files();
     let files2 = files.clone();
     let v1 = plane.rt.block_on(async {
@@ -791,7 +791,7 @@ fn the_reconcile_reports_applied_state_to_the_fleet() {
 
 #[test]
 fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal() {
-    let plane = common::start_plane("topos-channels-e2e", "s8", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s8", true, empty_seed);
     let files = deploy_files();
     let v1 = plane.rt.block_on(async {
         let a: &Authority = &plane.authority;
@@ -919,7 +919,7 @@ fn an_archive_withdraws_the_follower_frees_the_name_and_closes_the_open_proposal
 
 #[test]
 fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
-    let plane = common::start_plane("topos-channels-e2e", "s9", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s9", true, empty_seed);
     // v1 = {shared, secret}; v2 = {shared (unchanged), other}. v1 is purged.
     let shared: &[u8] = b"shared-content";
     let v2_files = vec![
@@ -1023,7 +1023,7 @@ fn a_fresh_follower_installs_v2_over_a_purged_v1_ancestor() {
 
 #[test]
 fn a_removed_member_freezes_in_place_and_re_adding_resumes() {
-    let plane = common::start_plane("topos-channels-e2e", "s10", true, empty_seed);
+    let plane = common::start_stack("topos-channels-e2e", "s10", true, empty_seed);
     let files = deploy_files();
     plane.rt.block_on(async {
         let a: &Authority = &plane.authority;

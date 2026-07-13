@@ -4,12 +4,11 @@
 
 use base64::Engine as _;
 use plane_store::{
-    AppliedSkill, CandidateUpload, ChannelIndexEntry, ChannelMembershipOutcome, CommitId,
-    CurationOutcome, Delivery, DeploymentMode as StoreDeploymentMode, DeviceAuthPoll,
-    DeviceAuthStart, GovernanceOutcome, InviteBootstrap, LoginOutcome, LoginSeat, Me,
-    OpenProposalSummary, PasscodeComplete, ProposalIndexEntry, ProtectOutcome, Reach,
-    RedeemOutcome, SessionIntent as StoreSessionIntent, SetCurrentReceipt, SkillId, SkillIndexRow,
-    SkillLog, SubscriptionOutcome, UploadedFile, VerificationContext, VersionMeta,
+    CandidateUpload, CommitId, DeploymentMode as StoreDeploymentMode, DeviceAuthPoll,
+    DeviceAuthStart, GovernanceOutcome, InviteBootstrap, LoginOutcome, LoginSeat,
+    OpenProposalSummary, PasscodeComplete, ProposalIndexEntry, RedeemOutcome,
+    SessionIntent as StoreSessionIntent, SetCurrentReceipt, SkillIndexRow, SkillLog, UploadedFile,
+    VerificationContext, VersionMeta,
 };
 use topos_types::bootstrap::{
     BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapWorkspace, ConsentMode,
@@ -17,12 +16,10 @@ use topos_types::bootstrap::{
 };
 use topos_types::requests::{
     DeviceAuthorizeResponse, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
-    InvitationData, LoginData, LoginMembership, PasscodeConfirmResponse, PasscodeConfirmStatus,
-    RedeemResponse, SessionIntent, VerificationContextResponse, WireAppliedReport, WireCandidate,
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
-    WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal, WireProposalEntry,
-    WireProposalIndex, WireProposalList, WireProtocolCard, WireReach, WireSkillIndex,
-    WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
+    LoginData, LoginMembership, PasscodeConfirmResponse, PasscodeConfirmStatus, RedeemResponse,
+    SessionIntent, VerificationContextResponse, WireCandidate, WireLogProposal, WireLogVersion,
+    WireOpenProposal, WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta,
 };
 use topos_types::{
     ActionCode, Affected, JsonEnvelope, NextAction, RECEIPT_SCHEMA_VERSION, Receipt,
@@ -196,75 +193,6 @@ pub(crate) fn skill_index_to_wire(rows: Vec<SkillIndexRow>) -> WireSkillIndex {
             })
             .collect(),
     }
-}
-
-/// Map the authority's [`Delivery`] (the per-device currency answer) to the wire [`WireDelivery`] —
-/// hex-encode each 32-byte id (the same `hex::encode` [`skill_index_to_wire`] uses), carry the `via`
-/// attribution / protection / timestamps through, and stamp the `workspace_id` from the request path. **NO
-/// bytes** — the client fetches each version through the per-blob bundle read after reconciling.
-pub(crate) fn delivery_to_wire(d: Delivery, ws: &str) -> WireDelivery {
-    WireDelivery {
-        schema_version: 1,
-        workspace_id: ws.to_owned(),
-        staleness_window_ms: d.staleness_window_ms,
-        skills: d
-            .skills
-            .into_iter()
-            .map(|s| WireDeliverySkill {
-                skill_id: s.skill_id,
-                name: s.name,
-                display_name: s.display_name,
-                protection: s.protection,
-                version_id: hex::encode(s.version_id),
-                bundle_digest: hex::encode(s.bundle_digest),
-                generation: s.generation,
-                updated_at: s.updated_at,
-                via: WireVia {
-                    channels: s.via_channels,
-                    direct: s.direct,
-                },
-            })
-            .collect(),
-        detached: d.detached,
-        excluded: d.excluded,
-        notices: d
-            .notices
-            .into_iter()
-            .map(|n| WireNotice {
-                id: n.id,
-                kind: n.kind,
-                skill_id: n.skill_id,
-                skill_name: n.skill_name,
-                version_id: n.version_id.map(hex::encode),
-                actor: n.actor,
-                outcome: n.outcome,
-                reason: n.reason,
-                message: n.message,
-                created_at: n.created_at,
-            })
-            .collect(),
-        proposals_awaiting: d.proposals_awaiting,
-    }
-}
-
-/// Map an inbound applied-state report to the authority's `Vec<AppliedSkill>`: parse each skill id and
-/// hex-decode each version id at the edge, mapping a bad id to a 400 (mirroring [`candidate_to_domain`]).
-pub(crate) fn applied_report_to_domain(
-    req: WireAppliedReport,
-) -> Result<Vec<AppliedSkill>, PlaneHttpError> {
-    let mut applied = Vec::with_capacity(req.applied.len());
-    for a in req.applied {
-        let skill_id =
-            SkillId::parse(&a.skill_id).map_err(|e| PlaneHttpError::BadId(e.to_string()))?;
-        let version_id = super::hex32(&a.version_id).map(CommitId).ok_or_else(|| {
-            PlaneHttpError::BadId(format!("invalid version id {:?}", a.version_id))
-        })?;
-        applied.push(AppliedSkill {
-            skill_id,
-            version_id,
-        });
-    }
-    Ok(applied)
 }
 
 /// The CLI verb a domain command string maps to (the envelope's `command`).
@@ -520,61 +448,6 @@ fn login_membership(s: LoginSeat) -> LoginMembership {
     }
 }
 
-/// The success envelope for an [`InviteOutcome::Invited`] — the workspace ADDRESS the invitees join at, the
-/// folded invited set, and the honest `mailed` flag (the mailing itself is the handler's fire-and-forget).
-/// The two typed refusals are mapped by the handler through [`denied_code_envelope`].
-pub(crate) fn invitation_envelope(
-    address: String,
-    invited: Vec<String>,
-    mailed: bool,
-) -> JsonEnvelope {
-    let data = InvitationData {
-        address,
-        invited,
-        mailed,
-    };
-    ok_envelope("invite", to_data(&data))
-}
-
-/// Map the caller's own membership ([`Me`]) to the wire [`WireMe`] (1:1 — plain owned fields).
-pub(crate) fn me_to_wire(me: Me) -> WireMe {
-    WireMe {
-        workspace_id: me.workspace_id,
-        name: me.name,
-        display_name: me.display_name,
-        address: me.address,
-        principal: me.principal,
-        role: me.role,
-        invited_by: me.invited_by,
-        invite_policy: me.invite_policy,
-    }
-}
-
-/// Map the workspace channels index to the wire [`WireChannelIndex`] — each channel's mode / builtin flag /
-/// caller membership / member count and its (name-sorted) skill references.
-pub(crate) fn channels_to_wire(entries: Vec<ChannelIndexEntry>) -> WireChannelIndex {
-    WireChannelIndex {
-        channels: entries
-            .into_iter()
-            .map(|c| WireChannelEntry {
-                name: c.name,
-                mode: c.mode,
-                builtin: c.builtin,
-                member: c.member,
-                member_count: c.member_count,
-                skills: c
-                    .skills
-                    .into_iter()
-                    .map(|s| WireChannelSkill {
-                        skill_id: s.skill_id,
-                        name: s.name,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
-}
-
 /// Map the review inbox (`Vec<ProposalIndexEntry>`) to the wire [`WireProposalIndex`] — hex-encode each
 /// 32-byte id, carry the author message + `stale` flag through.
 pub(crate) fn proposals_index_to_wire(entries: Vec<ProposalIndexEntry>) -> WireProposalIndex {
@@ -631,14 +504,6 @@ pub(crate) fn skill_log_to_wire(log: SkillLog) -> WireSkillLog {
     }
 }
 
-/// Map a skill's [`Reach`] to the wire [`WireReach`] (1:1).
-pub(crate) fn reach_to_wire(r: Reach) -> WireReach {
-    WireReach {
-        persons: r.persons,
-        devices: r.devices,
-    }
-}
-
 /// The constant protocol card's MACHINE face — the discriminant a client dispatches on plus the API base it
 /// re-roots onto (no content, no existence signal).
 pub(crate) fn protocol_card(api_base_url: String) -> WireProtocolCard {
@@ -656,55 +521,6 @@ pub(crate) fn protocol_card(api_base_url: String) -> WireProtocolCard {
 // string in `data`; a role/gate refusal is a 200 + DENIED with a specific code (the actor is an
 // authenticated member — nothing to hide, so never a 403). ONE consistent code family (`*_ROLE_REQUIRED` /
 // `CHANNEL_BUILTIN` / `SKILL_NOT_ACTIVE` / `BAD_NAME` / `UNKNOWN_CHANNEL`).
-
-/// A curation write's outcome ([`CurationOutcome`]) → its all-outcome envelope.
-pub(crate) fn curation_envelope(command: &str, outcome: CurationOutcome) -> JsonEnvelope {
-    match outcome {
-        CurationOutcome::Placed => ok_status_envelope(command, "placed"),
-        CurationOutcome::Created => ok_status_envelope(command, "created"),
-        CurationOutcome::Removed => ok_status_envelope(command, "removed"),
-        CurationOutcome::NotPlaced => ok_status_envelope(command, "not_placed"),
-        CurationOutcome::CuratedRoleRequired => {
-            denied_code_envelope(command, "CURATED_ROLE_REQUIRED")
-        }
-        CurationOutcome::BadName => denied_code_envelope(command, "BAD_NAME"),
-        CurationOutcome::SkillNotActive => denied_code_envelope(command, "SKILL_NOT_ACTIVE"),
-    }
-}
-
-/// A channel-membership change's outcome ([`ChannelMembershipOutcome`]) → its all-outcome envelope.
-pub(crate) fn membership_envelope(
-    command: &str,
-    outcome: ChannelMembershipOutcome,
-) -> JsonEnvelope {
-    match outcome {
-        ChannelMembershipOutcome::Joined => ok_status_envelope(command, "joined"),
-        ChannelMembershipOutcome::Left => ok_status_envelope(command, "left"),
-        ChannelMembershipOutcome::NotMember => ok_status_envelope(command, "not_member"),
-        ChannelMembershipOutcome::Builtin => denied_code_envelope(command, "CHANNEL_BUILTIN"),
-    }
-}
-
-/// A person-scoped subscription write's outcome ([`SubscriptionOutcome`]) → its all-outcome envelope.
-pub(crate) fn subscription_envelope(command: &str, outcome: SubscriptionOutcome) -> JsonEnvelope {
-    match outcome {
-        SubscriptionOutcome::Followed => ok_status_envelope(command, "followed"),
-        SubscriptionOutcome::Unfollowed => ok_status_envelope(command, "unfollowed"),
-        SubscriptionOutcome::Excluded => ok_status_envelope(command, "excluded"),
-        SubscriptionOutcome::SkillNotActive => denied_code_envelope(command, "SKILL_NOT_ACTIVE"),
-    }
-}
-
-/// A `protect` write's outcome ([`ProtectOutcome`]) → its all-outcome envelope.
-pub(crate) fn protect_envelope(command: &str, outcome: ProtectOutcome) -> JsonEnvelope {
-    match outcome {
-        ProtectOutcome::Set => ok_status_envelope(command, "set"),
-        ProtectOutcome::ReviewerRoleRequired => {
-            denied_code_envelope(command, "REVIEWER_ROLE_REQUIRED")
-        }
-        ProtectOutcome::OwnerRoleRequired => denied_code_envelope(command, "OWNER_ROLE_REQUIRED"),
-    }
-}
 
 /// The all-outcome envelope for a roster/revoke [`GovernanceOutcome`]: `Ok` → a 200 carrying `data` (`{}` for
 /// these data-less mutations); `Denied` → the uniform flat DENIED error. A role-denial is a 200+DENIED (the
@@ -733,12 +549,6 @@ fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelope {
         receipt: None,
         error: None,
     }
-}
-
-/// A success envelope carrying only a `status` string in `data` — the naturally-idempotent row ops'
-/// answer (`placed` / `joined` / `followed` / `set` / …; the client narrates it, no receipt).
-pub(crate) fn ok_status_envelope(command: &str, status: &str) -> JsonEnvelope {
-    ok_envelope(command, serde_json::json!({ "status": status }))
 }
 
 /// The uniform DENIED envelope — a flat [`WireError`] with the `DENIED` code + the access-recovery next

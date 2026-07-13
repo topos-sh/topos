@@ -44,17 +44,6 @@ pub fn router(state: PlaneState) -> Router {
             "/v1/workspaces/{ws}/skills",
             get(routes::skills_index::list_skills),
         )
-        // The per-device currency read (delivery) + the fleet's applied-state report. The report is a
-        // body-light device WRITE grouped with the reads (the currency lane); it carries the small 64 KiB
-        // belt as a per-route layer (the other reads carry no body, so the group has no shared belt).
-        .route(
-            "/v1/workspaces/{ws}/delivery",
-            get(routes::delivery::get_delivery),
-        )
-        .route(
-            "/v1/workspaces/{ws}/report",
-            put(routes::delivery::put_report).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
-        )
         .route(
             "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
             get(routes::bundles::get_bundle),
@@ -66,11 +55,20 @@ pub fn router(state: PlaneState) -> Router {
         .route(
             "/v1/workspaces/{ws}/skills/{skill}/proposals",
             get(routes::proposals::list_proposals),
+        )
+        // The two BYTE-DECORATED describe reads the vault keeps serving after the door cutover:
+        // the review inbox and the skill log both read git commit messages (byte custody), which
+        // the composing app deliberately does not hold. Every OTHER member-lane row op moved to
+        // the app (the guarded `topos_*` SQL functions under its scoped role are the one
+        // implementation; the contract stubs in `routes::door` keep the wire pinned here).
+        .route(
+            "/v1/workspaces/{ws}/proposals",
+            get(routes::describe::get_proposals),
+        )
+        .route(
+            "/v1/workspaces/{ws}/skills/{skill}/log",
+            get(routes::describe::get_log),
         );
-
-    // The member-lane VERB surface: the describe reads (no body) + the small guarded row-op writes. Shared
-    // the 64 KiB belt (harmless on the bodyless reads/PUTs) — every op the ONE Bearer workspace credential.
-    let member_verbs = member_verb_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
 
     // The unauthenticated claim bootstrap — a GET, no body, no body-size belt.
     let public = Router::new().route("/i/{token}", get(routes::bootstrap::read_bootstrap));
@@ -87,7 +85,6 @@ pub fn router(state: PlaneState) -> Router {
 
     writes
         .merge(reads)
-        .merge(member_verbs)
         .merge(public)
         .merge(enroll_and_governance)
         .merge(internal)
@@ -101,67 +98,6 @@ pub fn router(state: PlaneState) -> Router {
         // Outermost (the last layer added), so the rate limiter's 429s are recorded too.
         .layer(axum::middleware::from_fn(trace_requests))
         .with_state(state)
-}
-
-/// The member-lane verb-surface route group (the describe reads + the guarded row-op writes), all
-/// authenticated by the ONE Bearer workspace credential and front-doored by the ONE membership predicate.
-/// Factored out so the body-size belt wraps the whole group in one place.
-fn member_verb_routes() -> Router<PlaneState> {
-    Router::new()
-        // The describe reads (the two-phase verbs' "before").
-        .route("/v1/workspaces/{ws}/me", get(routes::describe::get_me))
-        .route(
-            "/v1/workspaces/{ws}/channels",
-            get(routes::describe::get_channels),
-        )
-        .route(
-            "/v1/workspaces/{ws}/proposals",
-            get(routes::describe::get_proposals),
-        )
-        .route(
-            "/v1/workspaces/{ws}/skills/{skill}/log",
-            get(routes::describe::get_log),
-        )
-        .route(
-            "/v1/workspaces/{ws}/skills/{skill}/reach",
-            get(routes::describe::get_reach),
-        )
-        // Person-scoped subscriptions + this-device exclusion.
-        .route(
-            "/v1/workspaces/{ws}/follows/{skill}",
-            put(routes::subscriptions::follow_skill).delete(routes::subscriptions::unfollow_skill),
-        )
-        .route(
-            "/v1/workspaces/{ws}/exclusions/{skill}",
-            put(routes::subscriptions::exclude_device),
-        )
-        // Channel membership (join/leave) + curation (place/unplace).
-        .route(
-            "/v1/workspaces/{ws}/channels/{ch}/membership",
-            put(routes::channels::channel_join).delete(routes::channels::channel_leave),
-        )
-        .route(
-            "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}",
-            put(routes::channels::channel_place).delete(routes::channels::channel_unplace),
-        )
-        // The `protect` setter (kind-polymorphic: a skill bundle, or a channel mode).
-        .route(
-            "/v1/workspaces/{ws}/skills/{skill}/protection",
-            put(routes::protection::set_skill_protection),
-        )
-        .route(
-            "/v1/workspaces/{ws}/channels/{ch}/protection",
-            put(routes::protection::set_channel_protection),
-        )
-        // Notices ack (person-scoped read-state) + invitation (a roster WRITE, member-level).
-        .route(
-            "/v1/workspaces/{ws}/notices/ack",
-            post(routes::notices::ack_notices),
-        )
-        .route(
-            "/v1/workspaces/{ws}/invitations",
-            post(routes::invitations::invite),
-        )
 }
 
 /// The INTERNAL session-lane route group — HTTP over the lib-only session wrappers for a downstream

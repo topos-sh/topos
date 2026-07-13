@@ -1,10 +1,19 @@
 # `tests/` — the workspace-level end-to-end suite
 
 One workspace member (`topos-e2e`) holding the loopback-HTTP end-to-end tests: the GENUINE client engine
-(the real `ureq` transport, the real pull/write verbs) against the GENUINE plane (`topos_plane::router`
-over a real `plane-store::Authority`) on a real `127.0.0.1:0` socket. Per-crate unit + generative tests
-live in their crates (every trust invariant is a unit/seeded-generative test in `topos-core`); this
-directory is for what only a cross-crate loopback run can prove.
+(the real `ureq` transport, the real pull/write verbs) against the GENUINE product topology. Since the
+door cutover that topology is the COMPOSED STACK (`start_stack`): the real web app — spawned from its
+production build (`web/build/server/index.js`; CI builds it before `cargo test`, locally run
+`cd web && bun install && bun run build` once) — in FRONT of an in-process `topos_plane::router` that
+has no public face, with the CLI dialing the app's `/api` base exactly as a real client does after
+re-rooting off the protocol card. The app serves the row ops under the scoped `topos_web` role and
+forwards byte/enrollment/governance ops to the vault, so every enrollment/distribute/contribute suite
+exercises the cutover's whole path. (The one exception is `restore_e2e`, which keeps a bare
+loopback plane — its subject is the operator SQL-rewind + the authority's epoch bump, an
+authority-level concern with no HTTP door in it; its follower-pull rides the same door-forwarded
+`GET current` the composed suites already cover.) Per-crate unit + generative tests live in their
+crates (every trust invariant is a unit/seeded-generative test in `topos-core`); this directory is
+for what only a cross-crate composed run can prove.
 
 ## Layout (what actually exists)
 

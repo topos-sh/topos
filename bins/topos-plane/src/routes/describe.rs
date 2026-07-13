@@ -1,11 +1,14 @@
-//! The member-lane DESCRIBE reads — what the two-phase verbs render their "before" from: the caller's own
-//! membership (`me`), the workspace channels index, the review inbox, a skill's log, and a skill's reach.
+//! The two BYTE-DECORATED describe reads the vault keeps serving after the door cutover: the
+//! review inbox and a skill's log. Both decorate their rows with git commit messages/authors
+//! (byte custody the composing app deliberately does not hold), so they stay here while every
+//! other member-lane describe/row op moved to the app (its contract stubs live in
+//! [`super::door`]).
 //!
-//! Each is authenticated by the ONE Bearer workspace credential and front-doored by the ONE membership
-//! predicate; every miss — missing/blank/unknown/revoked credential, non-member, or (for log/reach) an
-//! unknown skill — is the single indistinguishable **404**. The reads mint nothing durable and are
-//! per-member/hot, so each answers `Cache-Control: no-store`. Each handler is THIN: parse → one authority
-//! read → serialize.
+//! Each is authenticated by the ONE Bearer workspace credential and front-doored by the ONE
+//! membership predicate; every miss — missing/blank/unknown/revoked credential, non-member, or
+//! (for the log) an unknown skill — is the single indistinguishable **404**. The reads mint
+//! nothing durable and are per-member/hot, so each answers `Cache-Control: no-store`. Each
+//! handler is THIN: parse → one authority read → serialize.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,7 +16,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use plane_store::WorkspaceId;
 use topos_types::JsonEnvelope;
-use topos_types::requests::{WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillLog};
+use topos_types::requests::{WireProposalIndex, WireSkillLog};
 
 use crate::state::PlaneState;
 use crate::wire::error::PlaneHttpError;
@@ -38,61 +41,6 @@ fn read_response<T: serde::Serialize>(body: T) -> Response {
         Json(body),
     )
         .into_response()
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/workspaces/{ws}/me",
-    tag = "reads",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The caller's own membership (identity + address + role + inviter + invite policy).", body = WireMe),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) async fn get_me(
-    State(state): State<PlaneState>,
-    Path(ws): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, PlaneHttpError> {
-    let credential = wire::bearer_token(&headers)?;
-    let ws = parse_ws(&ws)?;
-    let me = state
-        .authority()
-        .membership_describe(&ws, &credential)
-        .await?;
-    Ok(read_response(map::me_to_wire(me)))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/workspaces/{ws}/channels",
-    tag = "reads",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The workspace channels (the structural `everyone` included), with the caller's membership marked.", body = WireChannelIndex),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) async fn get_channels(
-    State(state): State<PlaneState>,
-    Path(ws): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, PlaneHttpError> {
-    let credential = wire::bearer_token(&headers)?;
-    let ws = parse_ws(&ws)?;
-    let entries = state.authority().channels_index(&ws, &credential).await?;
-    Ok(read_response(map::channels_to_wire(entries)))
 }
 
 #[utoipa::path(
@@ -149,31 +97,4 @@ pub(crate) async fn get_log(
         .skill_log(&ws, &credential, &skill)
         .await?;
     Ok(read_response(map::skill_log_to_wire(log)))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/workspaces/{ws}/skills/{skill}/reach",
-    tag = "reads",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The skill's audience (entitled members + their non-revoked devices).", body = WireReach),
-        (status = 404, description = "Missing/blank credential, non-member, or unknown skill (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) async fn get_reach(
-    State(state): State<PlaneState>,
-    Path((ws, skill)): Path<(String, String)>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, PlaneHttpError> {
-    let credential = wire::bearer_token(&headers)?;
-    let ws = parse_ws(&ws)?;
-    let reach = state.authority().reach(&ws, &credential, &skill).await?;
-    Ok(read_response(map::reach_to_wire(reach)))
 }

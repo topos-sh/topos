@@ -30,6 +30,31 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("install", file("install.ts")),
     route("i/:token", file("claim-link.ts")),
     route("api/auth/*", file("api.auth.ts")),
+    // THE DEVICE LANE — `/api/v1` is the product's one public API, served here since the door
+    // cutover. Row ops run in this tier through the guarded `topos_*` functions under the
+    // scoped role (each route authenticates the workspace credential via `requireDeviceActor`);
+    // everything else — byte/pointer ops, enrollment, governance — falls through the static
+    // routes below onto the `api/v1/*` splat, which forwards VERBATIM to the vault on the
+    // internal network. Static segments outrank the splat, so each listed route wins its path.
+    // The REVIEW INBOX (`workspaces/:ws/proposals`) and the SKILL LOG (`…/skills/:skill/log`) are
+    // deliberately NOT served here: both decorate their rows with git commit messages — byte
+    // custody this tier does not hold — so they ride the splat to the vault like every byte op.
+    ...prefix("api/v1/workspaces/:ws", [
+      route("me", file("api.v1.me.ts")),
+      route("channels", file("api.v1.channels.ts")),
+      route("delivery", file("api.v1.delivery.ts")),
+      route("report", file("api.v1.report.ts")),
+      route("notices/ack", file("api.v1.notices-ack.ts")),
+      route("invitations", file("api.v1.invitations.ts")),
+      route("follows/:skill", file("api.v1.follows.ts")),
+      route("exclusions/:skill", file("api.v1.exclusions.ts")),
+      route("channels/:channel/membership", file("api.v1.channel-membership.ts")),
+      route("channels/:channel/skills/:skill", file("api.v1.curation.ts")),
+      route("channels/:channel/protection", file("api.v1.channel-protection.ts")),
+      route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
+      route("skills/:skill/protection", file("api.v1.skill-protection.ts")),
+    ]),
+    route("api/v1/*", file("api.v1.$.ts")),
     // Signed-in surface: one shell layout carries the session middleware + chrome.
     route("api/memberships", file("api.memberships.ts")),
     route("app", file("app-entry.tsx")),

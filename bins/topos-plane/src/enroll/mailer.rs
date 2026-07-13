@@ -1,4 +1,6 @@
-//! The passcode mailer seam — a private TEST seam, NOT a product port.
+//! The passcode mailer seam — a private TEST seam, NOT a product port. (The INVITATION mail moved
+//! to the composing web app with the door cutover: invitations are served there, and the app's own
+//! mail seam carries the courtesy notice + the honest `mailed` flag.)
 //!
 //! Mirrors the `Limiter` / `LargeObjectStore` precedent: a `pub(crate)` trait with a real SMTP impl
 //! (`SmtpMailer`), a silent self-host default (`NoopMailer`), and a recording test double (`FakeMailer`).
@@ -26,21 +28,6 @@ pub(crate) trait Mailer: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// [`MailError`] if the message cannot be built or the relay rejects/refuses the send.
     fn send_passcode(&self, to: &str, code: &Passcode, ctx: &MailContext) -> Result<(), MailError>;
-
-    /// Send an invitation to `to` disclosing the workspace `display_name` + its share `address` (the door
-    /// the invitee pastes to their agent) — a ROSTER write's courtesy notice, never a credential (the
-    /// address carries nothing; the roster is the lock). Fire-and-forget on `spawn_blocking`, like the
-    /// passcode.
-    ///
-    /// # Errors
-    /// [`MailError`] if the message cannot be built or the relay rejects/refuses the send.
-    fn send_invitation(&self, to: &str, display_name: &str, address: &str)
-    -> Result<(), MailError>;
-
-    /// Whether this mailer can actually DELIVER (a real relay is configured) — the honest `mailed` flag an
-    /// invitation reports. `false` for the no-SMTP self-host default, so an invitation over a self-host
-    /// plane truthfully reports `mailed: false` and the inviter pastes the address by hand.
-    fn can_send(&self) -> bool;
 }
 
 /// A 6-digit passcode to mail. The plaintext is wrapped so its `Debug` REDACTS — the code reaches the SMTP
@@ -174,35 +161,6 @@ impl Mailer for SmtpMailer {
         self.transport.send(&message).map_err(|_| MailError::Send)?;
         Ok(())
     }
-
-    fn send_invitation(
-        &self,
-        to: &str,
-        display_name: &str,
-        address: &str,
-    ) -> Result<(), MailError> {
-        let to: Mailbox = to.parse().map_err(|_| MailError::Build)?;
-        let body = format!(
-            "You were added to {display_name} on Topos.\n\n\
-             Paste this address to your agent to join:\n\n    {address}\n\n\
-             Topos keeps a team's agent skills current on every machine — once you join, shared skills \
-             arrive automatically (each behind your explicit yes).\n\
-             If you weren't expecting this, you can ignore this email.\n",
-        );
-        let message = Message::builder()
-            .from(self.from.clone())
-            .to(to)
-            .subject(format!("You were added to {display_name} on Topos"))
-            .header(ContentType::TEXT_PLAIN)
-            .body(body)
-            .map_err(|_| MailError::Build)?;
-        self.transport.send(&message).map_err(|_| MailError::Send)?;
-        Ok(())
-    }
-
-    fn can_send(&self) -> bool {
-        true
-    }
 }
 
 /// The no-SMTP self-host default — silently drops the passcode (the bootstrap simply won't advertise the
@@ -219,19 +177,6 @@ impl Mailer for NoopMailer {
     ) -> Result<(), MailError> {
         Ok(())
     }
-
-    fn send_invitation(
-        &self,
-        _to: &str,
-        _display_name: &str,
-        _address: &str,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    fn can_send(&self) -> bool {
-        false
-    }
 }
 
 /// A recording test double — captures each send (recipient + plaintext code) so a route test can assert the
@@ -240,7 +185,6 @@ impl Mailer for NoopMailer {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FakeMailer {
     sent: std::sync::Arc<std::sync::Mutex<Vec<SentMail>>>,
-    invitations: std::sync::Arc<std::sync::Mutex<Vec<SentInvitation>>>,
 }
 
 /// One recorded send. `code` is the PLAINTEXT on purpose — the whole point of the fake is to let a test read
@@ -254,29 +198,11 @@ pub(crate) struct SentMail {
     pub(crate) code: String,
 }
 
-/// One recorded invitation send — the recipient + the disclosed workspace address.
-#[cfg(any(test, feature = "test-fixtures"))]
-#[derive(Debug, Clone)]
-pub(crate) struct SentInvitation {
-    /// The recipient address.
-    pub(crate) to: String,
-    /// The workspace share address the body disclosed.
-    pub(crate) address: String,
-}
-
 #[cfg(any(test, feature = "test-fixtures"))]
 impl FakeMailer {
     /// A snapshot of every passcode mailed so far (a test asserts + reads the code off this).
     pub(crate) fn sent(&self) -> Vec<SentMail> {
         self.sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// A snapshot of every invitation mailed so far (a test asserts the recipients + disclosed address).
-    pub(crate) fn invitations(&self) -> Vec<SentInvitation> {
-        self.invitations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -299,26 +225,6 @@ impl Mailer for FakeMailer {
                 code: code.as_str().to_owned(),
             });
         Ok(())
-    }
-
-    fn send_invitation(
-        &self,
-        to: &str,
-        _display_name: &str,
-        address: &str,
-    ) -> Result<(), MailError> {
-        self.invitations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(SentInvitation {
-                to: to.to_owned(),
-                address: address.to_owned(),
-            });
-        Ok(())
-    }
-
-    fn can_send(&self) -> bool {
-        true
     }
 }
 

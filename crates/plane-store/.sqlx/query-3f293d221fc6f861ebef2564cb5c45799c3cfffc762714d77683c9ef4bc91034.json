@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT topos_delivery($1, $2, $3) AS \"body?: serde_json::Value\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body?: serde_json::Value",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3f293d221fc6f861ebef2564cb5c45799c3cfffc762714d77683c9ef4bc91034"
+}

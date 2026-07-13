@@ -69,10 +69,16 @@ path, never a directory table (a one-way seam `cargo xtask check-arch` enforces)
   (`topos_resolve_skill`: live catalog first, rename hints second — an old renamed name keeps
   resolving), so every tier resolves identically. Naturally idempotent row ops (no receipts);
   the channel audit is TRIGGER-emitted, so no write path can skip it.
-- `delivery.rs` / `db/directory/delivery.rs` — the delivery read ("what should THIS device have":
-  the ONE entitlement SRF + via attribution + the person's detached set + the unacked notices feed
-  + the open-proposal count) and the fleet's applied-state report (snapshot upsert; detach records
-  immutable; `last_report_at` the staleness clock).
+- `delivery.rs` / `db/directory/delivery.rs` — the delivery read ("what should THIS device have")
+  and the fleet's applied-state report — each ONE guarded SQL function since the door cutover
+  (migration 0019: `topos_delivery` assembles the complete wire body in a single statement — one
+  snapshot — and `topos_report_applied` fences itself `FOR UPDATE`, since its other caller is the
+  READ COMMITTED web tier). The Rust halves are thin typed wrappers over the same functions, so
+  the in-crate behavioral suite drives the production SQL whichever tier serves it. 0019 also adds
+  `topos_device_actor` (the web door's credential→confirmed-seat resolver; the hash computed in
+  Postgres) and carries the `topos_web` GRANTS next to the schema they bound (column-grain UPDATE;
+  role-guarded, so a bare test database skips them; `src/tests/device_door.rs` asserts the exact
+  shape + probes the row/byte line live).
 - `enroll.rs` / `db/directory/enroll.rs` — enrollment issuance BY ADDRESS (device-auth toward a
   workspace NAME, passcodes, grants, the central redeem — which gates on the ROSTER and mints the ONE
   **workspace credential** per device — and the LOGIN door, which re-mints that credential in every

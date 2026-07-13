@@ -54,27 +54,31 @@ use topos_types::{
         crate::routes::proposals::list_proposals,
         // The device-credential workspace catalog read (catalog visibility == membership).
         crate::routes::skills_index::list_skills,
-        // The per-device currency lane: the delivery read + the applied-state report.
-        crate::routes::delivery::get_delivery,
-        crate::routes::delivery::put_report,
-        // The member-lane DESCRIBE reads (the two-phase verbs' "before").
-        crate::routes::describe::get_me,
-        crate::routes::describe::get_channels,
+        // The per-device currency lane + the member-lane row ops — SERVED BY THE COMPOSING WEB APP
+        // since the door cutover (the guarded `topos_*` SQL functions under its scoped role are the
+        // implementation); the vault does not mount these paths. The `routes::door` contract stubs
+        // keep the ONE committed OpenAPI describing the whole product wire, in the original entry
+        // order (the generated JSON is byte-compared). The two exceptions staying live on the vault
+        // — `describe::get_proposals` and `describe::get_log` — are byte-decorated reads (git
+        // commit messages ride both bodies), which the composing app deliberately cannot serve.
+        crate::routes::door::get_delivery,
+        crate::routes::door::put_report,
+        crate::routes::door::get_me,
+        crate::routes::door::get_channels,
         crate::routes::describe::get_proposals,
         crate::routes::describe::get_log,
-        crate::routes::describe::get_reach,
-        // The member-lane row-op writes (subscriptions / channels / protection / notices / invitations).
-        crate::routes::subscriptions::follow_skill,
-        crate::routes::subscriptions::unfollow_skill,
-        crate::routes::subscriptions::exclude_device,
-        crate::routes::channels::channel_join,
-        crate::routes::channels::channel_leave,
-        crate::routes::channels::channel_place,
-        crate::routes::channels::channel_unplace,
-        crate::routes::protection::set_skill_protection,
-        crate::routes::protection::set_channel_protection,
-        crate::routes::notices::ack_notices,
-        crate::routes::invitations::invite,
+        crate::routes::door::get_reach,
+        crate::routes::door::follow_skill,
+        crate::routes::door::unfollow_skill,
+        crate::routes::door::exclude_device,
+        crate::routes::door::channel_join,
+        crate::routes::door::channel_leave,
+        crate::routes::door::channel_place,
+        crate::routes::door::channel_unplace,
+        crate::routes::door::set_skill_protection,
+        crate::routes::door::set_channel_protection,
+        crate::routes::door::ack_notices,
+        crate::routes::door::invite,
         // The unauthenticated claim bootstrap.
         crate::routes::bootstrap::read_bootstrap,
         // Enrollment flow (+ the login redeem).

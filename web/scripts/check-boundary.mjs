@@ -198,8 +198,13 @@ const SESSIONLESS_ROUTES = new Set([
   "resource-channel",
   "resource-skill",
   "catch-all",
+  // The device lane's PASS-THROUGH splat: no session and no guard BY DESIGN — it forwards
+  // byte/pointer + enrollment ops verbatim and the vault's in-transaction credential resolve
+  // is the authority (a guard here could only drift from the vault's replay-before-revoked
+  // ordering). Every SERVED /api/v1 route guards with requireDeviceActor like any other.
+  "api.v1.$",
 ]);
-const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer)\s*\(/;
+const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer|DeviceActor)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

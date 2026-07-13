@@ -10,10 +10,15 @@ The source of truth for the wire boundary, GENERATED from the Rust types and com
   by `cargo xtask gen-fixtures` (so they cannot drift from the contract); `gen-fixtures --check` is the
   drift gate. The digest golden vector, the consent truth-table, and the commit/identity byte vectors live
   as `topos-core` known-answer tests (the kernel is their source of truth).
-- **`openapi/openapi.json`** — the plane's HTTP contract, generated from `topos_plane::openapi()` (the
-  annotated routes + the `topos-types` wire DTOs). It rides the SAME `gen-schema` run and the same
-  `--check` drift discipline (stale / missing / orphan all fail), so one gate covers both contracts. The
-  feature-gated OIDC routes are default-off and therefore deliberately absent from the committed document.
+- **`openapi/openapi.json`** — the PRODUCT's device-lane HTTP contract, generated from
+  `topos_plane::openapi()` (the annotated handlers + the `topos-types` wire DTOs). Since the door
+  cutover the document spans TWO serving tiers behind one public base: the vault's own routes carry
+  live handlers, and the member-lane row ops the web app serves carry contract-only stubs
+  (`bins/topos-plane/src/routes/door.rs`) — same operation ids, same annotations, so the committed
+  bytes stayed identical through the move and the wire stays pinned in ONE generated artifact. It
+  rides the SAME `gen-schema` run and the same `--check` drift discipline (stale / missing / orphan
+  all fail), so one gate covers both contracts. The feature-gated OIDC routes are default-off and
+  therefore deliberately absent from the committed document.
 - **The CLI reference `docs/cli.md`** (a SIBLING generated + committed artifact, outside `contracts/`) is
   rendered from the real clap tree by `cargo xtask gen-cli-ref` and byte-gated by `gen-cli-ref --check` —
   the same generated-and-reviewed discipline, applied to the client's command surface.

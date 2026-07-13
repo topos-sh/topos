@@ -75,7 +75,7 @@ fn v2_files() -> Vec<UploadedFile> {
 /// confirmed owner holding [`OWNER_CRED`]), the genesis (v1) published into `everyone`, and the follower
 /// seated INVITED through the real invitation op.
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane(
+    common::start_stack(
         "topos-revoke-e2e",
         tag,
         true,
@@ -192,7 +192,7 @@ fn publish_child(plane: &Plane, parent: CommitId, files: Vec<UploadedFile>, op: 
 fn e2e_removed_member_fails_closed_then_reenrollment_recovers() {
     let plane = start_plane("revoke");
     let client = FollowHarness::new("revoke");
-    let address = ws_address(&plane.base_url);
+    let address = ws_address(&plane.link_base_url);
 
     // ── 1 · The follower joins by ADDRESS (enroll + `--yes`), and the reconcile lands the `everyone` v1. ──
     common::begin_address_enroll(&plane, &client, &address, FOLLOWER);

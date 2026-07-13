@@ -144,7 +144,7 @@ async fn genesis(
 /// motion, reused as the setup step of most scenarios.
 fn join_and_land(plane: &Plane, tag: &str, email: &str) -> FollowHarness {
     let client = FollowHarness::new(tag);
-    common::begin_address_enroll(plane, &client, &ws_address(&plane.base_url), email);
+    common::begin_address_enroll(plane, &client, &ws_address(&plane.link_base_url), email);
     let applied = client.resume_apply().expect("resume enrolls + applies");
     assert!(applied.enrolled_now, "THIS invocation enrolled the device");
     client
@@ -183,7 +183,7 @@ fn row_count(plane: &Plane, sql: &str, binds: &[&str]) -> i64 {
 
 #[test]
 fn s01_fresh_machine_pastes_the_address_and_everyone_lands() {
-    let plane = common::start_plane("topos-verbs", "s01", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s01", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, ALICE, "member").await;
@@ -204,7 +204,7 @@ fn s01_fresh_machine_pastes_the_address_and_everyone_lands() {
 #[test]
 fn s02_follow_a_channel_qualified_address_joins_and_lands_the_set() {
     const OPS_SKILL: &str = "s-ops";
-    let plane = common::start_plane("topos-verbs", "s02", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s02", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         // The channel-only skill: `publish --to ops` places it in #ops (creating the channel on
@@ -227,7 +227,7 @@ fn s02_follow_a_channel_qualified_address_joins_and_lands_the_set() {
 
     // The fresh machine pastes the CHANNEL-qualified address: enroll + join + land in one flow.
     let client = FollowHarness::new("vr-s02");
-    let address = format!("{}/{WS_NAME}/channels/ops", plane.base_url);
+    let address = format!("{}/{WS_NAME}/channels/ops", plane.link_base_url);
     common::begin_address_enroll(&plane, &client, &address, ALICE);
     let applied = client.resume_apply().expect("resume enrolls + applies");
     assert!(applied.enrolled_now);
@@ -276,7 +276,7 @@ fn s02_follow_a_channel_qualified_address_joins_and_lands_the_set() {
 
 #[test]
 fn s03_unfollow_is_person_scoped_and_freezes_bytes_everywhere() {
-    let plane = common::start_plane("topos-verbs", "s03", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s03", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, ALICE, "member").await;
@@ -345,7 +345,7 @@ fn s03_unfollow_is_person_scoped_and_freezes_bytes_everywhere() {
 
 #[test]
 fn s04_remove_excludes_one_device_and_follow_restores_it() {
-    let plane = common::start_plane("topos-verbs", "s04", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s04", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, ALICE, "member").await;
@@ -429,7 +429,7 @@ fn s04_remove_excludes_one_device_and_follow_restores_it() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
-    let plane = common::start_plane("topos-verbs", "s05", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s05", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         let g = genesis(a, SKILL, &op(1), genesis_files(), None).await;
         // Per-bundle protection: reviewed (the owner tightens — the reviewer-level gate admits it).
@@ -685,14 +685,14 @@ fn s05_contribute_loop_downgrade_conflict_supersede_and_verdict_notices() {
 #[test]
 fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
     const LOG_SKILL: &str = "s-log";
-    let plane = common::start_plane("topos-verbs", "s06", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s06", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         seat_invited(a, OWNER, "owner").await; // the owner's own address join (never demoted)
         common::Seeded::default()
     });
     // The owner enrolls by address and genesis-publishes a fresh skill with -m.
     let owner = FollowHarness::new("vr-s06-owner");
-    common::begin_address_enroll(&plane, &owner, &ws_address(&plane.base_url), OWNER);
+    common::begin_address_enroll(&plane, &owner, &ws_address(&plane.link_base_url), OWNER);
     let _ = owner.resume_describe().expect("owner enrolls");
     owner.adopt(LOG_SKILL, &[("SKILL.md", false, b"# log\nv1\n")]);
     // The follow entry for the AUTHORED skill (revert is follow-scoped: you revert what you follow).
@@ -835,7 +835,7 @@ fn s06_log_messages_purge_tombstone_revert_refusal_and_archive_facts() {
 fn s07_multi_flag_follow_resolves_all_or_applies_none() {
     const ALPHA: &str = "s-alpha";
     const BETA: &str = "s-beta";
-    let plane = common::start_plane("topos-verbs", "s07", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s07", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, ALPHA, &op(1), genesis_files(), None).await;
         genesis(
@@ -855,7 +855,7 @@ fn s07_multi_flag_follow_resolves_all_or_applies_none() {
     });
     // Enroll WITHOUT applying (describe only) — the subscription state starts empty.
     let client = FollowHarness::new("vr-s07");
-    common::begin_address_enroll(&plane, &client, &ws_address(&plane.base_url), ALICE);
+    common::begin_address_enroll(&plane, &client, &ws_address(&plane.link_base_url), ALICE);
     let _ = client.resume_describe().expect("enroll (describe only)");
 
     // One bad name in the --skill set refuses the WHOLE batch — nothing joined, nothing installed.
@@ -903,15 +903,15 @@ fn s07_multi_flag_follow_resolves_all_or_applies_none() {
 
 #[test]
 fn s08_the_protocol_card_is_identical_on_every_path() {
-    let plane = common::start_plane("topos-verbs", "s08", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s08", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         common::Seeded::default()
     });
     // Three DIFFERENT resource paths — a real workspace, a real-shaped channel path, and pure noise —
     // answer the byte-identical markdown card: an unmatched GET is never an existence oracle.
     let paths = [
-        format!("{}/{WS_NAME}", plane.base_url),
-        format!("{}/{WS_NAME}/channels/ops", plane.base_url),
+        format!("{}/{WS_NAME}", plane.link_base_url),
+        format!("{}/{WS_NAME}/channels/ops", plane.link_base_url),
         format!("{}/totally/made/up", plane.base_url),
     ];
     let bodies: Vec<String> = paths.iter().map(|p| http_get_body(p, "*/*")).collect();
@@ -938,14 +938,14 @@ fn s08_the_protocol_card_is_identical_on_every_path() {
 #[test]
 fn s09_invite_without_smtp_prints_the_address_and_the_invitee_joins() {
     const NEWBIE: &str = "newbie@acme.test";
-    let plane = common::start_plane("topos-verbs", "s09", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s09", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, OWNER, "owner").await;
         common::Seeded::default()
     });
     let owner = FollowHarness::new("vr-s09-owner");
-    common::begin_address_enroll(&plane, &owner, &ws_address(&plane.base_url), OWNER);
+    common::begin_address_enroll(&plane, &owner, &ws_address(&plane.link_base_url), OWNER);
     let _ = owner.resume_describe().expect("owner enrolls");
 
     // The invitation: a roster write + the address to paste. This plane has NO SMTP relay (the
@@ -987,7 +987,7 @@ fn s09_invite_without_smtp_prints_the_address_and_the_invitee_joins() {
 
 #[test]
 fn s10_protect_tighten_reviewer_loosen_owner_audience_in_describe() {
-    let plane = common::start_plane("topos-verbs", "s10", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s10", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, REVIEWER, "reviewer").await;
@@ -1052,7 +1052,7 @@ fn s10_protect_tighten_reviewer_loosen_owner_audience_in_describe() {
 #[test]
 fn s11_one_login_session_mints_credentials_for_two_workspaces() {
     const WS_B: &str = "w_beta";
-    let plane = common::start_plane("topos-verbs", "s11", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s11", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         let g = genesis(a, SKILL, &op(1), genesis_files(), None).await;
         // The SECOND workspace on the same plane; alice holds a CONFIRMED seat in BOTH (login mints
@@ -1158,7 +1158,7 @@ fn s11_one_login_session_mints_credentials_for_two_workspaces() {
 #[test]
 fn s12_hook_posture_freeze_line_and_staleness_warning() {
     // (a) A removed member's `update --quiet` exits 0 with the ONE freeze line; bytes stay.
-    let plane = common::start_plane("topos-verbs", "s12a", true, async |a: &Authority| {
+    let plane = common::start_stack("topos-verbs", "s12a", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, ALICE, "member").await;
@@ -1197,7 +1197,7 @@ fn s12_hook_posture_freeze_line_and_staleness_warning() {
 
     // (b) Unreachable past the staleness window: kill the listener, backdate the freshness doc —
     // the quiet hook warns "last synced <age> ago — server unreachable" and still exits 0.
-    let plane_b = common::start_plane("topos-verbs", "s12b", true, async |a: &Authority| {
+    let plane_b = common::start_stack("topos-verbs", "s12b", true, async |a: &Authority| {
         seed_owner_ws(a).await;
         genesis(a, SKILL, &op(1), genesis_files(), None).await;
         seat_invited(a, ALICE, "member").await;
@@ -1236,8 +1236,29 @@ fn http_get_body(url: &str, accept: &str) -> String {
     stream
         .read_to_string(&mut response)
         .expect("read the response");
-    response
+    let (headers, body) = response
         .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_owned())
-        .expect("a body follows the headers")
+        .expect("a body follows the headers");
+    // The web app (a node server) frames the card with `Transfer-Encoding: chunked`, so the raw
+    // body carries chunk sizes (`<hex>\r\n<bytes>\r\n…0\r\n`) — strip them (the pre-cutover axum
+    // plane sent Content-Length, which needed no decoding). Byte-identity across paths survives
+    // either way (identical content ⇒ identical framing); a JSON parse needs the payload clean.
+    if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        let mut out = String::new();
+        let mut rest = body;
+        while let Some((size_line, tail)) = rest.split_once("\r\n") {
+            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+            if size == 0 {
+                break;
+            }
+            out.push_str(&tail[..size.min(tail.len())]);
+            rest = tail.get(size + 2..).unwrap_or("");
+        }
+        out
+    } else {
+        body.to_owned()
+    }
 }

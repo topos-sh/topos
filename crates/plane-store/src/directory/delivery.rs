@@ -1,21 +1,18 @@
 //! Delivery — "what should this device have", and the fleet's applied-state report (the
-//! orchestration half; the SQL lives in `db/directory/delivery.rs`).
+//! orchestration half; since the door cutover the computation itself is ONE guarded SQL function
+//! per op — `topos_delivery` / `topos_report_applied`, migration 0019 — called by the web tier
+//! directly and by this crate through the thin statements in `db/directory/delivery.rs`).
 //!
-//! The delivery read is the currency hot path: the session-start hook calls it once per workspace,
-//! and the client reconciles against the answer — install new, update moved, withdraw what upstream
-//! no longer delivers, freeze what the person detached. The computation is the ONE entitlement
-//! predicate (`topos_entitled_skills`, extending the confirmed-membership predicate every lane
-//! gates on): DISTINCT union of roster-derived `everyone` ∪ followed channels ∪ direct follows −
-//! unfollowed skills − this device's exclusions, active catalog entries only, skipping current-less
-//! skills. Authentication is the device read lane's (credential sha256 → non-revoked row →
-//! confirmed member; every miss the uniform `NotFound` — a member REMOVED from the roster reads
-//! `NotFound` for the whole workspace, which the client treats as freeze-everything, never a clean).
+//! What stays here is the DEVICE lane's front door (credential sha256 → non-revoked row →
+//! confirmed member; every miss the uniform `NotFound`) and the typed view over the function's
+//! wire-shaped body — the in-crate suites drive the production SQL through it, so the one
+//! implementation carries the whole behavioral suite whichever tier calls it.
 
+use serde::Deserialize;
 use topos_types::Generation;
 
 use crate::Authority;
 use crate::db::custody::witness::AccessWitness;
-use crate::db::directory::delivery::{EntitledDbRow, NoticeDbRow};
 use crate::error::{AuthorityError, Result};
 use crate::id::{CommitId, SkillId, WorkspaceId};
 
@@ -43,7 +40,7 @@ pub struct DeliveredSkill {
 
 /// One unacked person-scoped notice (verdicts with reasons, circumstantial proposal closures — the
 /// open `kind` vocabulary grows without a schema change). The silent hook fetches these without
-/// acking; interactive narration acks by id (a later surface's write).
+/// acking; interactive narration acks by id.
 #[derive(Debug, Clone)]
 pub struct DeliveryNotice {
     pub id: String,
@@ -89,6 +86,73 @@ pub struct AppliedSkill {
     pub version_id: CommitId,
 }
 
+// ── The wire-shaped body `topos_delivery` returns, deserialized for the typed view. Field
+//    omission mirrors the wire contract (`excluded` absent when empty; a notice's optional
+//    fields absent, never null), so every `#[serde(default)]` below is a wire rule, not slack.
+#[derive(Deserialize)]
+struct WireDeliveryBody {
+    skills: Vec<WireSkillEntry>,
+    detached: Vec<String>,
+    #[serde(default)]
+    excluded: Vec<String>,
+    notices: Vec<WireNoticeEntry>,
+    proposals_awaiting: u64,
+    staleness_window_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct WireSkillEntry {
+    skill_id: String,
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    protection: String,
+    version_id: String,
+    bundle_digest: String,
+    generation: Generation,
+    updated_at: i64,
+    via: WireViaEntry,
+}
+
+#[derive(Deserialize)]
+struct WireViaEntry {
+    channels: Vec<String>,
+    direct: bool,
+}
+
+#[derive(Deserialize)]
+struct WireNoticeEntry {
+    id: String,
+    kind: String,
+    #[serde(default)]
+    skill_id: Option<String>,
+    #[serde(default)]
+    skill_name: Option<String>,
+    #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    created_at: String,
+}
+
+fn hex32(s: &str) -> Result<[u8; 32]> {
+    let mut out = [0u8; 32];
+    if s.len() != 64 {
+        return Err(AuthorityError::integrity(BadDeliveryBody));
+    }
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
+            .map_err(|_| AuthorityError::integrity(BadDeliveryBody))?;
+    }
+    Ok(out)
+}
+
 pub(crate) async fn delivery(
     authority: &Authority,
     ws: &WorkspaceId,
@@ -103,102 +167,58 @@ pub(crate) async fn delivery(
     if !authority.db().read_gate(ws, &identity.principal).await? {
         return Err(AuthorityError::NotFound);
     }
-    // ONE snapshot for the three semantic reads: a subscription change landing between the entitled
-    // read and the detached read could leave a skill in NEITHER list, which the client reads as an
-    // upstream withdrawal — cleaning agent dirs for a skill the person still subscribes to. The
-    // staleness window rides the same snapshot (one extra round trip, no serialization surface).
-    let mut tx = authority.db().begin_delivery_snapshot().await?;
-    let staleness_window_ms = authority.db().staleness_window(&mut tx, ws).await?;
-    let entitled = authority
+    let body = authority
         .db()
-        .entitled_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
-        .await?;
-    let detached = authority
-        .db()
-        .detached_skills(&mut tx, ws, &identity.principal, &identity.device_key_id)
-        .await?;
-    let excluded = authority
-        .db()
-        .device_exclusions(&mut tx, ws, &identity.device_key_id)
-        .await?;
-    let notice_rows = authority
-        .db()
-        .unacked_notices(&mut tx, ws, &identity.principal)
-        .await?;
-    // The snapshot has served its purpose; the read minted nothing durable, so the commit only
-    // releases it (a rollback would be equally correct).
-    tx.commit().await.map_err(AuthorityError::internal)?;
-    // The open-proposal count folds to ONE aggregate over the entitled skill ids — the delivery hot
-    // path fired the former per-skill `open_proposal_rows` loop once per entitled skill (the N+1).
-    // Deliberately OUTSIDE the snapshot: a disclosure gauge, not a semantic signal the client acts on
-    // with bytes. The aggregate shares the `open ∧ base == current` staleness predicate verbatim (a
-    // further tracked copy — see `Db::count_open_proposals`).
-    let skill_ids: Vec<String> = entitled.iter().map(|r| r.skill_id.clone()).collect();
-    let proposals_awaiting = authority.db().count_open_proposals(ws, &skill_ids).await?;
-    let skills = entitled
+        .delivery_body(ws, &identity.principal, &identity.device_key_id)
+        .await?
+        // The function re-runs the gate itself; a refusal past the front door is a revoke or
+        // removal racing this read — the same uniform miss either way.
+        .ok_or(AuthorityError::NotFound)?;
+    let parsed: WireDeliveryBody =
+        serde_json::from_value(body).map_err(AuthorityError::integrity)?;
+    let skills = parsed
+        .skills
         .into_iter()
-        .map(|row| {
-            let EntitledDbRow {
-                skill_id,
-                name,
-                display_name,
-                protection,
-                commit,
-                generation,
-                updated_at,
-                bundle_digest,
-                via_channels,
-                direct,
-            } = row;
-            DeliveredSkill {
-                skill_id,
-                name,
-                display_name,
-                protection,
-                version_id: commit,
-                generation,
-                updated_at,
-                bundle_digest,
-                via_channels,
-                direct,
-            }
+        .map(|s| {
+            Ok(DeliveredSkill {
+                skill_id: s.skill_id,
+                name: s.name,
+                display_name: s.display_name,
+                protection: s.protection,
+                version_id: hex32(&s.version_id)?,
+                generation: s.generation,
+                updated_at: s.updated_at,
+                bundle_digest: hex32(&s.bundle_digest)?,
+                via_channels: s.via.channels,
+                direct: s.via.direct,
+            })
         })
-        .collect();
-    let notices = notice_rows
+        .collect::<Result<Vec<_>>>()?;
+    let notices = parsed
+        .notices
         .into_iter()
-        .map(
-            |NoticeDbRow {
-                 id,
-                 kind,
-                 skill_id,
-                 skill_name,
-                 version_id,
-                 actor,
-                 outcome,
-                 reason,
-                 message,
-                 created_at,
-             }| DeliveryNotice {
-                id,
-                kind,
-                skill_id,
-                skill_name,
-                version_id,
-                actor,
-                outcome,
-                reason,
-                message,
-                created_at,
-            },
-        )
-        .collect();
+        .map(|n| {
+            Ok(DeliveryNotice {
+                id: n.id,
+                kind: n.kind,
+                skill_id: n.skill_id,
+                skill_name: n.skill_name,
+                version_id: n.version_id.as_deref().map(hex32).transpose()?,
+                actor: n.actor,
+                outcome: n.outcome,
+                reason: n.reason,
+                message: n.message,
+                created_at: n.created_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(Delivery {
         skills,
-        detached,
-        excluded,
+        detached: parsed.detached,
+        excluded: parsed.excluded,
         notices,
-        proposals_awaiting,
-        staleness_window_ms,
+        proposals_awaiting: parsed.proposals_awaiting,
+        staleness_window_ms: parsed.staleness_window_ms,
     })
 }
 
@@ -218,18 +238,29 @@ pub(crate) async fn report_applied(
     if !authority.db().read_gate(ws, &identity.principal).await? {
         return Err(AuthorityError::NotFound);
     }
-    let pairs: Vec<(SkillId, CommitId)> = applied
+    let skill_ids: Vec<String> = applied
         .iter()
-        .map(|a| (a.skill_id.clone(), a.version_id))
+        .map(|a| a.skill_id.as_str().to_owned())
         .collect();
-    authority
+    let commits: Vec<Vec<u8>> = applied.iter().map(|a| a.version_id.0.to_vec()).collect();
+    let ok = authority
         .db()
-        .report_applied_txn(
+        .report_applied_fn(
             ws,
             &identity.principal,
             &identity.device_key_id,
-            &pairs,
+            &skill_ids,
+            &commits,
             now,
         )
-        .await
+        .await?;
+    if !ok {
+        // The function's own gate refused past the front door — a revoke racing the report.
+        return Err(AuthorityError::NotFound);
+    }
+    Ok(())
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("topos_delivery returned a body outside the wire contract")]
+struct BadDeliveryBody;

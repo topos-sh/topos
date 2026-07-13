@@ -212,7 +212,7 @@ async fn seed_two_workspaces(authority: &Authority) -> Seeded {
 }
 
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane("topos-mws-e2e", tag, true, seed_two_workspaces)
+    common::start_stack("topos-mws-e2e", tag, true, seed_two_workspaces)
 }
 
 // ── plane-state witnesses (row-level, via the per-test pool) ────────────────────────────────────────
@@ -250,7 +250,7 @@ fn invite_count(plane: &Plane, ws: &str) -> i64 {
 /// The full workspace ADDRESS a `follow` targets: `<base_url>/<slug>` where the slug is the workspace id
 /// with `_`→`-` (`w_acme` → `w-acme`, `w_beacon` → `w-beacon`).
 fn address(plane: &Plane, ws_id: &str) -> String {
-    format!("{}/{}", plane.base_url, ws_id.replace('_', "-"))
+    format!("{}/{}", plane.link_base_url, ws_id.replace('_', "-"))
 }
 
 /// The real `follow <address> --yes`: enroll toward the workspace (card → device flow → confirm identity
@@ -507,7 +507,7 @@ async fn seed_two_shared_name_workspaces(authority: &Authority) -> Seeded {
 
 #[test]
 fn publish_disambiguates_a_shared_skill_name_by_workspace() {
-    let plane = common::start_plane(
+    let plane = common::start_stack(
         "topos-mws-e2e",
         "mws-shared",
         true,

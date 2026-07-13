@@ -18,14 +18,20 @@ const serverSchema = z.object({
    * vault answers 404 on the whole lane when its side is unset.
    */
   PLANE_INTERNAL_TOKEN: z.string().min(1),
-  /**
-   * The PUBLIC base a `topos follow` command should dial (see follow-base.server.ts). Set it
-   * while the plane is still directly exposed; unset, follow commands use this app's origin.
-   */
-  PLANE_PUBLIC_URL: z.url().optional(),
   /** Path the /install route serves; defaults to the repo's own installer. */
   INSTALL_SH_PATH: z.string().default("../scripts/install.sh"),
   APP_ENV: z.enum(["production", "development", "test"]).default("development"),
+  /** The `/api/v1` door's rate belt (the vault's own belt retired with its public listener). */
+  TOPOS_WEB_RATELIMIT: z.enum(["on", "off"]).default("on"),
+  /**
+   * The app's PUBLIC origin — the base every client-visible URL rides (resource addresses, the
+   * protocol card's `api_base_url` = this origin + `/api`, the invite/share lines). Behind a
+   * TLS-terminating reverse proxy this MUST be set: the container speaks plain HTTP, so a
+   * request-derived origin would be `http://…` and the CLI refuses to re-root an https link onto an
+   * http base. Unset, the app falls back to the request's own origin — correct for a same-origin
+   * (no-proxy) deployment.
+   */
+  TOPOS_PUBLIC_URL: z.url().optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverSchema>;

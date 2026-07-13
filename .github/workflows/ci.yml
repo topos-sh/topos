@@ -87,6 +87,14 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      # The composed-stack e2e (tests/) spawns the web app IN FRONT of the loopback plane — the
+      # door-cutover topology — so the suite needs bun + the app's production build on disk.
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.3.10
+      - name: build the web app (the composed e2e spawns it)
+        working-directory: web
+        run: bun install --frozen-lockfile && bun run build
       - name: test
         run: cargo test --workspace --locked
 

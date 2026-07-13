@@ -1,4 +1,6 @@
 import { data, redirect } from "react-router";
+import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
+import { deviceActorProbe } from "@/lib/db/queries.device.server";
 import { planeMembership } from "@/lib/db/queries.server";
 import { getAuth } from "./server";
 
@@ -190,4 +192,46 @@ export async function requireReviewer(
     notFound();
   }
   return actor as ReviewerActor;
+}
+
+/**
+ * Proof of an authenticated DEVICE — the `/api/v1` lane's actor: a presented workspace
+ * credential resolved (in Postgres — this tier computes no digest) to its non-revoked registry
+ * row on a CONFIRMED seat. Person and device ids come from the trusted rows, NEVER a
+ * client-asserted field; the role rides along for the guarded functions that band on it.
+ */
+export type DeviceActor = UserActor & {
+  readonly workspaceId: string;
+  readonly person: string;
+  readonly deviceKeyId: string;
+  readonly role: "owner" | "reviewer" | "member";
+};
+
+/**
+ * The device lane's front door. Every miss — no/blank/foreign-scheme Authorization, unknown
+ * credential, revoked device, unknown workspace, unseated or unconfirmed principal — throws the
+ * ONE uniform wire 404 (an ENVELOPE body, not the HTML miss: the caller is a device, and the
+ * vault's own edge answers the identical bytes). This guard authenticates ONLY the ops this
+ * tier serves itself; forwarded byte/pointer ops pass through untouched so the vault's
+ * in-transaction resolve (and its replay-before-revoked ordering) stays the sole authority.
+ */
+export async function requireDeviceActor(
+  request: Request,
+  workspaceId: string,
+): Promise<DeviceActor> {
+  const credential = bearerToken(request);
+  if (credential === null) {
+    throw uniformNotFound();
+  }
+  const row = await deviceActorProbe(workspaceId, credential);
+  if (row === null) {
+    throw uniformNotFound();
+  }
+  return {
+    email: row.person,
+    workspaceId,
+    person: row.person,
+    deviceKeyId: row.deviceKeyId,
+    role: row.role,
+  } as DeviceActor;
 }

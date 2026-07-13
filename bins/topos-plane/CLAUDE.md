@@ -32,37 +32,29 @@
   **workspace-catalog read** `GET /v1/workspaces/{ws}/skills` (the member-scoped catalog —
   a missing/blank credential folding to the uniform 404;
   calls `Authority::list_skills_device` → `WireSkillIndex`; the FIRST HTTP-routed member-scoped read, serving
-  cloud AND self-host), **the DELIVERY read** `GET /v1/workspaces/{ws}/delivery` (→
-  `Authority::delivery` → `WireDelivery`: the entitled set — skill id + catalog name + resolved
-  protection + pinned version + `via` attribution — plus the person's detached ids, the unacked
-  notices feed, and the open-proposal count; `Cache-Control: no-store` — per-device, hot, never
-  cacheable), **the fleet report** `PUT /v1/workspaces/{ws}/report` (`WireAppliedReport` → 204;
-  the device's post-reconcile applied snapshot, small-body-capped), and the device-credential writes
+  cloud AND self-host), the two **byte-decorated describe reads** the vault keeps serving after
+  the door cutover — `GET /v1/workspaces/{ws}/proposals` (the review inbox) → `WireProposalIndex`
+  and `GET /v1/workspaces/{ws}/skills/{skill}/log` → `WireSkillLog`, both decorating their rows
+  with git commit messages/authors (byte custody the composing app deliberately does not hold) —
+  and the device-credential writes
   `POST /v1/publish|/v1/proposals|/v1/reverts|/v1/reviews` (bodies carry NO credential material — the
   Bearer credential is resolved in-transaction by registry-row lookup; keeping the secret out of bodies
   keeps it out of receipt request identities and the client's persisted op-WAL; the review body now
   carries the mandatory reject `reason` and the author-only `withdraw` decision). Each handler is parse → call
   the authority → serialize: **no trust decision, no raw object read, no client-asserted principal** in a
   handler.
-- **The member-lane VERB surface** (`routes/{describe,subscriptions,channels,protection,notices,invitations}.rs`)
-  — the same ONE Bearer workspace credential + the ONE membership front door (every miss the uniform 404). The
-  DESCRIBE reads render the two-phase verbs' "before" (`no-store`, per-member/hot): `GET
-  /v1/workspaces/{ws}/me` → `WireMe`, `.../channels` → `WireChannelIndex`, `.../proposals` (the workspace-wide
-  review inbox) → `WireProposalIndex`, `.../skills/{skill}/log` → `WireSkillLog`, `.../skills/{skill}/reach`
-  → `WireReach`. The naturally-idempotent row-op WRITES answer a 200 all-outcome envelope carrying a `status`
-  string, or a 200 DENIED with a SPECIFIC code (the actor is an authenticated member — never a 403): `PUT|DELETE
-  /v1/workspaces/{ws}/follows/{skill}` (follow/unfollow), `PUT /v1/workspaces/{ws}/exclusions/{skill}`
-  (this-device exclude), `PUT|DELETE /v1/workspaces/{ws}/channels/{ch}/membership` (join/leave),
-  `PUT|DELETE /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` (curation place/unplace), `PUT
-  /v1/workspaces/{ws}/skills/{skill}/protection` + `PUT /v1/workspaces/{ws}/channels/{ch}/protection` (the
-  kind-polymorphic `protect` setter — the level parsed per kind at the edge, a wrong level a 400), and `POST
-  /v1/workspaces/{ws}/notices/ack`. The ONE consistent code family: `*_ROLE_REQUIRED`
-  (`CURATED`/`REVIEWER`/`OWNER`) · `CHANNEL_BUILTIN` (join/leave on `everyone`) · `SKILL_NOT_ACTIVE` ·
-  `BAD_NAME` · `UNKNOWN_CHANNEL`. And `POST /v1/workspaces/{ws}/invitations` (invitation as a member-lane
-  ROSTER WRITE → `InvitationData`: the workspace ADDRESS + the folded invited set + an honest `mailed` flag;
-  after a seating, one fire-and-forget `spawn_blocking` invitation mail per invitee through the Mailer seam —
-  `mailed:true` only when a real relay is configured, `NoopMailer` ⇒ `false`; an unknown channel is a 200
-  DENIED `UNKNOWN_CHANNEL`).
+- **The member-lane ROW OPS moved to the composing web app** (the door cutover): delivery, the
+  fleet report, me/channels/reach, follows/unfollows, exclusions, channel membership + curation,
+  both protection setters, notices ack, and invitations are served by `web/` calling the guarded
+  `topos_*` SQL functions directly under its scoped role (delivery and the report became guarded
+  functions themselves — migration 0019 — so the ONE implementation serves whichever tier calls
+  it; the plane's typed `Authority::delivery`/`report_applied` are thin wrappers over the same
+  functions, which keeps the whole in-crate behavioral suite pointed at the production SQL). Their
+  WIRE lives on here as **`routes/door.rs`** — contract-only stubs carrying the `#[utoipa::path]`
+  annotations the committed OpenAPI is generated from, so the product's frozen contract stays ONE
+  generated artifact across both serving tiers (the drift gate held byte-identical through the
+  move). The invitation's courtesy mail moved with the route (the app's own mail seam carries it
+  and the honest `mailed` flag); the vault's mailer seam is passcode-only again.
 - **The enrollment + governance HTTP surface** (`routes/{bootstrap,card,enroll,login,governance,oidc}.rs`): the
   unauthenticated bootstrap `GET /i/{token}` — now **CLAIMS ONLY** (the tokened invite door was interred;
   invitations became roster writes with no `/i/` link, and enrollment is by workspace ADDRESS). It serves the
@@ -243,12 +235,11 @@ issuance decision (every credential/identity decision is `plane-store::Authority
 
 - **The mailer seam** (`enroll/mailer.rs`) — a `pub(crate)` `Mailer` trait (SYNC + dyn-compatible,
   no async-trait: the handler runs the blocking send on `spawn_blocking`, fire-and-forget so neither the body
-  nor its latency leaks whether an address was rostered): `send_passcode`, plus `send_invitation` (the
-  invitation template "you were added to <display> — paste this address to your agent: <address>") and
-  `can_send` (the honest `mailed` flag an invitation reports — `true` only for a real relay). With `SmtpMailer`
-  (lettre, blocking SMTP + rustls; `can_send=true`), `NoopMailer` (the no-SMTP self-host default — silently
-  drops, `can_send=false`, so the bootstrap won't advertise the passcode method and an invitation reports
-  `mailed:false`), and a recording `FakeMailer` (test-gated — records passcodes AND invitations).
+  nor its latency leaks whether an address was rostered): `send_passcode`, passcode-only again since
+  the door cutover (the invitation route — and its courtesy mail + honest `mailed` flag — moved to
+  the composing web app's own mail seam). With `SmtpMailer` (lettre, blocking SMTP + rustls),
+  `NoopMailer` (the no-SMTP self-host default — silently drops, so the bootstrap won't advertise
+  the passcode method), and a recording `FakeMailer` (test-gated — records passcodes).
   **Redaction:** the code rides in a `Passcode` whose hand-written `Debug` is `<redacted>`; `SmtpMailer` /
   `SmtpConfig` `Debug` omit the transport / creds.
 - **The OIDC connector** (`enroll/oidc.rs`, behind `enroll-oidc`, **DEFAULT-OFF** — a default build resolves

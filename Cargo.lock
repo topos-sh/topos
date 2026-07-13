@@ -3071,6 +3071,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "hmac",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",
@@ -4560,6 +4561,7 @@ dependencies = [
  "topos",
  "topos-plane",
  "topos-types",
+ "ureq",
 ]
 
 [[package]]

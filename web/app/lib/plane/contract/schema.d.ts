@@ -19,6 +19,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workspaces/{ws}/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_channels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/reach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_reach"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/notices/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["ack_notices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/follows/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["follow_skill"];
+        post?: never;
+        delete: operations["unfollow_skill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/exclusions/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["exclude_device"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels/{ch}/membership": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["channel_join"];
+        post?: never;
+        delete: operations["channel_leave"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["channel_place"];
+        post?: never;
+        delete: operations["channel_unplace"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/protection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_skill_protection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels/{ch}/protection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_channel_protection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1365,6 +1541,824 @@ export interface operations {
                 };
             };
             /** @description Internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_me: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's own membership (identity + address + role + inviter + invite policy). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireMe"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_channels: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The workspace channels (the structural `everyone` included), with the caller's membership marked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireChannelIndex"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_reach: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The skill's audience (entitled members + their non-revoked devices). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireReach"];
+                };
+            };
+            /** @description Missing/blank credential, non-member, or unknown skill (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    ack_notices: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoticeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description The notices were acked (idempotent — only the caller's own unacked rows move). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    invite: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InvitationRequest"];
+            };
+        };
+        responses: {
+            /** @description The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body or a malformed invitee email. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    follow_skill: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id to direct-follow (the client resolves the address to it). */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (followed, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    unfollow_skill: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id to unfollow (person-scoped negative mask). */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (unfollowed, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    exclude_device: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The followed skill's immutable id to exclude from THIS device. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (excluded, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    channel_join: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name to join. */
+                ch: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The membership outcome (joined, or a 200 DENIED CHANNEL_BUILTIN for `everyone`). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    channel_leave: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name to leave. */
+                ch: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The membership outcome (left / not_member, or a 200 DENIED CHANNEL_BUILTIN for `everyone`). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    channel_place: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name (created on first placement, member-level self-serve). */
+                ch: string;
+                /** @description The skill's immutable id to place into the channel. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The curation outcome (placed / created, or a 200 DENIED CURATED_ROLE_REQUIRED / BAD_NAME / SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    channel_unplace: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name. */
+                ch: string;
+                /** @description The skill's immutable id to remove from the channel. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The curation outcome (removed / not_placed, or a 200 DENIED CURATED_ROLE_REQUIRED). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    set_skill_protection: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProtectionSetRequest"];
+            };
+        };
+        responses: {
+            /** @description The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description A level not valid for a skill (must be `reviewed` or `open`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    set_channel_protection: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name. */
+                ch: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProtectionSetRequest"];
+            };
+        };
+        responses: {
+            /** @description The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description A level not valid for a channel (must be `curated` or `open`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
             500: {
                 headers: {
                     [name: string]: unknown;

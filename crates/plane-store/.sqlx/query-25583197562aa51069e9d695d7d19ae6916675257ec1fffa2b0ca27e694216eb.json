@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT topos_report_applied($1, $2, $3, $4, $5::TEXT[], $6::BYTEA[]) AS \"outcome?\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "outcome?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "TextArray",
+        "ByteaArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "25583197562aa51069e9d695d7d19ae6916675257ec1fffa2b0ca27e694216eb"
+}

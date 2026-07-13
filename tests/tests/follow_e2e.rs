@@ -42,13 +42,16 @@ const GENESIS_OP: &str = "a0000000-0000-4000-8000-000000000001";
 /// loopback address): the workspace + owner, the genesis published into `everyone`, and the invitee
 /// seated as an INVITED member through the real invitation op (the redeem flips it to confirmed).
 fn start_plane(tag: &str) -> Plane {
-    common::start_plane("topos-enroll-e2e", tag, true, seed_follow_plane)
+    common::start_stack("topos-enroll-e2e", tag, true, seed_follow_plane)
 }
 
-/// [`start_plane`] on the SPLIT link base (the card + links ride `http://localhost:<port>`, the API stays
-/// `http://127.0.0.1:<port>` — one listener): the hosted main-domain-address shape.
+/// The SAME-ORIGIN re-root shape (post-cutover the app is ONE origin): the resource address rides the
+/// origin ROOT (`<origin>/<ws>`) while the API the card declares is that origin's `/api` mount. The app
+/// derives `api_base_url` from the request origin — so a request to the address root re-roots the client
+/// onto `<same-origin>/api`, the meaningful root→`/api` re-root that replaces the pre-cutover
+/// links-on-web-origin / API-on-plane-host split (the app is not a proxy to a separate plane host).
 fn start_plane_split(tag: &str) -> Plane {
-    common::start_plane_split("topos-enroll-e2e", tag, seed_follow_plane)
+    common::start_stack("topos-enroll-e2e", tag, true, seed_follow_plane)
 }
 
 async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
@@ -114,7 +117,7 @@ async fn seed_follow_plane(authority: &Authority) -> common::Seeded {
 fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     let plane = start_plane("follow");
     let client = FollowHarness::new("follow");
-    let address = ws_address(&plane.base_url);
+    let address = ws_address(&plane.link_base_url);
 
     // The constant protocol card, over the REAL socket, BOTH faces once:
     //  - JSON carries the API base the client re-roots onto;
@@ -235,7 +238,7 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
 fn e2e_off_roster_identity_gets_the_uniform_denial() {
     let plane = start_plane("offroster");
     let client = FollowHarness::new("offroster");
-    let address = ws_address(&plane.base_url);
+    let address = ws_address(&plane.link_base_url);
 
     // The agent fetches the card + device-authorizes fine (the address is a public enrollment START), and
     // the confirmed identity is a stranger NOT on the workspace roster.
@@ -321,11 +324,40 @@ fn http_get(url: &str, accept: &str) -> String {
 }
 
 /// GET `url` asking for JSON and parse the [`WireProtocolCard`] body (the fallback card's machine face).
+/// The card is served by the web app (a node server) with `Transfer-Encoding: chunked`, so the raw
+/// body carries chunk framing (`<hex-size>\r\n<bytes>\r\n…0\r\n`) — [`dechunk`] strips it before parsing
+/// (the pre-cutover axum plane sent Content-Length, which needed no decoding).
 fn fetch_card_json(url: &str) -> WireProtocolCard {
     let raw = http_get(url, "application/json");
-    let body = raw
+    let (headers, body) = raw
         .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
         .expect("a response body follows the headers");
-    serde_json::from_str(body.trim()).unwrap_or_else(|e| panic!("a WireProtocolCard: {e}\n{raw}"))
+    let decoded = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        dechunk(body)
+    } else {
+        body.to_owned()
+    };
+    serde_json::from_str(decoded.trim())
+        .unwrap_or_else(|e| panic!("a WireProtocolCard: {e}\n{raw}"))
+}
+
+/// Strip HTTP chunked-transfer framing: each chunk is `<hex-size>\r\n<size bytes>\r\n`, terminated by a
+/// zero-size chunk. Returns the concatenated payload. Tolerant enough for the test's small single-chunk
+/// card responses.
+fn dechunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((size_line, tail)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        out.push_str(&tail[..size.min(tail.len())]);
+        // Skip the payload + its trailing CRLF.
+        rest = tail.get(size + 2..).unwrap_or("");
+    }
+    out
 }

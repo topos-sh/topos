@@ -1,6 +1,21 @@
 # `web/` — the product web app (TypeScript / React Router 8 on bun)
 
-The signed-in surface for Topos: a workspace dashboard, the skill browser, the rendered review UI
+**THE DOOR.** Since the cutover this app is the ONE public surface: the signed-in pages below,
+the shareable resource addresses, AND the device API itself — `/api/v1/…` is served here. The
+row-op half of the device lane (delivery · the fleet report · me/channels/reach · subscriptions ·
+curation · exclusions · protection · notices ack · invitations) runs in this tier through the
+guarded `topos_*` SQL functions under the scoped `topos_web` role, behind the device-credential
+guard (`requireDeviceActor` — the presented Bearer resolved by `topos_device_actor`, whose
+credential hash is computed IN Postgres, so this tier still contains zero crypto). Everything the
+vault must decide itself — publish/propose/revert/review, the pointer/object/version reads, the
+review inbox + skill log (git commit messages ride both), ALL of enrollment, governance, the
+operator policy route — forwards VERBATIM over the internal network (`api.v1.$.ts` →
+`forwardDeviceLane`: the path pinned under `/v1`, header allowlists both ways, the device's own
+bearer passing through so the vault's in-transaction resolve and replay-before-revoked ordering
+stay the sole authority). Misses answer the vault's exact uniform-404 envelope; a rate belt wears
+the frozen 429.
+
+The signed-in surface: a workspace dashboard, the skill browser, the rendered review UI
 (unified diff + Approve/Reject + comments), the verification page, the create/join flows, and the
 ADMIN surfaces — the roster page in full (invite / role change / remove / self-serve leave), the
 skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), channel
@@ -9,7 +24,7 @@ window), the fleet page (staleness + the named blind spots: detached copies, rem
 rows, stale devices), the "your devices" self-service list, and the first-run claim. It renders
 state read from the vault over HTTP and its own Postgres schema. It holds **no signing key,
 computes no digest, and initiates no device-signed write** — publishing stays on the enrolled
-device; this app is surfaces.
+device; this app is surfaces, plus the door those surfaces and every agent walk through.
 
 **Step-up.** Every admin ceremony re-authenticates immediately before the act: the person
 re-enters their password inside the ceremony form (`app/lib/auth/step-up.server.ts`, verified with
@@ -28,10 +43,11 @@ work.
 **Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
 `/{workspace}/skills/{name}` are the shareable addresses, plus a root catch-all: a non-browser
 fetcher gets the CONSTANT protocol card (`app/lib/card.server.ts` — the vault card's negotiation
-mirrored; served whole from route middleware, byte-identical on every path, `api_base_url` = the
-follow base); an anonymous browser gets one constant teaser page; a signed-in member is resolved
-through their own confirmed seats into the workspace surface; everyone else gets the house 404.
-No face is an existence oracle.
+mirrored; served whole from route middleware, byte-identical on every path, `api_base_url` = this
+origin's own `/api` mount, where the device lane is served — the interim `PLANE_PUBLIC_URL`
+override retired with the vault's public listener); an anonymous browser gets one constant teaser
+page; a signed-in member is resolved through their own confirmed seats into the workspace surface;
+everyone else gets the house 404. No face is an existence oracle.
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the

@@ -27,7 +27,7 @@
 
 mod common;
 
-use common::{Plane, SKILL, WS, expected, start_plane_mode};
+use common::{Plane, SKILL, WS, expected, start_stack_mode};
 use plane_store::{
     ApproveStandupOutcome, Authority, AuthorityError, CreateWorkspaceOutcome, DeploymentMode,
     MintClaimOutcome, Principal, RedeemOutcome, WorkspaceId,
@@ -117,7 +117,7 @@ fn count(plane: &Plane, sql: &str) -> i64 {
 /// An enrollment-configured loopback plane with NOTHING seeded — every workspace in these chains is born
 /// through a standup door, never a fixture.
 fn empty_plane(tag: &str, mode: DeploymentMode) -> Plane {
-    start_plane_mode(
+    start_stack_mode(
         "topos-standup",
         tag,
         true,
@@ -156,7 +156,7 @@ fn e2e_door1_the_first_publish_stands_the_workspace_up() {
     );
     assert_eq!(
         pending.verification_uri_complete,
-        format!("{}/verify/{}", plane.base_url, pending.user_code),
+        format!("{}/verify/{}", plane.link_base_url, pending.user_code),
         "the SERVER-built complete URI rides verbatim"
     );
     assert!(pending.expires_at.is_some(), "the expiry is disclosed");
@@ -812,7 +812,7 @@ fn e2e_selfhost_claim_chain_enrolls_publishes_and_distributes() {
     let MintClaimOutcome::Minted(claim) = minted else {
         panic!("expected Minted, got {minted:?}");
     };
-    let claim_link = format!("{}/i/{}", plane.base_url, claim.token);
+    let claim_link = format!("{}/i/{}", plane.link_base_url, claim.token);
 
     // `follow <claim-link>` — ONE invocation, no web leg, no --resume.
     let owner = FollowHarness::new("standup-claim-owner");
@@ -898,7 +898,7 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
     let MintClaimOutcome::Minted(claim) = minted else {
         panic!("expected Minted, got {minted:?}");
     };
-    let claim_link = format!("{}/i/{}", plane.base_url, claim.token);
+    let claim_link = format!("{}/i/{}", plane.link_base_url, claim.token);
 
     // The owner consumes the claim (the real one-shot follow).
     let owner = FollowHarness::new("standup-claimwit-owner");
@@ -975,7 +975,7 @@ fn e2e_claim_replay_expiry_and_refetch_witnesses() {
         matches!(dead, RedeemOutcome::Denied(_)),
         "an expired claim's first consumption is Denied: {dead:?}"
     );
-    let dead_link = format!("{}/i/{}", plane.base_url, expired.token);
+    let dead_link = format!("{}/i/{}", plane.link_base_url, expired.token);
     let dead_follow = FollowHarness::new("standup-claimwit-expired").follow(&dead_link);
     assert!(
         dead_follow

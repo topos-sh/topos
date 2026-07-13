@@ -43,7 +43,10 @@ zeroize.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 uuid = { workspace = true }
-# Serialize the `current` record (a topos-types DTO) into the stored BLOB + the open receipt `details`.
+# Serialize the `current` record (a topos-types DTO) into the stored BLOB + the open receipt `details`,
+# and deserialize `topos_delivery`'s wire-shaped body into the typed view (serde derive on the
+# lane-local mirror structs in `directory/delivery.rs`).
+serde.workspace = true
 serde_json.workspace = true
 # The deterministic opaque-credential derivation: HMAC-SHA256 over the 0600 enrollment secret mints every
 # invite / grant / read-token plaintext, so a lost-ack retry re-derives the IDENTICAL credential (and only its

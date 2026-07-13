@@ -2280,6 +2280,22 @@ mod tests {
         assert!(resolve_api_base("https://links.example", "not-a-url").is_err());
     }
 
+    /// A PATH-CARRYING api base is a first-class re-root target — the door-cutover card declares
+    /// `<origin>/api` (the web app's mount) and every `/v1/…` route joins onto it. This pin keeps a
+    /// future "just parse the origin" refactor from silently amputating the mount path.
+    #[test]
+    fn api_base_resolver_accepts_a_path_carrying_base() {
+        assert_eq!(
+            resolve_api_base("https://topos.example", "https://topos.example/api").unwrap(),
+            "https://topos.example/api"
+        );
+        // Trailing slashes normalize without touching the mount segment.
+        assert_eq!(
+            resolve_api_base("http://localhost:3000", "http://localhost:3000/api/").unwrap(),
+            "http://localhost:3000/api"
+        );
+    }
+
     #[test]
     fn base_url_gate_accepts_the_legit_shapes_and_refuses_the_uri_hazards() {
         for ok in [

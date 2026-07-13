@@ -202,7 +202,7 @@ async fn seat_reader(authority: &Authority) {
 
 #[test]
 fn a_member_device_reads_the_workspace_catalog_over_loopback() {
-    let plane = common::start_plane("topos-catalog-e2e", "member-ok", false, empty_seed);
+    let plane = common::start_stack("topos-catalog-e2e", "member-ok", false, empty_seed);
     let mut rig = ContributeHarness::new("cat-member");
 
     let (fa, fb) = plane.rt.block_on(async {
@@ -249,7 +249,7 @@ fn a_member_device_reads_the_workspace_catalog_over_loopback() {
 
 #[test]
 fn list_remote_merges_the_catalog_with_local_follow_state() {
-    let plane = common::start_plane("topos-catalog-e2e", "merge", false, empty_seed);
+    let plane = common::start_stack("topos-catalog-e2e", "merge", false, empty_seed);
     let mut rig = ContributeHarness::new("cat-merge");
 
     plane.rt.block_on(async {
@@ -311,7 +311,7 @@ fn list_remote_merges_the_catalog_with_local_follow_state() {
 
 #[test]
 fn a_non_member_device_is_gated_to_an_empty_catalog() {
-    let plane = common::start_plane("topos-catalog-e2e", "gate", false, empty_seed);
+    let plane = common::start_stack("topos-catalog-e2e", "gate", false, empty_seed);
     let mut member = ContributeHarness::new("cat-gate-member");
     let mut stranger = ContributeHarness::new("cat-gate-stranger");
     let mut revoked = ContributeHarness::new("cat-gate-revoked");
@@ -388,7 +388,7 @@ fn the_catalog_serves_a_member_on_a_self_host_plane() {
     // The device lane authorizes catalog visibility by membership on BOTH cloud and self-host (device auth
     // IS the self-host membership story) — it never consults a deployment mode. The workspace is born
     // self-host (the honest signal the lane would read if it ever did), and the catalog still serves.
-    let plane = common::start_plane_mode(
+    let plane = common::start_stack_mode(
         "topos-catalog-e2e",
         "selfhost",
         false,
