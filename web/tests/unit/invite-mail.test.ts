@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  */
 
 const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
-  const sendMailSpy = vi.fn(async () => ({}));
+  const sendMailSpy = vi.fn(async (_message: unknown) => ({}));
   const createTransportSpy = vi.fn(() => ({ sendMail: sendMailSpy }));
   return { sendMailSpy, createTransportSpy };
 });

@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  */
 
 const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
-  const sendMailSpy = vi.fn(async () => ({}));
+  const sendMailSpy = vi.fn(async (_message: unknown) => ({}));
   const createTransportSpy = vi.fn(() => ({ sendMail: sendMailSpy }));
   return { sendMailSpy, createTransportSpy };
 });
@@ -92,8 +92,6 @@ describe("sendMagicLinkEmail in production mode", () => {
 
   it("throws COARSE without a transport — a dropped link must surface, never silently vanish", async () => {
     const mail = await importMagicLinkMail("production");
-    await expect(mail.sendMagicLinkEmail(ARGS)).rejects.toThrow(
-      "mail transport is not configured",
-    );
+    await expect(mail.sendMagicLinkEmail(ARGS)).rejects.toThrow("mail transport is not configured");
   });
 });
