@@ -758,6 +758,7 @@ impl FollowHarness {
             .map_err(|e| e.to_string())?
         {
             ops::FollowOutcome::Applied(applied) => Ok(applied_view(&applied)),
+            ops::FollowOutcome::ReattachApplied(reattach) => Ok(reattach_applied_view(&reattach)),
             other => Err(format!("test_support: expected an apply, got {other:?}")),
         }
     }
@@ -1306,6 +1307,9 @@ impl FollowHarness {
             .map_err(|e| e.to_string())?
         {
             ops::FollowOutcome::Applied(applied) => Ok(applied_view(&applied)),
+            // A device-excluded skill routes to the RE-ATTACH arm; its apply is the same
+            // "subscription re-affirmed + bytes landed" fact, projected into the one view.
+            ops::FollowOutcome::ReattachApplied(reattach) => Ok(reattach_applied_view(&reattach)),
             other => Err(format!("test_support: expected an apply, got {other:?}")),
         }
     }
@@ -2889,6 +2893,31 @@ fn describe_view(d: &crate::ops::FollowDescribe) -> FollowDescribeView {
         preplaced_channels: d.preplaced_channels.clone(),
         all_devices_note: d.all_devices_note.clone(),
         reporting_note: d.reporting_note.clone(),
+    }
+}
+
+/// Project a re-attach apply into the public [`FollowAppliedView`]: the one re-affirmed direct
+/// follow is the subscription row, and the reinstalled current is the single install (a re-attach
+/// is never a first-receive, so there is no via-channel attribution to carry).
+fn reattach_applied_view(r: &crate::ops::Reattach) -> FollowAppliedView {
+    FollowAppliedView {
+        workspace_id: r.workspace_id.clone(),
+        workspace_name: r.workspace_name.clone(),
+        enrolled_now: false,
+        subscribed: vec![("skill".to_owned(), r.name.clone())],
+        installed: if r.installed {
+            vec![InstallView {
+                skill_id: r.skill_id.clone(),
+                name: r.name.clone(),
+                version_id: r.version_id.clone(),
+                bundle_digest: r.bundle_digest.clone(),
+                via_channels: Vec::new(),
+                via_direct: true,
+            }]
+        } else {
+            Vec::new()
+        },
+        warnings: r.warnings.clone(),
     }
 }
 
