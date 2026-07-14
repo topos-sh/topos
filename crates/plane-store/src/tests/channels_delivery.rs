@@ -1419,10 +1419,10 @@ async fn delivery(fx: &Fixture, w: &WorkspaceId) -> Delivery {
     fx.authority.delivery(w, &cred(w, "dk_bob")).await.unwrap()
 }
 
-// ── the device-exclusion clear is fenced to the caller's own live device (0021) ───────────────────
+// ── the device-exclusion mint AND clear are fenced to the caller's own live device (0021) ─────────
 
 /// Whether a `device_exclusions` row survives for `(ws, dkid, skill_id)` — the "not on this device"
-/// marker, read raw off the committed `.sqlx` drift surface.
+/// marker, read raw.
 async fn has_exclusion(pool: &PgPool, w: &str, dkid: &str, skill_id: &str) -> bool {
     sqlx::query(
         "SELECT 1 AS one FROM device_exclusions \
@@ -1437,10 +1437,10 @@ async fn has_exclusion(pool: &PgPool, w: &str, dkid: &str, skill_id: &str) -> bo
     .is_some()
 }
 
-/// Call the guarded `topos_follow_skill` DIRECTLY, naming an arbitrary device — the only way to drive
-/// the (person, device) pair the public `follow_skill` never lets diverge (it resolves the device
-/// from the caller's own bearer credential), so this is how a caller bug or the web tier would name a
-/// foreign device. Returns the outcome code.
+/// Drive the guarded `topos_follow_skill` DIRECTLY, naming an arbitrary device — the only way to
+/// exercise the (person, device) pair the public `follow_skill` never lets diverge (it resolves the
+/// device from the caller's own bearer credential), so this is how a caller bug or the web tier
+/// would name a foreign device. Returns the outcome code.
 async fn follow_sql(
     pool: &PgPool,
     w: &str,
@@ -1448,17 +1448,12 @@ async fn follow_sql(
     skill_id: &str,
     device: &str,
 ) -> String {
-    use sqlx::Row as _;
-    sqlx::query("SELECT topos_follow_skill($1, $2, $3, $4, $5) AS outcome")
-        .bind(w)
-        .bind(principal)
-        .bind(skill_id)
-        .bind(device)
-        .bind(CREATED_AT)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-        .get::<String, _>("outcome")
+    fn_outcome(
+        pool,
+        "SELECT topos_follow_skill($1, $2, $3, $4, $5)",
+        &[w, principal, skill_id, device, CREATED_AT],
+    )
+    .await
 }
 
 /// Preserved behavior: a member excludes a skill on their OWN device, then follows the skill naming
@@ -1569,4 +1564,49 @@ async fn a_follow_naming_a_revoked_own_device_keeps_its_exclusion(pool: PgPool) 
         has_exclusion(&pool, "w_acme", "dk_bob", "s_deploy").await,
         "a revoked device is not a live device — its exclusion is not cleared"
     );
+}
+
+/// The mint side of the same fence: member B calls `topos_exclude_device` NAMING A's device (a
+/// caller bug or a malicious row op would be the only way — the public op resolves the device from
+/// the caller's own bearer credential). The mint refuses with the uniform 'member_required' and no
+/// row lands: an exclusion is a delivery kill-switch for that device, and only its own person may
+/// throw it.
+#[sqlx::test]
+async fn a_member_cannot_mint_another_persons_device_exclusion(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chd-exclude-foreign").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_alice", 11, ALICE, "member", "confirmed").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member", "confirmed").await;
+    fx.authority
+        .db()
+        .seed_catalog(&w, &s, "deploy")
+        .await
+        .unwrap();
+
+    // bob names ALICE's device — refused, nothing minted.
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_exclude_device($1, $2, $3, $4, $5)",
+            &["w_acme", BOB, "s_deploy", "dk_alice", CREATED_AT],
+        )
+        .await,
+        "member_required"
+    );
+    assert!(
+        !has_exclusion(&pool, "w_acme", "dk_alice", "s_deploy").await,
+        "a member must not mint an exclusion for ANOTHER person's device"
+    );
+
+    // bob's own live device still mints — the fence narrows WHOSE device qualifies, nothing else.
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_exclude_device($1, $2, $3, $4, $5)",
+            &["w_acme", BOB, "s_deploy", "dk_bob", CREATED_AT],
+        )
+        .await,
+        "excluded"
+    );
+    assert!(has_exclusion(&pool, "w_acme", "dk_bob", "s_deploy").await);
 }

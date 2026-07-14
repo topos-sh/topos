@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT topos_exclude_device($1, $2, $3, $4) AS \"outcome!\"",
+  "query": "SELECT topos_exclude_device($1, $2, $3, $4, $5) AS \"outcome!\"",
   "describe": {
     "columns": [
       {
@@ -14,6 +14,7 @@
         "Text",
         "Text",
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -21,5 +22,5 @@
       null
     ]
   },
-  "hash": "772613be7280a594ccc48d8539bb9493c794404bb0a412557402d357c806c7f3"
+  "hash": "a715510c16d2a29ce41ccf8de515c14be09de1f084d8914fe17fff540d1608a0"
 }

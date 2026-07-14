@@ -320,16 +320,18 @@ export function deviceUnfollowSkill(
   ]);
 }
 
-/** Exclude a skill from THIS device (`topos_exclude_device`; args: ws, device, skill, created_at). */
+/** Exclude a skill from THIS device (`topos_exclude_device`; args: ws, principal, skill, device,
+ * created_at — the function refuses unless the device is the acting person's own live device). */
 export function deviceExcludeDevice(
   actor: DeviceActor,
   skillId: string,
   createdAt: string,
 ): Promise<string> {
-  return guardedStatus("SELECT topos_exclude_device($1, $2, $3, $4) AS outcome", [
+  return guardedStatus("SELECT topos_exclude_device($1, $2, $3, $4, $5) AS outcome", [
     actor.workspaceId,
-    actor.deviceKeyId,
+    actor.person,
     skillId,
+    actor.deviceKeyId,
     createdAt,
   ]);
 }

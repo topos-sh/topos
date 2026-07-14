@@ -1234,16 +1234,6 @@ async fn resolve(pool: &PgPool, w: &str, name: &str) -> Option<(String, String, 
 
 // ── the web-admin roster/channel/device acts (guarded functions, called as the web tier calls them) ──
 
-/// One guarded-function call answering a TEXT outcome, with string binds (raw `sqlx`, exactly the
-/// call shape the web tier uses).
-async fn fn_outcome(pool: &PgPool, sql: &str, binds: &[&str]) -> String {
-    let mut q = sqlx::query_scalar::<_, String>(sql);
-    for b in binds {
-        q = q.bind(*b);
-    }
-    q.fetch_one(pool).await.unwrap()
-}
-
 /// `topos_set_member_role`: an owner act on any seat, with the last-owner lockout — demoting the
 /// sole confirmed owner refuses (`sole_owner`) until a second confirmed owner exists.
 #[sqlx::test]
@@ -1923,4 +1913,136 @@ async fn place_loses_a_create_race_politely_placing_into_the_winner(pool: PgPool
         landed, 1,
         "the loser's skill reference landed in the winner's channel row"
     );
+}
+
+/// Accumulated freed-name survivors can NEVER brick a channel name. Every rename-away cycle leaves
+/// one more immutable channel_id squatting the base name's id space (`foo`, `foo-2`, `foo-3`, ...);
+/// the create must jump past the highest visible survivor in ONE recompute, not probe linearly —
+/// a linear probe against a bounded loop bricks the name permanently once the survivors outnumber
+/// the bound (32). 35 cycles proves the jump: the old probe would raise on cycle 33.
+#[sqlx::test]
+async fn accumulated_freed_name_survivors_never_brick_the_create(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-place-survivors").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_a"),
+        "dk_alice",
+        "dddddddd-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"alpha")],
+        "A",
+    )
+    .await;
+
+    let place = "SELECT topos_channel_place($1, $2, $3, $4, $5)";
+    for i in 1..=35u32 {
+        assert_eq!(
+            fn_outcome(&pool, place, &["w_acme", "foo", "s_a", ALICE, CREATED_AT]).await,
+            "created",
+            "cycle {i}: the create must settle whatever survivors have accumulated"
+        );
+        // Rename the channel holding the NAME `foo` away (keyed on its immutable id), freeing the
+        // name while its id survives to squat the next create.
+        let cid: String = sqlx::query_scalar(
+            "SELECT channel_id FROM channels WHERE workspace_id = $1 AND name = 'foo'",
+        )
+        .bind("w_acme")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            fn_outcome(
+                &pool,
+                "SELECT topos_channel_rename($1, $2, $3, $4, $5)",
+                &["w_acme", &cid, &format!("graveyard-{i}"), ALICE, CREATED_AT],
+            )
+            .await,
+            "renamed"
+        );
+    }
+
+    // One more create past 35 surviving ids — the jump lands it as `foo-36` in one call.
+    assert_eq!(
+        fn_outcome(&pool, place, &["w_acme", "foo", "s_a", ALICE, CREATED_AT]).await,
+        "created"
+    );
+    let cid: String = sqlx::query_scalar(
+        "SELECT channel_id FROM channels WHERE workspace_id = $1 AND name = 'foo'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        cid, "foo-36",
+        "the recompute jumps past every survivor at once"
+    );
+}
+
+/// The frozen-snapshot escalation arm: a SERIALIZABLE transaction (the device-lane runner's
+/// isolation) whose snapshot predates a committed create of the same name can neither see the
+/// winner nor insert past it — the function must escalate with SQLSTATE 40001 (the class the
+/// runner already retries), NEVER spin to the bound or surface a raw unique_violation. At READ
+/// COMMITTED the same collision resolves in-loop (the race test above), so the escalation is
+/// exactly as narrow as the snapshot that needs it.
+#[sqlx::test]
+async fn place_escalates_a_frozen_snapshot_name_race_as_serialization_failure(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-place-frozen").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_a"),
+        "dk_alice",
+        "eeeeeeee-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"alpha")],
+        "A",
+    )
+    .await;
+
+    // Conn S: a SERIALIZABLE transaction freezes its snapshot BEFORE the winner commits.
+    let mut s = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN ISOLATION LEVEL SERIALIZABLE")
+        .execute(&mut *s)
+        .await
+        .unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT COUNT(*)::int8 FROM channels WHERE workspace_id = $1")
+        .bind("w_acme")
+        .fetch_one(&mut *s)
+        .await
+        .unwrap();
+
+    // The winner creates `esc` and commits (autocommit on the pool).
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_channel_place($1, $2, $3, $4, $5)",
+            &["w_acme", "esc", "s_a", ALICE, CREATED_AT],
+        )
+        .await,
+        "created"
+    );
+
+    // S places into `esc`: its INSERT collides with a winner its frozen snapshot cannot read.
+    let err = sqlx::query_scalar::<_, String>("SELECT topos_channel_place($1, $2, $3, $4, $5)")
+        .bind("w_acme")
+        .bind("esc")
+        .bind("s_a")
+        .bind(ALICE)
+        .bind(CREATED_AT)
+        .fetch_one(&mut *s)
+        .await
+        .expect_err("a frozen snapshot over a committed winner must not settle in-loop");
+    let db = err
+        .as_database_error()
+        .expect("a database error, not a driver fault");
+    assert_eq!(
+        db.code().as_deref(),
+        Some("40001"),
+        "the escalation must be a serialization failure the runner retries"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *s).await.unwrap();
 }

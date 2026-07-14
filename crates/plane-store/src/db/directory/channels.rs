@@ -193,11 +193,13 @@ impl Db {
         })
     }
 
-    /// Exclude a followed skill from THIS device ("not on this device"; `follow` lifts it).
+    /// Exclude a followed skill from THIS device ("not on this device"; `follow` lifts it). The
+    /// guarded function refuses unless the named device is the acting principal's own live device.
     pub(crate) async fn exclude_device_txn(
         &self,
         ws: &WorkspaceId,
         skill_id: &str,
+        principal: &Principal,
         device_key_id: &str,
         created_at: &str,
     ) -> Result<SubscriptionOutcome> {
@@ -208,6 +210,7 @@ impl Db {
                 PolicyCall::Exclude {
                     ws,
                     skill_id: &skill_id,
+                    principal,
                     device_key_id,
                     created_at,
                 },
@@ -419,6 +422,7 @@ enum PolicyCall<'a> {
     Exclude {
         ws: &'a WorkspaceId,
         skill_id: &'a str,
+        principal: &'a Principal,
         device_key_id: &'a str,
         created_at: &'a str,
     },
@@ -548,14 +552,16 @@ async fn call_policy(tx: &mut Transaction<'_, Postgres>, call: PolicyCall<'_>) -
         PolicyCall::Exclude {
             ws,
             skill_id,
+            principal,
             device_key_id,
             created_at,
         } => {
             sqlx::query_scalar!(
-                r#"SELECT topos_exclude_device($1, $2, $3, $4) AS "outcome!""#,
+                r#"SELECT topos_exclude_device($1, $2, $3, $4, $5) AS "outcome!""#,
                 ws.as_str(),
-                device_key_id,
+                principal.as_str(),
                 skill_id,
+                device_key_id,
                 created_at,
             )
             .fetch_one(&mut **tx)

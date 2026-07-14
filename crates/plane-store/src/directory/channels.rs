@@ -265,7 +265,13 @@ pub(crate) async fn exclude_device(
     let identity = device_member(authority, ws, credential).await?;
     authority
         .db()
-        .exclude_device_txn(ws, skill_id, &identity.device_key_id, created_at)
+        .exclude_device_txn(
+            ws,
+            skill_id,
+            &identity.principal,
+            &identity.device_key_id,
+            created_at,
+        )
         .await
 }
 

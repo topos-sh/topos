@@ -116,6 +116,16 @@ fn op(s: &str) -> OpId {
     OpId::parse(s).expect("op id")
 }
 
+/// One guarded-function call answering a TEXT outcome, with string binds (raw `sqlx`, exactly the
+/// call shape the web tier uses) — for the split suites that drive a `topos_*` function directly.
+async fn fn_outcome(pool: &PgPool, sql: &str, binds: &[&str]) -> String {
+    let mut q = sqlx::query_scalar::<_, String>(sql);
+    for b in binds {
+        q = q.bind(*b);
+    }
+    q.fetch_one(pool).await.unwrap()
+}
+
 /// A dummy 20-byte git locator for pure object_presence fence tests (no real git store touched).
 fn goid(b: u8) -> [u8; 20] {
     [b; 20]
