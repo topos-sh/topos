@@ -1722,3 +1722,205 @@ async fn revoke_device_self_only_refuses_even_an_owner_reaching_for_another_devi
         "revoked"
     );
 }
+
+/// `topos_channel_place` create-on-first-use is deterministic against a FREED NAME whose old
+/// `channel_id` survives a rename. A channel `foo` is created (channel_id == name == 'foo'); the
+/// owner renames it to `bar`, which frees the NAME `foo` while the row keeps `channel_id = 'foo'`.
+/// Placing into a fresh channel named `foo` used to collide on the surviving PRIMARY KEY and raise a
+/// raw unique_violation; now the loop mints a suffixed candidate id (`foo-2`) under the reused name
+/// and returns 'created'. The renamed channel (id 'foo', now named 'bar') and the new one both keep
+/// their references. (This also pins the preserved outcomes: first place 'created', a repeat 'placed'.)
+#[sqlx::test]
+async fn place_reuses_a_freed_name_though_the_old_channel_id_survives_a_rename(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-place-freed").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_a"),
+        "dk_alice",
+        "bbbbbbbb-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"alpha")],
+        "A",
+    )
+    .await;
+    gpub(
+        &fx,
+        &w,
+        &skill("s_b"),
+        "dk_alice",
+        "bbbbbbbb-0000-4000-8000-000000000002",
+        vec![file("SKILL.md", b"beacon")],
+        "B",
+    )
+    .await;
+
+    let place = "SELECT topos_channel_place($1, $2, $3, $4, $5)";
+    // First use CREATES `foo` (channel_id == name == 'foo'); a repeat of the same skill is 'placed'.
+    assert_eq!(
+        fn_outcome(&pool, place, &["w_acme", "foo", "s_a", ALICE, CREATED_AT]).await,
+        "created"
+    );
+    assert_eq!(
+        fn_outcome(&pool, place, &["w_acme", "foo", "s_a", ALICE, CREATED_AT]).await,
+        "placed"
+    );
+
+    // The owner renames `foo` -> `bar` (keyed on the IMMUTABLE channel_id 'foo'); the NAME `foo` is
+    // now free, but the row still carries channel_id = 'foo'.
+    assert_eq!(
+        fn_outcome(
+            &pool,
+            "SELECT topos_channel_rename($1, $2, $3, $4, $5)",
+            &["w_acme", "foo", "bar", ALICE, CREATED_AT],
+        )
+        .await,
+        "renamed"
+    );
+
+    // Placing s_b into a FRESH channel named `foo` — the create used to hit the surviving PK and
+    // raise; now it mints channel_id 'foo-2' under the reused name and returns 'created'.
+    assert_eq!(
+        fn_outcome(&pool, place, &["w_acme", "foo", "s_b", ALICE, CREATED_AT]).await,
+        "created"
+    );
+
+    // The row named 'foo' is the NEW channel with a suffixed id; 'bar' keeps the surviving id 'foo'.
+    let (foo_cid, foo_mode): (String, String) = {
+        use sqlx::Row as _;
+        let r = sqlx::query(
+            "SELECT channel_id, mode FROM channels WHERE workspace_id = $1 AND name = 'foo'",
+        )
+        .bind("w_acme")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!(
+        foo_cid, "foo-2",
+        "the reused name gets a fresh suffixed channel_id"
+    );
+    assert_eq!(foo_mode, "open");
+    let bar_cid: String = sqlx::query_scalar(
+        "SELECT channel_id FROM channels WHERE workspace_id = $1 AND name = 'bar'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bar_cid, "foo", "the renamed channel keeps its immutable id");
+
+    // Both channels' references survive: the renamed channel (id 'foo') holds s_a; the new one
+    // (id 'foo-2') holds s_b.
+    let a_ref: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM channel_skills \
+         WHERE workspace_id = $1 AND channel_id = 'foo' AND skill_id = 's_a'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let b_ref: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM channel_skills \
+         WHERE workspace_id = $1 AND channel_id = 'foo-2' AND skill_id = 's_b'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(a_ref, 1, "the renamed channel still references s_a");
+    assert_eq!(b_ref, 1, "the new channel references s_b");
+}
+
+/// `topos_channel_place`'s create-on-first-use loses a REAL race POLITELY. Connection A opens a
+/// transaction and inserts the channel `race` by hand, holding it OPEN so its `channels_by_name`
+/// index entry is in flight; a concurrent placement on connection B (a member placing a skill) must
+/// BLOCK on that entry, then — once A commits — find the winner's row and place into it as 'placed'
+/// (NOT raise a raw unique_violation). B runs at the web tier's READ COMMITTED autocommit, so the
+/// loop's re-read sees the winner. This is deterministic: B provably blocks until A commits.
+#[sqlx::test]
+async fn place_loses_a_create_race_politely_placing_into_the_winner(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chl-place-race").await;
+    let w = ws("w_acme");
+    seat(&fx, &w, "dk_alice", 11, ALICE, "owner").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member").await;
+    // The owner publishes an active skill; a plain member (bob) places it into the raced channel.
+    gpub(
+        &fx,
+        &w,
+        &skill("s_bob"),
+        "dk_alice",
+        "cccccccc-0000-4000-8000-000000000001",
+        vec![file("SKILL.md", b"shared")],
+        "Shared",
+    )
+    .await;
+
+    // Conn A: the WINNER — insert the `race` channel row by hand and HOLD the transaction open, so
+    // its unique-index entry is uncommitted and any concurrent create of the same name must wait.
+    let mut a = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *a).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channels (workspace_id, channel_id, name, mode, builtin, created_by, created_at) \
+         VALUES ($1, 'race', 'race', 'open', 0, $2, $3)",
+    )
+    .bind("w_acme")
+    .bind(ALICE)
+    .bind(CREATED_AT)
+    .execute(&mut *a)
+    .await
+    .unwrap();
+
+    // Conn B: a member places into `race` — its create-on-first-use INSERT blocks on A's in-flight
+    // name-index entry.
+    let pool_b = pool.clone();
+    let b = tokio::spawn(async move {
+        fn_outcome(
+            &pool_b,
+            "SELECT topos_channel_place($1, $2, $3, $4, $5)",
+            &["w_acme", "race", "s_bob", BOB, CREATED_AT],
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(
+        !b.is_finished(),
+        "B must block on the winner's in-flight name entry, not race past it"
+    );
+
+    // A commits; B unblocks, its INSERT raises on the now-committed name, and the loop re-reads and
+    // places into the winner's row.
+    sqlx::query("COMMIT").execute(&mut *a).await.unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), b)
+        .await
+        .expect("the blocked placement did not settle within 30s")
+        .expect("the placement task panicked");
+    assert_eq!(
+        outcome, "placed",
+        "a create-race loser places into the winner's channel, never a raw error"
+    );
+
+    // The winner's row (channel_id 'race') is the ONLY `race*` channel, and it holds B's reference.
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM channels WHERE workspace_id = $1 AND name LIKE 'race%'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "no phantom suffixed channel was minted");
+    let landed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM channel_skills \
+         WHERE workspace_id = $1 AND channel_id = 'race' AND skill_id = 's_bob'",
+    )
+    .bind("w_acme")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        landed, 1,
+        "the loser's skill reference landed in the winner's channel row"
+    );
+}
