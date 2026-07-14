@@ -1418,3 +1418,155 @@ async fn a_report_racing_an_unfollow_detach_does_not_revive_the_frozen_row(pool:
 async fn delivery(fx: &Fixture, w: &WorkspaceId) -> Delivery {
     fx.authority.delivery(w, &cred(w, "dk_bob")).await.unwrap()
 }
+
+// ── the device-exclusion clear is fenced to the caller's own live device (0021) ───────────────────
+
+/// Whether a `device_exclusions` row survives for `(ws, dkid, skill_id)` — the "not on this device"
+/// marker, read raw off the committed `.sqlx` drift surface.
+async fn has_exclusion(pool: &PgPool, w: &str, dkid: &str, skill_id: &str) -> bool {
+    sqlx::query(
+        "SELECT 1 AS one FROM device_exclusions \
+         WHERE workspace_id = $1 AND device_key_id = $2 AND skill_id = $3",
+    )
+    .bind(w)
+    .bind(dkid)
+    .bind(skill_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .is_some()
+}
+
+/// Call the guarded `topos_follow_skill` DIRECTLY, naming an arbitrary device — the only way to drive
+/// the (person, device) pair the public `follow_skill` never lets diverge (it resolves the device
+/// from the caller's own bearer credential), so this is how a caller bug or the web tier would name a
+/// foreign device. Returns the outcome code.
+async fn follow_sql(
+    pool: &PgPool,
+    w: &str,
+    principal: &str,
+    skill_id: &str,
+    device: &str,
+) -> String {
+    use sqlx::Row as _;
+    sqlx::query("SELECT topos_follow_skill($1, $2, $3, $4, $5) AS outcome")
+        .bind(w)
+        .bind(principal)
+        .bind(skill_id)
+        .bind(device)
+        .bind(CREATED_AT)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get::<String, _>("outcome")
+}
+
+/// Preserved behavior: a member excludes a skill on their OWN device, then follows the skill naming
+/// that device — the follow lands AND lifts the caller's own exclusion (the `remove` then `follow`
+/// undo on the same device that the convenience exists for).
+#[sqlx::test]
+async fn a_follow_clears_the_callers_own_device_exclusion(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chd-follow-own").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_bob", 12, BOB, "member", "confirmed").await;
+    fx.authority
+        .db()
+        .seed_catalog(&w, &s, "deploy")
+        .await
+        .unwrap();
+    let bob = cred(&w, "dk_bob");
+
+    assert_eq!(
+        fx.authority
+            .exclude_device(&w, &bob, s.as_str(), CREATED_AT)
+            .await
+            .unwrap(),
+        SubscriptionOutcome::Excluded
+    );
+    assert!(has_exclusion(&pool, "w_acme", "dk_bob", "s_deploy").await);
+
+    assert_eq!(
+        fx.authority
+            .follow_skill(&w, &bob, s.as_str(), CREATED_AT)
+            .await
+            .unwrap(),
+        SubscriptionOutcome::Followed
+    );
+    assert!(
+        !has_exclusion(&pool, "w_acme", "dk_bob", "s_deploy").await,
+        "a follow on the excluded device lifts the caller's OWN exclusion"
+    );
+}
+
+/// The fix: member A excludes a skill on A's device; member B follows the skill NAMING A's device id
+/// (a caller bug or a malicious row op). The follow is B's own legitimate act, so it still returns
+/// 'followed' — but A's exclusion SURVIVES: membership must not reach another person's device rows.
+#[sqlx::test]
+async fn a_follow_cannot_clear_another_persons_device_exclusion(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chd-follow-foreign").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_alice", 11, ALICE, "member", "confirmed").await;
+    seat(&fx, &w, "dk_bob", 12, BOB, "member", "confirmed").await;
+    fx.authority
+        .db()
+        .seed_catalog(&w, &s, "deploy")
+        .await
+        .unwrap();
+
+    // alice excludes the skill on ALICE's device.
+    let alice = cred(&w, "dk_alice");
+    assert_eq!(
+        fx.authority
+            .exclude_device(&w, &alice, s.as_str(), CREATED_AT)
+            .await
+            .unwrap(),
+        SubscriptionOutcome::Excluded
+    );
+
+    // bob follows the skill naming ALICE's device id — the follow lands, alice's marker is untouched.
+    assert_eq!(
+        follow_sql(&pool, "w_acme", BOB, "s_deploy", "dk_alice").await,
+        "followed"
+    );
+    assert!(
+        has_exclusion(&pool, "w_acme", "dk_alice", "s_deploy").await,
+        "a member must not clear ANOTHER person's device exclusion"
+    );
+}
+
+/// Predicate parity with the mint (`topos_exclude_device`): the caller's OWN but REVOKED device is
+/// not a live device, so a follow naming it still lands ('followed') but leaves its exclusion in
+/// place — the clear requires a `revoked = 0` row exactly as the mint does.
+#[sqlx::test]
+async fn a_follow_naming_a_revoked_own_device_keeps_its_exclusion(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "chd-follow-revoked").await;
+    let (w, s) = (ws("w_acme"), skill("s_deploy"));
+    seat(&fx, &w, "dk_bob", 12, BOB, "member", "confirmed").await;
+    fx.authority
+        .db()
+        .seed_catalog(&w, &s, "deploy")
+        .await
+        .unwrap();
+
+    // bob excludes on his own device while it is live …
+    let bob = cred(&w, "dk_bob");
+    assert_eq!(
+        fx.authority
+            .exclude_device(&w, &bob, s.as_str(), CREATED_AT)
+            .await
+            .unwrap(),
+        SubscriptionOutcome::Excluded
+    );
+
+    // … then the device is revoked. bob keeps his seat, so the follow lands — but the fence requires
+    // a LIVE device, so the exclusion is not cleared.
+    fx.authority.db().revoke_device(&w, "dk_bob").await.unwrap();
+    assert_eq!(
+        follow_sql(&pool, "w_acme", BOB, "s_deploy", "dk_bob").await,
+        "followed"
+    );
+    assert!(
+        has_exclusion(&pool, "w_acme", "dk_bob", "s_deploy").await,
+        "a revoked device is not a live device — its exclusion is not cleared"
+    );
+}
