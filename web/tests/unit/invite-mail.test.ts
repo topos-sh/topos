@@ -95,6 +95,18 @@ describe("sendInviteEmail in test mode", () => {
       // The address is a plain slug — no tokened link machinery of any kind.
       expect(lines[0]).not.toContain("/i/");
       expect(lines[0]).not.toContain("token");
+      // The accumulating dev outbox carries the FULL rendered mail, kind-tagged.
+      const outbox = (await fs.readFile(path.join(dir, ".outbox.jsonl"), "utf8"))
+        .trim()
+        .split("\n");
+      expect(outbox).toHaveLength(1);
+      const recorded = JSON.parse(outbox[0] as string);
+      expect(recorded.kind).toBe("invite");
+      expect(recorded.to).toBe(INVITE.to);
+      expect(recorded.subject).toBe(
+        `You've been invited to ${INVITE.workspaceDisplayName} on Topos`,
+      );
+      expect(recorded.text).toContain(`follow ${INVITE.address}`);
       await expect(fs.access(path.join(dir, ".magic-links.jsonl"))).rejects.toThrow();
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -116,6 +128,7 @@ describe("sendInviteEmail in production mode", () => {
       await mail.sendInviteEmail(INVITE);
       // No file is written (the seat + address already stand) and no transport is called.
       await expect(fs.access(path.join(dir, ".invite-emails.jsonl"))).rejects.toThrow();
+      await expect(fs.access(path.join(dir, ".outbox.jsonl"))).rejects.toThrow();
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(sendMailSpy).not.toHaveBeenCalled();
       expect(mail.inviteMailDelivery().canSend).toBe(false);

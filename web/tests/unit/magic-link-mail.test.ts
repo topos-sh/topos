@@ -64,6 +64,17 @@ describe("sendMagicLinkEmail in test mode", () => {
         .split("\n");
       expect(lines).toHaveLength(1);
       expect(JSON.parse(lines[0] as string)).toEqual(ARGS);
+      // The accumulating dev outbox carries the FULL rendered mail, kind-tagged.
+      const outbox = (await fs.readFile(path.join(dir, ".outbox.jsonl"), "utf8"))
+        .trim()
+        .split("\n");
+      expect(outbox).toHaveLength(1);
+      const recorded = JSON.parse(outbox[0] as string);
+      expect(recorded.kind).toBe("magic-link");
+      expect(recorded.to).toBe(ARGS.email);
+      expect(recorded.subject).toBe("Sign in to Topos");
+      expect(recorded.text).toContain(ARGS.url);
+      expect(recorded.html).toContain('href="https://topos.example/magic?token=abc"');
       await expect(fs.access(path.join(dir, ".invite-emails.jsonl"))).rejects.toThrow();
       expect(sendMailSpy).not.toHaveBeenCalled();
     } finally {

@@ -9,5 +9,6 @@ playwright-report/
 *.tsbuildinfo
 .invite-emails.jsonl
 .magic-links.jsonl
+.outbox.jsonl
 .passcode-emails.jsonl
 tests/e2e/.auth/

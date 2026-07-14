@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { serverEnv } from "@/env.server";
+import { recordDevMail } from "@/lib/mail/dev-outbox.server";
 import { escapeHtml, mailDelivery, sendMail } from "@/lib/mail/transport.server";
 
 /**
@@ -14,8 +15,9 @@ import { escapeHtml, mailDelivery, sendMail } from "@/lib/mail/transport.server"
  * unset, production is a deliberate no-op and the honest `mailed` flag stays false. Outside
  * production the notice is recorded to its OWN file, `.invite-emails.jsonl` (NEVER
  * `.magic-links.jsonl`, whose reader parses every line and would hand a sign-in flow the wrong
- * thing), plus the dev-server terminal — the two sanctioned non-email surfaces. A missing or
- * failed send never loses the invite, because the seat + the address already stand.
+ * thing), the full mail to the accumulating dev outbox, plus the dev-server terminal — the
+ * sanctioned non-email surfaces. A missing or failed send never loses the invite, because the
+ * seat + the address already stand.
  */
 
 export interface InviteEmailInput {
@@ -86,10 +88,13 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<void> {
     return;
   }
   // Dev/test: record the notice to its OWN file so a flow can assert it (never a send, never the
-  // magic-link file). The recorded fields carry the address — a plain slug, not a token.
+  // magic-link file), plus the full mail to the accumulating dev outbox. The recorded fields
+  // carry the address — a plain slug, not a token.
   const { to, workspaceDisplayName, address, invitedBy } = input;
   const line = `${JSON.stringify({ to, workspaceDisplayName, address, invitedBy })}\n`;
   await fs.appendFile(path.join(process.cwd(), ".invite-emails.jsonl"), line, "utf8");
+  const { subject, text, html } = inviteLines(input);
+  await recordDevMail("invite", { to, subject, text, html });
   if (appEnv === "development") {
     // biome-ignore lint/suspicious/noConsole: the deliberate dev-only invite surface.
     console.log(`\n  Invite for ${to} (dev — mail suppressed): follow ${address}\n`);

@@ -73,6 +73,17 @@ describe("sendPasscodeEmail in test mode", () => {
         code: INPUT.code,
         workspaceDisplayName: INPUT.workspaceDisplayName,
       });
+      // The accumulating dev outbox carries the FULL rendered mail, kind-tagged.
+      const outbox = (await fs.readFile(path.join(dir, ".outbox.jsonl"), "utf8"))
+        .trim()
+        .split("\n");
+      expect(outbox).toHaveLength(1);
+      const recorded = JSON.parse(outbox[0] as string);
+      expect(recorded.kind).toBe("passcode");
+      expect(recorded.to).toBe(INPUT.to);
+      expect(recorded.subject).toBe("Your Topos verification code");
+      expect(recorded.text).toContain("Your Topos verification code for Acme is 424242.");
+      expect(recorded.text).toContain("https://topos.example/verify");
       await expect(fs.access(path.join(dir, ".magic-links.jsonl"))).rejects.toThrow();
       expect(sendMailSpy).not.toHaveBeenCalled();
     } finally {
@@ -91,6 +102,7 @@ describe("sendPasscodeEmail in production mode", () => {
     try {
       await expect(mail.sendPasscodeEmail(INPUT)).resolves.toBeUndefined();
       await expect(fs.access(path.join(dir, ".passcode-emails.jsonl"))).rejects.toThrow();
+      await expect(fs.access(path.join(dir, ".outbox.jsonl"))).rejects.toThrow();
       expect(sendMailSpy).not.toHaveBeenCalled();
     } finally {
       process.chdir(previousCwd);
