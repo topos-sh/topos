@@ -24,7 +24,9 @@ export interface InviteEmailInput {
   to: string;
   /** The workspace's human-readable name (shown in the notice; user-entered). */
   workspaceDisplayName: string;
-  /** The workspace ADDRESS slug — the door: `follow <address>`. Not a credential. */
+  /** The workspace's FULL address (`<origin>/<name>`) — the door: `follow <address>`. Already the
+   * complete follow target (the caller composes it from the public base); never a bare slug, never a
+   * credential. */
   address: string;
   /** The inviter's email (attribution). */
   invitedBy: string;
@@ -41,31 +43,24 @@ export function inviteMailDelivery(): InviteMailDelivery {
 }
 
 /** The notice body — shared by the text mail and the dev recording (user-entered fields escaped
- * only in the HTML mirror). The terminal line stays `topos follow <server>/<address>`-shaped when
- * the public origin is known; the address alone is the door either way. */
+ * only in the HTML mirror). `address` is ALREADY the full follow target (`<origin>/<name>`), so both
+ * the primary line and the terminal line render `topos follow <address>` verbatim — no origin is
+ * ever prepended. */
 function inviteLines({ workspaceDisplayName, address, invitedBy }: InviteEmailInput): {
   subject: string;
   text: string;
   html: string;
 } {
-  const publicUrl = serverEnv().TOPOS_PUBLIC_URL;
-  const host = publicUrl === undefined ? undefined : new URL(publicUrl).host;
-  const terminalLine =
-    host === undefined ? "" : `Or from a terminal: topos follow ${host}/${address}\n\n`;
   const subject = `You've been invited to ${workspaceDisplayName} on Topos`;
   const text =
     `${invitedBy} invited you to ${workspaceDisplayName} on Topos — shared skills for your AI agents.\n\n` +
     `Ask your agent to join: have it follow ${address}\n\n` +
-    terminalLine +
+    `Or from a terminal: topos follow ${address}\n\n` +
     `If you weren't expecting this, you can ignore this email.\n`;
-  const htmlTerminal =
-    host === undefined
-      ? ""
-      : `<p>Or from a terminal: <code>topos follow ${escapeHtml(host)}/${escapeHtml(address)}</code></p>`;
   const html =
     `<p>${escapeHtml(invitedBy)} invited you to <strong>${escapeHtml(workspaceDisplayName)}</strong> on Topos — shared skills for your AI agents.</p>` +
     `<p>Ask your agent to join: have it follow <code>${escapeHtml(address)}</code></p>` +
-    htmlTerminal +
+    `<p>Or from a terminal: <code>topos follow ${escapeHtml(address)}</code></p>` +
     `<p>If you weren't expecting this, you can ignore this email.</p>`;
   return { subject, text, html };
 }
@@ -89,7 +84,7 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<void> {
   }
   // Dev/test: record the notice to its OWN file so a flow can assert it (never a send, never the
   // magic-link file), plus the full mail to the accumulating dev outbox. The recorded fields
-  // carry the address — a plain slug, not a token.
+  // carry the full workspace address (`<origin>/<name>`), never a token.
   const { to, workspaceDisplayName, address, invitedBy } = input;
   const line = `${JSON.stringify({ to, workspaceDisplayName, address, invitedBy })}\n`;
   await fs.appendFile(path.join(process.cwd(), ".invite-emails.jsonl"), line, "utf8");

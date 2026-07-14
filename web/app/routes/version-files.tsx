@@ -44,7 +44,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     loadVersionFilesData(actor, row.skillId, versionId),
     sessionCurrent(actor.email, ws, row.skillId),
   ]);
-  const isCurrent = current.ok && current.data.version_id === versionId;
+  const isCurrent = current.ok && current.data.record.version_id === versionId;
 
   return { ws, skill, versionId, isCurrent, versionFiles };
 }

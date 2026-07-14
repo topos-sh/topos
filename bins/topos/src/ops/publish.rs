@@ -36,8 +36,8 @@ use topos_types::results::{PublishDescribeData, PublishGate};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::follow::{
-    DirectoryConnect, EnrollConnect, complete_uri, device_fingerprint, guard_one_plane,
-    machine_name, promote_core, resolve_api_base,
+    DeliveryConnect, DirectoryConnect, EnrollConnect, complete_uri, device_fingerprint,
+    guard_one_plane, machine_name, promote_core, resolve_api_base,
 };
 use super::sync_engine;
 use super::{
@@ -144,10 +144,13 @@ pub(crate) fn publish(
     Ok(stamp_added(outcome, added))
 }
 
-/// The seam `publish`'s describe needs — the directory connector reads the audience (reach) + the
-/// workspace address (the share line), AFTER the local scan.
+/// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
+/// reads the audience (reach) + the workspace address (the share line); the delivery connector reads the
+/// FRESH per-skill protection the gate turns on — the one server fact the sidecar's cached follow-state
+/// (stamped at the last delivery reconcile) can misreport in either direction after an owner re-protects.
 pub(crate) struct PublishDescribeConnectors<'a> {
     pub directory: &'a DirectoryConnect<'a>,
+    pub delivery: &'a DeliveryConnect<'a>,
 }
 
 /// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
@@ -237,8 +240,21 @@ pub(crate) fn publish_describe(
     }
 
     // The gate the plane will apply: a reviewed bundle (or an explicit `--propose`) becomes a proposal;
-    // an open one lands directly.
-    let review_required = follow_entry.as_ref().is_some_and(|fc| fc.review_required);
+    // an open one lands directly. Protection is a SERVER fact that can move after this device's last sync
+    // (an owner runs `protect <skill> reviewed` — or loosens it back to `open`), so the sidecar's cached
+    // `review_required` — stamped at the last delivery reconcile — can misreport the gate in EITHER
+    // direction. Read the FRESH protection the delivery carries per skill (a read, after the local scan —
+    // the describe still mutates nothing) and prefer it, so the consent shown matches the act the apply
+    // performs; an offline/failed read falls back to the cached value, so the describe keeps working
+    // offline. A genesis (unfollowed) skill has no server protection — its first publish keeps the
+    // no-gate path.
+    let review_required = match &follow_entry {
+        Some(fc) => {
+            fresh_review_required(connectors, &instance.base_url, &workspace_id, id.as_str())
+                .unwrap_or(fc.review_required)
+        }
+        None => false,
+    };
     let gate = if propose || review_required {
         PublishGate::Proposal
     } else {
@@ -287,6 +303,27 @@ pub(crate) fn publish_describe(
         undo,
         origin_note,
     })
+}
+
+/// The server's FRESH per-skill protection for the describe's gate — the delivery read carries it (each
+/// delivered skill's re-resolved `review_required` posture). It is the authoritative answer the apply will
+/// see, unlike the sidecar's cached follow-state, which is stamped at the last delivery reconcile and can
+/// lie in EITHER direction after an owner tightens or loosens `protect`. `None` on an offline/failed read
+/// or a skill the delivery does not name (a followed-but-excluded copy) — the caller falls back to the
+/// cached value, so the describe still works offline.
+fn fresh_review_required(
+    connectors: &PublishDescribeConnectors<'_>,
+    base_url: &str,
+    workspace_id: &str,
+    skill_id: &str,
+) -> Option<bool> {
+    let delivery = (connectors.delivery)(base_url);
+    let snapshot = delivery.fetch_delivery(workspace_id).ok()?;
+    snapshot
+        .skills
+        .into_iter()
+        .find(|s| s.skill_id == skill_id)
+        .map(|s| s.review_required)
 }
 
 /// Publish an ALREADY-tracked skill by name (the pre-auto-add body): dispatch enrolled vs standup, then run

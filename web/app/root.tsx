@@ -20,6 +20,7 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  useRouteError,
 } from "react-router";
 import appStylesHref from "./app.css?url";
 
@@ -65,7 +66,8 @@ export default function App() {
  * about what exists or why a request failed (the 404-not-403 posture carried through to the
  * shell). React Router sets the HTTP status from the thrown response.
  */
-export function ErrorBoundary({ error }: { error: unknown }) {
+export function ErrorBoundary() {
+  const error = useRouteError();
   const notFound = isRouteErrorResponse(error) && error.status === 404;
   return (
     <main className="grid min-h-dvh place-items-center px-6">

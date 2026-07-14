@@ -43,10 +43,10 @@ interface CreateResult {
   status: "created" | "limit" | "denied" | "error";
   /** The name echoed back so a non-success re-render keeps the user's edit. */
   submittedName?: string;
-  /** `created` only: the fields the paste-to-your-agent block renders. */
+  /** `created` only: the fields the paste-to-your-agent block renders. `address` is the vault's
+   * FULL workspace address (`<link_base>/<name>`) — the paste block renders it verbatim. */
   displayName?: string;
   address?: string;
-  origin?: string;
   replayed?: boolean;
   /** The vault's static denial reason (`denied` only). */
   reason?: string;
@@ -92,7 +92,6 @@ export async function action({ request }: ActionFunctionArgs): Promise<CreateRes
       status: "created",
       displayName: submittedName,
       address: outcome.address,
-      origin: new URL(request.url).origin,
       replayed: outcome.outcome === "replayed",
     };
   }
@@ -171,7 +170,7 @@ export default function WorkspacesNew() {
 
 /** The success block: the one command that enrolls the creator's agent as this workspace's owner. */
 function CreatedPanel({ state }: { state: CreateResult }) {
-  const command = `topos follow ${state.origin ?? ""}/${state.address ?? ""}`;
+  const command = `topos follow ${state.address ?? ""}`;
   return (
     <div className="flex flex-col gap-4">
       <div>

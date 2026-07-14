@@ -461,8 +461,13 @@ pub(crate) fn apply_light_advance(
     wire_record: &WireCurrentRecord,
 ) -> Result<Generation, ClientError> {
     let new_gen = verified_new_generation(rec, wire_record)?;
-    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
-        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
+    // A reviewer who does NOT hold a local copy of the skill (a `review --approve` resolved through the
+    // workspace catalog over the wire, never followed here) has no sync state to fast-forward — the approve
+    // landed on the plane; there is nothing to advance locally. A FOLLOWED skill (and every `revert`, which
+    // only ever acts on a followed skill) always has this doc, so the absence uniquely means "no local copy".
+    let Some(sync): Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)? else {
+        return Ok(new_gen);
+    };
     // Read-your-writes only advances FORWARD — a replay of a move already superseded locally is a no-op (see
     // [`apply_publish_ok`]).
     if gen_cmp(new_gen, sync.observed) != Ordering::Greater {

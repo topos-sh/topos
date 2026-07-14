@@ -1,13 +1,14 @@
 import { expect, type Page, test } from "@playwright/test";
 import { CREATED_ADDRESS } from "../fixtures/plane/data.mjs";
-import { BASE_URL, MEMBER_EMAIL, PLANE_PORT } from "./env";
+import { MEMBER_EMAIL, PLANE_PORT } from "./env";
 
 /**
  * The /workspaces/new page (signed in via the suite's default storage state): the one optional-name
  * form → the vault's create write → the paste-to-your-agent block. The recorded fixture call proves
  * the wire: the acting identity is the session-derived acting-email header, the body carries only a
  * server-minted UUID request_id. The success hand-off is the workspace ADDRESS — `topos follow
- * <origin>/<address>` — not a tokened link (links carry nothing; the roster is the lock).
+ * <address>`, the vault's FULL address rendered verbatim — not a tokened link (links carry nothing;
+ * the roster is the lock).
  *
  * HTTP-surface proof ONLY (harness discipline): creation seats the owner on the DIRECTORY's roster;
  * the fixture's in-memory create never syncs into the seeded plane.* SQL rows, so the created
@@ -37,7 +38,7 @@ test("create a workspace: prefilled name → submit → the paste-to-agent block
   // a copy button, and the explicit follow command as the terminal-user fallback line.
   await expect(page.getByRole("heading", { name: "Acme Platform is ready" })).toBeVisible();
   await expect(page.getByText("Paste this command to your agent", { exact: false })).toBeVisible();
-  const followCmd = `topos follow ${BASE_URL}/${CREATED_ADDRESS}`;
+  const followCmd = `topos follow ${CREATED_ADDRESS}`;
   await expect(page.getByText(followCmd)).toBeVisible();
   await expect(page.getByRole("button", { name: /copy/i })).toBeVisible();
 

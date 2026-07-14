@@ -184,6 +184,14 @@ pub(crate) enum ClientError {
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
     #[error("the plane denied this operation ({0})")]
     Denied(String),
+    /// A `review` verdict (`--approve`/`--reject`/`--withdraw`) targeted a proposal that is no longer OPEN
+    /// at the live `current`: an already-resolved proposal moved `current` past its base, so the
+    /// fresh-current `expected` matches no open proposal and the plane answers a terminal
+    /// `PERMANENT_FAILURE` (its only signal is a prose message; there is NO distinguishing wire code, and it
+    /// does not name who resolved it). Rendered as an HONEST domain refusal shown VERBATIM — not the
+    /// transport-fault-shaped "the plane returned PERMANENT_FAILURE". The message is self-authored guidance.
+    #[error("{0}")]
+    ReviewNotOpen(String),
     /// An enrollment REDEEM came back DENIED — on a hosted plane this is the authenticated-but-uninvited
     /// case (a confirmed identity that is not on the workspace roster), so the guidance is ask-an-owner:
     /// the message tells the human exactly what to request, and the envelope carries `REQUEST_ACCESS`.
@@ -370,6 +378,8 @@ impl ClientError {
             ClientError::Denied(_) => "DENIED",
             // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
             ClientError::RedeemDenied { .. } => "DENIED",
+            // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
+            ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
             ClientError::ConfirmRequired { .. } => "CONFIRM_REQUIRED",
             ClientError::PendingOp { .. } => "PENDING_OP",

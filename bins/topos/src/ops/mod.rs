@@ -47,7 +47,7 @@ pub(crate) use auth::{
 pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
 pub(crate) use diff::diff;
 pub(crate) use follow::{
-    FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, follow,
+    FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, Reattach, follow,
 };
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};

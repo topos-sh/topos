@@ -381,6 +381,7 @@ pub fn run() -> ExitCode {
             if !yes && enrollment.is_some() {
                 let connectors = ops::PublishDescribeConnectors {
                     directory: &connect_directory,
+                    delivery: &connect_delivery,
                 };
                 let described = ops::publish_describe(
                     &ctx,
@@ -901,6 +902,29 @@ fn finish_follow(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::follow_applied_tty(&applied));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::ReattachDescribed { reattach, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "reattach": reattach });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::reattach_describe_tty(&reattach, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::ReattachApplied(reattach)) => {
+            if json {
+                let warnings = reattach.warnings.clone();
+                let value = serde_json::json!({ "reattach": reattach });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = warnings;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::reattach_applied_tty(&reattach));
             }
             ExitCode::SUCCESS
         }

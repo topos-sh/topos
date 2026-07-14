@@ -316,8 +316,9 @@ impl DirectorySource for FakeDirectory {
     fn channel_unplace(&self, _ws: &str, _ch: &str, _skill: &str) -> Result<(), ClientError> {
         unreachable!("no placement in these flows")
     }
-    fn exclude_device(&self, _ws: &str, _skill: &str) -> Result<(), ClientError> {
-        unreachable!("no exclusion in these flows")
+    fn exclude_device(&self, _ws: &str, skill_id: &str) -> Result<(), ClientError> {
+        self.record(format!("exclude {skill_id}"));
+        Ok(())
     }
     fn protect_skill(&self, _ws: &str, _skill: &str, _level: &str) -> Result<(), ClientError> {
         unreachable!("no protection in these flows")
@@ -1157,4 +1158,492 @@ fn the_pull_action_vocabulary_covers_the_applied_filter() {
             PullAction::FastForwarded | PullAction::UpToDate | PullAction::Merged
         ));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The per-device exclusion LIFT — `follow <skill>` re-attaches a skill `remove` excluded here.
+// ---------------------------------------------------------------------------------------------
+
+/// One workspace's transport whose delivery serves `s_deploy` (real bytes) — a `follow` installs it,
+/// `remove` excludes it, and a later `follow` re-attaches.
+fn deploy_transport(log: CallLog) -> FakeTransport {
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n")]);
+    let mut transport = FakeTransport::empty(log);
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_deploy".into(),
+        name: "deploy".into(),
+        review_required: false,
+        version_id: v.id,
+        generation: Generation { epoch: 1, seq: 1 },
+        bundle_digest: v.digest,
+        via_channels: vec!["eng".into()],
+        via_direct: false,
+    });
+    transport.versions.insert("s_deploy".into(), v.fetched);
+    transport
+}
+
+/// Drive the CANONICAL post-`remove` state a device holds when it excluded a followed skill: first a
+/// `follow acme/channels/eng --yes` installs `deploy` (sidecar + agent dir + follow entry), then
+/// `remove deploy --yes` writes the server exclusion, cleans the agent dir, resets the sync state to
+/// the never-received baseline, and marks `excluded_here`. Leaves the tracked sidecar in place.
+fn seed_excluded_deploy(rig: &Rig, directory: &FakeDirectory, transport: &FakeTransport) {
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: Arc::default(),
+    };
+    // Install deploy fresh (a channel follow — a delivered first-receive lands under `--yes`).
+    let out = run_follow(
+        rig,
+        &enroll_fake,
+        directory,
+        transport,
+        vec!["acme/channels/eng".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    assert!(
+        matches!(&out, ops::FollowOutcome::Applied(a) if a.installed.iter().any(|i| i.name == "deploy")),
+        "the seed install landed deploy",
+    );
+    assert!(
+        rig.work
+            .0
+            .join("skills")
+            .join("deploy")
+            .join("SKILL.md")
+            .exists(),
+        "the seed left deploy in the agent dir",
+    );
+    // Exclude it on THIS device — the exact `remove` path (server row + clean + reset + marker).
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
+    let connectors = ops::RemoveConnectors {
+        directory: &dir_connect,
+    };
+    ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true).unwrap();
+    assert!(
+        !rig.work.0.join("skills").join("deploy").exists(),
+        "remove cleaned the agent dir",
+    );
+    let e = follow_entry(rig, "s_deploy");
+    assert!(
+        e.following && e.excluded_here,
+        "excluded but still followed"
+    );
+}
+
+fn follow_entry(rig: &Rig, skill_id: &str) -> enroll::FollowEntry {
+    enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap()
+        .follows
+        .into_iter()
+        .find(|e| e.skill_id == skill_id)
+        .unwrap_or_else(|| panic!("no follow entry for {skill_id}"))
+}
+
+#[test]
+fn a_bare_follow_of_an_excluded_skill_describes_the_reattach_and_mutates_nothing() {
+    let rig = Rig::new("reattach-desc");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    // Bare `follow deploy` (no `--yes`): the re-attach DESCRIBE — nothing mutated, ever.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachDescribed { reattach, yes_argv } = out else {
+        panic!("an excluded skill describes the re-attach, never a first-receive offer");
+    };
+    assert_eq!(reattach.name, "deploy");
+    assert_eq!(reattach.skill_id, "s_deploy");
+    assert!(!reattach.installed);
+    assert_eq!(yes_argv, vec!["topos", "follow", "deploy", "--yes"]);
+    // Nothing mutated: no wire row, the marker still stands, the agent dir stays clean.
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a describe writes no row: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(
+        follow_entry(&rig, "s_deploy").excluded_here,
+        "still excluded"
+    );
+    assert!(!rig.work.0.join("skills").join("deploy").exists());
+    // The TTY names the re-attach and the apply argv.
+    let text = crate::render::reattach_describe_tty(&reattach, &yes_argv);
+    assert!(text.contains("re-attaches this device"), "{text}");
+    assert!(text.contains("topos follow deploy --yes"), "{text}");
+}
+
+#[test]
+fn a_yes_follow_of_an_excluded_skill_lifts_the_row_clears_the_marker_and_reinstalls() {
+    let rig = Rig::new("reattach-apply");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("--yes on an excluded skill applies the re-attach");
+    };
+    assert_eq!(reattach.name, "deploy");
+    assert!(
+        reattach.installed,
+        "the current bytes landed back on this device"
+    );
+    // (a) the SERVER exclusion was lifted via the `follow_skill` row op (the same op the web speaks).
+    let l = log.lock().unwrap();
+    assert!(
+        l.iter().any(|e| e == "follow s_deploy"),
+        "the lift rides `follow_skill` (PUT follows): {l:?}",
+    );
+    drop(l);
+    // (b) the local marker cleared; (c) the current bytes are back on disk.
+    assert!(
+        !follow_entry(&rig, "s_deploy").excluded_here,
+        "marker cleared"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills").join("deploy").join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+    );
+}
+
+#[test]
+fn a_qualified_follow_path_reaches_the_same_reattach_arm() {
+    let rig = Rig::new("reattach-qual");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    // The qualified `<ws>/skills/<name>` form must reach the SAME re-attach arm, not replay a
+    // person-scope subscribe that leaves the device exclusion standing.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/skills/deploy".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("the qualified path re-attaches an excluded skill too");
+    };
+    assert!(reattach.installed);
+    assert!(
+        !follow_entry(&rig, "s_deploy").excluded_here,
+        "marker cleared"
+    );
+    assert!(
+        log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
+        "the qualified lift rides the same row op",
+    );
+}
+
+#[test]
+fn a_bare_follow_of_a_never_followed_name_still_takes_the_offer_path() {
+    // The boundary: a bare name that is NOT a followed-and-excluded skill is unaffected by the
+    // re-attach arm — a never-followed catalog name still takes the ordinary offer/subscribe describe
+    // (`FollowOutcome::Described`), never a re-attach.
+    let rig = Rig::new("reattach-boundary");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = FakeTransport::empty(log.clone());
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    // `docs` is a catalog skill this device has never followed — bare `follow docs` describes the
+    // ordinary subscribe, not a re-attach.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["docs".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    assert!(
+        matches!(out, ops::FollowOutcome::Described { .. }),
+        "a never-followed name still takes the subscribe/offer describe, not the re-attach arm",
+    );
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .all(|e| !e.starts_with("follow ")),
+        "a describe writes no row: {:?}",
+        log.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_qualified_bare_follow_of_an_excluded_skill_qualifies_the_apply_argv() {
+    // The re-attach DESCRIBE reached via the qualified `<ws>/skills/<name>` path must print the CANONICAL
+    // qualified apply argv (`<slug>/skills/<name> --yes`), not a bare name that would resolve AMBIGUOUS if
+    // the same name were excluded in a second workspace.
+    let rig = Rig::new("reattach-qual-desc");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/skills/deploy".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachDescribed { yes_argv, .. } = out else {
+        panic!("the qualified excluded target describes the re-attach");
+    };
+    assert_eq!(
+        yes_argv,
+        vec!["topos", "follow", "acme/skills/deploy", "--yes"]
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a describe writes no row: {:?}",
+        log.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_yes_reattach_installs_only_its_subject_never_a_teammates_new_skill() {
+    // P1: after this device excluded `deploy`, a teammate shares a BRAND-NEW skill into #everyone. The
+    // re-attach describe named only `deploy`, so `--yes` must install ONLY `deploy` — the never-disclosed
+    // arrival gets no follow entry, no baseline, no bytes (it lands on the next full `update`/`follow`).
+    let rig = Rig::new("reattach-only-subject");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let mut transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    // NOW a teammate shares `newthing` into #everyone (delivered after the exclusion, never received here).
+    let znew = mk_version(&[("SKILL.md", FileMode::Regular, b"# secret\n")]);
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_new".into(),
+        name: "newthing".into(),
+        review_required: false,
+        version_id: znew.id,
+        generation: Generation { epoch: 1, seq: 1 },
+        bundle_digest: znew.digest,
+        via_channels: vec!["everyone".into()],
+        via_direct: false,
+    });
+    transport.versions.insert("s_new".into(), znew.fetched);
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("--yes re-attaches the subject");
+    };
+    assert!(reattach.installed, "the subject `deploy` landed");
+    assert!(
+        rig.work
+            .0
+            .join("skills")
+            .join("deploy")
+            .join("SKILL.md")
+            .exists(),
+        "the subject's bytes are back on this device",
+    );
+    // The undisclosed arrival was NOT installed: no follow entry, no materialized bytes.
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert!(
+        follows.follows.iter().all(|e| e.skill_id != "s_new"),
+        "the re-attach wrote no follow entry for the undisclosed skill: {:?}",
+        follows.follows,
+    );
+    assert!(
+        !rig.work.0.join("skills").join("newthing").exists(),
+        "the undisclosed skill's bytes never materialized",
+    );
+}
+
+#[test]
+fn a_yes_reattach_of_a_paused_and_excluded_skill_converges_to_installed() {
+    // P3: `remove deploy` then `unfollow deploy` leaves the entry PAUSED as well as excluded here. The
+    // re-attach must re-affirm the local follow (not just clear the marker) — else the reconcile's
+    // `!following` guard skips the skill and "lands on next update" is a lie.
+    let rig = Rig::new("reattach-paused");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    // The `unfollow` half: pause the entry (it stays excluded here too).
+    enroll::set_following(&rig.fs, &rig.layout(), "s_deploy", false).unwrap();
+    assert!(
+        !follow_entry(&rig, "s_deploy").following,
+        "seeded as paused",
+    );
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("--yes re-attaches a paused+excluded skill too");
+    };
+    assert!(
+        reattach.installed,
+        "a paused+excluded re-attach still lands the bytes",
+    );
+    let e = follow_entry(&rig, "s_deploy");
+    assert!(
+        e.following && !e.excluded_here,
+        "converged: following again AND the marker cleared (following={}, excluded_here={})",
+        e.following,
+        e.excluded_here,
+    );
+    assert!(
+        rig.work
+            .0
+            .join("skills")
+            .join("deploy")
+            .join("SKILL.md")
+            .exists(),
+        "the current bytes are back on disk",
+    );
+}
+
+#[test]
+fn a_multi_target_subscribe_clears_a_swept_in_excluded_skills_marker() {
+    // P3: the single-excluded-target case re-attaches, but `follow <x> <y> --yes` (multi) takes the
+    // classic subscribe apply. Its `follow_skill` PUT lifts x's SERVER exclusion — the local
+    // `excluded_here` marker must be cleared to match, or `list` lies. Both targets converge.
+    let rig = Rig::new("multi-excluded");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let mut transport = deploy_transport(log.clone());
+    // A second delivered skill, so the subscribe is genuinely multi-target.
+    let vdocs = mk_version(&[("SKILL.md", FileMode::Regular, b"# docs\n")]);
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_docs".into(),
+        name: "docs".into(),
+        review_required: false,
+        version_id: vdocs.id,
+        generation: Generation { epoch: 1, seq: 1 },
+        bundle_digest: vdocs.digest,
+        via_channels: vec!["everyone".into()],
+        via_direct: false,
+    });
+    transport.versions.insert("s_docs".into(), vdocs.fetched);
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    // Two targets → the classic subscribe apply (NOT the single-target re-attach arm).
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec![
+            "acme/skills/deploy".to_owned(),
+            "acme/skills/docs".to_owned(),
+        ],
+        opts(true),
+    )
+    .unwrap();
+    assert!(
+        matches!(out, ops::FollowOutcome::Applied(_)),
+        "a multi-target subscribe applies via the classic path, never the re-attach arm",
+    );
+    // deploy's stale local marker is cleared, and its bytes are reinstalled.
+    assert!(
+        !follow_entry(&rig, "s_deploy").excluded_here,
+        "the swept-in excluded skill's stale marker is cleared",
+    );
+    assert!(
+        rig.work
+            .0
+            .join("skills")
+            .join("deploy")
+            .join("SKILL.md")
+            .exists(),
+        "deploy converged (bytes reinstalled)",
+    );
 }

@@ -111,6 +111,15 @@ pub(crate) trait PlaneSource {
     fn list_open_proposals(&self, _skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
         Ok(Vec::new())
     }
+
+    /// Bind a skill to its workspace credential on THIS read transport — the read-side twin of
+    /// [`DeliverySource::bind_skill`]. The per-skill credential map is derived from `follows.json`, so a
+    /// skill this device has never followed (a genesis publisher's own skill, pre-`update`; a catalog-only
+    /// review target) is absent from it — and every read (`get_current` / `fetch_version`) would answer
+    /// the indistinguishable "not served" until it is bound. The workspace credential already authenticates
+    /// every skill in its workspace (membership IS the authorization), so binding is a lookup, never a new
+    /// secret. Default: a no-op (the inert source and the test fakes carry their creds up front).
+    fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 }
 
 /// How a skill is followed — the engine consults this to choose the consent situation. Persisted by

@@ -14,16 +14,22 @@ use topos_types::requests::{
     ReviewRequest, WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalEntry,
     WireProposalIndex, WireReach, WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
-use topos_types::{CurrencyKind, Generation, HarnessId, TriggerReport, TriggerState};
+use topos_types::results::PublishGate;
+use topos_types::{
+    CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, Receipt, TerminalOutcome,
+    TriggerReport, TriggerState, WIRE_SCHEMA_VERSION, WireCurrentRecord,
+};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    ContributeSource, DirectorySource, FollowSource, GovernanceSource, InertFollow, InertPlane,
-    PlaneSource, WriteReceipt,
+    ContributeSource, DeliverySkill, DeliverySnapshot, DeliverySource, DirectorySource,
+    FetchedVersion, FollowSource, GovernanceSource, InertFollow, InertPlane, KnownCurrent,
+    PlaneError, PlaneSource, PointerFetch, ReconcileTransport, WriteReceipt,
 };
+use crate::plane_http::FileFollow;
 use crate::sidecar::Layout;
 use crate::{enroll, ops};
 
@@ -840,4 +846,367 @@ fn review_inbox_splits_others_from_yours_by_principal() {
         }
         _ => panic!("a bare review is the inbox"),
     }
+}
+
+#[test]
+fn review_target_falls_back_to_the_catalog_when_not_locally_followed() {
+    // The device is enrolled and the workspace CATALOG knows the skill, but the device has NO local follow
+    // entry for it (the genesis publisher, pre-`update`). Resolving the review target must fall back to the
+    // catalog over the wire, so the exact `<name>@<hash>` command `topos review` printed resolves — instead
+    // of failing "no tracked skill". With no matching open proposal, resolution SUCCEEDS and the verb
+    // returns the uniform NOT_FOUND, proving it reached the proposal filter (a pre-fix run stops at
+    // NO_SUCH_SKILL during resolution, never reading the proposals at all).
+    let rig = Rig::new("rv-catalog");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    fake.skills = vec![skill("s_release", "release-notes")];
+    fake.proposals = Vec::new();
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(NullContribute) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let target = format!("release-notes@{}", "a".repeat(64));
+    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    assert_eq!(
+        err.code(),
+        "NOT_FOUND",
+        "resolution fell back to the catalog and reached the proposal filter"
+    );
+}
+
+#[test]
+fn review_target_keeps_no_such_skill_when_absent_from_the_catalog() {
+    // The catalog is reachable but does NOT hold the name (and there is no local copy): resolution stays
+    // the local "no tracked skill" — the wire fallback never invents a target.
+    let rig = Rig::new("rv-nocat");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    fake.skills = vec![skill("s_deploy", "deploy")];
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(NullContribute) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let target = format!("release-notes@{}", "a".repeat(64));
+    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    assert_eq!(err.code(), "NO_SUCH_SKILL");
+}
+
+#[test]
+fn a_catalog_resolved_describe_with_no_local_copy_degrades_to_the_clean_not_found() {
+    // The verdictless DESCRIBE of a catalog-only skill (no local copy) resolves via the catalog and finds
+    // the matching proposal, then the diff's LOCAL resolve has nothing to render — it must surface the
+    // clean old-shaped NO_SUCH_SKILL, NEVER a confusing transport-shaped plane error.
+    let rig = Rig::new("rv-desc-nolocal");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    fake.skills = vec![skill("s_release", "release-notes")];
+    let hash = "a".repeat(64);
+    fake.proposals = vec![proposal(
+        "s_release",
+        "release-notes",
+        &hash,
+        "bob@acme.com",
+        "notes",
+    )];
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(NullContribute) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let target = format!("release-notes@{hash}");
+    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    assert_eq!(
+        err.code(),
+        "NO_SUCH_SKILL",
+        "the describe degrades to the clean local not-found, never a transport error",
+    );
+}
+
+/// A read transport that GATES `get_current` on a prior `bind_skill` — exactly as the real `UreqPlane`
+/// gates on its `follows.json`-derived cred map, answering the indistinguishable `NotFound` for a skill
+/// it was never taught. Records the binding so the test can prove the review wiring applies it.
+struct BindGatedPlane {
+    bound: std::cell::RefCell<std::collections::HashSet<String>>,
+}
+impl BindGatedPlane {
+    fn new() -> Self {
+        Self {
+            bound: std::cell::RefCell::new(std::collections::HashSet::new()),
+        }
+    }
+}
+impl PlaneSource for BindGatedPlane {
+    fn get_current(
+        &self,
+        skill_id: &str,
+        _k: Option<KnownCurrent>,
+    ) -> Result<PointerFetch, PlaneError> {
+        if !self.bound.borrow().contains(skill_id) {
+            // The pre-bind state: the per-skill cred map does not know this skill → "not served here".
+            return Err(PlaneError::NotFound);
+        }
+        Ok(PointerFetch::Record(WireCurrentRecord {
+            schema_version: WIRE_SCHEMA_VERSION,
+            scope: PointerScope {
+                workspace_id: WS.to_owned(),
+                skill_id: skill_id.to_owned(),
+            },
+            record: CurrentRecord {
+                version_id: "7".repeat(64),
+                generation: Generation { epoch: 1, seq: 1 },
+            },
+        }))
+    }
+    fn fetch_version(&self, _s: &str, _v: [u8; 32]) -> Result<FetchedVersion, PlaneError> {
+        unreachable!("a reject verdict fetches no version bytes")
+    }
+    fn bind_skill(&self, _ws: &str, skill_id: &str) {
+        self.bound.borrow_mut().insert(skill_id.to_owned());
+    }
+}
+
+/// A contribute source whose `review` returns a canned OK receipt (the reject write's terminal outcome);
+/// the other three verbs never fire in a review-reject flow.
+struct OkReview;
+impl ContributeSource for OkReview {
+    fn publish(&self, _b: PublishRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("no publish in a review flow")
+    }
+    fn propose(&self, _b: ProposeRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("no propose in a review flow")
+    }
+    fn revert(&self, _b: RevertRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("no revert in a review flow")
+    }
+    fn review(&self, _b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
+        Ok(WriteReceipt {
+            receipt: Receipt {
+                schema_version: 1,
+                op_id: "op-1".into(),
+                command: "review".into(),
+                outcome: TerminalOutcome::Ok,
+                workspace_id: WS.into(),
+                skill_id: Some("s_release".into()),
+                version_id: None,
+                bundle_digest: None,
+                expected_generation: None,
+                current_generation: None,
+                created_at: "2026-07-13T00:00:00Z".into(),
+                details: None,
+            },
+            error: None,
+            wire_record: None,
+        })
+    }
+}
+
+#[test]
+fn a_catalog_resolved_review_binds_the_skill_credential_for_the_downstream_reads() {
+    // The genesis publisher: enrolled, the catalog knows the skill, but NO local follow entry
+    // (pre-`update`). A review VERDICT resolves via the catalog, then reads `current` under the workspace
+    // credential — which requires the read transport to be TAUGHT this skill first (`bind_skill`). Without
+    // the bind (the pre-fix code) that read answers the transport-shaped "not served here" and the verdict
+    // dies WORSE than the old clean NO_SUCH_SKILL; with it, the reject lands.
+    let rig = Rig::new("rv-bind");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    fake.skills = vec![skill("s_release", "release-notes")];
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(OkReview) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let plane = BindGatedPlane::new();
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&plane, &inert_f);
+
+    let target = format!("release-notes@{}", "a".repeat(64));
+    let out = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        Some(&target),
+        Some(ops::ReviewVerdict::Reject {
+            reason: Some("not yet".into()),
+        }),
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(out, ops::ReviewOutcome::Applied(_)),
+        "the catalog-resolved reject landed (the downstream current read authenticated)",
+    );
+    assert!(
+        plane.bound.borrow().contains("s_release"),
+        "the review wiring bound the catalog-resolved skill's credential before the read",
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// publish (describe gate) — the gate reads the FRESH server protection, not the cached follow-state
+// ---------------------------------------------------------------------------------------------
+
+/// A delivery transport whose `fetch_delivery` answers a canned snapshot (`Some`) or fails (`None` — the
+/// offline path). `publish_describe` reads only `fetch_delivery`, so the pointer/byte/report lanes panic.
+#[derive(Clone)]
+struct FakeDelivery {
+    snapshot: Option<DeliverySnapshot>,
+}
+impl PlaneSource for FakeDelivery {
+    fn get_current(&self, _s: &str, _k: Option<KnownCurrent>) -> Result<PointerFetch, PlaneError> {
+        unreachable!("publish_describe reads delivery, never the pointer")
+    }
+    fn fetch_version(&self, _s: &str, _v: [u8; 32]) -> Result<FetchedVersion, PlaneError> {
+        unreachable!("publish_describe fetches no bytes")
+    }
+}
+impl DeliverySource for FakeDelivery {
+    fn workspaces(&self) -> Vec<String> {
+        vec![WS.to_owned()]
+    }
+    fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
+        self.snapshot
+            .clone()
+            .ok_or_else(|| PlaneError::Unreachable("offline".to_owned()))
+    }
+    fn report_applied(&self, _ws: &str, _a: &[(String, [u8; 32])]) -> Result<(), PlaneError> {
+        unreachable!("publish_describe never reports")
+    }
+}
+
+/// A one-skill delivery snapshot carrying `review_required` as the FRESH per-bundle protection.
+fn delivery_with(skill_id: &str, review_required: bool) -> DeliverySnapshot {
+    DeliverySnapshot {
+        skills: vec![DeliverySkill {
+            skill_id: skill_id.to_owned(),
+            name: "pd-skill".to_owned(),
+            review_required,
+            version_id: [0u8; 32],
+            generation: Generation { epoch: 1, seq: 1 },
+            bundle_digest: [0u8; 32],
+            via_channels: vec!["everyone".to_owned()],
+            via_direct: true,
+        }],
+        detached: Vec::new(),
+        excluded: Vec::new(),
+        proposals_awaiting: 0,
+        notices: Vec::new(),
+        staleness_window_ms: 604_800_000,
+    }
+}
+
+/// Adopt + FOLLOW a real skill (recording `cached_review_required` in `follows.json`, as the last
+/// delivery reconcile stamped it), edit its draft so it diverges from `current`, then run
+/// `publish_describe` with the delivery connector answering `fresh` (a snapshot with that protection, or
+/// `None` to make the delivery read fail — the offline fallback). Returns the described gate.
+fn publish_describe_gate(cached_review_required: bool, fresh: Option<bool>) -> PublishGate {
+    let rig = Rig::new("pubdesc");
+    rig.seed_enrolled("alice@acme.com");
+
+    // A real tracked skill, adopted in place (placement = the source dir).
+    let src = Scratch::new("pubdesc-src");
+    let skill_dir = src.0.join("pd-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: pd-skill\ndescription: base\n---\n# base\n",
+    )
+    .unwrap();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let add = {
+        let ctx = rig.ctx(&inert_p, &inert_f);
+        ops::add(&ctx, &skill_dir).unwrap()
+    };
+
+    // Edit the draft so it diverges from `current` (a describe of an unchanged draft is NO_CHANGES).
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: pd-skill\ndescription: edited\n---\n# edited draft\n",
+    )
+    .unwrap();
+
+    // The follow entry carries the CACHED protection + the workspace scope.
+    enroll::write_follows_merged(
+        &rig.fs,
+        &rig.layout(),
+        &[enroll::FollowEntry {
+            skill_id: add.skill_id.clone(),
+            workspace_id: WS.to_owned(),
+            mode: enroll::FollowModeDoc::Auto,
+            review_required: cached_review_required,
+            following: true,
+            excluded_here: false,
+        }],
+    )
+    .unwrap();
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    let file_follow = FileFollow::new(enroll::follow_contexts(&follows));
+
+    // The directory connector (reach + me — tolerated); the delivery connector carries the FRESH protection.
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let dir = FakeDir::new(log);
+    let dir_c = dir_connect(&dir);
+    let del = FakeDelivery {
+        snapshot: fresh.map(|p| delivery_with(&add.skill_id, p)),
+    };
+    let del_c = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(del.clone()) };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dir_c,
+        delivery: &del_c,
+    };
+
+    let ctx = rig.ctx(&inert_p, &file_follow);
+    ops::publish_describe(&ctx, &connectors, None, "pd-skill", false, None, None)
+        .expect("describe succeeds")
+        .gate
+}
+
+#[test]
+fn publish_describe_gate_prefers_fresh_reviewed_over_cached_open() {
+    // The device followed while the skill was OPEN (cached review_required=false); an owner has since run
+    // `protect <skill> reviewed`. The describe must show the PROPOSAL gate the apply will be rerouted
+    // into — never the stale "lands directly" the cached follow-state would claim (consent == the act).
+    assert_eq!(
+        publish_describe_gate(false, Some(true)),
+        PublishGate::Proposal
+    );
+}
+
+#[test]
+fn publish_describe_gate_prefers_fresh_open_over_cached_reviewed() {
+    // The reverse staleness: cached reviewed, loosened to open upstream since the last sync — the fresh
+    // read lands it directly.
+    assert_eq!(publish_describe_gate(true, Some(false)), PublishGate::Lands);
+}
+
+#[test]
+fn publish_describe_gate_falls_back_to_cached_when_delivery_offline() {
+    // The delivery read fails (offline): the describe keeps working and falls back to the CACHED
+    // protection in either direction, so a bare describe still answers with no network.
+    assert_eq!(publish_describe_gate(false, None), PublishGate::Lands);
+    assert_eq!(publish_describe_gate(true, None), PublishGate::Proposal);
 }

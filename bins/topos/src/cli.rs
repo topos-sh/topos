@@ -142,7 +142,7 @@ pub(crate) enum Command {
         yes: bool,
     },
     /// Remove skills from this machine (or from specific agents). A followed skill becomes a per-device
-    /// exclusion (your other devices keep receiving it); an untracked local copy is cleaned. Lands later.
+    /// exclusion (your other devices keep receiving it); an untracked local copy is cleaned.
     Remove {
         /// The skill name(s) to remove.
         skill: Vec<String>,
@@ -252,7 +252,8 @@ pub(crate) enum Command {
         /// the bad version.
         #[arg(long = "to")]
         to: String,
-        /// Acknowledge a no-op revert (the `--to` version is already `current`), and apply without a describe.
+        /// Acknowledge a no-op revert (the `--to` version is already `current`). Parses today; the
+        /// two-phase describe lands later.
         #[arg(long)]
         yes: bool,
     },
@@ -268,7 +269,7 @@ pub(crate) enum Command {
         yes: bool,
     },
     /// Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated`
-    /// (channel) — reviewer+; `open` loosens it back — owner. Lands later.
+    /// (channel) — reviewer+; `open` loosens it back — owner.
     Protect {
         /// The skill or channel to protect.
         target: String,

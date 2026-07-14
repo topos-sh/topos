@@ -91,7 +91,7 @@ Adopt a skill into topos. The source is polymorphic: • a skill NAME (`deploy`,
 topos remove [OPTIONS] [SKILL]...
 ```
 
-Remove skills from this machine (or from specific agents). A followed skill becomes a per-device exclusion (your other devices keep receiving it); an untracked local copy is cleaned. Lands later
+Remove skills from this machine (or from specific agents). A followed skill becomes a per-device exclusion (your other devices keep receiving it); an untracked local copy is cleaned
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -194,7 +194,7 @@ Undo a release for the TEAM: move `current` to the older version named by `--to`
 |---|---|---|---|
 | `<SKILL>` |  |  | The skill to revert |
 | `--to` | `<TO>` |  | The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT the bad version |
-| `--yes` |  |  | Acknowledge a no-op revert (the `--to` version is already `current`), and apply without a describe |
+| `--yes` |  |  | Acknowledge a no-op revert (the `--to` version is already `current`). Parses today; the two-phase describe lands later |
 
 
 ### `topos channel`
@@ -217,7 +217,7 @@ Group skills into channels. `channel add <channel> <skill>...` places a skill's 
 topos protect [OPTIONS] <TARGET> [LEVEL]
 ```
 
-Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated` (channel) — reviewer+; `open` loosens it back — owner. Lands later
+Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated` (channel) — reviewer+; `open` loosens it back — owner
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|

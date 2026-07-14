@@ -82,6 +82,11 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             code: ActionCode::DisambiguateName,
             argv: vec!["topos".into(), "list".into(), "--json".into()],
         }],
+        // A review verdict on a no-longer-open proposal — point the agent at the open inbox.
+        ClientError::ReviewNotOpen(_) => vec![NextAction {
+            code: ActionCode::from("REVIEW_INBOX".to_owned()),
+            argv: vec!["topos".into(), "review".into(), "--json".into()],
+        }],
         // A stale base — update to rebase, then re-show the diff and retry. Never a silent retry.
         ClientError::Conflict { skill, .. } => vec![NextAction {
             code: ActionCode::RebaseAndRetry,
@@ -803,9 +808,31 @@ pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> 
         .collect()
 }
 
-/// One argv as a paste-ready shell line (the TTY's spelling of a next action).
+/// One argv as a paste-ready shell line (the TTY's spelling of a next action) — each token
+/// [`shell_quote`]d so a value carrying whitespace or a shell metacharacter (e.g. a multi-word `-m
+/// <message>`) copy-pastes back as ONE argument instead of mis-parsing. The `--json` envelope carries the
+/// argv ARRAY untouched (already unambiguous); only this human line needs the quoting.
 fn argv_line(argv: &[String]) -> String {
-    argv.join(" ")
+    argv.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Quote ONE argv token for a paste-ready POSIX shell line: a token that is safe bare (non-empty and all
+/// `[A-Za-z0-9_@%+=:,./-]`) is returned as-is; anything else — whitespace, glob/redirection
+/// metacharacters, quotes, or an empty string — is wrapped in single quotes with any embedded single quote
+/// escaped as `'\''`.
+fn shell_quote(arg: &str) -> String {
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-')
+    };
+    if !arg.is_empty() && arg.chars().all(safe) {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
 }
 
 /// The follow DESCRIBE's TTY: the workspace story, the install list with digests + via, the
@@ -913,6 +940,41 @@ pub(crate) fn follow_applied_tty(a: &crate::ops::FollowApplied) -> String {
         ));
     }
     for w in &a.warnings {
+        s.push_str(&format!("\nwarning: {w}"));
+    }
+    s
+}
+
+/// The re-attach DESCRIBE's TTY: this device excluded the skill (via `remove`); `follow` lifts the
+/// exclusion and reinstalls the current bytes. Nothing has changed yet.
+pub(crate) fn reattach_describe_tty(r: &crate::ops::Reattach, yes_argv: &[String]) -> String {
+    let digest = r.bundle_digest.as_deref().map(short).unwrap_or("?");
+    format!(
+        "{} was removed on THIS device (excluded here); the exclusion still stands, and the person \
+         keeps receiving it on every other device.\n`topos follow {}` re-attaches this device: it \
+         lifts the exclusion and reinstalls the current bytes ({} @{digest}).\nNothing has changed \
+         yet — apply with:\n  {}",
+        r.name,
+        r.name,
+        r.name,
+        argv_line(yes_argv)
+    )
+}
+
+/// The re-attach APPLY's TTY: the exclusion is lifted, the marker cleared, the current bytes back.
+pub(crate) fn reattach_applied_tty(r: &crate::ops::Reattach) -> String {
+    let mut s = format!(
+        "Re-attached {} on this device in {} ({}) — the exclusion is lifted; the person keeps \
+         following it.",
+        r.name, r.workspace_name, r.workspace_id
+    );
+    if r.installed {
+        let digest = r.bundle_digest.as_deref().map(short).unwrap_or("?");
+        s.push_str(&format!("\nReinstalled: {}  @{digest}", r.name));
+    } else {
+        s.push_str("\nThe current bytes will land on the next `topos update`.");
+    }
+    for w in &r.warnings {
         s.push_str(&format!("\nwarning: {w}"));
     }
     s
@@ -1110,8 +1172,9 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
             let verb = if applied { "Removed" } else { "Would remove" };
             format!(
                 "{verb} '{}' from THIS device only — your other devices and the team are \
-                 unaffected. The local copy is kept as a frozen copy; nothing returns at the next \
-                 sync. `topos follow {}` re-attaches (stopping it everywhere is `topos unfollow`).",
+                 unaffected. The copy leaves this device's agent dirs; topos keeps the canonical bytes \
+                 (so re-attaching needs no re-download), and nothing returns at the next sync. `topos \
+                 follow {}` re-attaches it here (stopping it everywhere is `topos unfollow`).",
                 item.name, item.name
             )
         }
@@ -2221,6 +2284,45 @@ mod tests {
         assert!(!out.contains("second line"), "{out}");
         // Unknown shapes fall back to their raw JSON line — never dropped.
         assert!(out.contains("{\"unknown\":true}"), "{out}");
+    }
+
+    #[test]
+    fn argv_line_shell_quotes_only_tokens_that_would_mis_parse() {
+        use super::{argv_line, shell_quote};
+        // Safe tokens ride bare (the common apply line stays clean).
+        for safe in [
+            "topos",
+            "publish",
+            "release-notes",
+            "--yes",
+            "-m",
+            "acme/skills/deploy",
+            "release-notes@abc123",
+        ] {
+            assert_eq!(shell_quote(safe), safe, "{safe:?} should not be quoted");
+        }
+        // A multi-word -m message (the bug) pastes back as ONE argument.
+        assert_eq!(
+            shell_quote("First cut of the release-notes skill"),
+            "'First cut of the release-notes skill'"
+        );
+        // Shell metacharacters + an embedded single quote are quoted/escaped; empty is quoted.
+        assert_eq!(shell_quote("a > b"), "'a > b'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
+        // The whole line quotes each token independently.
+        let argv = [
+            "topos".to_owned(),
+            "publish".to_owned(),
+            "release-notes".to_owned(),
+            "-m".to_owned(),
+            "First cut of the release-notes skill".to_owned(),
+            "--yes".to_owned(),
+        ];
+        assert_eq!(
+            argv_line(&argv),
+            "topos publish release-notes -m 'First cut of the release-notes skill' --yes"
+        );
     }
 
     #[test]

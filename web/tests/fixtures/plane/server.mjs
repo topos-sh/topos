@@ -153,15 +153,17 @@ function readableVersionIds(s) {
 // ── Wire serializers (the internal lane is byte-parity with the device /v1 wire shapes) ────────
 
 function wireCurrent(ws, skill, s) {
+  // The FROZEN nested pointer envelope (WireCurrentRecord): a versioned wrapper around the
+  // (workspace, skill) scope and the `record` — the version id + its `(epoch, seq)` generation.
+  // NO bundle_digest / created_at: the pointer names the version; the commit transitively pins the
+  // bytes. Byte-parity with the device `/v1` current read.
   return {
     schema_version: 1,
-    workspace_id: ws,
-    skill_id: skill,
-    version_id: s.currentId,
-    bundle_digest: s.bundleDigest,
-    epoch: s.generation.epoch,
-    seq: s.generation.seq,
-    created_at: A_LONG_TIME_AGO,
+    scope: { workspace_id: ws, skill_id: skill },
+    record: {
+      version_id: s.currentId,
+      generation: { epoch: s.generation.epoch, seq: s.generation.seq },
+    },
   };
 }
 

@@ -31,8 +31,8 @@ use crate::enroll::{self, FollowEntry, FollowModeDoc};
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::plane::{
-    DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, KnownCurrent,
-    PlaneError, PlaneSource, PointerFetch,
+    DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, FollowSource,
+    KnownCurrent, PlaneError, PlaneSource, PointerFetch,
 };
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, sidecar};
@@ -121,6 +121,13 @@ pub(crate) struct ReconcileOpts {
     pub rename: HashMap<String, String>,
     /// Reconcile only this workspace (a `follow --yes` targets one); `None` = every enrolled one.
     pub only_workspace: Option<String>,
+    /// When `Some`, RESTRICT first-receive acceptance AND new-arrival installation to these skill ids —
+    /// the targeted RE-ATTACH installs exactly its subject. Every OTHER pending first-receive stays
+    /// undisclosed: a never-received skill this device already follows keeps its offer (never
+    /// auto-placed), and a brand-new arrival outside the set is skipped WHOLESALE (no follow entry, no
+    /// baseline, no bytes) for the next full describe to disclose. `None` (the default) installs across
+    /// the whole delivered set (the bare sweep / `follow --yes`, whose describe already disclosed it all).
+    pub install_only: Option<HashSet<String>>,
     /// Ack the delivered notices after collecting them (the interactive / `--json` update); the
     /// quiet hook fetches WITHOUT acking, so nothing is marked read that no one narrated.
     pub ack_notices: bool,
@@ -430,6 +437,16 @@ pub(crate) fn pull_reconcile_with(
                 // a server-side detach freezes by touching nothing.
                 Some((_, f)) if !f.following => continue,
                 Some((_, f)) => sync_delivered(ctx, &ws, ds, f, accept_for(ctx, ds, opts)),
+                // A brand-new arrival OUTSIDE a targeted install (the re-attach) stays undisclosed —
+                // no follow entry, no baseline, no bytes. Skipped wholesale (like a declined collision)
+                // so the next full describe is the first to disclose it.
+                None if opts
+                    .install_only
+                    .as_ref()
+                    .is_some_and(|only| !only.contains(&ds.skill_id)) =>
+                {
+                    continue;
+                }
                 None => install_new_arrival(ctx, &ws, ds, opts),
             };
             match row {
@@ -807,6 +824,15 @@ impl PullAccumulator {
 /// update stays an offer).
 fn accept_for(ctx: &Ctx<'_>, ds: &DeliverySkill, opts: &ReconcileOpts) -> Invocation {
     if !opts.accept_first_receive {
+        return Invocation::Sweep;
+    }
+    // A targeted install (the re-attach) accepts ONLY its subject's first receive — any OTHER
+    // never-received skill stays an offer, never silently placed under a describe that named just one.
+    if opts
+        .install_only
+        .as_ref()
+        .is_some_and(|only| !only.contains(&ds.skill_id))
+    {
         return Invocation::Sweep;
     }
     let never_received = SkillId::parse(&ds.skill_id)
@@ -1236,6 +1262,27 @@ pub(super) fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -
         harness: ctx.harness,
         plane,
         follow: ctx.follow,
+    }
+}
+
+/// A shallow copy of `ctx` with BOTH the plane source AND the follow seam swapped — the re-attach
+/// reconcile drives the delivery transport for its byte fetches (`bind_skill` must land on the object
+/// the fetches use) AND a follow seam re-read from disk (the startup seam predates the re-attach's
+/// `set_following` / `set_excluded` writes, so a just-re-affirmed skill would otherwise read as paused).
+pub(super) fn ctx_with_plane_and_follow<'a>(
+    ctx: &'a Ctx<'a>,
+    plane: &'a dyn PlaneSource,
+    follow: &'a dyn FollowSource,
+) -> Ctx<'a> {
+    Ctx {
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        layout: ctx.layout.clone(),
+        harness: ctx.harness,
+        plane,
+        follow,
     }
 }
 

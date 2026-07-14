@@ -9,7 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * a sign-in flow the wrong thing). Delivery rides the ONE transport: without the five
  * `TOPOS_MAIL_SMTP_*`, production is a deliberate no-op and `inviteMailDelivery().canSend` is
  * false; with them, production really sends. The notice carries the workspace ADDRESS + display
- * name — a plain slug, never a tokened link.
+ * name — the full `<origin>/<name>` follow target rendered verbatim (never re-prefixed), never a
+ * tokened link.
  */
 
 const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
@@ -47,7 +48,9 @@ async function importInviteMail(appEnv: string, smtp: Record<string, string> = {
 const INVITE = {
   to: "newbie@example.com",
   workspaceDisplayName: "Acme Platform",
-  address: "acme-platform",
+  // The FULL follow target (`<origin>/<name>`) the caller composes — the notice renders it
+  // verbatim, never re-prepending an origin.
+  address: "https://topos.example/acme-platform",
   invitedBy: "owner@example.com",
 };
 
@@ -92,7 +95,7 @@ describe("sendInviteEmail in test mode", () => {
         address: INVITE.address,
         workspaceDisplayName: INVITE.workspaceDisplayName,
       });
-      // The address is a plain slug — no tokened link machinery of any kind.
+      // The address is the plain follow target — no tokened link machinery of any kind.
       expect(lines[0]).not.toContain("/i/");
       expect(lines[0]).not.toContain("token");
       // The accumulating dev outbox carries the FULL rendered mail, kind-tagged.
@@ -106,7 +109,8 @@ describe("sendInviteEmail in test mode", () => {
       expect(recorded.subject).toBe(
         `You've been invited to ${INVITE.workspaceDisplayName} on Topos`,
       );
-      expect(recorded.text).toContain(`follow ${INVITE.address}`);
+      // The terminal line renders the full address verbatim — no origin is ever doubled onto it.
+      expect(recorded.text).toContain(`topos follow ${INVITE.address}`);
       await expect(fs.access(path.join(dir, ".magic-links.jsonl"))).rejects.toThrow();
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -150,8 +154,8 @@ describe("sendInviteEmail in production mode", () => {
     };
     expect(message.to).toBe(INVITE.to);
     expect(message.subject).toBe("You've been invited to Acme <Platform> on Topos");
-    expect(message.text).toContain(`follow ${INVITE.address}`);
-    // The notice carries the plain ADDRESS slug — never a tokened link.
+    expect(message.text).toContain(`topos follow ${INVITE.address}`);
+    // The notice carries the plain follow address — never a tokened link.
     expect(message.text).not.toContain("/i/");
     expect(message.html).toContain("Acme &lt;Platform&gt;");
   });

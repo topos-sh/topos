@@ -226,9 +226,12 @@ export const RATE_LIMITED_CODE = "RATELIMIT";
 // Workspace standup / create (the internal-lane genesis writes).
 // ---------------------------------------------------------------------------------------------
 
-/** The workspace the fixture "creates"; the ADDRESS is what the paste block must show. */
+/** The workspace the fixture "creates". The vault's create-workspace outcome returns the workspace's
+ * FULL address (`<link_base>/<name>` — see bins/topos-plane/src/standup_cmd.rs
+ * `CreateWorkspaceSummary::Created`), which the paste block renders VERBATIM — it must never
+ * re-prepend an origin. A distinct absolute URL (not the app's own origin) proves that. */
 export const CREATED_WS_ID = "w_created01";
-export const CREATED_ADDRESS = "acme-platform";
+export const CREATED_ADDRESS = "https://topos.example/acme-platform";
 /** Submitting this display name simulates the per-owner cap denial. */
 export const CAP_TRIGGER_NAME = "CAP TEST";
 export const CAP_REASON = "workspace creation limit reached";

@@ -125,6 +125,21 @@ impl UreqPlane {
         self.creds.borrow().get(skill_id).cloned()
     }
 
+    /// Teach the read transport a skill's workspace credential (the shared body behind BOTH the
+    /// [`PlaneSource`] and [`crate::plane::DeliverySource`] `bind_skill` — the read lane and the delivery
+    /// lane on one object). A no-op when the workspace has no stored credential (the read then answers the
+    /// same "not served" it would have) and idempotent (`or_insert_with` never overwrites a follows-derived
+    /// cred). The workspace credential authenticates every skill in its workspace, so this is a lookup.
+    fn bind(&self, workspace_id: &str, skill_id: &str) {
+        let Some(credential) = self.ws_creds.get(workspace_id) else {
+            return;
+        };
+        self.creds
+            .borrow_mut()
+            .entry(skill_id.to_owned())
+            .or_insert_with(|| SkillCred::new(workspace_id.to_owned(), credential.clone()));
+    }
+
     /// Attach the per-WORKSPACE credential map (`credentials.json`) — what arms the delivery-driven
     /// reconcile ([`crate::plane::DeliverySource`]). Without it the transport still serves the
     /// per-skill reads; the sweep just has no delivery lane to drive.
@@ -258,6 +273,12 @@ impl PlaneSource for UreqPlane {
             Err(e) => Err(e),
         }
     }
+
+    fn bind_skill(&self, workspace_id: &str, skill_id: &str) {
+        // The read-lane twin of the delivery-lane bind (same map, same object): a catalog-resolved
+        // read target (a review verdict on a skill with no follow entry) authenticates once bound.
+        self.bind(workspace_id, skill_id);
+    }
 }
 
 impl crate::plane::DeliverySource for UreqPlane {
@@ -265,13 +286,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         // A brand-new arrival is absent from the `follows.json`-derived per-skill map; its
         // workspace credential already authenticates it (membership IS the authorization), so
         // teach the read transport the pairing before its first version fetch.
-        let Some(credential) = self.ws_creds.get(workspace_id) else {
-            return;
-        };
-        self.creds
-            .borrow_mut()
-            .entry(skill_id.to_owned())
-            .or_insert_with(|| SkillCred::new(workspace_id.to_owned(), credential.clone()));
+        self.bind(workspace_id, skill_id);
     }
 
     fn workspaces(&self) -> Vec<String> {

@@ -127,7 +127,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       message: `Fetching this skill's current pointer failed: ${current.message}. Nothing below is known — reload to retry.`,
     };
   }
-  const currentId = current.data.version_id;
+  const currentId = current.data.record.version_id;
+  const currentGeneration = current.data.record.generation;
   const currentMetaPromise = sessionVersionMeta(actor.email, ws, skillId, currentId);
 
   // A degraded (non-404) detail read still renders the page — the state is honestly unknown.
@@ -138,7 +139,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
           status: detail.data.status,
           base_generation: { epoch: detail.data.base_epoch, seq: detail.data.base_seq },
         },
-        { versionId: currentId, generation: { epoch: current.data.epoch, seq: current.data.seq } },
+        { versionId: currentId, generation: currentGeneration },
       )
     : "unknown";
   const isSelfProposal =
@@ -265,8 +266,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       ? {
           approveRequestId: crypto.randomUUID(),
           rejectRequestId: crypto.randomUUID(),
-          expectedEpoch: String(current.data.epoch),
-          expectedSeq: String(current.data.seq),
+          expectedEpoch: String(currentGeneration.epoch),
+          expectedSeq: String(currentGeneration.seq),
           baseEpoch: detail.ok ? String(detail.data.base_epoch) : "0",
           baseSeq: detail.ok ? String(detail.data.base_seq) : "0",
           withholdApprove: isSelfProposal,

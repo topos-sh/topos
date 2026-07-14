@@ -10,18 +10,17 @@
  * Read responses are byte-parity with the device lane's `/v1` wire shapes (the vault serializes
  * both through the same mappers); the shapes here are the fields this tier consumes.
  */
+import type { components } from "./contract/schema";
 
-/** GET  /internal/v1/workspaces/{ws}/skills/{skill}/current */
-export interface WireCurrentRecord {
-  schema_version: number;
-  workspace_id: string;
-  skill_id: string;
-  version_id: string;
-  bundle_digest: string;
-  epoch: number;
-  seq: number;
-  created_at: string;
-}
+/**
+ * GET  /internal/v1/workspaces/{ws}/skills/{skill}/current — the frozen NESTED pointer envelope
+ * `{ schema_version, scope: { workspace_id, skill_id }, record: { version_id, generation } }`.
+ * Aliased straight from the generated, drift-gated contract (never hand-restated): a wire-shape
+ * change now fails `tsc` right here instead of silently mislabelling a read. The flat shape this
+ * once hand-declared did NOT exist on the wire — `record.version_id` came back `undefined`, and the
+ * follow-up version fetch failed as "unreachable".
+ */
+export type WireCurrentRecord = components["schemas"]["WireCurrentRecord"];
 
 /** GET  /internal/v1/workspaces/{ws}/skills/{skill}/versions/{versionId} */
 export interface WireVersionMeta {
