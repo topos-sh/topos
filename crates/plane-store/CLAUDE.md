@@ -627,7 +627,15 @@ stay put; only the Rust custody vocabulary moved.)
   open-proposal count) and written back by `Authority::report_applied` (snapshot upsert; detach records
   immutable; `last_report_at` the staleness clock). The WHO-ACTS placement is server-legible: unfollow /
   channel-leave / member-removal run the lapse-detach reconcile (final per-device detach records,
-  reference-counted via the union); `follow`/join re-attach. Curation is member-level on `open` channels,
+  reference-counted via the union); `follow`/join re-attach. Two hardening migrations fence the sharp
+  edges: `0021` keys the device exclusion to the CALLER's own live device on BOTH sides — the mint
+  (`topos_exclude_device`, now carrying the acting principal) and the clear (`topos_follow_skill`'s
+  lift) — so membership alone reaches no other person's device rows; `0022` makes
+  `topos_channel_place`'s create-on-first-use collision-proof (a name-race loser places into the
+  winner; a rename-freed name re-creates under a suffixed immutable `channel_id` — one jump past the
+  visible survivors, so accumulated ids can't exhaust the loop; an invisible winner under the
+  SERIALIZABLE runner escalates SQLSTATE 40001 for its retry, while the READ COMMITTED web tier
+  always settles in-loop). Curation is member-level on `open` channels,
   reviewer+ on `curated`; `protect` tightens at reviewer+ and loosens only at owner, per kind. The
   LIFECYCLE session ops (owner; answered on a self-host plane exactly like a hosted one, the acting gate
   the confirmed-seat check; every op KEYED on the immutable skill id — the composing surface resolves
