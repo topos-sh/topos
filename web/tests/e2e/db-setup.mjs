@@ -149,6 +149,17 @@ async function appliedMigrationVersions(db) {
       20,
       "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('catalog') AND attname = 'kind' AND NOT attisdropped) AS ok",
     ],
+    // 0021 re-keys the exclusion mint on the acting caller: the 5-arg signature IS the marker.
+    [
+      21,
+      "SELECT to_regprocedure('topos_exclude_device(text,text,text,text,text)') IS NOT NULL AS ok",
+    ],
+    // 0022 only replaces topos_channel_place's body (same signature), so probe a body fact the
+    // 0015 original lacks: the rewritten create-loop names the channels_pkey constraint.
+    [
+      22,
+      "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('topos_channel_place(text,text,text,text,text)') AND prosrc LIKE '%channels_pkey%') AS ok",
+    ],
   ];
   const applied = new Set();
   for (let v = 1; v <= 18; v += 1) {
